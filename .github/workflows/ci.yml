@@ -67,7 +67,6 @@ jobs:
         with:
           scan-args: |-
             --lockfile=composer.lock
-            --skip-git
 
       - name: Gitleaks (committed-secret scan)
         uses: gitleaks/gitleaks-action@v2
