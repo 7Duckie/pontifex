@@ -128,10 +128,11 @@ In Local, create a new site:
   rest of these docs.
 - **Domain**: `pontifex-dev.local` (Local sets this automatically from
   the name).
-- **PHP version**: any version from 8.1 upward. Matching the CI matrix
-  (8.1, 8.2, 8.3, or 8.4) is recommended so that "works locally" implies
-  "works in CI." If you develop on 8.5 or higher, be aware that CI does
-  not yet test against those versions.
+- **PHP version**: any version from 8.1 upward. The CI matrix tests
+  against 8.1, 8.2, 8.3, and 8.4 — matching one of these means
+  "works locally" implies "works in CI." This document was written
+  against a site running PHP 8.1.29 to match the CI floor; pick
+  whichever version makes sense for what you are debugging.
 - **Web server and database**: the defaults (nginx + MySQL) are fine.
 
 Once created, click "Open site" once to confirm WordPress loads. You
