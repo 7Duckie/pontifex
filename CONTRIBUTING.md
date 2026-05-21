@@ -110,3 +110,105 @@ indentation and line endings will Just Work without further setup.
 Other editors (VS Code with Intelephense, Neovim with phpactor, etc.)
 typically pick up the stubs through Composer's autoload metadata and
 need no equivalent step.
+
+## Local development environment
+
+Pontifex is developed against a real WordPress installation, not against
+mocked WordPress functions. The recommended setup uses
+[Local](https://localwp.com) by Flywheel, which is free, has a friendly
+GUI, and handles PHP, the web server, and MySQL/MariaDB for you. Other
+WordPress dev environments (wp-env, Valet, Lando) work too, but the
+instructions below assume Local.
+
+### 1. Create a Local site for Pontifex
+
+In Local, create a new site:
+
+- **Name**: anything, but `pontifex-dev` is the convention used in the
+  rest of these docs.
+- **Domain**: `pontifex-dev.local` (Local sets this automatically from
+  the name).
+- **PHP version**: any version from 8.1 upward. Matching the CI matrix
+  (8.1, 8.2, 8.3, or 8.4) is recommended so that "works locally" implies
+  "works in CI." If you develop on 8.5 or higher, be aware that CI does
+  not yet test against those versions.
+- **Web server and database**: the defaults (nginx + MySQL) are fine.
+
+Once created, click "Open site" once to confirm WordPress loads. You
+should see the default WordPress welcome screen.
+
+### 2. Symlink the project into the site
+
+This is what lets WordPress see your project as an installed plugin
+without needing to copy files. Edits to your project's files take effect
+immediately, because the plugin directory inside the Local site is a
+symbolic link pointing back at your working tree.
+
+From your project's parent directory, run:
+
+```bash
+ln -s "$(pwd)/pontifex" \
+      "$HOME/Local Sites/pontifex-dev/app/public/wp-content/plugins/pontifex"
+```
+
+Adjust the path on the right if your Local site has a different name or
+your `Local Sites` directory lives elsewhere.
+
+Verify it worked:
+
+```bash
+ls -la "$HOME/Local Sites/pontifex-dev/app/public/wp-content/plugins/"
+```
+
+You should see `pontifex` listed with an `->` arrow pointing back at
+your project directory.
+
+### 3. Activate the plugin
+
+In Local, click "WP Admin" to open `pontifex-dev.local/wp-admin`. Log in
+(Local pre-creates an admin user; the credentials are visible in Local's
+site dashboard). Navigate to **Plugins**. Pontifex should appear in the
+list. Click **Activate**.
+
+### 4. Run WP-CLI against the site
+
+Pontifex registers a `wp pontifex` command tree via WP-CLI. The
+easiest way to invoke it is through Local's built-in site shell:
+
+1. In Local, right-click the site in the sidebar.
+2. Choose **Open site shell**.
+3. A terminal opens, pre-configured with the right PHP version and the
+   `wp` command pointed at this site.
+4. Run:
+
+```bash
+   wp pontifex doctor
+```
+
+You should see the doctor command's environment checklist. If you see
+"Command 'pontifex' is not registered," confirm the plugin is activated
+in WP Admin and re-run.
+
+### 5. Working with the project
+
+From this point on, your daily cycle is:
+
+1. Edit code in your usual location (e.g., PhpStorm pointed at the
+   project root).
+2. Run `composer check` from the project directory to lint, analyse,
+   and test before committing.
+3. Use the Local site shell to invoke `wp pontifex` commands against a
+   real WordPress install.
+4. Use WP Admin (browser) to confirm anything that affects the
+   admin UI.
+
+The symlink means there's no "deploy" step between editing and running.
+What you save is what WordPress sees.
+
+### Other Local sites
+
+If you want to test Pontifex against another existing Local site (a
+WooCommerce installation, a multisite setup, a site you've been
+building separately), symlink the plugin into that site's
+`wp-content/plugins/` directory using the same command pattern as
+above, substituting the other site's name. One project, many sites.
