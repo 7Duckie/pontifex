@@ -213,3 +213,102 @@ WooCommerce installation, a multisite setup, a site you've been
 building separately), symlink the plugin into that site's
 `wp-content/plugins/` directory using the same command pattern as
 above, substituting the other site's name. One project, many sites.
+
+## Step debugging with Xdebug
+
+When a test fails or a check method returns an unexpected row, stepping
+through the failing code is dramatically faster than scattering
+`var_dump()` calls and re-running. Xdebug is the PHP step debugger; Local
+bundles it, PhpStorm has first-class support, and the integration is
+mostly configuration once you do it the first time.
+
+This section assumes you have the Local site from "Local development
+environment" already working and the PhpStorm hints from "PhpStorm
+setup" already applied.
+
+### 1. Enable Xdebug in Local
+
+In Local, click your `pontifex-dev` site in the sidebar, then click the
+**Tools** tab at the top. Find the **Xdebug** entry and toggle it on.
+Local restarts the site's PHP-FPM and CLI processes with Xdebug loaded.
+
+Xdebug runs in `debug` mode by default in Local — i.e. it listens for
+PhpStorm to connect when an HTTP request or CLI command runs. This is
+the mode you want for stepping through code. Other modes (`profile`,
+`trace`) exist but aren't needed for the workflow described here.
+
+### 2. Configure PhpStorm
+
+Open **Settings** → **PHP** in PhpStorm. Two configurations matter.
+
+**CLI Interpreter.** Point PhpStorm at the PHP binary Local ships, not
+your system PHP. To find the path, open Local's site shell and run:
+
+```bash
+which php
+```
+
+Copy the path it returns. In PhpStorm, click the **...** beside the CLI
+Interpreter dropdown, add a new interpreter from the local path, and
+paste it in. Once configured, PhpStorm displays the interpreter's PHP
+version and detected extensions — you should see `xdebug` in the list.
+
+**Debug port.** Open **Settings** → **PHP** → **Debug**. Confirm the
+Xdebug port is set to `9003` (the modern default; the older `9000` is
+no longer used). Make sure **Can accept external connections** is
+ticked.
+
+### 3. Set a breakpoint and listen for connections
+
+Open any PHP file in PhpStorm and click in the left gutter next to a
+line. A red dot appears — that's a breakpoint. Pick something the doctor
+command actually hits, e.g. inside `check_php_version()`.
+
+Click the small **phone-with-a-bug** icon in the top-right toolbar to
+start listening for debug connections. The icon turns green to indicate
+PhpStorm is waiting.
+
+### 4. Run the code under debug
+
+From Local's site shell:
+
+```bash
+wp pontifex doctor
+```
+
+When PHP reaches the breakpoint, PhpStorm pulls itself to the
+foreground and pauses execution there. You can:
+
+- Hover any variable in the source pane to see its current value.
+- Use the Variables panel (bottom of the Debug tool window) to inspect
+  the full scope, including `$this->environment` and any nested mock
+  state.
+- Step **Over** (F8), **Into** (F7), or **Out** (Shift-F8) one line at a
+  time.
+- Click **Resume** (F9) to continue running until the next breakpoint
+  or the program ends.
+
+### 5. Debugging tests
+
+The same setup debugs the test suite. From the project directory, with
+PhpStorm listening for connections:
+
+```bash
+composer test
+```
+
+Or `composer test:unit` for just the unit suite. PHPUnit runs each test
+under Xdebug; breakpoints in both test code and production code are hit
+in execution order. Useful when a behavioural test fails and you want
+to inspect the mock Environment state at the moment the check method
+returns.
+
+### 6. Disable Xdebug when you're not actively debugging
+
+Xdebug adds significant overhead even when no breakpoints are set —
+roughly 5-10× slower test execution. The 80ms test run becomes 500-800ms
+with Xdebug active. Toggle Xdebug off in Local's Tools tab when you're
+done debugging, so the daily `composer check` stays fast.
+
+Local remembers the last-used setting per site, so re-enabling is a
+single click whenever the next bug appears.
