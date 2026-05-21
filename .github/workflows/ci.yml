@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # for OSV-Scanner SARIF upload
+
+jobs:
+
+  quality-gates:
+    name: Quality gates (PHP ${{ matrix.php_version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php_version: ['8.1', '8.2', '8.3', '8.4']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php_version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php_version }}
+          extensions: mbstring, openssl, sodium, zlib, json, pcre
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-${{ matrix.php_version }}-
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      # --- Quality gates ---------------------------------------------
+
+      - name: Lint (PHPCS)
+        run: composer lint
+
+      - name: Static analysis (PHPStan)
+        run: composer analyse
+
+      - name: Tests (PHPUnit)
+        run: composer test
+
+      # --- Security ---------------------------------------------------
+
+      - name: Composer audit (Packagist advisories)
+        run: composer audit
+
+      - name: OSV-Scanner (cross-ecosystem advisories)
+        uses: google/osv-scanner-action/osv-scanner-action@v1.9.0
+        with:
+          scan-args: |-
+            --lockfile=composer.lock
+            --skip-git
+
+      - name: Gitleaks (committed-secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

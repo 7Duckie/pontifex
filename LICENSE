@@ -1,0 +1,30 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 2, June 1991
+
+ Copyright (C) 1989, 1991 Free Software Foundation, Inc.,
+ 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+------------------------------------------------------------------------
+NOTE FOR PONTIFEX SCAFFOLD
+------------------------------------------------------------------------
+
+This LICENSE file is a placeholder. Before the first public release of
+Pontifex, replace this file with the full verbatim text of the GNU
+General Public License, version 2, available from:
+
+    https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Suggested command:
+
+    curl -fsSL https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt -o LICENSE
+
+The "or-later" element of GPL-2.0-or-later is communicated by the
+plugin header (`License: GPL-2.0-or-later`) and the composer.json
+`license` field, not by the LICENSE file text itself. The LICENSE
+file contains only the GPL-2.0 text verbatim.
+
+Pontifex itself is licensed under the GNU General Public License,
+version 2 or any later version, at the user's option. See the plugin
+header in pontifex.php for the canonical statement of this.

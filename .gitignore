@@ -1,0 +1,40 @@
+# Composer
+/vendor/
+composer.phar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Test artefacts
+/.phpunit.cache/
+.phpunit.result.cache
+/coverage/
+/build/
+
+# Pre-commit
+/.pre-commit-cache/
+
+# PHPStan
+/.phpstan-cache/
+
+# Local dev databases / archives
+*.sql
+*.wpmig
+*.wpmig.snapshot
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local

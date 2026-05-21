@@ -1,0 +1,26 @@
+# EditorConfig — https://editorconfig.org
+# Keeps whitespace, line endings, and indentation consistent across
+# editors and contributors so nothing needs to be argued about.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = tab
+indent_size = 4
+
+# YAML and JSON require spaces. Markdown conventionally uses spaces too.
+[*.{yml,yaml,json,md}]
+indent_style = space
+indent_size = 2
+
+# Composer expects 4-space indent in composer.json specifically.
+[composer.json]
+indent_size = 4
+
+# Makefile is one of the very few formats that requires tabs.
+[Makefile]
+indent_style = tab

@@ -1,0 +1,97 @@
+# Pre-commit hooks for Pontifex.
+#
+# One-time install:
+#     pip install pre-commit
+#     pre-commit install --hook-type pre-commit --hook-type pre-push
+#
+# Budget per stage:
+#   pre-commit ≤ 3 seconds on a normal change
+#   pre-push   ≤ 60 seconds
+#
+# If a hook exceeds its budget, demote it to the next stage rather than
+# letting it degrade the developer experience.
+
+default_stages: [pre-commit]
+
+repos:
+
+  # -------------------------------------------------------------------
+  # Pre-commit stage — fast hygiene and secret scanning.
+  # -------------------------------------------------------------------
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+
+      - id: composer-validate
+        name: composer validate
+        entry: composer validate --strict --no-check-publish
+        language: system
+        files: ^composer\.(json|lock)$
+        pass_filenames: false
+
+      # PHPCS only on staged PHP files. Fast because the file set is
+      # small. Full PHPCS runs in CI.
+      - id: phpcs-staged
+        name: phpcs (staged files)
+        entry: vendor/bin/phpcs --standard=phpcs.xml.dist
+        language: system
+        files: \.php$
+        pass_filenames: true
+
+      # Fast PHPUnit unit tests. Excludes integration suite, which is
+      # slower and runs pre-push instead.
+      - id: phpunit-unit
+        name: phpunit (unit)
+        entry: vendor/bin/phpunit --testsuite=unit --no-coverage
+        language: system
+        files: \.(php)$
+        pass_filenames: false
+
+  # -------------------------------------------------------------------
+  # Pre-push stage — heavier analysis and full test suite.
+  # -------------------------------------------------------------------
+
+  - repo: local
+    hooks:
+
+      - id: phpstan
+        name: phpstan (full)
+        entry: vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --no-progress
+        language: system
+        files: \.php$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: phpunit-full
+        name: phpunit (full suite)
+        entry: vendor/bin/phpunit --no-coverage
+        language: system
+        files: \.(php)$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: composer-audit
+        name: composer audit
+        entry: composer audit
+        language: system
+        files: ^composer\.(json|lock)$
+        pass_filenames: false
+        stages: [pre-push]

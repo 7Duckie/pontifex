@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<ruleset name="Pontifex">
+    <description>PHP_CodeSniffer ruleset for Pontifex.</description>
+
+    <!-- Files to inspect. -->
+    <file>pontifex.php</file>
+    <file>src/</file>
+
+    <!-- Patterns to exclude. -->
+    <exclude-pattern>vendor/*</exclude-pattern>
+    <exclude-pattern>tests/fixtures/*</exclude-pattern>
+
+    <!-- Show progress and use colours. -->
+    <arg value="ps"/>
+    <arg name="colors"/>
+
+    <!-- Run on multiple cores when available. -->
+    <arg name="parallel" value="8"/>
+
+    <!-- Allow only PHP files to be sniffed. -->
+    <arg name="extensions" value="php"/>
+
+    <!--
+        WordPress-Extra includes:
+          - WordPress-Core (formatting, naming)
+          - WordPress-Docs (DocBlocks)
+          - WordPress-Extra (best practices)
+        We deliberately do NOT include WordPress-VIP, which is for the
+        wordpress.com hosted environment and forbids things we want.
+    -->
+    <rule ref="WordPress-Extra"/>
+    <rule ref="WordPress-Docs"/>
+
+    <!--
+        File-naming rules: PSR-4 vs traditional WordPress.
+
+        WPCS by default requires files in the WordPress style:
+        `class-foo-bar.php` for classes, lowercase hyphenated for the rest.
+        That conflicts with PSR-4 autoloading, which requires the file
+        name to match the class name in PascalCase (so `FooBar.php` for
+        class `FooBar`). Since Pontifex uses Composer/PSR-4 for autoload,
+        we exempt the autoloaded directories from those rules.
+
+        The exemption is targeted: the file-naming rules still apply to
+        pontifex.php at the project root and any other non-PSR-4 file.
+    -->
+    <rule ref="WordPress.Files.FileName.NotHyphenatedLowercase">
+        <exclude-pattern>src/*</exclude-pattern>
+        <exclude-pattern>tests/*</exclude-pattern>
+    </rule>
+    <rule ref="WordPress.Files.FileName.InvalidClassFileName">
+        <exclude-pattern>src/*</exclude-pattern>
+        <exclude-pattern>tests/*</exclude-pattern>
+    </rule>
+
+    <!-- Tell the standards where to find our text-domain. -->
+    <config name="text_domain" value="pontifex"/>
+
+    <!-- Plugin/class prefix enforcement: nothing in Pontifex's code
+         should be in the global namespace without a Pontifex prefix. -->
+    <rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+        <properties>
+            <property name="prefixes" type="array">
+                <element value="pontifex"/>
+                <element value="Pontifex"/>
+                <element value="PONTIFEX_"/>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Minimum PHP version for compatibility sniffs. -->
+    <config name="testVersion" value="8.1-"/>
+</ruleset>

@@ -1,0 +1,35 @@
+parameters:
+    level: 6
+
+    paths:
+        - pontifex.php
+        - src
+
+    excludePaths:
+        - vendor/*
+        - tests/fixtures/*
+
+    bootstrapFiles:
+        - vendor/szepeviktor/phpstan-wordpress/bootstrap.php
+
+    # WP-CLI symbols (WP_CLI, WP_CLI\Formatter, etc.) live in a separate
+    # stubs package. phpstan-wordpress's bootstrap only covers core WP
+    # functions and classes; we add the WP-CLI stubs explicitly here so
+    # PHPStan can resolve calls like WP_CLI::add_command() and the
+    # WP_CLI\Formatter constructor.
+    scanFiles:
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+
+    # Treat these as known global constants defined by our bootstrap.
+    # PHPStan analyses src/ files in isolation and wouldn't otherwise
+    # know that PONTIFEX_VERSION exists.
+    dynamicConstantNames:
+        - PONTIFEX_VERSION
+        - PONTIFEX_PLUGIN_FILE
+        - PONTIFEX_PLUGIN_DIR
+        - PONTIFEX_PLUGIN_URL
+        - PONTIFEX_MINIMUM_PHP_VERSION
+        - PONTIFEX_MINIMUM_WP_VERSION
+
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
