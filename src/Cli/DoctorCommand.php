@@ -37,6 +37,7 @@ use Pontifex\Environment\RealEnvironment;
  */
 final class DoctorCommand {
 
+
 	/**
 	 * Status constants.
 	 *
@@ -112,7 +113,7 @@ final class DoctorCommand {
 	 * command class. When we add `wp pontifex export`, it will be its
 	 * own class with its own `__invoke`.
 	 *
-	 * @param array<int, string>         $positional_args  Positional arguments passed on the CLI. Unused for `doctor`.
+	 * @param array<int, string>         $positional_args Positional arguments passed on the CLI. Unused for `doctor`.
 	 * @param array<string, string|bool> $associative_args Associative `--key=value` and `--flag` arguments. Consumed by the formatter.
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
@@ -360,8 +361,8 @@ final class DoctorCommand {
 	 * Check whether a named PHP extension is loaded.
 	 *
 	 * @param string $extension_name Extension identifier, e.g. 'zstd' or 'sodium'.
-	 * @param bool   $is_required    True → missing extension is FAIL; false → missing extension is WARN only.
-	 * @param string $purpose_note   Human-readable reason the extension matters, shown in the row's note column.
+	 * @param bool   $is_required True → missing extension is FAIL; false → missing extension is WARN only.
+	 * @param string $purpose_note Human-readable reason the extension matters, shown in the row's note column.
 	 * @return array<string, string>
 	 */
 	private function check_extension_present(
@@ -531,10 +532,10 @@ final class DoctorCommand {
 	 * uses the first row's keys to define the table columns.
 	 *
 	 * @param string $category Group label for the row (e.g. 'Runtime', 'PHP config').
-	 * @param string $name     Short check name displayed in the table.
-	 * @param string $value    The observed value being reported.
-	 * @param string $status   One of the STATUS_* constants on this class.
-	 * @param string $note     Optional human-readable note explaining the value or implication.
+	 * @param string $name Short check name displayed in the table.
+	 * @param string $value The observed value being reported.
+	 * @param string $status One of the STATUS_* constants on this class.
+	 * @param string $note Optional human-readable note explaining the value or implication.
 	 * @return array<string, string>
 	 */
 	private function build_row( string $category, string $name, string $value, string $status, string $note ): array {
@@ -548,14 +549,16 @@ final class DoctorCommand {
 	}
 
 	/**
-	 * Print a one-line summary counting the rows by status.
+	 * Count how many rows fall into each status category.
 	 *
-	 * Also halts WP-CLI with exit code 1 if any FAIL rows are present,
-	 * so CI and shell scripts can detect failure via the exit code.
+	 * Pure function: given the same input rows, returns the same counts
+	 * with no side effects. Separated from print_summary() so it can be
+	 * unit-tested without invoking WP_CLI::log or WP_CLI::halt.
 	 *
 	 * @param array<int, array<string, string>> $check_rows All collected rows from the run.
+	 * @return array<string, int> A map from status string to count, with one entry per known status.
 	 */
-	private function print_summary( array $check_rows ): void {
+	private function compute_status_counts( array $check_rows ): array {
 
 		$status_counts = array(
 			self::STATUS_OK   => 0,
@@ -570,6 +573,24 @@ final class DoctorCommand {
 				++$status_counts[ $row_status ];
 			}
 		}
+
+		return $status_counts;
+	}
+
+	/**
+	 * Print a one-line summary counting the rows by status.
+	 *
+	 * Also halts WP-CLI with exit code 1 if any FAIL rows are present,
+	 * so CI and shell scripts can detect failure via the exit code.
+	 * The counting logic is delegated to compute_status_counts() so
+	 * the pure calculation can be tested in isolation from the I/O.
+	 *
+	 * @param array<int, array<string, string>> $check_rows All collected rows from the run.
+	 * @return void
+	 */
+	private function print_summary( array $check_rows ): void {
+
+		$status_counts = $this->compute_status_counts( $check_rows );
 
 		WP_CLI::log( '' );
 		WP_CLI::log(
