@@ -6,8 +6,14 @@
  * runtime is loaded; tests must not assume any WordPress global state,
  * function, or class is available.
  *
+ * brain/monkey provides per-test WordPress function mocking via the
+ * Pontifex\Tests\TestCase base class, which sets up and tears down
+ * the monkey patches around each test method. Tests opt into mocking
+ * by extending that class instead of PHPUnit's TestCase directly.
+ *
  * Integration tests in tests/Integration/ will eventually use a separate
- * bootstrap (wp-phpunit-style) once the WP test suite is wired in.
+ * bootstrap if and when wp-phpunit is wired in. For now the directory
+ * is a placeholder.
  *
  * @package Pontifex\Tests
  */
