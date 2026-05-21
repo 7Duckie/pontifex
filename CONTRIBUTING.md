@@ -9,13 +9,19 @@ setup. For architectural background, see the design documents in `docs/`.
 git clone https://github.com/7Duckie/pontifex.git
 cd pontifex
 composer install
-pip install pre-commit
-pre-commit install --hook-type pre-commit --hook-type pre-push
+composer dev:setup
 ```
 
 After this, `git commit` runs the fast pre-commit checks and `git push`
 runs the heavier pre-push checks. CI runs everything plus the security
-scans.
+
+
+`composer dev:setup` installs `pre-commit` via Python's package manager
+and registers it with your local git checkout. Python 3 must be
+available on your PATH as `python3` (macOS ships this by default;
+Linux distributions vary). Without pre-commit registered, your local
+commits will still work — they just skip the fast pre-flight checks
+and rely on CI to catch issues.
 
 ## Daily workflow
 

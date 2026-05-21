@@ -38,18 +38,24 @@
         "sort-packages": true
     },
     "scripts": {
-        "lint": "phpcs --standard=phpcs.xml.dist",
-        "lint:fix": "phpcbf --standard=phpcs.xml.dist",
-        "analyse": "phpstan analyse --configuration=phpstan.neon.dist --memory-limit=1G",
-        "test": "phpunit",
-        "test:unit": "phpunit --testsuite=unit",
+      "analyse": "phpstan analyse --configuration=phpstan.neon.dist --memory-limit=1G",
+      "check": [
+          "@lint",
+          "@analyse",
+          "@test",
+          "@composer audit"
+      ],
+      "dev:setup": [
+      "@php -r \"echo 'Installing pre-commit hooks...' . PHP_EOL;\"",
+        "python3 -m pip install pre-commit",
+      "pre-commit install --hook-type pre-commit --hook-type pre-push",
+      "@php -r \"echo 'Done. Run composer check before committing.' . PHP_EOL;\""
+      ],
+      "lint": "phpcs --standard=phpcs.xml.dist",
+      "lint:fix": "phpcbf --standard=phpcs.xml.dist",
+      "test": "phpunit",
         "test:integration": "phpunit --testsuite=integration",
-        "check": [
-            "@lint",
-            "@analyse",
-            "@test",
-            "@composer audit"
-        ]
+      "test:unit": "phpunit --testsuite=unit"
     },
     "minimum-stability": "stable",
     "prefer-stable": true
