@@ -1,13 +1,13 @@
 <?php
 /**
  * Plugin Name:       Pontifex
- * Plugin URI:        https://github.com/34Johnte/pontifex
+ * Plugin URI:        https://github.com/7Duckie/pontifex
  * Description:       A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
  * Version:           0.0.1
  * Requires at least: 6.5
  * Requires PHP:      8.1
- * Author:            34Johnte
- * Author URI:        https://github.com/34Johnte
+ * Author:            7Duckie
+ * Author URI:        https://github.com/7Duckie
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       pontifex
@@ -100,7 +100,7 @@ define( 'PONTIFEX_MINIMUM_PHP_VERSION', $pontifex_minimum_php_version );
 define( 'PONTIFEX_MINIMUM_WP_VERSION', $pontifex_minimum_wp_version );
 
 // -----------------------------------------------------------------------------
-// Autoloader
+// Autoloaderp
 //
 // Composer generates vendor/autoload.php from the PSR-4 mapping in
 // composer.json. Without this require, no `Pontifex\…` class can be
