@@ -18,15 +18,17 @@ use ReflectionNamedType;
 /**
  * Asserts the structural invariants of DoctorCommand.
  *
- * In unit context there is no WordPress runtime available, so this test
- * asserts only the structural invariants of the class: it exists, is
- * final, exposes __invoke, and the invoke signature is the void return
- * WP-CLI expects.
+ * These tests cover only the structural contract of the class: it
+ * exists, is final, exposes __invoke, and the invoke signature is
+ * the void return WP-CLI expects. They run without WordPress and
+ * without brain/monkey because they assert facts about the class
+ * shape itself rather than about runtime behavior.
  *
- * Behavioural assertions (what each check actually returns) will arrive
- * once brain/monkey is wired up to mock WordPress functions. Until then,
- * this suite exists primarily to prove the testing pipeline itself
- * works end-to-end.
+ * Behavioral assertions — what each check method actually reports
+ * under different environmental conditions — live in separate test
+ * classes that extend Pontifex\Tests\TestCase and use brain/monkey
+ * to mock WordPress functions and a mock Environment to control
+ * PHP-level inputs.
  */
 final class DoctorCommandTest extends TestCase {
 

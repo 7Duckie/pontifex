@@ -11,6 +11,8 @@ namespace Pontifex\Cli;
 
 use WP_CLI;
 use WP_CLI\Formatter;
+use Pontifex\Environment\Environment;
+use Pontifex\Environment\RealEnvironment;
 
 /**
  * `wp pontifex doctor` — host environment audit command.
@@ -76,6 +78,31 @@ final class DoctorCommand {
 	 * is the threshold below which we cannot even meaningfully start.
 	 */
 	private const RECOMMENDED_FREE_DISK_BYTES = 2 * 1024 * 1024 * 1024;
+
+	/**
+	 * The Environment abstraction this command queries.
+	 *
+	 * Injected via the constructor so tests can substitute a mock that
+	 * returns deterministic values for PHP version, extension presence,
+	 * disk space, and the other environmental facts each check needs.
+	 *
+	 * @var Environment
+	 */
+	private Environment $environment;
+
+	/**
+	 * Construct a DoctorCommand instance.
+	 *
+	 * WP-CLI registers the command via its class name and does not pass
+	 * constructor arguments, so the parameter is optional and defaults
+	 * to a RealEnvironment that talks to PHP's actual global state.
+	 * Tests pass a mock Environment explicitly.
+	 *
+	 * @param Environment|null $environment Optional. The Environment to query. Defaults to a fresh RealEnvironment instance.
+	 */
+	public function __construct( ?Environment $environment = null ) {
+		$this->environment = $environment ?? new RealEnvironment();
+	}
 
 	/**
 	 * The WP-CLI command entry point.
@@ -161,7 +188,7 @@ final class DoctorCommand {
 	 */
 	private function check_php_version(): array {
 
-		$current_php_version = PHP_VERSION;
+		$current_php_version = $this->environment->php_version();
 
 		// We are guaranteed to be on >= 8.1 here, because the bootstrap
 		// refused to load otherwise. So the only question is whether the
@@ -190,8 +217,8 @@ final class DoctorCommand {
 	private function check_wordpress_version(): array {
 
 		$current_wp_version = (string) get_bloginfo( 'version' );
-		$minimum_wp_version = defined( 'PONTIFEX_MINIMUM_WP_VERSION' )
-			? (string) constant( 'PONTIFEX_MINIMUM_WP_VERSION' )
+		$minimum_wp_version = $this->environment->is_constant_defined( 'PONTIFEX_MINIMUM_WP_VERSION' )
+			? (string) $this->environment->constant_value( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			: '6.5';
 
 		$meets_minimum = version_compare( $current_wp_version, $minimum_wp_version, '>=' );
@@ -239,7 +266,7 @@ final class DoctorCommand {
 
 		// `memory_limit` is a string like "256M". WordPress ships a
 		// helper that parses these into byte counts. -1 means unlimited.
-		$configured_value    = (string) ini_get( 'memory_limit' );
+		$configured_value    = $this->environment->ini_get( 'memory_limit' );
 		$configured_in_bytes = wp_convert_hr_to_bytes( $configured_value );
 
 		// `wp_convert_hr_to_bytes('-1')` returns 0; we treat -1 specially.
@@ -265,7 +292,7 @@ final class DoctorCommand {
 	 */
 	private function check_max_execution_time(): array {
 
-		$configured_seconds = (int) ini_get( 'max_execution_time' );
+		$configured_seconds = (int) $this->environment->ini_get( 'max_execution_time' );
 
 		// 0 means unlimited (typical on CLI runs).
 		if ( 0 === $configured_seconds ) {
@@ -314,7 +341,7 @@ final class DoctorCommand {
 	 */
 	private function check_open_basedir(): array {
 
-		$open_basedir_setting = (string) ini_get( 'open_basedir' );
+		$open_basedir_setting = $this->environment->ini_get( 'open_basedir' );
 
 		if ( '' === $open_basedir_setting ) {
 			return $this->build_row( 'PHP config', 'open_basedir', '(not set)', self::STATUS_OK, '' );
@@ -343,7 +370,7 @@ final class DoctorCommand {
 		string $purpose_note
 	): array {
 
-		$is_loaded = extension_loaded( $extension_name );
+		$is_loaded = $this->environment->extension_loaded( $extension_name );
 
 		if ( $is_loaded ) {
 			return $this->build_row(
@@ -373,7 +400,8 @@ final class DoctorCommand {
 
 		// `disk_free_space` returns false on failure (e.g. open_basedir
 		// restriction). We treat false distinctly from a low number.
-		$free_bytes_raw = disk_free_space( WP_CONTENT_DIR );
+		$wp_content_dir = (string) $this->environment->constant_value( 'WP_CONTENT_DIR' );
+		$free_bytes_raw = $this->environment->disk_free_space( $wp_content_dir );
 
 		if ( false === $free_bytes_raw ) {
 			return $this->build_row(
@@ -417,7 +445,7 @@ final class DoctorCommand {
 		$uploads_info    = wp_upload_dir();
 		$uploads_basedir = (string) $uploads_info['basedir'];
 
-		if ( '' === $uploads_basedir || ! is_dir( $uploads_basedir ) ) {
+		if ( '' === $uploads_basedir || ! $this->environment->is_dir( $uploads_basedir ) ) {
 			return $this->build_row(
 				'Filesystem',
 				'Uploads directory',
@@ -432,8 +460,7 @@ final class DoctorCommand {
 		// direct/SSH back-end based on FS_METHOD); for a read-only
 		// permission probe inside a CLI command, the native call is the
 		// appropriate primitive.
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
-		$is_writable = is_writable( $uploads_basedir );
+		$is_writable = $this->environment->is_writable( $uploads_basedir );
 
 		return $this->build_row(
 			'Filesystem',
@@ -451,7 +478,8 @@ final class DoctorCommand {
 	 */
 	private function check_wp_cron_status(): array {
 
-		$is_wp_cron_disabled = defined( 'DISABLE_WP_CRON' ) && constant( 'DISABLE_WP_CRON' );
+		$is_wp_cron_disabled = $this->environment->is_constant_defined( 'DISABLE_WP_CRON' )
+			&& (bool) $this->environment->constant_value( 'DISABLE_WP_CRON' );
 
 		if ( ! $is_wp_cron_disabled ) {
 			return $this->build_row(
@@ -479,8 +507,8 @@ final class DoctorCommand {
 	 */
 	private function check_action_scheduler_presence(): array {
 
-		$is_loaded_by_other_plugin = class_exists( 'ActionScheduler', false )
-			|| function_exists( 'as_schedule_single_action' );
+		$is_loaded_by_other_plugin = $this->environment->class_exists( 'ActionScheduler', false )
+			|| $this->environment->function_exists( 'as_schedule_single_action' );
 
 		return $this->build_row(
 			'WordPress config',
