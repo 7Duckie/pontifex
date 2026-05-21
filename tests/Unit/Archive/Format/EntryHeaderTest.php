@@ -721,4 +721,110 @@ final class EntryHeaderTest extends TestCase {
 		$this->assertSame( $original->path(), $parsed->path() );
 		$this->assertSame( $original->target(), $parsed->target() );
 	}
+
+	/**
+	 * Serialisation of a file entry must produce the canonical data shape.
+	 *
+	 * @return void
+	 */
+	public function test_to_canonical_data_file_shape(): void {
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+
+		$this->assertSame(
+			array(
+				'kind'  => 'file',
+				'path'  => 'wp-config.php',
+				'size'  => 1234,
+				'mode'  => 420,
+				'mtime' => 1690000000,
+			),
+			$entry->to_canonical_data()
+		);
+	}
+
+	/**
+	 * Serialisation of a db_chunk entry must produce the canonical data shape.
+	 *
+	 * @return void
+	 */
+	public function test_to_canonical_data_db_chunk_shape(): void {
+		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567 );
+
+		$this->assertSame(
+			array(
+				'kind'            => 'db_chunk',
+				'chunk_index'     => 0,
+				'table_name'      => 'wp_posts',
+				'statement_count' => 42,
+				'byte_count'      => 1234567,
+			),
+			$entry->to_canonical_data()
+		);
+	}
+
+	/**
+	 * Serialisation of a directory entry must produce the canonical data shape.
+	 *
+	 * @return void
+	 */
+	public function test_to_canonical_data_directory_shape(): void {
+		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+
+		$this->assertSame(
+			array(
+				'kind' => 'directory',
+				'path' => 'wp-content/uploads',
+				'mode' => 493,
+			),
+			$entry->to_canonical_data()
+		);
+	}
+
+	/**
+	 * Serialisation of a symlink entry must produce the canonical data shape.
+	 *
+	 * @return void
+	 */
+	public function test_to_canonical_data_symlink_shape(): void {
+		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+
+		$this->assertSame(
+			array(
+				'kind'   => 'symlink',
+				'path'   => 'wp-content/cache',
+				'target' => '/tmp/wp-cache',
+			),
+			$entry->to_canonical_data()
+		);
+	}
+
+	/**
+	 * Round-trip through to_canonical_data + from_canonical_data must preserve every kind.
+	 *
+	 * @return void
+	 */
+	public function test_canonical_data_round_trip_each_kind(): void {
+		$entries = array(
+			EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 ),
+			EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000 ),
+			EntryHeader::for_directory( 'wp-content/uploads', 0755 ),
+			EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' ),
+		);
+
+		foreach ( $entries as $original ) {
+			$parsed = EntryHeader::from_canonical_data( $original->to_canonical_data() );
+			$this->assertSame( $original->to_canonical_data(), $parsed->to_canonical_data() );
+		}
+	}
+
+	/**
+	 * Parsing of canonical data must reject an unknown kind.
+	 *
+	 * @return void
+	 */
+	public function test_from_canonical_data_rejects_unknown_kind(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::from_canonical_data( array( 'kind' => 'mystery' ) );
+	}
 }

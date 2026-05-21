@@ -569,15 +569,17 @@ final class EntryHeader {
 	}
 
 	/**
-	 * Encode this EntryHeader to a canonical JSON byte string.
+	 * Return the canonical data array representation of this EntryHeader.
 	 *
-	 * The "kind" field is always first; kind-specific fields follow
-	 * in a fixed order so output is deterministic.
+	 * Produces the same data the canonical JSON encoder serialises:
+	 * the "kind" field first, then the kind-specific fields in a
+	 * fixed order. Other classes (notably ArchiveManifest) use this
+	 * to nest an EntryHeader inside their own JSON without going
+	 * through string serialisation and back.
 	 *
-	 * @return string A canonical JSON byte string in UTF-8.
-	 * @throws JsonException If encoding fails (should not happen for the validated fields).
+	 * @return array<string, mixed> The canonical data array.
 	 */
-	private function encode_canonical_json(): string {
+	public function to_canonical_data(): array {
 		$data = array( 'kind' => $this->kind );
 
 		switch ( $this->kind ) {
@@ -603,37 +605,24 @@ final class EntryHeader {
 				break;
 		}
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- Deterministic byte output required for hash stability; wp_json_encode wraps json_encode without adding anything needed here, and depends on WordPress being loaded.
-		return json_encode( $data, self::JSON_ENCODE_FLAGS );
+		return $data;
 	}
 
 	/**
-	 * Decode a JSON payload into an EntryHeader value object.
+	 * Build an EntryHeader from a decoded canonical data array.
 	 *
-	 * Validates that the kind field is present and recognised, then
-	 * dispatches to a kind-specific parser that verifies the
-	 * expected fields are present and well-typed.
+	 * Validates the kind field is present, is a string, and is one
+	 * of the recognised values, then dispatches to the
+	 * kind-specific parser that verifies the expected fields are
+	 * present and well-typed.
 	 *
-	 * @param string $json The JSON payload bytes as read from disk.
-	 * @return self An EntryHeader reflecting the decoded data.
-	 * @throws InvalidArgumentException If the JSON is malformed, missing the kind field, or contains an unknown or under-specified kind.
+	 * @param array<string, mixed> $data The canonical data array.
+	 * @return self An EntryHeader reflecting the data.
+	 * @throws InvalidArgumentException If the kind field is missing, mis-typed, or unrecognised, or if kind-specific fields are missing or wrong-typed.
 	 */
-	private static function decode_canonical_json( string $json ): self {
-		try {
-			$data = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
-		} catch ( JsonException $e ) {
-			throw new InvalidArgumentException(
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-				'EntryHeader: JSON payload is malformed: ' . $e->getMessage()
-			);
-		}
-
-		if ( ! is_array( $data ) ) {
-			throw new InvalidArgumentException( 'EntryHeader: JSON payload must decode to an object.' );
-		}
-
+	public static function from_canonical_data( array $data ): self {
 		if ( ! array_key_exists( 'kind', $data ) ) {
-			throw new InvalidArgumentException( 'EntryHeader: JSON payload is missing required field "kind".' );
+			throw new InvalidArgumentException( 'EntryHeader: data is missing required field "kind".' );
 		}
 		if ( ! is_string( $data['kind'] ) ) {
 			throw new InvalidArgumentException( 'EntryHeader: field "kind" must be a string.' );
@@ -658,6 +647,51 @@ final class EntryHeader {
 				// Should be unreachable given the in_array guard above.
 				throw new InvalidArgumentException( 'EntryHeader: kind dispatch fell through.' );
 		}
+	}
+
+	/**
+	 * Encode this EntryHeader to a canonical JSON byte string.
+	 *
+	 * Thin wrapper over to_canonical_data + json_encode. Kept
+	 * private because callers that need the data shape should use
+	 * to_canonical_data directly; this method is for the on-disk
+	 * binary serialisation path only.
+	 *
+	 * @return string A canonical JSON byte string in UTF-8.
+	 * @throws JsonException If encoding fails (should not happen for the validated fields).
+	 */
+	private function encode_canonical_json(): string {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- Deterministic byte output required for hash stability; wp_json_encode wraps json_encode without adding anything needed here, and depends on WordPress being loaded.
+		return json_encode( $this->to_canonical_data(), self::JSON_ENCODE_FLAGS );
+	}
+
+	/**
+	 * Decode a JSON payload into an EntryHeader value object.
+	 *
+	 * Thin wrapper over json_decode + from_canonical_data. Kept
+	 * private because the JSON form is only used in the on-disk
+	 * binary serialisation path; nested-data callers should use
+	 * from_canonical_data directly.
+	 *
+	 * @param string $json The JSON payload bytes as read from disk.
+	 * @return self An EntryHeader reflecting the decoded data.
+	 * @throws InvalidArgumentException If the JSON is malformed or the decoded data is invalid.
+	 */
+	private static function decode_canonical_json( string $json ): self {
+		try {
+			$data = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+		} catch ( JsonException $e ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
+				'EntryHeader: JSON payload is malformed: ' . $e->getMessage()
+			);
+		}
+
+		if ( ! is_array( $data ) ) {
+			throw new InvalidArgumentException( 'EntryHeader: JSON payload must decode to an object.' );
+		}
+
+		return self::from_canonical_data( $data );
 	}
 
 	/**
