@@ -14,8 +14,8 @@ Format: one section per advisory, newest at top. Each entry includes:
 
 ## Active
 
-(none yet — v0.0.1)
+(none yet)
 
 ## Resolved
 
-(none yet — v0.0.1)
+(none yet)

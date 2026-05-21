@@ -487,7 +487,7 @@ final class DoctorCommand {
 			'Action Scheduler',
 			$is_loaded_by_other_plugin ? 'loaded by another plugin' : 'not loaded yet',
 			self::STATUS_INFO,
-			'In v0.0.1 we do not yet bundle Action Scheduler. Phase 1 will.'
+			'Pontifex does not yet bundle Action Scheduler. Phase 1 will.'
 		);
 	}
 

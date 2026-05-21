@@ -2,7 +2,7 @@
 
 A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
 
-**Status: pre-alpha (v0.0.1).** The only working feature in this release is the `wp pontifex doctor` environment-audit command. Do not use Pontifex on production sites yet.
+**Status: pre-alpha.** Pontifex is in early development. The current working feature is the `wp pontifex doctor` environment-audit command. Do not use Pontifex on production sites yet.
 
 ## What Pontifex will be
 
@@ -28,7 +28,7 @@ composer install
 
 Then symlink or copy the directory into `wp-content/plugins/` and activate.
 
-## Usage (v0.0.1)
+## Usage
 
 ```bash
 wp pontifex doctor

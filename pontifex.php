@@ -3,7 +3,7 @@
  * Plugin Name:       Pontifex
  * Plugin URI:        https://github.com/7Duckie/pontifex
  * Description:       A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
- * Version:           0.0.1
+ * Version:           0.0.2
  * Requires at least: 6.5
  * Requires PHP:      8.1
  * Author:            7Duckie
@@ -92,12 +92,12 @@ if ( version_compare( PHP_VERSION, $pontifex_minimum_php_version, '<' ) ) {
 // `PONTIFEX_*` prefix avoids collision with anything else in global scope.
 // -----------------------------------------------------------------------------
 
-define( 'PONTIFEX_VERSION', '0.0.1' );
+// Define plugin constants.
 define( 'PONTIFEX_PLUGIN_FILE', __FILE__ );
 define( 'PONTIFEX_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PONTIFEX_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'PONTIFEX_MINIMUM_PHP_VERSION', $pontifex_minimum_php_version );
-define( 'PONTIFEX_MINIMUM_WP_VERSION', $pontifex_minimum_wp_version );
+define( 'PONTIFEX_MINIMUM_PHP_VERSION', '8.1' );
+define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
 
 // -----------------------------------------------------------------------------
 // Autoloaderp

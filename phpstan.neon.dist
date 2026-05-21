@@ -22,9 +22,8 @@ parameters:
 
     # Treat these as known global constants defined by our bootstrap.
     # PHPStan analyses src/ files in isolation and wouldn't otherwise
-    # know that PONTIFEX_VERSION exists.
+    # know these exist.
     dynamicConstantNames:
-        - PONTIFEX_VERSION
         - PONTIFEX_PLUGIN_FILE
         - PONTIFEX_PLUGIN_DIR
         - PONTIFEX_PLUGIN_URL
