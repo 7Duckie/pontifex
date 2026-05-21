@@ -5,6 +5,7 @@
     <!-- Files to inspect. -->
     <file>pontifex.php</file>
     <file>src/</file>
+    <file>tests/</file>
 
     <!-- Patterns to exclude. -->
     <exclude-pattern>vendor/*</exclude-pattern>
