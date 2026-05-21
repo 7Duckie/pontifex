@@ -76,3 +76,37 @@ their description.
 - Tests — `phpunit.xml.dist` (unit + integration suites)
 - Pre-commit — `.pre-commit-config.yaml`
 - CI — `.github/workflows/ci.yml`
+
+## PhpStorm setup
+
+PhpStorm needs two small hints to play nicely with this project. Without
+them, you'll see a wash of "undefined function" warnings on every
+`add_action`, `esc_html__`, `wp_max_upload_size`, and similar WordPress
+or WP-CLI call — even though the code is correct and PHPStan finds the
+same functions via the Composer-installed stubs.
+
+After `composer install`, configure PhpStorm:
+
+1. **Add the stubs directories to the PHP include path.** Open Settings
+   (or Preferences on macOS) → PHP → Include Path. Click the **+**
+   button and add both:
+
+  - `vendor/php-stubs/wordpress-stubs`
+  - `vendor/php-stubs/wp-cli-stubs`
+
+   PhpStorm will reindex briefly; the undefined-function warnings
+   disappear once it finishes.
+
+2. **Ignore the harmless XSD warning on `phpunit.xml.dist`.** PhpStorm
+   may flag the schema declaration because it doesn't have the
+   PHPUnit 10.5 XSD cached locally. The XML is valid and PHPUnit
+   reads it correctly. The warning can be safely ignored, or you can
+   register the schema under Settings → Languages & Frameworks →
+   Schemas and DTDs if you'd prefer it gone.
+
+PhpStorm reads `.editorconfig` automatically in recent versions, so tab
+indentation and line endings will Just Work without further setup.
+
+Other editors (VS Code with Intelephense, Neovim with phpactor, etc.)
+typically pick up the stubs through Composer's autoload metadata and
+need no equivalent step.
