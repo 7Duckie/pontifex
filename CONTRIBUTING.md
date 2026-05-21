@@ -318,3 +318,35 @@ done debugging, so the daily `composer check` stays fast.
 
 Local remembers the last-used setting per site, so re-enabling is a
 single click whenever the next bug appears.
+
+
+## Troubleshooting
+
+### `pip: command not found` during `composer dev:setup`
+
+macOS doesn't alias `pip` by default. The `dev:setup` script uses
+`python3 -m pip` for portability, which works as long as `python3` is on
+your PATH. If you see this error, confirm Python 3 is installed and
+accessible by running `python3 --version`. macOS ships Python 3 by
+default; if it's missing, install it from
+[python.org](https://www.python.org/downloads/macos/) or via Homebrew
+(`brew install python`).
+
+### SSL certificate verification failed during `git commit`
+
+If git commit fails with a Python `URLError: [SSL: CERTIFICATE_VERIFY_FAILED]`
+while pre-commit is downloading hook dependencies (gitleaks, etc.), Python
+can't verify TLS certificates against your system trust store. This is
+a common state for Python installations from python.org's installer on
+macOS, which doesn't bootstrap the certifi bundle automatically.
+
+The fix is shipped with the Python installer. Open Finder, navigate to
+`/Applications/Python 3.x/` (substituting your installed version), and
+double-click `Install Certificates.command`. A Terminal window opens
+briefly, installs certifi, and configures Python to use it. Close that
+Terminal and re-run your commit.
+
+For non-python.org Python installations (Homebrew, asdf, pyenv, system
+Python), the fix is usually:
+
+```bash
