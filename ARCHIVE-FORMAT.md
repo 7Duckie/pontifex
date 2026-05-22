@@ -7,6 +7,14 @@
 
 ---
 
+## How to read this document
+
+This document tells implementers what bytes go where. It is short on prose and long on tables, layouts, and field rules. If you are writing code that emits or parses `.wpmig` archives, this is your reference.
+
+The *why* — what alternatives we considered, what trade-offs we accepted, what concerns motivated specific decisions — lives in the companion [design document](./ARCHIVE-FORMAT-DESIGN.md). You do not need to read it to implement the format, but it answers most of the "why on earth did you do it that way?" questions.
+
+[Appendix B](#appendix-b-glossary) glosses the cryptographic and format-specific terms that the spec uses without defining inline.
+
 ## 1. Introduction
 
 `.wpmig` is a documented, versioned, open archive format designed to package a complete WordPress site — files, database, configuration, and contextual metadata — into a single portable file that can be moved between hosts and reliably reconstructed.
@@ -158,7 +166,7 @@ The provenance block is deliberately the first thing after the header so that a 
 
 ## 6. Entries
 
-After the provenance block, the archive contains a sequence of entries, each describing one file or one chunk of the database. Entries are laid out one after another, with no padding or alignment requirement.
+After the provenance block, the archive contains a sequence of entries, each describing one file or one chunk of the database. Entries are laid out one after another with no gap or filler between them: the next entry's first byte sits immediately after the previous entry's last byte.
 
 Each entry has the structure:
 
@@ -227,9 +235,13 @@ Readers must support **all** v1 codecs to claim v1 compliance. This is non-negot
 
 ## 8. Encryption
 
-When flag bit 0 is set, the archive is encrypted using AES-256-GCM with a key derived from a user-supplied passphrase.
+When flag bit 0 is set, the archive is encrypted. The flow has three parts. First, the operator's passphrase is turned into a 256-bit binary key (key derivation, §8.1). Second, each entry's payload is encrypted independently using that key plus a unique per-entry nonce (§8.2 and §8.3). Third, the operator's passphrase must meet minimum strength requirements so the resulting encryption is actually strong (§8.4).
+
+The cipher is AES-256-GCM. Unlike older modes like CBC, GCM both encrypts the data *and* produces an authentication tag — a small cryptographic fingerprint that catches any modification to the encrypted bytes when the reader tries to decrypt them. Modifying ciphertext without the key produces decryption failure, not silently corrupted output.
 
 ### 8.1 Key derivation
+
+A key derivation function (KDF) converts a human-typed passphrase into a fixed-size binary key suitable for AES. Done right, a KDF is deliberately slow and memory-hungry — by design — so that brute-force attacks against the resulting archive are expensive even when the passphrase itself is not especially strong. The slow-and-hungry part is the whole point: a fast KDF is a weak one.
 
 The encryption key is derived from the passphrase using Argon2id with the following parameters:
 
@@ -250,9 +262,9 @@ For each encrypted entry:
 
 1. The entry header, codec id, and nonce are written in plaintext.
 2. The payload is compressed (if applicable) and then encrypted with AES-256-GCM using:
-   - the derived key,
-   - the per-entry nonce, and
-   - the entry's plaintext header bytes as additional authenticated data (AAD).
+  - the derived key,
+  - the per-entry nonce, and
+  - the entry's plaintext header bytes as additional authenticated data (AAD).
 3. The 16-byte GCM authentication tag is appended to the ciphertext. The combined ciphertext+tag is the stored payload.
 4. The hash is computed over the as-stored bytes.
 
@@ -260,7 +272,9 @@ Using the plaintext header as AAD binds the metadata to the ciphertext: an attac
 
 ### 8.3 Nonce uniqueness
 
-Nonce reuse with the same key catastrophically breaks AES-GCM. To prevent any possibility of reuse within a single archive, nonces are constructed as:
+AES-GCM (like every counter-mode-based cipher) becomes catastrophically insecure if the same nonce is ever used twice with the same key. The mechanism of the break: an attacker who obtains two ciphertexts encrypted with the same nonce-and-key combination can XOR them together to recover the XOR of the underlying plaintexts, which is often enough to reconstruct both. "Catastrophically" is not an exaggeration — this is the same failure mode that broke WEP and is documented as the single most important failure mode of GCM by NIST SP 800-38D.
+
+To prevent any possibility of reuse within a single archive, nonces are constructed as:
 
 ```
 nonce = entry_index (4 B big-endian) || random (8 B)
@@ -345,7 +359,7 @@ The footer is the trust anchor for random access: from it, a reader knows where 
 
 ## 11. Optional detached signature
 
-When flag bit 1 is set, an Ed25519 signature is appended after the footer:
+When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25519 is a modern public-key signature scheme — small keys, small signatures, single-step verification — used by OpenSSH, Signal, signify, and minisign.)
 
 ```
 +--------+--------+--------+

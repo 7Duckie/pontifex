@@ -1,7 +1,17 @@
 # Contributing to Pontifex
 
-Thanks for taking an interest. This document covers the local development
-setup. For architectural background, see the design documents in `docs/`.
+## What this document is
+
+Thanks for taking an interest. This document covers what you need to
+develop and contribute to the plugin: local environment setup, commit
+and branch conventions, test commands, and the quality gates every PR
+must pass.
+
+For architectural background — what the format is and why it's shaped
+this way — see [`ARCHIVE-FORMAT.md`](./ARCHIVE-FORMAT.md),
+[`ARCHIVE-FORMAT-DESIGN.md`](./ARCHIVE-FORMAT-DESIGN.md), and
+[`THREAT_MODEL.md`](./THREAT_MODEL.md). Ideas not yet committed to a
+release live in [`IDEA-BANK.md`](./IDEA-BANK.md).
 
 ## One-time setup
 
@@ -14,7 +24,7 @@ composer dev:setup
 
 After this, `git commit` runs the fast pre-commit checks and `git push`
 runs the heavier pre-push checks. CI runs everything plus the security
-
+audit.
 
 `composer dev:setup` installs `pre-commit` via Python's package manager
 and registers it with your local git checkout. Python 3 must be
@@ -75,6 +85,37 @@ See also [THREAT_MODEL.md](THREAT_MODEL.md) for the attack-surface
 ranking. PRs touching ranks 1-4 should reference the threat model in
 their description.
 
+## Design language
+
+From v0.1.0 onward, Pontifex's UI follows Swiss design principles — the
+mid-20th-century typographic style associated with Helvetica, the
+Bauhaus school, and modern wayfinding systems. The plugin's admin
+screens, when they arrive in v0.3.0+, will reflect these principles
+consistently:
+
+- **Typography over decoration.** Information hierarchy through type
+  weight and size, not boxes, borders, or alert colours.
+- **Generous whitespace.** Density through good rhythm, not by packing
+  pixels.
+- **Sans-serif faces.** Helvetica or a system sans-serif. No serifs,
+  no display faces.
+- **Restrained colour.** Black, white, and grey as the working
+  palette, with one accent colour used sparingly. No traffic-light
+  status colours unless the status genuinely demands them.
+- **Grid-based layouts.** Asymmetric balance, sharp lines, alignment
+  to a consistent grid.
+- **Restraint over alarm.** Destructive actions (e.g. the reset
+  feature in IDEA-BANK Idea 004) are communicated through clear
+  language and explicit confirmation steps, not warning-coloured
+  boxes that operators learn to dismiss.
+
+This direction will be promoted to a dedicated `DESIGN-LANGUAGE.md`
+once admin UI work begins in earnest (target: v0.3.0+) and there is
+enough component vocabulary, colour palette, and type scale to
+populate it. For now, contributors making UI proposals or sketches
+should note the principles above and bring intentional restraint to
+anything they build.
+
 ## Quality-gate reference
 
 - Code style — `phpcs.xml.dist` (WordPress-Extra + Pontifex prefix rules)
@@ -97,11 +138,11 @@ After `composer install`, configure PhpStorm:
    (or Preferences on macOS) → PHP → Include Path. Click the **+**
    button and add both:
 
-  - `vendor/php-stubs/wordpress-stubs`
-  - `vendor/php-stubs/wp-cli-stubs`
+- `vendor/php-stubs/wordpress-stubs`
+- `vendor/php-stubs/wp-cli-stubs`
 
-   PhpStorm will reindex briefly; the undefined-function warnings
-   disappear once it finishes.
+PhpStorm will reindex briefly; the undefined-function warnings
+disappear once it finishes.
 
 2. **Ignore the harmless XSD warning on `phpunit.xml.dist`.** PhpStorm
    may flag the schema declaration because it doesn't have the
@@ -350,3 +391,5 @@ For non-python.org Python installations (Homebrew, asdf, pyenv, system
 Python), the fix is usually:
 
 ```bash
+python3 -m pip install --upgrade certifi
+```
