@@ -13,7 +13,6 @@ use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ByteOrder;
-use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Integrity\Sha256;
 
@@ -57,18 +56,20 @@ final class ArchiveManifestTest extends TestCase {
 	private function two_entry_manifest(): ArchiveManifest {
 		return new ArchiveManifest(
 			array(
-				new ManifestEntry(
+				ManifestEntry::for_file(
+					0,
 					16,
-					EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 ),
+					650,
+					'wp-config.php',
 					1,
-					500,
 					self::HASH_ONE
 				),
-				new ManifestEntry(
-					600,
-					EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 9000 ),
+				ManifestEntry::for_db_chunk(
 					1,
-					3500,
+					600,
+					3700,
+					0,
+					1,
 					self::HASH_TWO
 				),
 			)
@@ -148,20 +149,8 @@ final class ArchiveManifestTest extends TestCase {
 	 * @return void
 	 */
 	public function test_constructor_reindexes_entries(): void {
-		$entry_a = new ManifestEntry(
-			16,
-			EntryHeader::for_file( 'a.txt', 0, 0644, 0 ),
-			0,
-			0,
-			self::HASH_ONE
-		);
-		$entry_b = new ManifestEntry(
-			32,
-			EntryHeader::for_file( 'b.txt', 0, 0644, 0 ),
-			0,
-			0,
-			self::HASH_TWO
-		);
+		$entry_a = ManifestEntry::for_file( 0, 16, 50, 'a.txt', 0, self::HASH_ONE );
+		$entry_b = ManifestEntry::for_file( 1, 32, 50, 'b.txt', 0, self::HASH_TWO );
 
 		$manifest = new ArchiveManifest(
 			array(
@@ -355,18 +344,17 @@ final class ArchiveManifestTest extends TestCase {
 		$parsed_entries   = $parsed->entries();
 
 		// First entry: the file.
+		$this->assertSame( $original_entries[0]->index(), $parsed_entries[0]->index() );
 		$this->assertSame( $original_entries[0]->offset(), $parsed_entries[0]->offset() );
+		$this->assertSame( $original_entries[0]->length(), $parsed_entries[0]->length() );
+		$this->assertSame( $original_entries[0]->kind(), $parsed_entries[0]->kind() );
 		$this->assertSame( $original_entries[0]->codec_id(), $parsed_entries[0]->codec_id() );
-		$this->assertSame( $original_entries[0]->payload_length(), $parsed_entries[0]->payload_length() );
-		$this->assertSame( $original_entries[0]->payload_hash(), $parsed_entries[0]->payload_hash() );
-		$this->assertSame(
-			$original_entries[0]->entry_header()->to_canonical_data(),
-			$parsed_entries[0]->entry_header()->to_canonical_data()
-		);
+		$this->assertSame( $original_entries[0]->entry_hash(), $parsed_entries[0]->entry_hash() );
+		$this->assertSame( $original_entries[0]->path(), $parsed_entries[0]->path() );
 
 		// Second entry: the db chunk.
 		$this->assertSame( $original_entries[1]->offset(), $parsed_entries[1]->offset() );
-		$this->assertSame( 'db_chunk', $parsed_entries[1]->entry_header()->kind() );
-		$this->assertSame( 'wp_posts', $parsed_entries[1]->entry_header()->table_name() );
+		$this->assertSame( 'db_chunk', $parsed_entries[1]->kind() );
+		$this->assertSame( 0, $parsed_entries[1]->chunk_index() );
 	}
 }
