@@ -195,6 +195,22 @@ final class EntryHeader {
 	private ?string $target;
 
 	/**
+	 * Encoded payload byte count on disk, after the codec runs.
+	 *
+	 * Present on all four kinds. Directories always carry 0 since
+	 * they have no payload. Set explicitly by the writer once the
+	 * codec has finished encoding; callers that build a draft
+	 * header before encoding can use with_size_compressed() to
+	 * produce a corrected copy.
+	 *
+	 * Per spec §6, this is the value stored in the on-disk entry
+	 * header as `size_compressed`.
+	 *
+	 * @var int
+	 */
+	private int $size_compressed;
+
+	/**
 	 * Construct an EntryHeader directly with all field values.
 	 *
 	 * Private to force construction through the kind-specific
@@ -212,6 +228,7 @@ final class EntryHeader {
 	 * @param int|null    $statement_count Statement count (db_chunk).
 	 * @param int|null    $byte_count      Original byte count (db_chunk).
 	 * @param string|null $target          Symlink target (symlink).
+	 * @param int         $size_compressed Encoded payload byte count on disk.
 	 */
 	private function __construct(
 		string $kind,
@@ -223,7 +240,8 @@ final class EntryHeader {
 		?string $table_name = null,
 		?int $statement_count = null,
 		?int $byte_count = null,
-		?string $target = null
+		?string $target = null,
+		int $size_compressed = 0
 	) {
 		$this->kind            = $kind;
 		$this->path            = $path;
@@ -235,19 +253,21 @@ final class EntryHeader {
 		$this->statement_count = $statement_count;
 		$this->byte_count      = $byte_count;
 		$this->target          = $target;
+		$this->size_compressed = $size_compressed;
 	}
 
 	/**
 	 * Build an EntryHeader for a regular file entry.
 	 *
-	 * @param string $path  Relative path from the archive root; must be non-empty.
-	 * @param int    $size  Original byte size before any codec encoding; must be non-negative.
-	 * @param int    $mode  POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
-	 * @param int    $mtime Unix modification timestamp; must be non-negative.
+	 * @param string $path            Relative path from the archive root; must be non-empty.
+	 * @param int    $size            Original byte size before any codec encoding; must be non-negative.
+	 * @param int    $mode            POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
+	 * @param int    $mtime           Unix modification timestamp; must be non-negative.
+	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative.
 	 * @return self A file-kind EntryHeader.
 	 * @throws InvalidArgumentException If any argument is out of range or empty.
 	 */
-	public static function for_file( string $path, int $size, int $mode, int $mtime ): self {
+	public static function for_file( string $path, int $size, int $mode, int $mtime, int $size_compressed ): self {
 		if ( '' === $path ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_file: path must not be empty.' );
 		}
@@ -266,13 +286,24 @@ final class EntryHeader {
 				sprintf( 'EntryHeader::for_file: mtime %d must be non-negative.', (int) $mtime )
 			);
 		}
+		if ( $size_compressed < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::for_file: size_compressed %d must be non-negative.', (int) $size_compressed )
+			);
+		}
 
 		return new self(
 			self::KIND_FILE,
 			$path,
 			$size,
 			$mode,
-			$mtime
+			$mtime,
+			null,
+			null,
+			null,
+			null,
+			null,
+			$size_compressed
 		);
 	}
 
@@ -283,10 +314,11 @@ final class EntryHeader {
 	 * @param string $table_name      Predominant table name; must be non-empty.
 	 * @param int    $statement_count Number of SQL statements in this chunk; must be non-negative.
 	 * @param int    $byte_count      Original byte size of the statements before encoding; must be non-negative.
+	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative.
 	 * @return self A db_chunk-kind EntryHeader.
 	 * @throws InvalidArgumentException If any argument is out of range or empty.
 	 */
-	public static function for_db_chunk( int $chunk_index, string $table_name, int $statement_count, int $byte_count ): self {
+	public static function for_db_chunk( int $chunk_index, string $table_name, int $statement_count, int $byte_count, int $size_compressed ): self {
 		if ( $chunk_index < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf( 'EntryHeader::for_db_chunk: chunk_index %d must be non-negative.', (int) $chunk_index )
@@ -305,6 +337,11 @@ final class EntryHeader {
 				sprintf( 'EntryHeader::for_db_chunk: byte_count %d must be non-negative.', (int) $byte_count )
 			);
 		}
+		if ( $size_compressed < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::for_db_chunk: size_compressed %d must be non-negative.', (int) $size_compressed )
+			);
+		}
 
 		return new self(
 			self::KIND_DB_CHUNK,
@@ -315,19 +352,26 @@ final class EntryHeader {
 			$chunk_index,
 			$table_name,
 			$statement_count,
-			$byte_count
+			$byte_count,
+			null,
+			$size_compressed
 		);
 	}
 
 	/**
 	 * Build an EntryHeader for a directory entry.
 	 *
-	 * @param string $path Relative path from the archive root; must be non-empty.
-	 * @param int    $mode POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
+	 * Directories carry no payload (per spec §6), so the writer passes
+	 * 0 for size_compressed. The parameter is retained for consistency
+	 * across all four factories.
+	 *
+	 * @param string $path            Relative path from the archive root; must be non-empty.
+	 * @param int    $mode            POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
+	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative (normally 0 for directories).
 	 * @return self A directory-kind EntryHeader.
 	 * @throws InvalidArgumentException If any argument is out of range or empty.
 	 */
-	public static function for_directory( string $path, int $mode ): self {
+	public static function for_directory( string $path, int $mode, int $size_compressed ): self {
 		if ( '' === $path ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_directory: path must not be empty.' );
 		}
@@ -336,29 +380,47 @@ final class EntryHeader {
 				sprintf( 'EntryHeader::for_directory: mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
 			);
 		}
+		if ( $size_compressed < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::for_directory: size_compressed %d must be non-negative.', (int) $size_compressed )
+			);
+		}
 
 		return new self(
 			self::KIND_DIRECTORY,
 			$path,
 			null,
-			$mode
+			$mode,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			$size_compressed
 		);
 	}
 
 	/**
 	 * Build an EntryHeader for a symbolic-link entry.
 	 *
-	 * @param string $path   Relative path from the archive root; must be non-empty.
-	 * @param string $target The path the symlink points to; must be non-empty; stored verbatim.
+	 * @param string $path            Relative path from the archive root; must be non-empty.
+	 * @param string $target          The path the symlink points to; must be non-empty; stored verbatim.
+	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative.
 	 * @return self A symlink-kind EntryHeader.
-	 * @throws InvalidArgumentException If either argument is empty.
+	 * @throws InvalidArgumentException If either path/target is empty or size_compressed is negative.
 	 */
-	public static function for_symlink( string $path, string $target ): self {
+	public static function for_symlink( string $path, string $target, int $size_compressed ): self {
 		if ( '' === $path ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_symlink: path must not be empty.' );
 		}
 		if ( '' === $target ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_symlink: target must not be empty.' );
+		}
+		if ( $size_compressed < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::for_symlink: size_compressed %d must be non-negative.', (int) $size_compressed )
+			);
 		}
 
 		return new self(
@@ -371,7 +433,8 @@ final class EntryHeader {
 			null,
 			null,
 			null,
-			$target
+			$target,
+			$size_compressed
 		);
 	}
 
@@ -463,6 +526,41 @@ final class EntryHeader {
 	 */
 	public function target(): ?string {
 		return $this->target;
+	}
+
+	/**
+	 * Return the encoded payload byte count on disk.
+	 *
+	 * Present on all four kinds. Directories typically return 0 since
+	 * they have no payload.
+	 *
+	 * @return int The non-negative encoded payload byte count.
+	 */
+	public function size_compressed(): int {
+		return $this->size_compressed;
+	}
+
+	/**
+	 * Return a copy of this EntryHeader with size_compressed updated.
+	 *
+	 * Immutable PSR-7-style update. Useful when a draft EntryHeader is
+	 * built before the codec runs (with size_compressed = 0) and a
+	 * corrected copy is needed once the encoded payload size is known.
+	 *
+	 * @param int $size_compressed New encoded payload byte count; must be non-negative.
+	 * @return self A new EntryHeader instance with the updated size_compressed and all other fields preserved.
+	 * @throws InvalidArgumentException If size_compressed is negative.
+	 */
+	public function with_size_compressed( int $size_compressed ): self {
+		if ( $size_compressed < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::with_size_compressed: size_compressed %d must be non-negative.', (int) $size_compressed )
+			);
+		}
+
+		$copy                  = clone $this;
+		$copy->size_compressed = $size_compressed;
+		return $copy;
 	}
 
 	/**
@@ -584,24 +682,28 @@ final class EntryHeader {
 
 		switch ( $this->kind ) {
 			case self::KIND_FILE:
-				$data['path']  = $this->path;
-				$data['size']  = $this->size;
-				$data['mode']  = $this->mode;
-				$data['mtime'] = $this->mtime;
+				$data['path']            = $this->path;
+				$data['size']            = $this->size;
+				$data['mode']            = $this->mode;
+				$data['mtime']           = $this->mtime;
+				$data['size_compressed'] = $this->size_compressed;
 				break;
 			case self::KIND_DB_CHUNK:
 				$data['chunk_index']     = $this->chunk_index;
 				$data['table_name']      = $this->table_name;
 				$data['statement_count'] = $this->statement_count;
 				$data['byte_count']      = $this->byte_count;
+				$data['size_compressed'] = $this->size_compressed;
 				break;
 			case self::KIND_DIRECTORY:
-				$data['path'] = $this->path;
-				$data['mode'] = $this->mode;
+				$data['path']            = $this->path;
+				$data['mode']            = $this->mode;
+				$data['size_compressed'] = $this->size_compressed;
 				break;
 			case self::KIND_SYMLINK:
-				$data['path']   = $this->path;
-				$data['target'] = $this->target;
+				$data['path']            = $this->path;
+				$data['target']          = $this->target;
+				$data['size_compressed'] = $this->size_compressed;
 				break;
 		}
 
@@ -706,12 +808,14 @@ final class EntryHeader {
 		self::require_int( $data, 'size' );
 		self::require_int( $data, 'mode' );
 		self::require_int( $data, 'mtime' );
+		self::require_int( $data, 'size_compressed' );
 
 		return self::for_file(
 			$data['path'],
 			$data['size'],
 			$data['mode'],
-			$data['mtime']
+			$data['mtime'],
+			$data['size_compressed']
 		);
 	}
 
@@ -727,12 +831,14 @@ final class EntryHeader {
 		self::require_string( $data, 'table_name' );
 		self::require_int( $data, 'statement_count' );
 		self::require_int( $data, 'byte_count' );
+		self::require_int( $data, 'size_compressed' );
 
 		return self::for_db_chunk(
 			$data['chunk_index'],
 			$data['table_name'],
 			$data['statement_count'],
-			$data['byte_count']
+			$data['byte_count'],
+			$data['size_compressed']
 		);
 	}
 
@@ -746,10 +852,12 @@ final class EntryHeader {
 	private static function parse_directory_payload( array $data ): self {
 		self::require_string( $data, 'path' );
 		self::require_int( $data, 'mode' );
+		self::require_int( $data, 'size_compressed' );
 
 		return self::for_directory(
 			$data['path'],
-			$data['mode']
+			$data['mode'],
+			$data['size_compressed']
 		);
 	}
 
@@ -763,10 +871,12 @@ final class EntryHeader {
 	private static function parse_symlink_payload( array $data ): self {
 		self::require_string( $data, 'path' );
 		self::require_string( $data, 'target' );
+		self::require_int( $data, 'size_compressed' );
 
 		return self::for_symlink(
 			$data['path'],
-			$data['target']
+			$data['target'],
+			$data['size_compressed']
 		);
 	}
 

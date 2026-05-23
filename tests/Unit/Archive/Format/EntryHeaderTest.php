@@ -112,7 +112,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_valid_inputs(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
 
 		$this->assertSame( EntryHeader::KIND_FILE, $entry->kind() );
 		$this->assertSame( 'wp-config.php', $entry->path() );
@@ -127,7 +127,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_non_file_accessors_return_null(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
 
 		$this->assertNull( $entry->chunk_index() );
 		$this->assertNull( $entry->table_name() );
@@ -144,7 +144,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_empty_path(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( '', 1234, 0644, 1690000000 );
+		EntryHeader::for_file( '', 1234, 0644, 1690000000, 0 );
 	}
 
 	/**
@@ -155,7 +155,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_size(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', -1, 0644, 1690000000 );
+		EntryHeader::for_file( 'wp-config.php', -1, 0644, 1690000000, 0 );
 	}
 
 	/**
@@ -164,7 +164,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_zero_size(): void {
-		$entry = EntryHeader::for_file( 'empty.txt', 0, 0644, 1690000000 );
+		$entry = EntryHeader::for_file( 'empty.txt', 0, 0644, 1690000000, 0 );
 
 		$this->assertSame( 0, $entry->size() );
 	}
@@ -177,7 +177,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, -1, 1690000000 );
+		EntryHeader::for_file( 'wp-config.php', 1234, -1, 1690000000, 0 );
 	}
 
 	/**
@@ -188,7 +188,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_oversize_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, 4096, 1690000000 );
+		EntryHeader::for_file( 'wp-config.php', 1234, 4096, 1690000000, 0 );
 	}
 
 	/**
@@ -197,7 +197,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_mode_zero(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0, 1690000000, 0 );
 
 		$this->assertSame( 0, $entry->mode() );
 	}
@@ -208,7 +208,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_max_mode(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, EntryHeader::MAX_POSIX_MODE, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, EntryHeader::MAX_POSIX_MODE, 1690000000, 0 );
 
 		$this->assertSame( 4095, $entry->mode() );
 	}
@@ -221,7 +221,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_mtime(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, 0644, -1 );
+		EntryHeader::for_file( 'wp-config.php', 1234, 0644, -1, 0 );
 	}
 
 
@@ -231,7 +231,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_db_chunk_accepts_valid_inputs(): void {
-		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567 );
+		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567, 0 );
 
 		$this->assertSame( EntryHeader::KIND_DB_CHUNK, $entry->kind() );
 		$this->assertSame( 0, $entry->chunk_index() );
@@ -246,7 +246,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_db_chunk_non_db_chunk_accessors_return_null(): void {
-		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567 );
+		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567, 0 );
 
 		$this->assertNull( $entry->path() );
 		$this->assertNull( $entry->size() );
@@ -263,7 +263,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_db_chunk_rejects_negative_index(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_db_chunk( -1, 'wp_posts', 42, 1234567 );
+		EntryHeader::for_db_chunk( -1, 'wp_posts', 42, 1234567, 0 );
 	}
 
 	/**
@@ -274,7 +274,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_db_chunk_rejects_empty_table_name(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_db_chunk( 0, '', 42, 1234567 );
+		EntryHeader::for_db_chunk( 0, '', 42, 1234567, 0 );
 	}
 
 	/**
@@ -285,7 +285,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_db_chunk_rejects_negative_statement_count(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_db_chunk( 0, 'wp_posts', -1, 1234567 );
+		EntryHeader::for_db_chunk( 0, 'wp_posts', -1, 1234567, 0 );
 	}
 
 	/**
@@ -296,7 +296,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_db_chunk_rejects_negative_byte_count(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_db_chunk( 0, 'wp_posts', 42, -1 );
+		EntryHeader::for_db_chunk( 0, 'wp_posts', 42, -1, 0 );
 	}
 
 
@@ -306,7 +306,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_directory_accepts_valid_inputs(): void {
-		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 );
 
 		$this->assertSame( EntryHeader::KIND_DIRECTORY, $entry->kind() );
 		$this->assertSame( 'wp-content/uploads', $entry->path() );
@@ -319,7 +319,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_directory_non_directory_accessors_return_null(): void {
-		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 );
 
 		$this->assertNull( $entry->size() );
 		$this->assertNull( $entry->mtime() );
@@ -335,7 +335,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_directory_rejects_empty_path(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_directory( '', 0755 );
+		EntryHeader::for_directory( '', 0755, 0 );
 	}
 
 	/**
@@ -346,7 +346,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_directory_rejects_oversize_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_directory( 'wp-content/uploads', 4096 );
+		EntryHeader::for_directory( 'wp-content/uploads', 4096, 0 );
 	}
 
 
@@ -356,7 +356,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_symlink_accepts_valid_inputs(): void {
-		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 0 );
 
 		$this->assertSame( EntryHeader::KIND_SYMLINK, $entry->kind() );
 		$this->assertSame( 'wp-content/cache', $entry->path() );
@@ -369,7 +369,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_symlink_non_symlink_accessors_return_null(): void {
-		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 0 );
 
 		$this->assertNull( $entry->size() );
 		$this->assertNull( $entry->mode() );
@@ -385,7 +385,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_symlink_rejects_empty_path(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_symlink( '', '/tmp/wp-cache' );
+		EntryHeader::for_symlink( '', '/tmp/wp-cache', 0 );
 	}
 
 	/**
@@ -396,7 +396,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_symlink_rejects_empty_target(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_symlink( 'wp-content/cache', '' );
+		EntryHeader::for_symlink( 'wp-content/cache', '', 0 );
 	}
 
 
@@ -406,10 +406,10 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_predicates_report_kind_correctly(): void {
-		$file      = EntryHeader::for_file( 'a.txt', 0, 0644, 0 );
-		$db_chunk  = EntryHeader::for_db_chunk( 0, 't', 0, 0 );
-		$directory = EntryHeader::for_directory( 'd', 0755 );
-		$symlink   = EntryHeader::for_symlink( 's', 't' );
+		$file      = EntryHeader::for_file( 'a.txt', 0, 0644, 0, 0 );
+		$db_chunk  = EntryHeader::for_db_chunk( 0, 't', 0, 0, 0 );
+		$directory = EntryHeader::for_directory( 'd', 0755, 0 );
+		$symlink   = EntryHeader::for_symlink( 's', 't', 0 );
 
 		$this->assertTrue( $file->is_file() );
 		$this->assertFalse( $file->is_db_chunk() );
@@ -431,12 +431,12 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_file_canonical_layout(): void {
-		$entry   = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry   = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 489 );
 		$bytes   = $entry->to_bytes();
 		$payload = substr( $bytes, EntryHeader::LENGTH_PREFIX_SIZE );
 
 		$this->assertSame(
-			'{"kind":"file","path":"wp-config.php","size":1234,"mode":420,"mtime":1690000000}',
+			'{"kind":"file","path":"wp-config.php","size":1234,"mode":420,"mtime":1690000000,"size_compressed":489}',
 			$payload
 		);
 	}
@@ -447,12 +447,12 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_db_chunk_canonical_layout(): void {
-		$entry   = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567 );
+		$entry   = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567, 234567 );
 		$bytes   = $entry->to_bytes();
 		$payload = substr( $bytes, EntryHeader::LENGTH_PREFIX_SIZE );
 
 		$this->assertSame(
-			'{"kind":"db_chunk","chunk_index":0,"table_name":"wp_posts","statement_count":42,"byte_count":1234567}',
+			'{"kind":"db_chunk","chunk_index":0,"table_name":"wp_posts","statement_count":42,"byte_count":1234567,"size_compressed":234567}',
 			$payload
 		);
 	}
@@ -463,12 +463,12 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_directory_canonical_layout(): void {
-		$entry   = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+		$entry   = EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 );
 		$bytes   = $entry->to_bytes();
 		$payload = substr( $bytes, EntryHeader::LENGTH_PREFIX_SIZE );
 
 		$this->assertSame(
-			'{"kind":"directory","path":"wp-content/uploads","mode":493}',
+			'{"kind":"directory","path":"wp-content/uploads","mode":493,"size_compressed":0}',
 			$payload
 		);
 	}
@@ -479,12 +479,12 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_symlink_canonical_layout(): void {
-		$entry   = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+		$entry   = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 13 );
 		$bytes   = $entry->to_bytes();
 		$payload = substr( $bytes, EntryHeader::LENGTH_PREFIX_SIZE );
 
 		$this->assertSame(
-			'{"kind":"symlink","path":"wp-content/cache","target":"/tmp/wp-cache"}',
+			'{"kind":"symlink","path":"wp-content/cache","target":"/tmp/wp-cache","size_compressed":13}',
 			$payload
 		);
 	}
@@ -495,7 +495,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_length_prefix_matches_payload(): void {
-		$entry           = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry           = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
 		$bytes           = $entry->to_bytes();
 		$declared_length = ByteOrder::unpack_uint32( substr( $bytes, 0, 4 ) );
 		$payload         = substr( $bytes, 4 );
@@ -534,7 +534,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_from_bytes_rejects_length_mismatch(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
 		$bytes = $entry->to_bytes();
 
 		$this->expectException( InvalidArgumentException::class );
@@ -668,7 +668,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_round_trip_file(): void {
-		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
 		$parsed   = EntryHeader::from_bytes( $original->to_bytes() );
 
 		$this->assertSame( $original->kind(), $parsed->kind() );
@@ -684,7 +684,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_round_trip_db_chunk(): void {
-		$original = EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000 );
+		$original = EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000, 0 );
 		$parsed   = EntryHeader::from_bytes( $original->to_bytes() );
 
 		$this->assertSame( $original->kind(), $parsed->kind() );
@@ -700,7 +700,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_round_trip_directory(): void {
-		$original = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+		$original = EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 );
 		$parsed   = EntryHeader::from_bytes( $original->to_bytes() );
 
 		$this->assertSame( $original->kind(), $parsed->kind() );
@@ -714,7 +714,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_round_trip_symlink(): void {
-		$original = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+		$original = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 0 );
 		$parsed   = EntryHeader::from_bytes( $original->to_bytes() );
 
 		$this->assertSame( $original->kind(), $parsed->kind() );
@@ -728,15 +728,16 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_canonical_data_file_shape(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 489 );
 
 		$this->assertSame(
 			array(
-				'kind'  => 'file',
-				'path'  => 'wp-config.php',
-				'size'  => 1234,
-				'mode'  => 420,
-				'mtime' => 1690000000,
+				'kind'            => 'file',
+				'path'            => 'wp-config.php',
+				'size'            => 1234,
+				'mode'            => 420,
+				'mtime'           => 1690000000,
+				'size_compressed' => 489,
 			),
 			$entry->to_canonical_data()
 		);
@@ -748,7 +749,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_canonical_data_db_chunk_shape(): void {
-		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567 );
+		$entry = EntryHeader::for_db_chunk( 0, 'wp_posts', 42, 1234567, 234567 );
 
 		$this->assertSame(
 			array(
@@ -757,6 +758,7 @@ final class EntryHeaderTest extends TestCase {
 				'table_name'      => 'wp_posts',
 				'statement_count' => 42,
 				'byte_count'      => 1234567,
+				'size_compressed' => 234567,
 			),
 			$entry->to_canonical_data()
 		);
@@ -768,13 +770,14 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_canonical_data_directory_shape(): void {
-		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755 );
+		$entry = EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 );
 
 		$this->assertSame(
 			array(
-				'kind' => 'directory',
-				'path' => 'wp-content/uploads',
-				'mode' => 493,
+				'kind'            => 'directory',
+				'path'            => 'wp-content/uploads',
+				'mode'            => 493,
+				'size_compressed' => 0,
 			),
 			$entry->to_canonical_data()
 		);
@@ -786,13 +789,14 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_canonical_data_symlink_shape(): void {
-		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' );
+		$entry = EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 13 );
 
 		$this->assertSame(
 			array(
-				'kind'   => 'symlink',
-				'path'   => 'wp-content/cache',
-				'target' => '/tmp/wp-cache',
+				'kind'            => 'symlink',
+				'path'            => 'wp-content/cache',
+				'target'          => '/tmp/wp-cache',
+				'size_compressed' => 13,
 			),
 			$entry->to_canonical_data()
 		);
@@ -805,10 +809,10 @@ final class EntryHeaderTest extends TestCase {
 	 */
 	public function test_canonical_data_round_trip_each_kind(): void {
 		$entries = array(
-			EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000 ),
-			EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000 ),
-			EntryHeader::for_directory( 'wp-content/uploads', 0755 ),
-			EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache' ),
+			EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 ),
+			EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000, 0 ),
+			EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 ),
+			EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 0 ),
 		);
 
 		foreach ( $entries as $original ) {
@@ -826,5 +830,141 @@ final class EntryHeaderTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		EntryHeader::from_canonical_data( array( 'kind' => 'mystery' ) );
+	}
+
+	/**
+	 * The file factory must reject a negative size_compressed.
+	 *
+	 * @return void
+	 */
+	public function test_for_file_rejects_negative_size_compressed(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::for_file( 'a.txt', 100, 0644, 0, -1 );
+	}
+
+	/**
+	 * The db_chunk factory must reject a negative size_compressed.
+	 *
+	 * @return void
+	 */
+	public function test_for_db_chunk_rejects_negative_size_compressed(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::for_db_chunk( 0, 'wp_posts', 1, 100, -1 );
+	}
+
+	/**
+	 * The directory factory must reject a negative size_compressed.
+	 *
+	 * @return void
+	 */
+	public function test_for_directory_rejects_negative_size_compressed(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::for_directory( 'd', 0755, -1 );
+	}
+
+	/**
+	 * The symlink factory must reject a negative size_compressed.
+	 *
+	 * @return void
+	 */
+	public function test_for_symlink_rejects_negative_size_compressed(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::for_symlink( 'a', 'b', -1 );
+	}
+
+	/**
+	 * The size_compressed accessor must return the constructed value.
+	 *
+	 * @return void
+	 */
+	public function test_size_compressed_accessor_returns_constructed_value(): void {
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 250 );
+
+		$this->assertSame( 250, $entry->size_compressed() );
+	}
+
+	/**
+	 * The with_size_compressed method must return a new instance (immutability check).
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_returns_new_instance(): void {
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$copy     = $original->with_size_compressed( 489 );
+
+		$this->assertNotSame( $original, $copy );
+	}
+
+	/**
+	 * The with_size_compressed method must apply the new value to the returned copy.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_updates_size_compressed(): void {
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$copy     = $original->with_size_compressed( 489 );
+
+		$this->assertSame( 489, $copy->size_compressed() );
+	}
+
+	/**
+	 * The with_size_compressed method must leave the original instance unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_leaves_original_unchanged(): void {
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$original->with_size_compressed( 489 );
+
+		$this->assertSame( 0, $original->size_compressed() );
+	}
+
+	/**
+	 * The with_size_compressed method must preserve every other file field on the copy.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_preserves_all_other_fields_file(): void {
+		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$copy     = $original->with_size_compressed( 489 );
+
+		$this->assertSame( EntryHeader::KIND_FILE, $copy->kind() );
+		$this->assertSame( 'wp-config.php', $copy->path() );
+		$this->assertSame( 1234, $copy->size() );
+		$this->assertSame( 0644, $copy->mode() );
+		$this->assertSame( 1690000000, $copy->mtime() );
+	}
+
+	/**
+	 * The with_size_compressed method must preserve every other db_chunk field on the copy.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_preserves_all_other_fields_db_chunk(): void {
+		$original = EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 50000, 0 );
+		$copy     = $original->with_size_compressed( 12000 );
+
+		$this->assertSame( EntryHeader::KIND_DB_CHUNK, $copy->kind() );
+		$this->assertSame( 5, $copy->chunk_index() );
+		$this->assertSame( 'wp_postmeta', $copy->table_name() );
+		$this->assertSame( 200, $copy->statement_count() );
+		$this->assertSame( 50000, $copy->byte_count() );
+	}
+
+	/**
+	 * The with_size_compressed method must reject a negative value.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_compressed_rejects_negative(): void {
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$entry->with_size_compressed( -1 );
 	}
 }
