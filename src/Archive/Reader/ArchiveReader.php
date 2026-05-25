@@ -11,18 +11,19 @@ namespace Pontifex\Archive\Reader;
 
 use InvalidArgumentException;
 use RuntimeException;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\Footer;
 use Pontifex\Archive\Format\Header;
+use Pontifex\Archive\Integrity\Sha256;
 
 /**
  * Opens a Pontifex archive and exposes its high-level structure.
  *
- * This is the entry point for reading archives. It is intentionally
- * small: it parses the fixed-size Header at offset 0 and the
- * fixed-size Footer at the end of the stream, then exposes both
- * plus convenience accessors for the manifest's location. Parsing
- * the manifest itself, iterating entries, and verifying hashes
- * arrive in later commits.
+ * This is the entry point for reading archives. It parses the
+ * fixed-size Header at offset 0 and the fixed-size Footer at the
+ * end of the stream eagerly at construction time; the variable-size
+ * manifest block is parsed lazily on first access via
+ * {@see ArchiveReader::manifest()}, then cached.
  *
  * Symmetric with {@see \Pontifex\Archive\Writer\ArchiveWriter}: every
  * piece of information ArchiveWriter writes, ArchiveReader knows
@@ -40,6 +41,10 @@ use Pontifex\Archive\Format\Header;
  *    manifest block begins, from the Footer.
  *  - {@see ArchiveReader::manifest_length()} — declared length of
  *    the manifest block in bytes, from the Footer.
+ *  - {@see ArchiveReader::manifest()} — the parsed ArchiveManifest,
+ *    read and cached on first access. Verifies the manifest's
+ *    internal hash matches the Footer's recorded hash; throws if
+ *    they disagree.
  *
  * Internal choices (implementation details; may change without
  * breaking the public API):
@@ -47,11 +52,16 @@ use Pontifex\Archive\Format\Header;
  *  - Eager parsing of Header and Footer at construction time. Both
  *    are tiny (16 and 64 bytes respectively) and reading them up
  *    front lets the caller rely on the accessors never failing.
- *    Manifest parsing is NOT eager because the manifest can be
- *    megabytes; deferring it respects laziness.
+ *  - Lazy parsing of the manifest. The manifest can be megabytes;
+ *    parsing only happens on first call to manifest(). The result
+ *    is cached so subsequent calls are O(1).
+ *  - Double hash check on the manifest. ArchiveManifest::from_bytes
+ *    already verifies its own internal hash; ArchiveReader
+ *    additionally verifies that internal hash equals the Footer's
+ *    manifest_hash. Defense in depth against tampering with just
+ *    one of the two recorded copies.
  *  - The source stream's seek position is changed by this class.
- *    Callers should not assume the position is preserved after
- *    construction.
+ *    Callers should not assume the position is preserved.
  *  - Stream ownership: the caller owns the stream. ArchiveReader
  *    does not close it on destruction.
  */
@@ -77,6 +87,15 @@ final class ArchiveReader {
 	 * @var Footer
 	 */
 	private Footer $footer;
+
+	/**
+	 * The parsed ArchiveManifest, populated lazily on first access via manifest().
+	 *
+	 * Null until the first manifest() call; cached thereafter.
+	 *
+	 * @var ArchiveManifest|null
+	 */
+	private ?ArchiveManifest $manifest = null;
 
 	/**
 	 * Open an ArchiveReader around an existing archive stream.
@@ -149,6 +168,32 @@ final class ArchiveReader {
 	 */
 	public function manifest_length(): int {
 		return $this->footer->manifest_length();
+	}
+
+	/**
+	 * Return the parsed ArchiveManifest, reading it from the stream on first access.
+	 *
+	 * The manifest is parsed lazily on the first call and cached;
+	 * subsequent calls return the cached instance. The read uses the
+	 * manifest_offset and manifest_length recorded in the Footer.
+	 *
+	 * Verification performed on first read:
+	 *  - The declared manifest_offset plus manifest_length must fit
+	 *    inside the stream (no reading past EOF).
+	 *  - ArchiveManifest::from_bytes verifies the manifest's own
+	 *    internal hash matches the manifest payload.
+	 *  - The manifest's internal hash must equal the Footer's
+	 *    manifest_hash. Defense in depth against tampering that
+	 *    might modify only one of the two recorded copies.
+	 *
+	 * @return ArchiveManifest The parsed manifest.
+	 * @throws RuntimeException If the manifest cannot be read, parsed, or fails hash verification.
+	 */
+	public function manifest(): ArchiveManifest {
+		if ( null === $this->manifest ) {
+			$this->manifest = $this->read_manifest();
+		}
+		return $this->manifest;
 	}
 
 	/**
@@ -232,5 +277,76 @@ final class ArchiveReader {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
 			throw new RuntimeException( 'ArchiveReader: archive footer is malformed.', 0, $e );
 		}
+	}
+
+	/**
+	 * Read and parse the manifest block from the position recorded in the Footer.
+	 *
+	 * Bounds-checks the offset and length against the stream's total
+	 * size before reading so a malformed footer cannot trick us into
+	 * reading past EOF or allocating a huge buffer. Then defers to
+	 * ArchiveManifest::from_bytes for the parse, and finally
+	 * cross-checks that the manifest's internal hash equals the
+	 * Footer's manifest_hash.
+	 *
+	 * @return ArchiveManifest The parsed manifest.
+	 * @throws RuntimeException If the manifest cannot be read, parses to bytes that fail their internal hash check, or whose hash disagrees with the Footer.
+	 */
+	private function read_manifest(): ArchiveManifest {
+		$offset = $this->footer->manifest_offset();
+		$length = $this->footer->manifest_length();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to bounds-check the manifest.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$stream_length = ftell( $this->source );
+		if ( false === $stream_length ) {
+			throw new RuntimeException( 'ArchiveReader: could not determine stream length for manifest bounds check.' );
+		}
+
+		// The manifest must sit entirely between the Header and the Footer.
+		// Anything else means the Footer's recorded offset/length is inconsistent with the stream.
+		if ( $offset < Header::SIZE || $offset + $length > $stream_length - Footer::SIZE ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: manifest at offset %d length %d does not fit between header (%d) and footer (start at %d).',
+					(int) $offset,
+					(int) $length,
+					(int) Header::SIZE,
+					(int) ( $stream_length - Footer::SIZE )
+				)
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, $offset ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to manifest offset.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$bytes = fread( $this->source, $length );
+		if ( false === $bytes || strlen( $bytes ) !== $length ) {
+			throw new RuntimeException(
+				sprintf( 'ArchiveReader: could not read %d manifest bytes; stream may be truncated.', (int) $length )
+			);
+		}
+
+		try {
+			$manifest = ArchiveManifest::from_bytes( $bytes );
+		} catch ( InvalidArgumentException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+			throw new RuntimeException( 'ArchiveReader: archive manifest is malformed or its internal hash check failed.', 0, $e );
+		}
+
+		// Cross-check: the manifest payload's hash (embedded inside the manifest block) must equal the Footer's recorded hash.
+		// ArchiveManifest::from_bytes already verified the payload-versus-internal-hash match;
+		// here we verify the internal hash equals what the Footer says it should be.
+		$manifest_internal_hash = substr( $bytes, ArchiveManifest::LENGTH_PREFIX_SIZE, Sha256::DIGEST_SIZE );
+		if ( ! hash_equals( $this->footer->manifest_hash(), $manifest_internal_hash ) ) {
+			throw new RuntimeException( 'ArchiveReader: manifest hash recorded in footer does not match the hash embedded in the manifest block.' );
+		}
+
+		return $manifest;
 	}
 }

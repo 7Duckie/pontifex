@@ -15,12 +15,18 @@ use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Footer;
 use Pontifex\Archive\Format\Header;
+use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Integrity\Sha256;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 
@@ -264,5 +270,181 @@ final class ArchiveReaderTest extends TestCase {
 		$reader = new ArchiveReader( $stream );
 
 		$this->assertInstanceOf( Header::class, $reader->header() );
+	}
+
+	/**
+	 * Build an archive containing the given EntryPlan list and return a stream of its bytes.
+	 *
+	 * @param array<int, EntryPlan> $plans The entry plans to write.
+	 * @return resource A readable, seekable stream containing the resulting archive.
+	 */
+	private static function build_archive_stream_with_entries( array $plans ) {
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( self::sample_provenance(), $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		return $dest;
+	}
+
+	/**
+	 * Build a single file-entry plan for use in archive-construction tests.
+	 *
+	 * @param string $path     Relative path inside the archive.
+	 * @param string $contents File contents.
+	 * @return EntryPlan A plan that writes a raw-codec file entry.
+	 */
+	private static function plan_for_file( string $path, string $contents ): EntryPlan {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$src = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $src, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $src );
+
+		return new EntryPlan(
+			EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			$src
+		);
+	}
+
+	/**
+	 * The manifest() method must return an ArchiveManifest instance for a valid archive with no entries.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_accessor_returns_empty_manifest_for_archive_with_no_entries(): void {
+		$reader = new ArchiveReader( self::build_sample_archive_stream() );
+
+		$manifest = $reader->manifest();
+
+		$this->assertInstanceOf( ArchiveManifest::class, $manifest );
+		$this->assertSame( 0, $manifest->entry_count() );
+	}
+
+	/**
+	 * The manifest() method must return all entries written, in order, when the archive has multiple entries.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_accessor_returns_all_entries_for_archive_with_entries(): void {
+		$plans  = array(
+			self::plan_for_file( 'a.txt', 'apple' ),
+			self::plan_for_file( 'b.txt', 'banana' ),
+			self::plan_for_file( 'c.txt', 'cherry' ),
+		);
+		$reader = new ArchiveReader( self::build_archive_stream_with_entries( $plans ) );
+
+		$manifest = $reader->manifest();
+		$entries  = $manifest->entries();
+
+		$this->assertSame( 3, $manifest->entry_count() );
+		$this->assertSame( 'a.txt', $entries[0]->path() );
+		$this->assertSame( 'b.txt', $entries[1]->path() );
+		$this->assertSame( 'c.txt', $entries[2]->path() );
+	}
+
+	/**
+	 * The manifest() method must return the same instance on repeated calls (caching).
+	 *
+	 * @return void
+	 */
+	public function test_manifest_accessor_is_cached(): void {
+		$reader = new ArchiveReader( self::build_sample_archive_stream() );
+
+		$first  = $reader->manifest();
+		$second = $reader->manifest();
+
+		$this->assertSame( $first, $second );
+	}
+
+	/**
+	 * The manifest() method must reject a stream where the Footer's manifest_hash disagrees with the manifest's internal hash.
+	 *
+	 * Defense in depth: ArchiveManifest already verifies its own payload
+	 * against its embedded hash; ArchiveReader additionally cross-checks
+	 * that the embedded hash matches the Footer's recorded hash.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_rejects_footer_hash_mismatch(): void {
+		$bytes = self::read_all( self::build_sample_archive_stream() );
+
+		// Corrupt the Footer's manifest_hash field (32 bytes starting 48 bytes from the end of the file).
+		$footer_start = strlen( $bytes ) - Footer::SIZE;
+		// Footer layout: manifest_offset (8) + manifest_length (8) + manifest_hash (32) + argon2id_salt (16) = 64.
+		$hash_offset = $footer_start + 16;
+		$tampered    = substr( $bytes, 0, $hash_offset ) . str_repeat( "\xFF", Sha256::DIGEST_SIZE ) . substr( $bytes, $hash_offset + Sha256::DIGEST_SIZE );
+
+		$reader = new ArchiveReader( self::bytes_to_stream( $tampered ) );
+
+		$this->expectException( RuntimeException::class );
+		$reader->manifest();
+	}
+
+	/**
+	 * The manifest() method must reject a manifest declared at an offset before the Header ends.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_rejects_offset_inside_header(): void {
+		$bytes = self::read_all( self::build_sample_archive_stream() );
+
+		// Corrupt the Footer's manifest_offset (first 8 bytes of the footer) to point at offset 0.
+		$footer_start = strlen( $bytes ) - Footer::SIZE;
+		$tampered     = substr( $bytes, 0, $footer_start ) . str_repeat( "\x00", 8 ) . substr( $bytes, $footer_start + 8 );
+
+		$reader = new ArchiveReader( self::bytes_to_stream( $tampered ) );
+
+		$this->expectException( RuntimeException::class );
+		$reader->manifest();
+	}
+
+	/**
+	 * The manifest() method must reject a manifest whose declared length pushes past the Footer's start.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_rejects_length_overflows_into_footer(): void {
+		$bytes = self::read_all( self::build_sample_archive_stream() );
+
+		// Corrupt the Footer's manifest_length to a huge value (bytes 8-16 of the footer).
+		$footer_start = strlen( $bytes ) - Footer::SIZE;
+		$huge_length  = "\x00\x00\x00\x00\xFF\xFF\xFF\xFF";
+		$tampered     = substr( $bytes, 0, $footer_start + 8 ) . $huge_length . substr( $bytes, $footer_start + 16 );
+
+		$reader = new ArchiveReader( self::bytes_to_stream( $tampered ) );
+
+		$this->expectException( RuntimeException::class );
+		$reader->manifest();
+	}
+
+	/**
+	 * The manifest() method must reject malformed manifest payload bytes.
+	 *
+	 * Corrupts a byte inside the manifest JSON payload (mid-archive)
+	 * so ArchiveManifest::from_bytes fails its internal hash check.
+	 * The reader wraps that failure as RuntimeException. Uses an
+	 * archive with entries so the manifest payload is non-empty.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_rejects_malformed_payload(): void {
+		$plans = array( self::plan_for_file( 'a.txt', 'apple' ) );
+		$bytes = self::read_all( self::build_archive_stream_with_entries( $plans ) );
+
+		// Read the original footer to know where the manifest payload starts.
+		$footer_bytes  = substr( $bytes, strlen( $bytes ) - Footer::SIZE, Footer::SIZE );
+		$footer        = Footer::from_bytes( $footer_bytes );
+		$payload_start = $footer->manifest_offset() + ArchiveManifest::LENGTH_PREFIX_SIZE + Sha256::DIGEST_SIZE;
+
+		// Flip a byte inside the JSON payload — internal hash will no longer match.
+		$tampered = substr( $bytes, 0, $payload_start ) . "\xFF" . substr( $bytes, $payload_start + 1 );
+
+		$reader = new ArchiveReader( self::bytes_to_stream( $tampered ) );
+
+		$this->expectException( RuntimeException::class );
+		$reader->manifest();
 	}
 }
