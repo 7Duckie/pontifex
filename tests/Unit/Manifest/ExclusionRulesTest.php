@@ -96,14 +96,19 @@ final class ExclusionRulesTest extends TestCase {
 	}
 
 	/**
-	 * The matches method must reject the db_chunk kind (not produced by FileScanner).
+	 * The matches method must accept the db_chunk kind (used by DatabaseScanner).
+	 *
+	 * Widened from the commit-10 stub when DatabaseScanner landed in
+	 * commit 11: ExclusionRules now governs both filesystem and
+	 * database exclusion.
 	 *
 	 * @return void
 	 */
-	public function test_matches_rejects_db_chunk_kind(): void {
-		$this->expectException( InvalidArgumentException::class );
+	public function test_matches_accepts_db_chunk_kind(): void {
+		$rules = new ExclusionRules( array( 'wp_postmeta' ) );
 
-		ExclusionRules::none()->matches( 'wp_posts', EntryHeader::KIND_DB_CHUNK );
+		$this->assertTrue( $rules->matches( 'wp_postmeta', EntryHeader::KIND_DB_CHUNK ) );
+		$this->assertFalse( $rules->matches( 'wp_posts', EntryHeader::KIND_DB_CHUNK ) );
 	}
 
 	/**

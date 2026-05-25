@@ -95,11 +95,16 @@ final class ExclusionRules {
 		if ( '' === $relative_path ) {
 			throw new InvalidArgumentException( 'ExclusionRules::matches: relative_path must be non-empty.' );
 		}
-		$allowed_kinds = array( EntryHeader::KIND_FILE, EntryHeader::KIND_DIRECTORY, EntryHeader::KIND_SYMLINK );
+		$allowed_kinds = array(
+			EntryHeader::KIND_FILE,
+			EntryHeader::KIND_DIRECTORY,
+			EntryHeader::KIND_SYMLINK,
+			EntryHeader::KIND_DB_CHUNK,
+		);
 		if ( ! in_array( $kind, $allowed_kinds, true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind reported verbatim in exception message for diagnostic context; not HTML output.
-				sprintf( 'ExclusionRules::matches: kind "%s" is not one of file, directory, symlink.', $kind )
+				sprintf( 'ExclusionRules::matches: kind "%s" is not one of file, directory, symlink, db_chunk.', $kind )
 			);
 		}
 
