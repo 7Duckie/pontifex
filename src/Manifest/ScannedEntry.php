@@ -97,6 +97,17 @@ final class ScannedEntry {
 	private ?string $target;
 
 	/**
+	 * MIME type sniffed at scan time; non-null for files only.
+	 *
+	 * Captured by FileScanner via finfo_file() and passed through
+	 * ManifestBuilder to EntryHeader::for_file(). For directory and
+	 * symlink entries this is always null.
+	 *
+	 * @var string|null
+	 */
+	private ?string $media_type;
+
+	/**
 	 * Construct a ScannedEntry with explicit field values.
 	 *
 	 * @param string      $kind          One of EntryHeader::KIND_FILE, KIND_DIRECTORY, KIND_SYMLINK.
@@ -106,6 +117,7 @@ final class ScannedEntry {
 	 * @param int         $mode          POSIX mode bits; must be in 0..EntryHeader::MAX_POSIX_MODE inclusive.
 	 * @param int         $mtime         Unix modification timestamp; must be non-negative.
 	 * @param string|null $target        Symlink target; must be non-null and non-empty for KIND_SYMLINK; must be null for other kinds.
+	 * @param string|null $media_type    MIME type; must be non-null and non-empty for KIND_FILE; must be null for other kinds.
 	 * @throws InvalidArgumentException If any argument is out of range, empty, or inconsistent with the kind.
 	 */
 	public function __construct(
@@ -115,7 +127,8 @@ final class ScannedEntry {
 		int $size,
 		int $mode,
 		int $mtime,
-		?string $target = null
+		?string $target = null,
+		?string $media_type = null
 	) {
 		$allowed_kinds = array( EntryHeader::KIND_FILE, EntryHeader::KIND_DIRECTORY, EntryHeader::KIND_SYMLINK );
 		if ( ! in_array( $kind, $allowed_kinds, true ) ) {
@@ -155,6 +168,16 @@ final class ScannedEntry {
 				sprintf( 'ScannedEntry: target may only be set for symlink entries; got kind "%s".', $kind )
 			);
 		}
+		if ( EntryHeader::KIND_FILE === $kind ) {
+			if ( null === $media_type || '' === $media_type ) {
+				throw new InvalidArgumentException( 'ScannedEntry: file entries must have a non-empty media_type.' );
+			}
+		} elseif ( null !== $media_type ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is a validated constant from a closed set; exception path, not HTML output.
+				sprintf( 'ScannedEntry: media_type may only be set for file entries; got kind "%s".', $kind )
+			);
+		}
 
 		$this->kind          = $kind;
 		$this->relative_path = $relative_path;
@@ -163,6 +186,7 @@ final class ScannedEntry {
 		$this->mode          = $mode;
 		$this->mtime         = $mtime;
 		$this->target        = $target;
+		$this->media_type    = $media_type;
 	}
 
 	/**
@@ -226,6 +250,18 @@ final class ScannedEntry {
 	 */
 	public function target(): ?string {
 		return $this->target;
+	}
+
+	/**
+	 * Return the MIME type, or null for non-file entries.
+	 *
+	 * Captured at scan time by FileScanner; non-null for file
+	 * entries and null for directory and symlink entries.
+	 *
+	 * @return string|null The MIME type for file entries; null otherwise.
+	 */
+	public function media_type(): ?string {
+		return $this->media_type;
 	}
 
 	/**

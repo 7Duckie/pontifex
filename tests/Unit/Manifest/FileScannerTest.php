@@ -429,4 +429,47 @@ final class FileScannerTest extends TestCase {
 			chmod( $abs, 0o644 );
 		}
 	}
+
+	/**
+	 * Scanned file entries must carry a non-empty media_type.
+	 *
+	 * The exact value depends on the host's finfo magic database, so
+	 * this test asserts only the structural invariant: every file
+	 * entry has a non-null, non-empty media_type string.
+	 *
+	 * @return void
+	 */
+	public function test_scanned_files_carry_non_empty_media_type(): void {
+		$this->write_file( 'note.txt', 'plain text content' );
+		$this->write_file( 'wp-config.php', '<?php echo 1; ?>' );
+
+		$entries = self::unfiltered_scanner()->scan( $this->fixture_root );
+
+		foreach ( $entries as $entry ) {
+			if ( EntryHeader::KIND_FILE === $entry->kind() ) {
+				$this->assertIsString( $entry->media_type() );
+				$this->assertNotSame( '', $entry->media_type() );
+			}
+		}
+	}
+
+	/**
+	 * Scanned directory entries must carry null media_type.
+	 *
+	 * Directories have no MIME type by definition; FileScanner must
+	 * not populate the field on directory entries.
+	 *
+	 * @return void
+	 */
+	public function test_scanned_directories_carry_null_media_type(): void {
+		$this->write_file( 'wp-content/themes/x/style.css' );
+
+		$entries = self::unfiltered_scanner()->scan( $this->fixture_root );
+
+		foreach ( $entries as $entry ) {
+			if ( EntryHeader::KIND_DIRECTORY === $entry->kind() ) {
+				$this->assertNull( $entry->media_type() );
+			}
+		}
+	}
 }

@@ -149,7 +149,7 @@ final class EntryWriterTest extends TestCase {
 		$source          = self::memory_stream( $source_contents );
 		$destination     = self::memory_stream();
 
-		$header = EntryHeader::for_file( 'test.txt', strlen( $source_contents ), 0644, 1690000000, 0 );
+		$header = EntryHeader::for_file( 'test.txt', strlen( $source_contents ), 0644, 1690000000, 'application/octet-stream', 0 );
 		$result = self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $destination );
 
 		$this->assertSame( strlen( $source_contents ), $result->payload_length() );
@@ -180,7 +180,7 @@ final class EntryWriterTest extends TestCase {
 		$source = self::memory_stream( 'payload bytes here' );
 		$dest   = self::memory_stream();
 
-		$header = EntryHeader::for_file( 'a.txt', 18, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 18, 0644, 0, 'application/octet-stream', 0 );
 		$result = self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $dest );
 
 		$bytes          = self::read_all( $dest );
@@ -205,7 +205,7 @@ final class EntryWriterTest extends TestCase {
 		$source          = self::memory_stream( $source_contents );
 		$dest            = self::memory_stream();
 
-		$draft_header = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$draft_header = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 		$result       = self::make_writer()->write_entry( $draft_header, 1, self::zero_nonce(), $source, $dest );
 
 		$parts         = self::parse_entry_record( self::read_all( $dest ) );
@@ -226,7 +226,7 @@ final class EntryWriterTest extends TestCase {
 		$source          = self::memory_stream( $source_contents );
 		$dest            = self::memory_stream();
 
-		$header = EntryHeader::for_file( 'a.txt', strlen( $source_contents ), 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', strlen( $source_contents ), 0644, 0, 'application/octet-stream', 0 );
 		$result = self::make_writer()->write_entry( $header, 1, self::zero_nonce(), $source, $dest );
 
 		$parts = self::parse_entry_record( self::read_all( $dest ) );
@@ -323,7 +323,7 @@ final class EntryWriterTest extends TestCase {
 		$source          = self::memory_stream( $source_contents );
 		$dest            = self::memory_stream();
 
-		$header = EntryHeader::for_file( 'a.bin', strlen( $source_contents ), 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.bin', strlen( $source_contents ), 0644, 0, 'application/octet-stream', 0 );
 		self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $dest );
 
 		$parts = self::parse_entry_record( self::read_all( $dest ) );
@@ -344,7 +344,7 @@ final class EntryWriterTest extends TestCase {
 		$source          = self::memory_stream( $source_contents );
 		$dest            = self::memory_stream();
 
-		$header = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 		self::make_writer()->write_entry( $header, 1, self::zero_nonce(), $source, $dest );
 
 		$parts = self::parse_entry_record( self::read_all( $dest ) );
@@ -363,11 +363,11 @@ final class EntryWriterTest extends TestCase {
 		$dest   = self::memory_stream();
 
 		$source1 = self::memory_stream( 'first entry payload' );
-		$header1 = EntryHeader::for_file( 'a.txt', 19, 0644, 0, 0 );
+		$header1 = EntryHeader::for_file( 'a.txt', 19, 0644, 0, 'application/octet-stream', 0 );
 		$result1 = $writer->write_entry( $header1, 0, self::zero_nonce(), $source1, $dest );
 
 		$source2 = self::memory_stream( 'second entry payload, slightly longer' );
-		$header2 = EntryHeader::for_file( 'b.txt', 37, 0644, 0, 0 );
+		$header2 = EntryHeader::for_file( 'b.txt', 37, 0644, 0, 'application/octet-stream', 0 );
 		$result2 = $writer->write_entry( $header2, 0, self::zero_nonce(), $source2, $dest );
 
 		$all_bytes = self::read_all( $dest );
@@ -388,7 +388,7 @@ final class EntryWriterTest extends TestCase {
 		$writer  = self::make_writer();
 		$source  = self::memory_stream( 'x' );
 		$dest    = self::memory_stream();
-		$header  = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 0 );
+		$header  = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 'application/octet-stream', 0 );
 		$unknown = 0xABCD;
 
 		$this->expectException( InvalidArgumentException::class );
@@ -405,7 +405,7 @@ final class EntryWriterTest extends TestCase {
 		$writer = self::make_writer();
 		$source = self::memory_stream( 'x' );
 		$dest   = self::memory_stream();
-		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 'application/octet-stream', 0 );
 
 		$this->expectException( InvalidArgumentException::class );
 
@@ -421,7 +421,7 @@ final class EntryWriterTest extends TestCase {
 		$writer = self::make_writer();
 		$source = self::memory_stream( 'x' );
 		$dest   = self::memory_stream();
-		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 'application/octet-stream', 0 );
 
 		$this->expectException( InvalidArgumentException::class );
 
@@ -436,7 +436,7 @@ final class EntryWriterTest extends TestCase {
 	public function test_write_entry_rejects_non_resource_source(): void {
 		$writer = self::make_writer();
 		$dest   = self::memory_stream();
-		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 'application/octet-stream', 0 );
 
 		$this->expectException( InvalidArgumentException::class );
 
@@ -451,7 +451,7 @@ final class EntryWriterTest extends TestCase {
 	public function test_write_entry_rejects_non_resource_destination(): void {
 		$writer = self::make_writer();
 		$source = self::memory_stream( 'x' );
-		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 0 );
+		$header = EntryHeader::for_file( 'a.txt', 1, 0644, 0, 'application/octet-stream', 0 );
 
 		$this->expectException( InvalidArgumentException::class );
 

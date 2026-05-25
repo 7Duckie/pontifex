@@ -195,6 +195,24 @@ final class EntryHeader {
 	private ?string $target;
 
 	/**
+	 * MIME type sniffed at scan time; present on file entries only.
+	 *
+	 * Captured at scan time by FileScanner via finfo_file() and
+	 * passed through ManifestBuilder. Used at restore time for
+	 * type-confusion defense (the reader can refuse to write an
+	 * executable PHP file if the original was sniffed as
+	 * something else) and to support future selective-restore
+	 * filters (e.g. wp pontifex import --only=images).
+	 *
+	 * Defaults to 'application/octet-stream' (RFC 2046's standard
+	 * "treat as raw bytes" fallback) when MIME detection fails or
+	 * is not applicable.
+	 *
+	 * @var string|null
+	 */
+	private ?string $media_type;
+
+	/**
 	 * Encoded payload byte count on disk, after the codec runs.
 	 *
 	 * Present on all four kinds. Directories always carry 0 since
@@ -228,6 +246,7 @@ final class EntryHeader {
 	 * @param int|null    $statement_count Statement count (db_chunk).
 	 * @param int|null    $byte_count      Original byte count (db_chunk).
 	 * @param string|null $target          Symlink target (symlink).
+	 * @param string|null $media_type      MIME type (file).
 	 * @param int         $size_compressed Encoded payload byte count on disk.
 	 */
 	private function __construct(
@@ -241,6 +260,7 @@ final class EntryHeader {
 		?int $statement_count = null,
 		?int $byte_count = null,
 		?string $target = null,
+		?string $media_type = null,
 		int $size_compressed = 0
 	) {
 		$this->kind            = $kind;
@@ -253,6 +273,7 @@ final class EntryHeader {
 		$this->statement_count = $statement_count;
 		$this->byte_count      = $byte_count;
 		$this->target          = $target;
+		$this->media_type      = $media_type;
 		$this->size_compressed = $size_compressed;
 	}
 
@@ -263,11 +284,12 @@ final class EntryHeader {
 	 * @param int    $size            Original byte size before any codec encoding; must be non-negative.
 	 * @param int    $mode            POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
 	 * @param int    $mtime           Unix modification timestamp; must be non-negative.
+	 * @param string $media_type      MIME type sniffed at scan time; must be non-empty. Use 'application/octet-stream' as the safe default for unsniffable bytes.
 	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative.
 	 * @return self A file-kind EntryHeader.
 	 * @throws InvalidArgumentException If any argument is out of range or empty.
 	 */
-	public static function for_file( string $path, int $size, int $mode, int $mtime, int $size_compressed ): self {
+	public static function for_file( string $path, int $size, int $mode, int $mtime, string $media_type, int $size_compressed ): self {
 		if ( '' === $path ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_file: path must not be empty.' );
 		}
@@ -286,6 +308,9 @@ final class EntryHeader {
 				sprintf( 'EntryHeader::for_file: mtime %d must be non-negative.', (int) $mtime )
 			);
 		}
+		if ( '' === $media_type ) {
+			throw new InvalidArgumentException( 'EntryHeader::for_file: media_type must not be empty.' );
+		}
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf( 'EntryHeader::for_file: size_compressed %d must be non-negative.', (int) $size_compressed )
@@ -303,6 +328,7 @@ final class EntryHeader {
 			null,
 			null,
 			null,
+			$media_type,
 			$size_compressed
 		);
 	}
@@ -354,6 +380,7 @@ final class EntryHeader {
 			$statement_count,
 			$byte_count,
 			null,
+			null,
 			$size_compressed
 		);
 	}
@@ -397,6 +424,7 @@ final class EntryHeader {
 			null,
 			null,
 			null,
+			null,
 			$size_compressed
 		);
 	}
@@ -434,6 +462,7 @@ final class EntryHeader {
 			null,
 			null,
 			$target,
+			null,
 			$size_compressed
 		);
 	}
@@ -481,6 +510,20 @@ final class EntryHeader {
 	 */
 	public function mtime(): ?int {
 		return $this->mtime;
+	}
+
+	/**
+	 * Return the MIME type, or null for non-file entries.
+	 *
+	 * Sniffed at scan time. For file entries this is always
+	 * non-null (defaults to 'application/octet-stream' when
+	 * detection fails). For db_chunk, directory, and symlink
+	 * entries this is always null.
+	 *
+	 * @return string|null The MIME type.
+	 */
+	public function media_type(): ?string {
+		return $this->media_type;
 	}
 
 	/**
@@ -686,6 +729,7 @@ final class EntryHeader {
 				$data['size']            = $this->size;
 				$data['mode']            = $this->mode;
 				$data['mtime']           = $this->mtime;
+				$data['media_type']      = $this->media_type;
 				$data['size_compressed'] = $this->size_compressed;
 				break;
 			case self::KIND_DB_CHUNK:
@@ -808,6 +852,7 @@ final class EntryHeader {
 		self::require_int( $data, 'size' );
 		self::require_int( $data, 'mode' );
 		self::require_int( $data, 'mtime' );
+		self::require_string( $data, 'media_type' );
 		self::require_int( $data, 'size_compressed' );
 
 		return self::for_file(
@@ -815,6 +860,7 @@ final class EntryHeader {
 			$data['size'],
 			$data['mode'],
 			$data['mtime'],
+			$data['media_type'],
 			$data['size_compressed']
 		);
 	}

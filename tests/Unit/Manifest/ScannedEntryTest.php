@@ -32,7 +32,8 @@ final class ScannedEntryTest extends TestCase {
 			1234,
 			0644,
 			1690000000,
-			null
+			null,
+			'text/x-php'
 		);
 
 		$this->assertSame( EntryHeader::KIND_FILE, $entry->kind() );
@@ -42,6 +43,7 @@ final class ScannedEntryTest extends TestCase {
 		$this->assertSame( 0644, $entry->mode() );
 		$this->assertSame( 1690000000, $entry->mtime() );
 		$this->assertNull( $entry->target() );
+		$this->assertSame( 'text/x-php', $entry->media_type() );
 	}
 
 	/**
@@ -148,7 +150,7 @@ final class ScannedEntryTest extends TestCase {
 	public function test_constructor_rejects_oversize_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, EntryHeader::MAX_POSIX_MODE + 1, 0 );
+		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, EntryHeader::MAX_POSIX_MODE + 1, 0, null, 'text/plain' );
 	}
 
 	/**
@@ -159,7 +161,7 @@ final class ScannedEntryTest extends TestCase {
 	public function test_constructor_rejects_negative_mtime(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, -1 );
+		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, -1, null, 'text/plain' );
 	}
 
 	/**
@@ -207,12 +209,73 @@ final class ScannedEntryTest extends TestCase {
 	}
 
 	/**
+	 * The constructor must reject a file entry with null media_type.
+	 *
+	 * File entries require a non-null, non-empty media_type so the
+	 * downstream EntryHeader::for_file() factory can always be called.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_file_with_null_media_type(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, null );
+	}
+
+	/**
+	 * The constructor must reject a file entry with empty media_type.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_file_with_empty_media_type(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, '' );
+	}
+
+	/**
+	 * The constructor must reject a directory with a non-null media_type.
+	 *
+	 * The media_type field is meaningful only for files; passing it to a
+	 * directory indicates a caller bug.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_directory_with_media_type(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0, null, 'text/plain' );
+	}
+
+	/**
+	 * The constructor must reject a symlink with a non-null media_type.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_symlink_with_media_type(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new ScannedEntry( EntryHeader::KIND_SYMLINK, 'link', '/link', 0, 0777, 0, '/target', 'text/plain' );
+	}
+
+	/**
+	 * The media_type accessor must return null for non-file entries.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_accessor_returns_null_for_non_file_kinds(): void {
+		$dir = new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0 );
+
+		$this->assertNull( $dir->media_type() );
+	}
+
+	/**
 	 * The is_file predicate must reflect the kind correctly.
 	 *
 	 * @return void
 	 */
 	public function test_is_file_predicate(): void {
-		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0 );
+		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
 		$dir  = new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0 );
 
 		$this->assertTrue( $file->is_file() );
@@ -225,7 +288,7 @@ final class ScannedEntryTest extends TestCase {
 	 * @return void
 	 */
 	public function test_is_directory_predicate(): void {
-		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0 );
+		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
 		$dir  = new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0 );
 
 		$this->assertTrue( $dir->is_directory() );
@@ -238,7 +301,7 @@ final class ScannedEntryTest extends TestCase {
 	 * @return void
 	 */
 	public function test_is_symlink_predicate(): void {
-		$file    = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0 );
+		$file    = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
 		$symlink = new ScannedEntry( EntryHeader::KIND_SYMLINK, 'link', '/link', 0, 0777, 0, '/target' );
 
 		$this->assertTrue( $symlink->is_symlink() );

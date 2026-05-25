@@ -26,7 +26,7 @@ final class EntryPlanTest extends TestCase {
 	 * @return EntryHeader A file-kind EntryHeader with size_compressed = 0.
 	 */
 	private static function sample_header(): EntryHeader {
-		return EntryHeader::for_file( 'a.txt', 100, 0644, 1690000000, 0 );
+		return EntryHeader::for_file( 'a.txt', 100, 0644, 1690000000, 'application/octet-stream', 0 );
 	}
 
 	/**

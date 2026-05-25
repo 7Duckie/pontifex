@@ -338,7 +338,7 @@ final class ArchiveWriterTest extends TestCase {
 	public function test_archive_with_single_file_entry_raw_codec(): void {
 		$payload = 'hello world from the entry payload';
 		$plan    = new EntryPlan(
-			EntryHeader::for_file( 'test.txt', strlen( $payload ), 0644, 1690000000, 0 ),
+			EntryHeader::for_file( 'test.txt', strlen( $payload ), 0644, 1690000000, 'application/octet-stream', 0 ),
 			0,
 			self::zero_nonce(),
 			self::memory_stream_with( $payload )
@@ -369,7 +369,7 @@ final class ArchiveWriterTest extends TestCase {
 	 */
 	public function test_first_entry_offset_starts_after_provenance(): void {
 		$plan = new EntryPlan(
-			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 0 ),
+			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
 			0,
 			self::zero_nonce(),
 			self::memory_stream_with( 'data' )
@@ -402,7 +402,7 @@ final class ArchiveWriterTest extends TestCase {
 	public function test_manifest_entry_hash_matches_on_disk_entry_bytes(): void {
 		$payload = str_repeat( 'X', 200 );
 		$plan    = new EntryPlan(
-			EntryHeader::for_file( 'a.txt', strlen( $payload ), 0644, 0, 0 ),
+			EntryHeader::for_file( 'a.txt', strlen( $payload ), 0644, 0, 'application/octet-stream', 0 ),
 			0,
 			self::zero_nonce(),
 			self::memory_stream_with( $payload )
@@ -437,19 +437,19 @@ final class ArchiveWriterTest extends TestCase {
 	public function test_multiple_entries_chain_offsets_contiguously(): void {
 		$plans = array(
 			new EntryPlan(
-				EntryHeader::for_file( 'a.txt', 5, 0644, 0, 0 ),
+				EntryHeader::for_file( 'a.txt', 5, 0644, 0, 'application/octet-stream', 0 ),
 				0,
 				self::zero_nonce(),
 				self::memory_stream_with( 'first' )
 			),
 			new EntryPlan(
-				EntryHeader::for_file( 'b.txt', 6, 0644, 0, 0 ),
+				EntryHeader::for_file( 'b.txt', 6, 0644, 0, 'application/octet-stream', 0 ),
 				0,
 				self::zero_nonce(),
 				self::memory_stream_with( 'second' )
 			),
 			new EntryPlan(
-				EntryHeader::for_file( 'c.txt', 5, 0644, 0, 0 ),
+				EntryHeader::for_file( 'c.txt', 5, 0644, 0, 'application/octet-stream', 0 ),
 				0,
 				self::zero_nonce(),
 				self::memory_stream_with( 'third' )
@@ -480,7 +480,7 @@ final class ArchiveWriterTest extends TestCase {
 	public function test_archive_with_one_of_each_kind(): void {
 		$plans = array(
 			new EntryPlan(
-				EntryHeader::for_file( 'a.txt', 4, 0644, 0, 0 ),
+				EntryHeader::for_file( 'a.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
 				0,
 				self::zero_nonce(),
 				self::memory_stream_with( 'data' )
@@ -536,7 +536,7 @@ final class ArchiveWriterTest extends TestCase {
 	public function test_entry_with_gzip_codec_records_codec_id_in_manifest(): void {
 		$payload = str_repeat( 'compress me ', 100 );
 		$plan    = new EntryPlan(
-			EntryHeader::for_file( 'a.txt', strlen( $payload ), 0644, 0, 0 ),
+			EntryHeader::for_file( 'a.txt', strlen( $payload ), 0644, 0, 'application/octet-stream', 0 ),
 			1,
 			self::zero_nonce(),
 			self::memory_stream_with( $payload )
@@ -564,7 +564,7 @@ final class ArchiveWriterTest extends TestCase {
 		$plans = array();
 		for ( $i = 0; $i < 5; $i++ ) {
 			$plans[] = new EntryPlan(
-				EntryHeader::for_file( 'f' . $i . '.txt', 4, 0644, 0, 0 ),
+				EntryHeader::for_file( 'f' . $i . '.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
 				0,
 				self::zero_nonce(),
 				self::memory_stream_with( 'data' )
@@ -614,7 +614,7 @@ final class ArchiveWriterTest extends TestCase {
 	 */
 	public function test_footer_manifest_offset_correct_with_entries(): void {
 		$plan = new EntryPlan(
-			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 0 ),
+			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
 			0,
 			self::zero_nonce(),
 			self::memory_stream_with( 'data' )

@@ -112,7 +112,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_valid_inputs(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 
 		$this->assertSame( EntryHeader::KIND_FILE, $entry->kind() );
 		$this->assertSame( 'wp-config.php', $entry->path() );
@@ -127,7 +127,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_non_file_accessors_return_null(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 
 		$this->assertNull( $entry->chunk_index() );
 		$this->assertNull( $entry->table_name() );
@@ -144,7 +144,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_empty_path(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( '', 1234, 0644, 1690000000, 0 );
+		EntryHeader::for_file( '', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 	}
 
 	/**
@@ -155,7 +155,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_size(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', -1, 0644, 1690000000, 0 );
+		EntryHeader::for_file( 'wp-config.php', -1, 0644, 1690000000, 'application/octet-stream', 0 );
 	}
 
 	/**
@@ -164,7 +164,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_zero_size(): void {
-		$entry = EntryHeader::for_file( 'empty.txt', 0, 0644, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'empty.txt', 0, 0644, 1690000000, 'application/octet-stream', 0 );
 
 		$this->assertSame( 0, $entry->size() );
 	}
@@ -177,7 +177,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, -1, 1690000000, 0 );
+		EntryHeader::for_file( 'wp-config.php', 1234, -1, 1690000000, 'application/octet-stream', 0 );
 	}
 
 	/**
@@ -188,7 +188,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_oversize_mode(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, 4096, 1690000000, 0 );
+		EntryHeader::for_file( 'wp-config.php', 1234, 4096, 1690000000, 'application/octet-stream', 0 );
 	}
 
 	/**
@@ -197,7 +197,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_mode_zero(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0, 1690000000, 'application/octet-stream', 0 );
 
 		$this->assertSame( 0, $entry->mode() );
 	}
@@ -208,7 +208,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_for_file_accepts_max_mode(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, EntryHeader::MAX_POSIX_MODE, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, EntryHeader::MAX_POSIX_MODE, 1690000000, 'application/octet-stream', 0 );
 
 		$this->assertSame( 4095, $entry->mode() );
 	}
@@ -221,7 +221,40 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_mtime(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'wp-config.php', 1234, 0644, -1, 0 );
+		EntryHeader::for_file( 'wp-config.php', 1234, 0644, -1, 'application/octet-stream', 0 );
+	}
+
+	/**
+	 * The for_file factory must reject an empty media_type.
+	 *
+	 * @return void
+	 */
+	public function test_for_file_rejects_empty_media_type(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, '', 0 );
+	}
+
+	/**
+	 * The media_type accessor must return the value supplied to the factory.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_accessor_returns_supplied_value(): void {
+		$entry = EntryHeader::for_file( 'image.jpg', 1024, 0644, 1690000000, 'image/jpeg', 0 );
+
+		$this->assertSame( 'image/jpeg', $entry->media_type() );
+	}
+
+	/**
+	 * The media_type accessor must return null for non-file entries.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_accessor_returns_null_for_non_file_kinds(): void {
+		$this->assertNull( EntryHeader::for_db_chunk( 0, 'wp_posts', 1, 100, 0 )->media_type() );
+		$this->assertNull( EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 )->media_type() );
+		$this->assertNull( EntryHeader::for_symlink( 'wp-content/cache', '/tmp/x', 0 )->media_type() );
 	}
 
 
@@ -406,7 +439,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_predicates_report_kind_correctly(): void {
-		$file      = EntryHeader::for_file( 'a.txt', 0, 0644, 0, 0 );
+		$file      = EntryHeader::for_file( 'a.txt', 0, 0644, 0, 'application/octet-stream', 0 );
 		$db_chunk  = EntryHeader::for_db_chunk( 0, 't', 0, 0, 0 );
 		$directory = EntryHeader::for_directory( 'd', 0755, 0 );
 		$symlink   = EntryHeader::for_symlink( 's', 't', 0 );
@@ -431,12 +464,12 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_file_canonical_layout(): void {
-		$entry   = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 489 );
+		$entry   = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 489 );
 		$bytes   = $entry->to_bytes();
 		$payload = substr( $bytes, EntryHeader::LENGTH_PREFIX_SIZE );
 
 		$this->assertSame(
-			'{"kind":"file","path":"wp-config.php","size":1234,"mode":420,"mtime":1690000000,"size_compressed":489}',
+			'{"kind":"file","path":"wp-config.php","size":1234,"mode":420,"mtime":1690000000,"media_type":"application/octet-stream","size_compressed":489}',
 			$payload
 		);
 	}
@@ -495,7 +528,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_bytes_length_prefix_matches_payload(): void {
-		$entry           = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$entry           = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 		$bytes           = $entry->to_bytes();
 		$declared_length = ByteOrder::unpack_uint32( substr( $bytes, 0, 4 ) );
 		$payload         = substr( $bytes, 4 );
@@ -534,7 +567,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_from_bytes_rejects_length_mismatch(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 		$bytes = $entry->to_bytes();
 
 		$this->expectException( InvalidArgumentException::class );
@@ -668,7 +701,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_round_trip_file(): void {
-		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'text/x-php', 0 );
 		$parsed   = EntryHeader::from_bytes( $original->to_bytes() );
 
 		$this->assertSame( $original->kind(), $parsed->kind() );
@@ -676,6 +709,7 @@ final class EntryHeaderTest extends TestCase {
 		$this->assertSame( $original->size(), $parsed->size() );
 		$this->assertSame( $original->mode(), $parsed->mode() );
 		$this->assertSame( $original->mtime(), $parsed->mtime() );
+		$this->assertSame( $original->media_type(), $parsed->media_type() );
 	}
 
 	/**
@@ -728,7 +762,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_to_canonical_data_file_shape(): void {
-		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 489 );
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 489 );
 
 		$this->assertSame(
 			array(
@@ -737,6 +771,7 @@ final class EntryHeaderTest extends TestCase {
 				'size'            => 1234,
 				'mode'            => 420,
 				'mtime'           => 1690000000,
+				'media_type'      => 'application/octet-stream',
 				'size_compressed' => 489,
 			),
 			$entry->to_canonical_data()
@@ -809,7 +844,7 @@ final class EntryHeaderTest extends TestCase {
 	 */
 	public function test_canonical_data_round_trip_each_kind(): void {
 		$entries = array(
-			EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 ),
+			EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 ),
 			EntryHeader::for_db_chunk( 5, 'wp_postmeta', 200, 5000000, 0 ),
 			EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 ),
 			EntryHeader::for_symlink( 'wp-content/cache', '/tmp/wp-cache', 0 ),
@@ -840,7 +875,7 @@ final class EntryHeaderTest extends TestCase {
 	public function test_for_file_rejects_negative_size_compressed(): void {
 		$this->expectException( InvalidArgumentException::class );
 
-		EntryHeader::for_file( 'a.txt', 100, 0644, 0, -1 );
+		EntryHeader::for_file( 'a.txt', 100, 0644, 0, 'application/octet-stream', -1 );
 	}
 
 	/**
@@ -882,7 +917,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_size_compressed_accessor_returns_constructed_value(): void {
-		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 250 );
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 250 );
 
 		$this->assertSame( 250, $entry->size_compressed() );
 	}
@@ -893,7 +928,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_with_size_compressed_returns_new_instance(): void {
-		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 		$copy     = $original->with_size_compressed( 489 );
 
 		$this->assertNotSame( $original, $copy );
@@ -905,7 +940,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_with_size_compressed_updates_size_compressed(): void {
-		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 		$copy     = $original->with_size_compressed( 489 );
 
 		$this->assertSame( 489, $copy->size_compressed() );
@@ -917,7 +952,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_with_size_compressed_leaves_original_unchanged(): void {
-		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 		$original->with_size_compressed( 489 );
 
 		$this->assertSame( 0, $original->size_compressed() );
@@ -929,7 +964,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_with_size_compressed_preserves_all_other_fields_file(): void {
-		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 0 );
+		$original = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, 'application/octet-stream', 0 );
 		$copy     = $original->with_size_compressed( 489 );
 
 		$this->assertSame( EntryHeader::KIND_FILE, $copy->kind() );
@@ -961,7 +996,7 @@ final class EntryHeaderTest extends TestCase {
 	 * @return void
 	 */
 	public function test_with_size_compressed_rejects_negative(): void {
-		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 0 );
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
 
 		$this->expectException( InvalidArgumentException::class );
 

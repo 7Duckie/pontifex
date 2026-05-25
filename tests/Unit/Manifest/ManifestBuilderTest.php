@@ -317,4 +317,26 @@ final class ManifestBuilderTest extends TestCase {
 		$this->assertContains( 'keep.txt', $paths );
 		$this->assertNotContains( 'drop.txt', $paths );
 	}
+
+	/**
+	 * The media_type captured by FileScanner must propagate through ManifestBuilder into the resulting EntryHeader.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_propagates_through_to_entry_header(): void {
+		$this->write_file( 'note.txt', 'plain text content' );
+
+		$plans = self::default_builder()->build( $this->fixture_root );
+
+		$file_plans = array();
+		foreach ( $plans as $plan ) {
+			if ( EntryHeader::KIND_FILE === $plan->header()->kind() ) {
+				$file_plans[] = $plan;
+			}
+		}
+
+		$this->assertCount( 1, $file_plans );
+		$this->assertIsString( $file_plans[0]->header()->media_type() );
+		$this->assertNotSame( '', $file_plans[0]->header()->media_type() );
+	}
 }

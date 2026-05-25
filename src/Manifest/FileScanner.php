@@ -263,7 +263,7 @@ final class FileScanner {
 			}
 			$mode  = (int) ( $lstat['mode'] & 0o7777 );
 			$mtime = (int) $lstat['mtime'];
-			return new ScannedEntry( $kind, $relative_path, $absolute_path, 0, $mode, $mtime, $target );
+			return new ScannedEntry( $kind, $relative_path, $absolute_path, 0, $mode, $mtime, $target, null );
 		}
 
 		// Files and directories: stat normally.
@@ -278,6 +278,45 @@ final class FileScanner {
 		$mode  = (int) ( $info->getPerms() & 0o7777 );
 		$mtime = (int) $info->getMTime();
 
-		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null );
+		// Files carry a media_type sniffed at scan time; directories do not.
+		$media_type = EntryHeader::KIND_FILE === $kind ? self::sniff_media_type( $absolute_path ) : null;
+
+		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null, $media_type );
+	}
+
+	/**
+	 * Sniff the MIME type of a file via finfo.
+	 *
+	 * Uses PHP's fileinfo extension. On detection failure (file is
+	 * empty, finfo cannot identify the bytes, finfo extension is
+	 * unavailable, or any other reason), returns the RFC 2046 safe
+	 * fallback 'application/octet-stream' — which signals "treat as
+	 * raw bytes" at restore time and never triggers special handling.
+	 *
+	 * @param string $absolute_path Absolute path to a regular file.
+	 * @return string A non-empty MIME-type string.
+	 */
+	private static function sniff_media_type( string $absolute_path ): string {
+		$fallback = 'application/octet-stream';
+
+		if ( ! function_exists( 'finfo_open' ) ) {
+			return $fallback;
+		}
+
+		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_open emits a warning when the magic database is unavailable; the warning is informational and we already handle the false return.
+		$handle = @finfo_open( FILEINFO_MIME_TYPE );
+		if ( false === $handle ) {
+			return $fallback;
+		}
+
+		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_file emits a warning on unreadable files; the warning is informational and we already handle the false return.
+		$detected = @finfo_file( $handle, $absolute_path );
+		// finfo_close() was deprecated in PHP 8.4; $handle is cleaned up by garbage collection when it goes out of scope at the end of this method.
+
+		if ( false === $detected || '' === $detected ) {
+			return $fallback;
+		}
+
+		return $detected;
 	}
 }
