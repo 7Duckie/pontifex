@@ -304,8 +304,6 @@ final class FileScannerTest extends TestCase {
 	/**
 	 * Excluded paths must be omitted from the output.
 	 *
-	 * Uses an inline subclass of ExclusionRules to control matches.
-	 *
 	 * @return void
 	 */
 	public function test_excluded_paths_are_omitted(): void {
@@ -319,6 +317,51 @@ final class FileScannerTest extends TestCase {
 
 		$this->assertContains( 'keep.txt', $paths );
 		$this->assertNotContains( 'drop.txt', $paths );
+	}
+
+	/**
+	 * Pontifex's own working directory must be excluded regardless of ExclusionRules.
+	 *
+	 * This is the structural recursion-prevention invariant: even when
+	 * the caller passes ExclusionRules::none(), FileScanner refuses to
+	 * emit entries for wp-content/pontifex/ or anything beneath it.
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_working_directory_is_always_excluded(): void {
+		$this->make_dir( 'wp-content/pontifex' );
+		$this->write_file( 'wp-content/pontifex/log.txt', 'old-pontifex-log' );
+		$this->write_file( 'wp-content/pontifex/exports/archive.bin', 'old-archive' );
+		$this->write_file( 'wp-content/uploads/safe.txt', 'site-content' );
+
+		$entries = ( new FileScanner( ExclusionRules::none() ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		$this->assertContains( 'wp-content/uploads/safe.txt', $paths );
+		$this->assertNotContains( 'wp-content/pontifex', $paths );
+		$this->assertNotContains( 'wp-content/pontifex/log.txt', $paths );
+		$this->assertNotContains( 'wp-content/pontifex/exports/archive.bin', $paths );
+	}
+
+	/**
+	 * Similarly-named sibling directories must NOT be caught by the recursion-prevention invariant.
+	 *
+	 * Defends against a regression where the invariant uses substring
+	 * comparison without a slash boundary and accidentally excludes
+	 * directories like "wp-content/pontifex-staging" or
+	 * "wp-content/pontifex2".
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_lookalike_directories_are_not_excluded(): void {
+		$this->write_file( 'wp-content/pontifex-staging/note.txt', 'should be kept' );
+		$this->write_file( 'wp-content/pontifex2/note.txt', 'should be kept' );
+
+		$entries = ( new FileScanner( ExclusionRules::none() ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		$this->assertContains( 'wp-content/pontifex-staging/note.txt', $paths );
+		$this->assertContains( 'wp-content/pontifex2/note.txt', $paths );
 	}
 
 	/**

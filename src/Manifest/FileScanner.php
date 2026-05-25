@@ -130,6 +130,16 @@ final class FileScanner {
 
 			$kind = self::classify( $info, $absolute_path );
 
+			// Structural recursion-prevention invariant: Pontifex's own working directory.
+			// Always excluded regardless of the ExclusionRules configuration.
+			// Prevents an existing Pontifex export from being recursively re-included in a new archive, which would produce an archive-of-archives.
+			if ( self::is_pontifex_working_path( $relative_path ) ) {
+				if ( EntryHeader::KIND_DIRECTORY === $kind ) {
+					$walker->next();
+				}
+				continue;
+			}
+
 			if ( $this->exclusions->matches( $relative_path, $kind ) ) {
 				// If the excluded entry is a directory, do not descend into it.
 				if ( EntryHeader::KIND_DIRECTORY === $kind ) {
@@ -149,6 +159,38 @@ final class FileScanner {
 		);
 
 		return $entries;
+	}
+
+	/**
+	 * Whether the given relative path is inside Pontifex's working directory.
+	 *
+	 * This is a structural invariant enforced independently of
+	 * {@see ExclusionRules}: regardless of which rules the caller
+	 * configures, FileScanner never emits entries for Pontifex's own
+	 * working directory. The point is to prevent a previous Pontifex
+	 * export (which may have left files in wp-content/pontifex/) from
+	 * being recursively re-included in a new archive — that would
+	 * produce an archive-of-archives whose size and meaning is
+	 * surprising.
+	 *
+	 * The match covers both the directory itself and anything
+	 * beneath it:
+	 *
+	 *  - "wp-content/pontifex"            → excluded
+	 *  - "wp-content/pontifex/logs"       → excluded
+	 *  - "wp-content/pontifex/exports/x"  → excluded
+	 *  - "wp-content/pontifex-foo"        → NOT excluded (different directory)
+	 *
+	 * @param string $relative_path Path relative to the scan root.
+	 * @return bool True if the path is inside wp-content/pontifex/.
+	 */
+	private static function is_pontifex_working_path( string $relative_path ): bool {
+		$root = 'wp-content/pontifex';
+		if ( $relative_path === $root ) {
+			return true;
+		}
+		$prefix = $root . '/';
+		return 0 === strncmp( $relative_path, $prefix, strlen( $prefix ) );
 	}
 
 	/**
