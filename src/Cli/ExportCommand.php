@@ -24,6 +24,7 @@ use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Manifest\ManifestBuilder;
+use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
@@ -94,15 +95,16 @@ final class ExportCommand {
 	private WordPressContext $wordpress_context;
 
 	/**
-	 * The ManifestBuilder used to enumerate entries for the archive.
+	 * The manifest builder used to enumerate entries for the archive.
 	 *
 	 * Optional in the constructor: when null, the command wires one up
 	 * from a fresh FileScanner+DatabaseScanner+WpdbAdapter against the
-	 * computed ExclusionRules. Tests inject a fake.
+	 * computed ExclusionRules. Tests inject a fake fulfilling the
+	 * ManifestBuilderInterface contract.
 	 *
-	 * @var ManifestBuilder|null
+	 * @var ManifestBuilderInterface|null
 	 */
-	private ?ManifestBuilder $manifest_builder;
+	private ?ManifestBuilderInterface $manifest_builder;
 
 	/**
 	 * Construct an ExportCommand instance.
@@ -111,14 +113,14 @@ final class ExportCommand {
 	 * pass constructor arguments, so all parameters are optional and
 	 * default to real implementations. Tests pass mocks explicitly.
 	 *
-	 * @param Environment|null      $environment       Optional. Defaults to a fresh RealEnvironment.
-	 * @param WordPressContext|null $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
-	 * @param ManifestBuilder|null  $manifest_builder  Optional. When null, the command builds one from the exclusion rules at run time.
+	 * @param Environment|null              $environment Optional. Defaults to a fresh RealEnvironment.
+	 * @param WordPressContext|null         $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
+	 * @param ManifestBuilderInterface|null $manifest_builder Optional. When null, the command builds a concrete ManifestBuilder from the exclusion rules at run time.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
-		?ManifestBuilder $manifest_builder = null
+		?ManifestBuilderInterface $manifest_builder = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();

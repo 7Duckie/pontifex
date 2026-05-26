@@ -27,12 +27,19 @@ use ReflectionNamedType;
  *
  * Behavioural assertions about the pure helpers — flag parsing,
  * exclude-file parsing, exclusion-rule construction — live in the
- * sibling directory tests/Unit/Cli/ExportCommand/. The __invoke
- * orchestration is exercised end-to-end via Phase 5 integration
- * tests against a real WordPress installation; mocking out
- * ManifestBuilder, WP_CLI's confirm/error/log calls, and the
- * filesystem to unit-test the orchestration adds little real
+ * sibling directory tests/Unit/Cli/ExportCommand/. The bulk of
+ * __invoke's orchestration is exercised end-to-end via Phase 5
+ * integration tests against a real WordPress installation; mocking
+ * out ManifestBuilder, WP_CLI's confirm/error/log calls, and the
+ * filesystem to unit-test the full orchestration adds little real
  * coverage and is deliberately deferred.
+ *
+ * Two surgical exceptions: the --yes confirmation short-circuit and
+ * the try-finally exception-propagation contract are covered by
+ * sibling-directory test InvokeBranchesTest, because helper tests
+ * cannot exercise WP_CLI control flow and integration tests would
+ * catch regressions slowly and with diffuse failure messages. See
+ * idea-bank Idea 007 for the broader decision rationale.
  */
 final class ExportCommandTest extends TestCase {
 

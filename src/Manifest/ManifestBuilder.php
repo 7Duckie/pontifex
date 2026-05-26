@@ -56,7 +56,7 @@ use Pontifex\Archive\Writer\EntryWriter;
  *    and symlink entries get empty php://memory streams (their
  *    meaningful data lives in the EntryHeader, not the payload).
  */
-final class ManifestBuilder {
+final class ManifestBuilder implements ManifestBuilderInterface {
 
 	/**
 	 * Codec id used for every entry in v0.1.0.
