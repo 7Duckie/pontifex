@@ -12,6 +12,7 @@
     "require-dev": {
         "brain/monkey": "^2.7",
         "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+        "mockery/mockery": "^1.6",
         "php-stubs/wp-cli-stubs": "^2.10",
         "phpstan/phpstan": "^1.11",
         "phpunit/phpunit": "^10.5",
@@ -45,7 +46,7 @@
           "@lint",
           "@analyse",
           "@test",
-          "@composer audit"
+          "@composer audit --abandoned=report"
       ],
       "dev:setup": [
       "@php -r \"echo 'Installing pre-commit hooks...' . PHP_EOL;\"",

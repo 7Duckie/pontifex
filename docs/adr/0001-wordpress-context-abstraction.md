@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-26
-- **Deciders:** Muriithi
+- **Deciders:** 7Duckie
 
 ## Context
 
