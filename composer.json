@@ -23,9 +23,7 @@
     },
     "autoload": {
         "psr-4": {
-            "Pontifex\\": "src/",
-            "Pontifex\\Restore\\": "src/Restore/",
-            "Pontifex\\WordPress\\": "src/WordPress/"
+            "Pontifex\\": "src/"
         }
     },
     "autoload-dev": {
