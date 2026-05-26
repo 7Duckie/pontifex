@@ -115,7 +115,7 @@ define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
 define( 'PONTIFEX_VERSION', '0.0.2' );
 
 // -----------------------------------------------------------------------------
-// Autoloaderp
+// Autoloader
 //
 // Composer generates vendor/autoload.php from the PSR-4 mapping in
 // composer.json. Without this require, no `Pontifex\…` class can be
