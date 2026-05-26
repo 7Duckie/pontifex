@@ -14,26 +14,116 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
+Work toward v0.1.0 — the round-trip baseline. The roadmap item list
+is in [`docs/roadmap.md`](docs/roadmap.md); the major remaining
+pieces are: `wp pontifex import` CLI wiring (Phase 5), WordPress
+integration tests across the PHP 8.1–8.4 matrix (Phase 6), round-
+trip tests proving export-then-import reconstructs the source byte-
+perfectly, and dedicated `FileWriter` unit tests (audit Finding
+F001). Intermediate v0.0.x tags may land along the way as each
+piece completes.
+
+## [0.0.5] — pre-alpha: archive format + export half
+
+The archive format is implemented end-to-end as a library: writer
+produces sealed archives conforming to the v1 byte layout, reader
+enforces the mandatory verification-order contract. The export CLI
+is functional. The import CLI is not yet registered; restore
+primitives exist at the PHP API level but the command is pending.
+This is **the export half of the v0.1.0 round-trip baseline**, with
+the import half and the round-trip tests still to come.
+
 ### Added
-- Phase 1: format primitives — `Codec` interface, `RawCodec` (`0x0000`),
-  `GzipCodec` (`0x0001`), `CodecRegistry`, `HashingStream`, `ByteOrder`
-  big-endian helpers, and the `Header`, `Provenance`, `EntryHeader`,
-  `ArchiveManifest`, `Footer` value objects.
-- Phase 2: archive writer — `EntryWriter`, `FooterWriter`,
-  `ArchiveWriter`, `FileScanner`, `DatabaseScanner`, `ManifestBuilder`,
-  `ExclusionRules`.
-- Phase 3: archive reader — `EntryReader`, `ArchiveReader`,
-  `EntryReadResult`, with the mandatory verification-order contract
-  from the format spec.
-- Phase 4: CLI integration — `WordPressContext` abstraction
+
+- **Format primitives.** `Codec` interface, `RawCodec` (`0x0000`),
+  `GzipCodec` (`0x0001`), `CodecRegistry`, `HashingStream`,
+  `ByteOrder` big-endian helpers, and the `Header`, `Provenance`,
+  `EntryHeader`, `ArchiveManifest`, `Footer` value objects.
+- **Archive writer.** `EntryWriter`, `FooterWriter`,
+  `ArchiveWriter`, `FileScanner`, `DatabaseScanner`,
+  `ManifestBuilder` (with extracted `ManifestBuilderInterface`
+  for test mockability), `ExclusionRules`.
+- **Archive reader.** `EntryReader`, `ArchiveReader`,
+  `EntryReadResult`, with the mandatory verification-order
+  contract from the format spec.
+- **Restore primitives (library only).** `DatabaseWriter`,
+  `FileWriter`, `RestoreRunner`. Not user-facing yet; pending the
+  `wp pontifex import` CLI command in a later v0.0.x release.
+- **CLI integration.** `WordPressContext` abstraction
   ([ADR 0001](docs/adr/0001-wordpress-context-abstraction.md)),
   refactored `DoctorCommand` to use it, and new `ExportCommand`
   registering `wp pontifex export`.
+- **Strict version-stamping policy.** Every `v*` git tag must
+  match `PONTIFEX_VERSION` and the plugin header `Version:` line;
+  the CI workflow's *Verify tag matches plugin version* step
+  enforces this on tag push
+  ([ADR 0003](docs/adr/0003-strict-version-stamping.md)).
+- **Test infrastructure.** brain/monkey for WordPress-function
+  mocking, Mockery lifecycle handling in a shared
+  `Pontifex\Tests\TestCase` base class, `INVOKE_TESTING.md`
+  documenting the surgical `__invoke` test pattern.
+- **Pre-commit hooks.** 72-char commit-subject limit enforced via
+  a `commit-msg` stage hook
+  (`scripts/check-commit-subject-length.sh`).
+
+### Changed
+
+- **Composer audit strictness.** `--abandoned=report` flag aligned
+  across all three call sites — `composer.json`'s `check` script,
+  `.pre-commit-config.yaml`'s pre-push hook, and
+  `.github/workflows/ci.yml`'s audit step. ADR 0002 documents the
+  invariant and was amended during the 2026-05-26 audit pass to
+  cover the CI site that the original enumeration missed.
+- **PSR-4 autoload.** Three redundant entries in `composer.json`
+  collapsed to the single umbrella entry the others were already
+  subsumed by.
+- **Test directory naming.** `tests/Unit/Wordpress/` renamed to
+  `tests/Unit/WordPress/` to align with the namespace declared
+  inside and avoid PSR-4 case-sensitivity issues on Linux CI.
+
+### Removed
+
+- `src/Version.php` — dead-code class that claimed canonical
+  status but had no consumers. The strict version-stamping policy
+  above makes the abstraction unnecessary at this scale; git
+  remembers it if a future need brings it back.
+
+### Known issues and pending work toward v0.1.0
+
+- **`wp pontifex import` is not registered.** The restore
+  primitives (`DatabaseWriter`, `FileWriter`, `RestoreRunner`) are
+  implemented and unit-tested as far as the audit allowed, but the
+  CLI command that exposes them to users is not yet wired. This is
+  Phase 5 of the roadmap and the gating piece for v0.1.0's round-
+  trip headline.
+- **No WordPress integration tests yet.** Phase 6 of the roadmap
+  requires running PHPUnit against a real WordPress installation
+  across the PHP 8.1–8.4 matrix; `wp-phpunit` is not yet wired
+  into the test harness.
+- **No round-trip tests yet.** Cannot exist until import lands. The
+  format's correctness guarantee is "export then import
+  reconstructs the source byte-perfectly"; that test cannot run
+  while only the export half exists.
+- **`src/Restore/FileWriter.php` lacks dedicated unit tests**
+  (audit finding F001). Roughly 350 lines of path-traversal
+  defence code, exercised indirectly via `RestoreRunnerTest` but
+  with most individual defences unverified at unit level.
 
 ### Notes
-- v0.1.0 archives are **unencrypted**. Encryption (codecs `0x0100`,
-  `0x0101`, `0x0102`) lands in v0.2.0. See
-  [`docs/roadmap.md`](docs/roadmap.md) for the full deferred list.
+
+- **Archives are unencrypted** in the v0.1.x series. Encryption
+  (codecs `0x0100`, `0x0101`, `0x0102`) is deferred to v0.2.0.
+  See [`docs/roadmap.md`](docs/roadmap.md) for the full deferred
+  list.
+- **Format compatibility.** Archives written by v0.0.5 will be
+  readable by v0.1.0 and onward without conversion. The byte
+  layout from `archive-format.md` is the public contract; later
+  versions add features without breaking earlier archives.
+- **Practical implication.** Users running v0.0.5 can produce
+  archives via `wp pontifex export` and the archives are valid
+  per the spec, but they cannot import them back through a CLI
+  command — the restore path is library-only until import wires
+  up.
 
 ## [0.0.4] — pre-alpha (docs-only)
 
@@ -102,7 +192,8 @@ v0.0.x decision log for the reasoning.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.5
 [0.0.4]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.4
 [0.0.3]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.3
 [0.0.2]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.2

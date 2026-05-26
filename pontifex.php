@@ -3,7 +3,7 @@
  * Plugin Name:       Pontifex
  * Plugin URI:        https://github.com/7Duckie/pontifex
  * Description:       A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
- * Version:           0.0.2
+ * Version:           0.0.5
  * Requires at least: 6.5
  * Requires PHP:      8.1
  * Author:            7Duckie
@@ -110,9 +110,11 @@ define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
  * gets stamped onto archives.
  *
  * Bumping the version means updating both this define and the header
- * Version line at the top of the file. They must agree.
+ * Version line at the top of the file. They must agree. ADR 0003
+ * formalises this with a CI guard that fails the workflow on tag
+ * push if the values disagree with the tag.
  */
-define( 'PONTIFEX_VERSION', '0.0.2' );
+define( 'PONTIFEX_VERSION', '0.0.5' );
 
 // -----------------------------------------------------------------------------
 // Autoloader
