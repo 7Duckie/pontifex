@@ -90,7 +90,7 @@ repos:
 
       - id: composer-audit
         name: composer audit
-        entry: composer audit
+        entry: composer audit --abandoned=report
         language: system
         files: ^composer\.(json|lock)$
         pass_filenames: false
