@@ -101,7 +101,7 @@ of state.
 ### Idea 001 — Track plugin installs, including direct ZIP installs
 
 - **Status:** Active
-- **Proposed:** 2026-05-21 by Muriithi
+- **Proposed:** 2026-05-21 by 7Duckie
 - **Last reviewed:** 2026-05-21
 
 **The concept.** A way to know how many Pontifex instances are
@@ -244,7 +244,7 @@ WP.org submission flow (separate workstream).
 ### Idea 002 — Track transfer metrics (count, success rate, total bytes)
 
 - **Status:** Active
-- **Proposed:** 2026-05-21 by Muriithi
+- **Proposed:** 2026-05-21 by 7Duckie
 - **Last reviewed:** 2026-05-21
 
 **The concept.** Each Pontifex instance keeps a running tally of the
@@ -357,7 +357,7 @@ the import feature (v0.2.0).
 ### Idea 003 — Error and failure reporting mechanism
 
 - **Status:** Active
-- **Proposed:** 2026-05-21 by Muriithi
+- **Proposed:** 2026-05-21 by 7Duckie
 - **Last reviewed:** 2026-05-21
 
 **The concept.** A structured way to capture errors and failures during
@@ -481,7 +481,7 @@ bundle includes stats output, which presumes stats exist).
 ### Idea 004 — `--passphrase` encryption flag for `wp pontifex export`
 
 - **Status:** Active
-- **Proposed:** 2026-05-26 by Muriithi (surfaced during commit 19c planning)
+- **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
 - **Last reviewed:** 2026-05-26
 
 **The concept.** A flag on `wp pontifex export` (and the matching
@@ -575,7 +575,7 @@ this; needs cross-checking when this idea is picked up).
 ### Idea 005 — Per-file progress indicators during `wp pontifex export`
 
 - **Status:** Active
-- **Proposed:** 2026-05-26 by Muriithi (surfaced during commit 19c planning)
+- **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
 - **Last reviewed:** 2026-05-26
 
 **The concept.** During `wp pontifex export`, print a progress
@@ -650,7 +650,7 @@ existing WP_CLI progress bar utility (already available).
 ### Idea 006 — Resumable exports from partial state
 
 - **Status:** Active
-- **Proposed:** 2026-05-26 by Muriithi (surfaced during commit 19c planning)
+- **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
 - **Last reviewed:** 2026-05-26
 
 **The concept.** If `wp pontifex export` is interrupted partway
@@ -726,7 +726,7 @@ either sidecar progress files or in-place resume markers.
 ### Idea 007 — Full behavioural test coverage of CLI commands' `__invoke`
 
 - **Status:** Active
-- **Proposed:** 2026-05-26 by Muriithi (surfaced during commit 19c planning)
+- **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
 - **Last reviewed:** 2026-05-26
 
 **The concept.** Add behavioural tests that exercise each CLI
@@ -808,6 +808,105 @@ tests by leaking state).
   deliberately accepted at the time of building 19c on the
   understanding it would be closed in this follow-up.
 
+
+### Idea 008 — Migrate to PHPUnit 11 or 12 (drop abandoned transitive deps)
+
+- **Status:** Active
+- **Proposed:** 2026-05-26 by 7Duckie (surfaced during Sprint 1 lockfile work)
+- **Last reviewed:** 2026-05-26
+
+**The concept.** Upgrade the project's test framework from PHPUnit
+10.5 to PHPUnit 11 or 12. The motivating signal is that `composer
+update` reports two of PHPUnit 10's transitive dependencies as
+"abandoned": `sebastian/code-unit` and
+`sebastian/code-unit-reverse-lookup`. Both are tiny internal
+utilities written by Sebastian Bergmann (PHPUnit's creator); his
+plan is to merge their functionality into the main
+`phpunit/phpunit` package, which happens in PHPUnit 11+. Upgrading
+removes the abandoned warnings cleanly without any package-by-
+package replacement.
+
+**Motivation.** Less about urgency, more about hygiene. The
+abandoned warnings are not security concerns — Bergmann actively
+maintains the broader PHPUnit umbrella, and "abandoned" here means
+"the standalone API is frozen; the code lives on inside PHPUnit
+itself." But the warnings are noise in every `composer update`,
+they may eventually attract drive-by Dependabot alerts, and the
+underlying issue does resolve on its own with the framework
+upgrade. Doing it deliberately, on our schedule, is cleaner than
+being forced into it by a future security disclosure or a
+PHPUnit 10 EOL announcement.
+
+**Feasibility.** Real work, not a one-line change. Three concerns:
+
+1. **PHPUnit 11 requires PHP 8.2+.** Pontifex currently targets
+   PHP 8.1 as its support floor (composer.json: `"php": ">=8.1"`;
+   PHPStan pinned to `phpVersion: 80100`). Raising the floor to
+   8.2 is a real product decision — it affects which WordPress
+   hosts can run Pontifex. WordPress.org reports show 8.1 still
+   has meaningful share in shared hosting. Worth checking the
+   adoption numbers at decision time rather than guessing.
+2. **PHPUnit 11 dropped some PHPUnit 10 patterns** (annotation
+   syntax in particular) and changed others. Our 578 tests would
+   need a review pass for deprecated patterns. The maintainers
+   publish a migration guide; the work is mechanical but
+   non-trivial.
+3. **PHPUnit 12 has the same PHP-floor concern (8.3+ in some
+   minor releases).** Going directly to 12 rather than 11 doubles
+   the floor-raise question.
+
+**Benefit.** Removes two abandoned-package warnings on every
+`composer update`. Brings the project onto an actively-developed
+test framework with current features (better data providers,
+improved attribute syntax, stricter risky-test handling).
+Modernises the test suite ahead of v1.0. Modest immediate
+benefit; future-proofing value.
+
+**Alternative implementations.**
+
+- **Stay on PHPUnit 10, accept the warnings.** Composer's
+  "abandoned" notification is informational, not blocking. The
+  packages remain functional. Cost-free. Worth doing if v0.1.0
+  ships and gets traction without anyone complaining about
+  abandoned-package warnings.
+- **Pin to PHPUnit 11 specifically** rather than 12, accepting
+  the smaller PHP-floor raise (8.1 → 8.2) for the smaller
+  upgrade surface.
+- **Skip 11, go directly to 12** when 12 is mature, accepting
+  the larger PHP-floor raise but avoiding a two-step migration.
+
+**Concerns and constraints.** PHP-floor raise is the real cost.
+Every WordPress site that runs Pontifex on PHP 8.1 would be cut
+off the day this lands. Mitigation: pair the upgrade with a
+clear release-note announcement, give it a major version bump
+(v0.x.0 → v0.(x+1).0 minimum, possibly defer to v1.0), and time
+it to align with WordPress core's own PHP-floor moves.
+
+**When in the build.** Defer to post-v0.1.0 at the earliest.
+Best candidate is v0.3.0 or v1.0 release polish, when the
+PHP-floor question gets a deliberate review anyway. Not v0.1.0
+or v0.2.0 — both have enough scope already.
+
+**Dependencies.** None hard. The decision is calendar-driven
+(when does PHPUnit 10 EOL? what's PHP 8.1's WordPress install
+share at the time?) rather than blocked by other Pontifex work.
+
+**Open questions.**
+
+- What's the actual WordPress install share on PHP 8.1 at the
+  point this decision is made? `wordpress.org/about/stats` is
+  the data source; the answer drives the floor-raise call.
+- PHPUnit 11 or PHPUnit 12? Probably 11 first (smaller jump),
+  but check support-window dates at decision time.
+- Are there any custom assertion helpers or attributes Pontifex
+  uses that have changed between PHPUnit 10 and 11? Quick audit
+  before the migration starts.
+
+**Decision log.**
+
+- 2026-05-26: Captured during Sprint 1 / Commit 1 lockfile work.
+  Recommended: defer to v0.3.0 or v1.0 release polish; revisit
+  PHP-floor data at decision time.
 ---
 
 ## Implemented ideas
