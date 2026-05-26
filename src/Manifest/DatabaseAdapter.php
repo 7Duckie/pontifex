@@ -80,23 +80,4 @@ interface DatabaseAdapter {
 	 * @throws RuntimeException If the rows cannot be retrieved.
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string;
-
-	/**
-	 * Execute one SQL statement against the database.
-	 *
-	 * Used during restore by {@see \Pontifex\Restore\DatabaseWriter}
-	 * to replay the SQL bytes captured from db_chunk archive entries.
-	 * Each call executes exactly one statement; callers split
-	 * multi-statement payloads into individual statements before
-	 * calling this method.
-	 *
-	 * The statement is run as-is. The adapter does not parse, rewrite,
-	 * or validate it — the bytes came from a Pontifex-produced archive
-	 * and are trusted to be syntactically correct for the destination
-	 * MySQL/MariaDB server.
-	 *
-	 * @param string $sql The SQL statement to execute. Must not be empty.
-	 * @throws RuntimeException If the statement fails to execute.
-	 */
-	public function execute_sql( string $sql ): void;
 }
