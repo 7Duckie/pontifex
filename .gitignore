@@ -38,3 +38,6 @@ Thumbs.db
 # Environment files
 .env
 .env.local
+
+# Local working state (Claude session context)
+STATE.md
