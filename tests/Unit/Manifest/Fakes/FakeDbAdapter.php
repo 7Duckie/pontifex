@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Manifest\Fakes;
 
+use RuntimeException;
 use Pontifex\Manifest\DatabaseAdapter;
 
 /**
@@ -93,5 +94,62 @@ final class FakeDbAdapter implements DatabaseAdapter {
 			$sql .= "INSERT INTO `{$table_name}` VALUES ({$i});\n";
 		}
 		return $sql;
+	}
+
+	/**
+	 * Statements passed to execute_sql, in order.
+	 *
+	 * Tests inspect this array to verify which SQL the writer ran.
+	 *
+	 * @var string[]
+	 */
+	private array $executed_statements = array();
+
+	/**
+	 * If non-null, the next execute_sql call throws this message.
+	 *
+	 * Set via {@see FakeDbAdapter::fail_next_execute()} to simulate
+	 * a database error in tests.
+	 *
+	 * @var string|null
+	 */
+	private ?string $next_failure = null;
+
+	/**
+	 * Configure the next execute_sql call to throw a RuntimeException.
+	 *
+	 * @param string $message The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_next_execute( string $message ): void {
+		$this->next_failure = $message;
+	}
+
+	/**
+	 * Return the SQL statements passed to execute_sql, in order.
+	 *
+	 * @return string[] The recorded statements.
+	 */
+	public function executed_statements(): array {
+		return $this->executed_statements;
+	}
+
+	/**
+	 * Record the SQL statement, or simulate a configured failure.
+	 *
+	 * @param string $sql The SQL to execute.
+	 * @throws RuntimeException If $sql is empty or fail_next_execute() was called.
+	 */
+	public function execute_sql( string $sql ): void {
+		if ( '' === $sql ) {
+			throw new RuntimeException( 'FakeDbAdapter::execute_sql: sql must not be empty.' );
+		}
+		if ( null !== $this->next_failure ) {
+			$message            = $this->next_failure;
+			$this->next_failure = null;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $message );
+		}
+		$this->executed_statements[] = $sql;
 	}
 }

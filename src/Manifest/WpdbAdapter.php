@@ -189,6 +189,33 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Execute one SQL statement against the database via $wpdb->query().
+	 *
+	 * The statement is sent verbatim; no preparation, escaping, or
+	 * placeholder substitution is applied because the SQL came from a
+	 * Pontifex-produced archive and is already in its final form. On
+	 * failure (non-empty $wpdb->last_error), a RuntimeException is
+	 * thrown carrying the database driver's error message.
+	 *
+	 * @param string $sql The SQL statement to execute. Must not be empty.
+	 * @throws RuntimeException If the statement fails to execute.
+	 */
+	public function execute_sql( string $sql ): void {
+		if ( '' === $sql ) {
+			throw new RuntimeException( 'WpdbAdapter::execute_sql: sql must not be empty.' );
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql came from a Pontifex-produced archive; preparation/caching does not apply to schema-modifying restore statements.
+		$this->wpdb->query( $sql );
+		if ( '' !== $this->wpdb->last_error ) {
+			$last_error = (string) $this->wpdb->last_error;
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $last_error is the database driver's error message, reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'WpdbAdapter::execute_sql: query failed: %s', $last_error )
+			);
+		}
+	}
+
+	/**
 	 * Encode a single row value into its SQL literal form.
 	 *
 	 * Null becomes NULL. Numeric scalar values are emitted unquoted

@@ -22,7 +22,8 @@
     },
     "autoload": {
         "psr-4": {
-            "Pontifex\\": "src/"
+            "Pontifex\\": "src/",
+            "Pontifex\\Restore\\": "src/Restore/"
         }
     },
     "autoload-dev": {
