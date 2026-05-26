@@ -74,7 +74,7 @@ repos:
 
       - id: phpstan
         name: phpstan (full)
-        entry: vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --no-progress
+        entry: vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --no-progress --memory-limit=1G
         language: system
         files: \.php$
         pass_filenames: false
