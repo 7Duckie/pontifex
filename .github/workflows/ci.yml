@@ -60,7 +60,7 @@ jobs:
       # --- Security ---------------------------------------------------
 
       - name: Composer audit (Packagist advisories)
-        run: composer audit
+        run: composer audit --abandoned=report
 
       - name: OSV-Scanner (cross-ecosystem advisories)
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.8

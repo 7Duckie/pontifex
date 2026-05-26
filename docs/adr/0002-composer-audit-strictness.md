@@ -1,6 +1,6 @@
 # ADR 0002 — Composer audit strictness: report abandoned, fail on advisories
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-05-26)
 - **Date:** 2026-05-26
 - **Deciders:** 7Duckie
 
@@ -167,3 +167,39 @@ This ADR should be revisited when any of the following happens:
 - Commit 8b25e63 — aligned the pre-push hook with the same flag.
 - Composer's audit documentation:
   <https://getcomposer.org/doc/03-cli.md#audit>.
+
+---
+
+## Amendment — 2026-05-26 (audit pass, finding F005)
+
+The original "two configuration points that enforce this"
+enumeration above was incomplete. `.github/workflows/ci.yml` also
+runs `composer audit` as a quality-gate step, and that invocation
+was not listed alongside the `composer.json` `check` script and
+the `.pre-commit-config.yaml` pre-push hook when this ADR was
+written.
+
+The CI step worked correctly at the time because Composer 2.7+
+defaults to `--abandoned=report` behaviour for the `audit` command.
+That is a *default*, not a *guarantee* — if Composer's behaviour
+ever tightens again, the CI step would fail while the local and
+pre-push gates would stay green. That asymmetric-gate failure is
+the exact situation this ADR was written to prevent, so the CI
+step being uncovered by the invariant was a real gap, not a
+matter of taste.
+
+This amendment corrects the enumeration. The three configuration
+points that must change together are:
+
+1. `composer.json` — the `check` script ends with
+   `"@composer audit --abandoned=report"`.
+2. `.pre-commit-config.yaml` — the `composer-audit` hook's `entry:`
+   is `composer audit --abandoned=report`.
+3. `.github/workflows/ci.yml` — the *Composer audit (Packagist
+   advisories)* step's `run:` is
+   `composer audit --abandoned=report`.
+
+The accompanying commit aligns the CI step to match the other two.
+The original prose above remains untouched per ADR-immutability
+practice; this amendment is the canonical statement of the
+invariant's scope from 2026-05-26 onward.
