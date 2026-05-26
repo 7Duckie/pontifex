@@ -9,11 +9,11 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\DoctorCommand;
 
-use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Cli\DoctorCommand;
 use Pontifex\Environment\Environment;
 use Pontifex\Tests\TestCase;
+use Pontifex\WordPress\WordPressContext;
 use ReflectionMethod;
 
 /**
@@ -25,16 +25,23 @@ use ReflectionMethod;
  * check_upload_max_filesize, and check_open_basedir.
  *
  * Each check method is exercised through the public surface of
- * DoctorCommand (via the constructor's Environment injection) and
+ * DoctorCommand (via the constructor's dependency injection) and
  * called via reflection because the methods are private. The
  * alternative — promoting them to public for testability — would
  * weaken encapsulation without benefit, since nothing outside
  * collect_all_checks() needs to call them individually.
  *
- * brain/monkey is used to stub WordPress functions where present
- * (get_bloginfo, wp_convert_hr_to_bytes, wp_max_upload_size,
- * size_format). The Environment mock controls PHP-level inputs
- * (PHP version, ini_get values, defined constants).
+ * Two abstractions are mocked:
+ *
+ *  - Environment controls PHP-level inputs (PHP version, ini_get
+ *    values, defined constants).
+ *  - WordPressContext controls WordPress-level inputs (wp_version,
+ *    db_server_version, convert_hr_to_bytes, max_upload_size,
+ *    format_size, upload_dir_basedir).
+ *
+ * Both abstractions are mocked via Mockery. brain/monkey is no
+ * longer needed for these tests because every WordPress call inside
+ * DoctorCommand now routes through WordPressContext.
  *
  * Status string values are hardcoded ('OK', 'WARN', 'FAIL', 'INFO')
  * because they are part of DoctorCommand's visible output contract;
@@ -48,13 +55,14 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Construct a DoctorCommand instance with the given mock Environment.
+	 * Construct a DoctorCommand instance with the given mock dependencies.
 	 *
-	 * @param Environment $environment The mock environment to inject.
+	 * @param Environment      $environment       The mock environment to inject.
+	 * @param WordPressContext $wordpress_context The mock WordPress context to inject.
 	 * @return DoctorCommand
 	 */
-	private function build_command( Environment $environment ): DoctorCommand {
-		return new DoctorCommand( $environment );
+	private function build_command( Environment $environment, WordPressContext $wordpress_context ): DoctorCommand {
+		return new DoctorCommand( $environment, $wordpress_context );
 	}
 
 	/**
@@ -87,7 +95,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'php_version' )->andReturn( '8.4.0' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_php_version' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_php_version' );
 
 		$this->assertSame( 'Runtime', $row['category'] );
 		$this->assertSame( 'PHP version', $row['name'] );
@@ -105,7 +115,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'php_version' )->andReturn( '8.1.29' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_php_version' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_php_version' );
 
 		$this->assertSame( '8.1.29', $row['value'] );
 		$this->assertSame( 'WARN', $row['status'] );
@@ -124,7 +136,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'php_version' )->andReturn( '8.1.29' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_php_version' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_php_version' );
 
 		$this->assertStringContainsString( '8.1.29', $row['note'] );
 		$this->assertStringContainsString( 'end-of-life', $row['note'] );
@@ -145,9 +159,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			->andReturn( false );
 
-		Functions\when( 'get_bloginfo' )->justReturn( '7.0' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'wp_version' )->andReturn( '7.0' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_wordpress_version' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_wordpress_version' );
 
 		$this->assertSame( 'WordPress version', $row['name'] );
 		$this->assertSame( '7.0', $row['value'] );
@@ -166,9 +181,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			->andReturn( false );
 
-		Functions\when( 'get_bloginfo' )->justReturn( '6.0' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'wp_version' )->andReturn( '6.0' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_wordpress_version' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_wordpress_version' );
 
 		$this->assertSame( '6.0', $row['value'] );
 		$this->assertSame( 'FAIL', $row['status'] );
@@ -189,10 +205,11 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			->andReturn( '7.0' );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 		// Site is running 6.9 — less than the bumped minimum of 7.0.
-		Functions\when( 'get_bloginfo' )->justReturn( '6.9' );
+		$wordpress_context->shouldReceive( 'wp_version' )->andReturn( '6.9' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_wordpress_version' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_wordpress_version' );
 
 		$this->assertSame( 'FAIL', $row['status'] );
 		$this->assertStringContainsString( '7.0', $row['note'] );
@@ -209,10 +226,11 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 		// 6.4 is below the hardcoded default 6.5.
-		Functions\when( 'get_bloginfo' )->justReturn( '6.4' );
+		$wordpress_context->shouldReceive( 'wp_version' )->andReturn( '6.4' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_wordpress_version' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_wordpress_version' );
 
 		$this->assertSame( 'FAIL', $row['status'] );
 		$this->assertStringContainsString( '6.5', $row['note'] );
@@ -229,9 +247,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			->andReturn( false );
 
-		Functions\when( 'get_bloginfo' )->justReturn( '6.0' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'wp_version' )->andReturn( '6.0' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_wordpress_version' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_wordpress_version' );
 
 		$this->assertStringContainsString( 'WordPress', $row['note'] );
 		$this->assertStringContainsString( '6.5', $row['note'] );
@@ -247,22 +266,16 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_database_version_present_returns_info_with_value(): void {
-		$wpdb_mock = Mockery::mock();
-		$wpdb_mock->shouldReceive( 'get_var' )
-			->with( 'SELECT VERSION()' )
-			->andReturn( '8.4.0' );
-		// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Deliberate test setup; the global is unset after the assertion.
-		$GLOBALS['wpdb'] = $wpdb_mock;
-
 		$environment = Mockery::mock( Environment::class );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_database_version' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'db_server_version' )->andReturn( '8.4.0' );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_database_version' );
 
 		$this->assertSame( 'Database version', $row['name'] );
 		$this->assertSame( '8.4.0', $row['value'] );
 		$this->assertSame( 'INFO', $row['status'] );
-
-		unset( $GLOBALS['wpdb'] );
 	}
 
 	/**
@@ -271,21 +284,15 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_database_version_empty_returns_unknown(): void {
-		$wpdb_mock = Mockery::mock();
-		$wpdb_mock->shouldReceive( 'get_var' )
-			->with( 'SELECT VERSION()' )
-			->andReturn( null );
-		// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Deliberate test setup; the global is unset after the assertion.
-		$GLOBALS['wpdb'] = $wpdb_mock;
-
 		$environment = Mockery::mock( Environment::class );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_database_version' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'db_server_version' )->andReturn( '' );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_database_version' );
 
 		$this->assertSame( '(unknown)', $row['value'] );
 		$this->assertSame( 'INFO', $row['status'] );
-
-		unset( $GLOBALS['wpdb'] );
 	}
 
 	// -------------------------------------------------------------------------
@@ -303,9 +310,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'memory_limit' )
 			->andReturn( '-1' );
 
-		Functions\when( 'wp_convert_hr_to_bytes' )->justReturn( 0 );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_memory_limit' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_memory_limit' );
 
 		$this->assertSame( 'memory_limit', $row['name'] );
 		$this->assertSame( 'unlimited', $row['value'] );
@@ -323,9 +331,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'memory_limit' )
 			->andReturn( '256M' );
 
-		Functions\when( 'wp_convert_hr_to_bytes' )->justReturn( 256 * 1024 * 1024 );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 256 * 1024 * 1024 );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_memory_limit' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_memory_limit' );
 
 		$this->assertSame( '256M', $row['value'] );
 		$this->assertSame( 'OK', $row['status'] );
@@ -342,9 +351,10 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'memory_limit' )
 			->andReturn( '128M' );
 
-		Functions\when( 'wp_convert_hr_to_bytes' )->justReturn( 128 * 1024 * 1024 );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 128 * 1024 * 1024 );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_memory_limit' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_memory_limit' );
 
 		$this->assertSame( '128M', $row['value'] );
 		$this->assertSame( 'WARN', $row['status'] );
@@ -366,7 +376,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'max_execution_time' )
 			->andReturn( '0' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_max_execution_time' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_max_execution_time' );
 
 		$this->assertSame( 'max_execution_time', $row['name'] );
 		$this->assertSame( 'unlimited', $row['value'] );
@@ -384,7 +396,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'max_execution_time' )
 			->andReturn( '120' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_max_execution_time' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_max_execution_time' );
 
 		$this->assertSame( '120 seconds', $row['value'] );
 		$this->assertSame( 'OK', $row['status'] );
@@ -401,7 +415,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'max_execution_time' )
 			->andReturn( '30' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_max_execution_time' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_max_execution_time' );
 
 		$this->assertSame( '30 seconds', $row['value'] );
 		$this->assertSame( 'WARN', $row['status'] );
@@ -420,11 +436,12 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 	public function test_upload_max_filesize_returns_info_with_formatted_size(): void {
 		$environment = Mockery::mock( Environment::class );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 		// 300 MB.
-		Functions\when( 'wp_max_upload_size' )->justReturn( 314572800 );
-		Functions\when( 'size_format' )->justReturn( '300 MB' );
+		$wordpress_context->shouldReceive( 'max_upload_size' )->andReturn( 314572800 );
+		$wordpress_context->shouldReceive( 'format_size' )->with( 314572800 )->andReturn( '300 MB' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_upload_max_filesize' );
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_upload_max_filesize' );
 
 		$this->assertSame( 'Effective upload limit', $row['name'] );
 		$this->assertSame( '300 MB', $row['value'] );
@@ -446,7 +463,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'open_basedir' )
 			->andReturn( '' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_open_basedir' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_open_basedir' );
 
 		$this->assertSame( 'open_basedir', $row['name'] );
 		$this->assertSame( '(not set)', $row['value'] );
@@ -464,7 +483,9 @@ final class RuntimeAndPhpConfigChecksTest extends TestCase {
 			->with( 'open_basedir' )
 			->andReturn( '/var/www/html:/tmp' );
 
-		$row = $this->invoke_check( $this->build_command( $environment ), 'check_open_basedir' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$row = $this->invoke_check( $this->build_command( $environment, $wordpress_context ), 'check_open_basedir' );
 
 		$this->assertSame( '/var/www/html:/tmp', $row['value'] );
 		$this->assertSame( 'WARN', $row['status'] );

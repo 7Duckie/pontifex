@@ -13,6 +13,7 @@ use Mockery;
 use Pontifex\Cli\DoctorCommand;
 use Pontifex\Environment\Environment;
 use Pontifex\Tests\TestCase;
+use Pontifex\WordPress\WordPressContext;
 use ReflectionMethod;
 
 /**
@@ -22,6 +23,14 @@ use ReflectionMethod;
  * check_action_scheduler_presence (bundled-dependency detection for the
  * future Phase 1 Action Scheduler integration), and compute_status_counts
  * (the pure aggregation logic that print_summary delegates to).
+ *
+ * The check methods exercised here only touch Environment (constant
+ * probes, class/function existence checks); none of them call into
+ * WordPressContext. The mock is still injected for consistency with the
+ * other behavioural test files and to defend against future drift —
+ * if a check ever starts touching WordPressContext, the mock catches
+ * it as an unexpected call instead of silently delegating to the real
+ * implementation.
  *
  * __invoke is deliberately not covered with behavioural tests here. It is a
  * thin orchestrator that delegates to collect_all_checks() (already tested
@@ -44,13 +53,14 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Construct a DoctorCommand instance with the given mock Environment.
+	 * Construct a DoctorCommand instance with the given mock dependencies.
 	 *
-	 * @param Environment $environment The mock environment to inject.
+	 * @param Environment      $environment       The mock environment to inject.
+	 * @param WordPressContext $wordpress_context The mock WordPress context to inject.
 	 * @return DoctorCommand
 	 */
-	private function build_command( Environment $environment ): DoctorCommand {
-		return new DoctorCommand( $environment );
+	private function build_command( Environment $environment, WordPressContext $wordpress_context ): DoctorCommand {
+		return new DoctorCommand( $environment, $wordpress_context );
 	}
 
 	/**
@@ -81,8 +91,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 					->with( 'DISABLE_WP_CRON' )
 					->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_wp_cron_status'
 		);
 
@@ -106,8 +118,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 					->with( 'DISABLE_WP_CRON' )
 					->andReturn( true );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_wp_cron_status'
 		);
 
@@ -134,8 +148,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 					->with( 'DISABLE_WP_CRON' )
 					->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_wp_cron_status'
 		);
 
@@ -161,8 +177,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 					->with( 'as_schedule_single_action' )
 					->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_action_scheduler_presence'
 		);
 
@@ -185,8 +203,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 		// Function check may or may not run because of short-circuit OR; allow either.
 		$environment->shouldReceive( 'function_exists' )->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_action_scheduler_presence'
 		);
 
@@ -211,8 +231,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 					->with( 'as_schedule_single_action' )
 					->andReturn( true );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_action_scheduler_presence'
 		);
 
@@ -230,10 +252,11 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_empty_input_returns_zero_for_all(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			array()
 		);
@@ -250,7 +273,8 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_single_ok_row(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$rows = array(
 			array(
@@ -263,7 +287,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 		);
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			$rows
 		);
@@ -280,7 +304,8 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_mixed_rows(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$rows = array(
 			array( 'status' => 'OK' ),
@@ -294,7 +319,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 		);
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			$rows
 		);
@@ -316,7 +341,8 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_row_without_status_falls_back_to_info(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$rows = array(
 			array(
@@ -326,7 +352,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 		);
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			$rows
 		);
@@ -345,7 +371,8 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_unrecognised_status_is_ignored(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$rows = array(
 			array( 'status' => 'OK' ),
@@ -354,7 +381,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 		);
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			$rows
 		);
@@ -375,10 +402,11 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	 * @return void
 	 */
 	public function test_status_counts_always_contains_four_known_keys(): void {
-		$environment = Mockery::mock( Environment::class );
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$counts = (array) $this->invoke_private(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'compute_status_counts',
 			array()
 		);

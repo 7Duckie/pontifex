@@ -9,11 +9,11 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\DoctorCommand;
 
-use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Cli\DoctorCommand;
 use Pontifex\Environment\Environment;
 use Pontifex\Tests\TestCase;
+use Pontifex\WordPress\WordPressContext;
 use ReflectionMethod;
 
 /**
@@ -30,6 +30,13 @@ use ReflectionMethod;
  * testing each one separately would multiply test count without
  * adding coverage.
  *
+ * Two abstractions are mocked:
+ *
+ *  - Environment controls PHP-level inputs (extension presence,
+ *    filesystem-stat results, constant values).
+ *  - WordPressContext controls WordPress-level inputs (format_size,
+ *    upload_dir_basedir).
+ *
  * Status string values are hardcoded ('OK', 'WARN', 'FAIL') because
  * they are part of DoctorCommand's visible output contract.
  */
@@ -40,13 +47,14 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Construct a DoctorCommand instance with the given mock Environment.
+	 * Construct a DoctorCommand instance with the given mock dependencies.
 	 *
-	 * @param Environment $environment The mock environment to inject.
+	 * @param Environment      $environment       The mock environment to inject.
+	 * @param WordPressContext $wordpress_context The mock WordPress context to inject.
 	 * @return DoctorCommand
 	 */
-	private function build_command( Environment $environment ): DoctorCommand {
-		return new DoctorCommand( $environment );
+	private function build_command( Environment $environment, WordPressContext $wordpress_context ): DoctorCommand {
+		return new DoctorCommand( $environment, $wordpress_context );
 	}
 
 	/**
@@ -77,8 +85,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( 'sodium' )
 			->andReturn( true );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_extension_present',
 			'sodium',
 			true,
@@ -103,8 +113,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( 'zstd' )
 			->andReturn( true );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_extension_present',
 			'zstd',
 			false,
@@ -126,8 +138,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( 'sodium' )
 			->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_extension_present',
 			'sodium',
 			true,
@@ -151,8 +165,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( 'zstd' )
 			->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_extension_present',
 			'zstd',
 			false,
@@ -175,8 +191,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( 'mbstring' )
 			->andReturn( true );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_extension_present',
 			'mbstring',
 			true,
@@ -204,10 +222,11 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content' )
 			->andReturn( (float) ( 10 * 1024 * 1024 * 1024 ) );
 
-		Functions\when( 'size_format' )->justReturn( '10 GB' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'format_size' )->andReturn( '10 GB' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_free_disk_space'
 		);
 
@@ -231,10 +250,11 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content' )
 			->andReturn( (float) ( 500 * 1024 * 1024 ) );
 
-		Functions\when( 'size_format' )->justReturn( '500 MB' );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'format_size' )->andReturn( '500 MB' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_free_disk_space'
 		);
 
@@ -257,8 +277,10 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content' )
 			->andReturn( false );
 
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_free_disk_space'
 		);
 
@@ -285,12 +307,12 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content/uploads' )
 			->andReturn( true );
 
-		Functions\when( 'wp_upload_dir' )->justReturn(
-			array( 'basedir' => '/var/www/wp-content/uploads' )
-		);
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'upload_dir_basedir' )
+			->andReturn( '/var/www/wp-content/uploads' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_uploads_dir_writable'
 		);
 
@@ -314,12 +336,12 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content/uploads' )
 			->andReturn( false );
 
-		Functions\when( 'wp_upload_dir' )->justReturn(
-			array( 'basedir' => '/var/www/wp-content/uploads' )
-		);
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'upload_dir_basedir' )
+			->andReturn( '/var/www/wp-content/uploads' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_uploads_dir_writable'
 		);
 
@@ -339,12 +361,12 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 			->with( '/var/www/wp-content/uploads' )
 			->andReturn( false );
 
-		Functions\when( 'wp_upload_dir' )->justReturn(
-			array( 'basedir' => '/var/www/wp-content/uploads' )
-		);
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'upload_dir_basedir' )
+			->andReturn( '/var/www/wp-content/uploads' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_uploads_dir_writable'
 		);
 
@@ -361,10 +383,11 @@ final class ExtensionsAndFilesystemChecksTest extends TestCase {
 	public function test_uploads_dir_empty_basedir_returns_fail(): void {
 		$environment = Mockery::mock( Environment::class );
 
-		Functions\when( 'wp_upload_dir' )->justReturn( array( 'basedir' => '' ) );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+		$wordpress_context->shouldReceive( 'upload_dir_basedir' )->andReturn( '' );
 
 		$row = $this->invoke_check(
-			$this->build_command( $environment ),
+			$this->build_command( $environment, $wordpress_context ),
 			'check_uploads_dir_writable'
 		);
 

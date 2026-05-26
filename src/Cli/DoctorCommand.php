@@ -13,6 +13,8 @@ use WP_CLI;
 use WP_CLI\Formatter;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\WordPress\RealWordPressContext;
+use Pontifex\WordPress\WordPressContext;
 
 /**
  * `wp pontifex doctor` — host environment audit command.
@@ -92,17 +94,33 @@ final class DoctorCommand {
 	private Environment $environment;
 
 	/**
+	 * The WordPressContext abstraction this command queries.
+	 *
+	 * Where Environment covers PHP-runtime and filesystem facts,
+	 * WordPressContext covers WordPress-specific facts and utility
+	 * functions: wp_version, the wpdb instance, wp_convert_hr_to_bytes,
+	 * size_format, wp_upload_dir, and so on. Splitting the two means
+	 * tests can mock the two layers independently.
+	 *
+	 * @var WordPressContext
+	 */
+	private WordPressContext $wordpress_context;
+
+	/**
 	 * Construct a DoctorCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
-	 * constructor arguments, so the parameter is optional and defaults
-	 * to a RealEnvironment that talks to PHP's actual global state.
-	 * Tests pass a mock Environment explicitly.
+	 * constructor arguments, so both parameters are optional and
+	 * default to the real implementations that talk to PHP's actual
+	 * global state and WordPress's actual functions. Tests pass mocks
+	 * explicitly.
 	 *
-	 * @param Environment|null $environment Optional. The Environment to query. Defaults to a fresh RealEnvironment instance.
+	 * @param Environment|null      $environment       Optional. The Environment to query. Defaults to a fresh RealEnvironment.
+	 * @param WordPressContext|null $wordpress_context Optional. The WordPressContext to query. Defaults to a fresh RealWordPressContext.
 	 */
-	public function __construct( ?Environment $environment = null ) {
-		$this->environment = $environment ?? new RealEnvironment();
+	public function __construct( ?Environment $environment = null, ?WordPressContext $wordpress_context = null ) {
+		$this->environment       = $environment ?? new RealEnvironment();
+		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 	}
 
 	/**
@@ -217,7 +235,7 @@ final class DoctorCommand {
 	 */
 	private function check_wordpress_version(): array {
 
-		$current_wp_version = (string) get_bloginfo( 'version' );
+		$current_wp_version = $this->wordpress_context->wp_version();
 		$minimum_wp_version = $this->environment->is_constant_defined( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			? (string) $this->environment->constant_value( 'PONTIFEX_MINIMUM_WP_VERSION' )
 			: '6.5';
@@ -242,12 +260,7 @@ final class DoctorCommand {
 	 */
 	private function check_database_version(): array {
 
-		global $wpdb;
-
-		// `get_var` returns the first value of the first row, or null.
-		// We cast to string for a consistent row shape; an unknown DB
-		// version is unusual but not a failure (just informational).
-		$database_version = (string) $wpdb->get_var( 'SELECT VERSION()' );
+		$database_version = $this->wordpress_context->db_server_version();
 
 		return $this->build_row(
 			'Runtime',
@@ -268,7 +281,7 @@ final class DoctorCommand {
 		// `memory_limit` is a string like "256M". WordPress ships a
 		// helper that parses these into byte counts. -1 means unlimited.
 		$configured_value    = $this->environment->ini_get( 'memory_limit' );
-		$configured_in_bytes = wp_convert_hr_to_bytes( $configured_value );
+		$configured_in_bytes = $this->wordpress_context->convert_hr_to_bytes( $configured_value );
 
 		// `wp_convert_hr_to_bytes('-1')` returns 0; we treat -1 specially.
 		if ( '-1' === $configured_value ) {
@@ -324,12 +337,12 @@ final class DoctorCommand {
 		// `post_max_size` into account, plus any filters, and returns
 		// the effective maximum a user can actually upload via the
 		// admin UI. This is the number that matters for Import.
-		$effective_maximum_bytes = (int) wp_max_upload_size();
+		$effective_maximum_bytes = $this->wordpress_context->max_upload_size();
 
 		return $this->build_row(
 			'PHP config',
 			'Effective upload limit',
-			size_format( $effective_maximum_bytes ),
+			$this->wordpress_context->format_size( $effective_maximum_bytes ),
 			self::STATUS_INFO,
 			'Archives larger than this must be uploaded via WP-CLI or SFTP.'
 		);
@@ -420,7 +433,7 @@ final class DoctorCommand {
 		return $this->build_row(
 			'Filesystem',
 			'Free disk space (wp-content)',
-			size_format( $free_bytes ),
+			$this->wordpress_context->format_size( $free_bytes ),
 			$is_sufficient ? self::STATUS_OK : self::STATUS_WARN,
 			$is_sufficient
 				? ''
@@ -439,12 +452,7 @@ final class DoctorCommand {
 		// absolute filesystem path. We test for writability via PHP
 		// rather than asking the OS, because PHP's view (after FPM user,
 		// group, ACLs, open_basedir) is what actually matters.
-		//
-		// PHPStan/the WordPress stubs guarantee `basedir` is always
-		// present in the returned array, so we cast directly without
-		// an isset() guard.
-		$uploads_info    = wp_upload_dir();
-		$uploads_basedir = (string) $uploads_info['basedir'];
+		$uploads_basedir = $this->wordpress_context->upload_dir_basedir();
 
 		if ( '' === $uploads_basedir || ! $this->environment->is_dir( $uploads_basedir ) ) {
 			return $this->build_row(
