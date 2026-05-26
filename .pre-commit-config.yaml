@@ -2,10 +2,11 @@
 #
 # One-time install:
 #     pip install pre-commit
-#     pre-commit install --hook-type pre-commit --hook-type pre-push
+#     pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg
 #
 # Budget per stage:
 #   pre-commit ≤ 3 seconds on a normal change
+#   commit-msg ≤ 1 second
 #   pre-push   ≤ 60 seconds
 #
 # If a hook exceeds its budget, demote it to the next stage rather than
@@ -64,6 +65,19 @@ repos:
         language: system
         files: \.(php)$
         pass_filenames: false
+
+  # -------------------------------------------------------------------
+  # Commit-msg stage — message-format checks.
+  # -------------------------------------------------------------------
+
+  - repo: local
+    hooks:
+
+      - id: commit-subject-length
+        name: commit subject ≤72 chars
+        entry: scripts/check-commit-subject-length.sh
+        language: system
+        stages: [commit-msg]
 
   # -------------------------------------------------------------------
   # Pre-push stage — heavier analysis and full test suite.
