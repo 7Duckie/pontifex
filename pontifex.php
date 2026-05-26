@@ -99,6 +99,21 @@ define( 'PONTIFEX_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'PONTIFEX_MINIMUM_PHP_VERSION', '8.1' );
 define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
 
+/**
+ * The Pontifex plugin version, exposed to runtime code.
+ *
+ * The plugin header above also carries a Version line, but that line
+ * is documentation/metadata read by WordPress and the Plugins screen.
+ * PONTIFEX_VERSION is the runtime source of truth: it is what
+ * ExporterInfo records inside every Pontifex archive's Provenance
+ * block, so the value at this point in the file IS the value that
+ * gets stamped onto archives.
+ *
+ * Bumping the version means updating both this define and the header
+ * Version line at the top of the file. They must agree.
+ */
+define( 'PONTIFEX_VERSION', '0.0.2' );
+
 // -----------------------------------------------------------------------------
 // Autoloaderp
 //
@@ -141,4 +156,5 @@ require_once $pontifex_autoloader;
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex doctor', \Pontifex\Cli\DoctorCommand::class );
+	\WP_CLI::add_command( 'pontifex export', \Pontifex\Cli\ExportCommand::class );
 }
