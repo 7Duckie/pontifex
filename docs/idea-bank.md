@@ -550,7 +550,7 @@ not actually a blocking concern for early users.
 encryption layer can wrap an already-working pipeline rather than
 being built into the foundation). sodium extension (already
 required). Documented threat model around at-rest archive
-confidentiality (the existing THREAT_MODEL.md may already cover
+confidentiality (the existing threat model may already cover
 this; needs cross-checking when this idea is picked up).
 
 **Open questions.**

@@ -38,14 +38,18 @@ dispositions:
 
 - **Patch** — a fix is merged and a release issued.
 - **Defer** — accepted risk for now, with a documented rationale and
-  a date for re-review. Recorded in `SECURITY-ADVISORIES.md`.
+  a date for re-review. Recorded as a published GitHub Security
+  Advisory on the repository's
+  [Security Advisories page](https://github.com/7Duckie/pontifex/security/advisories).
 - **Not applicable** — the vulnerable code path is unreachable in
   Pontifex's usage. Rationale documented.
 - **Upstream pending** — fix exists in principle but no released
   version yet. We track and pick up automatically.
 
 We do not silently drop alerts. Every advisory we choose not to act
-on is documented in `SECURITY-ADVISORIES.md` with a re-review date.
+on is documented in the project's GitHub Security Advisories with a
+re-review date, where it remains publicly visible alongside any
+advisories that did result in a fix.
 
 ### Where alerts come from
 
@@ -73,6 +77,6 @@ a note explaining that the package is not shipped to users.
 
 ## Threat model
 
-See `THREAT_MODEL.md` for Pontifex's attack-surface ranking. New
-security-relevant contributions should explain their relationship to
-that document.
+See [`docs/threat-model.md`](../docs/threat-model.md) for Pontifex's
+attack-surface ranking. New security-relevant contributions should
+explain their relationship to that document.

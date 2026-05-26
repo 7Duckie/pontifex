@@ -11,7 +11,7 @@
 
 This document tells implementers what bytes go where. It is short on prose and long on tables, layouts, and field rules. If you are writing code that emits or parses `.wpmig` archives, this is your reference.
 
-The *why* — what alternatives we considered, what trade-offs we accepted, what concerns motivated specific decisions — lives in the companion [design document](./ARCHIVE-FORMAT-DESIGN.md). You do not need to read it to implement the format, but it answers most of the "why on earth did you do it that way?" questions.
+The *why* — what alternatives we considered, what trade-offs we accepted, what concerns motivated specific decisions — lives in the companion [design document](./archive-format-design.md). You do not need to read it to implement the format, but it answers most of the "why on earth did you do it that way?" questions.
 
 [Appendix B](#appendix-b-glossary) glosses the cryptographic and format-specific terms that the spec uses without defining inline.
 
@@ -608,7 +608,6 @@ The following references informed this specification. URLs are stable as of May 
 ### User reports informing design
 
 - WordPress.org support: "Import process gets stuck" (All-in-One WP Migration). <https://wordpress.org/support/topic/import-process-gets-stuck/>
-- WordPress.org support forum (Duplicator). <https://wordpress.org/support/plugin/duplicator/>
 - WebHostingAdvices: "All-in-One WP Migration Import Stuck — solutions". <https://webhostingadvices.com/all-in-one-wp-migration-import-stuck/>
 
 ## 17. Appendices

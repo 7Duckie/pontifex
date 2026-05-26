@@ -1,6 +1,6 @@
 # Pontifex Archive Format — Design Document
 
-*Companion to* [`ARCHIVE-FORMAT.md`](./ARCHIVE-FORMAT.md). *Where the spec defines* what *implementations must do, this document explains* why.
+*Companion to* [`archive-format.md`](./archive-format.md). *Where the spec defines* what *implementations must do, this document explains* why.
 
 **Status:** Living document. Expected to evolve as we learn from real-world use of the format. Updates here do not change the format itself — they only deepen the rationale.
 

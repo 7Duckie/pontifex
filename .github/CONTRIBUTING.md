@@ -8,10 +8,10 @@ and branch conventions, test commands, and the quality gates every PR
 must pass.
 
 For architectural background — what the format is and why it's shaped
-this way — see [`ARCHIVE-FORMAT.md`](./ARCHIVE-FORMAT.md),
-[`ARCHIVE-FORMAT-DESIGN.md`](./ARCHIVE-FORMAT-DESIGN.md), and
-[`THREAT_MODEL.md`](./THREAT_MODEL.md). Ideas not yet committed to a
-release live in [`IDEA-BANK.md`](./IDEA-BANK.md).
+this way — see [`docs/archive-format.md`](../docs/archive-format.md),
+[`docs/archive-format-design.md`](../docs/archive-format-design.md), and
+[`docs/threat-model.md`](../docs/threat-model.md). Ideas not yet
+committed to a release live in [`docs/idea-bank.md`](../docs/idea-bank.md).
 
 ## One-time setup
 
@@ -81,9 +81,9 @@ Vulnerability reports: see [SECURITY.md](SECURITY.md), do not file
 public issues. Architectural questions about security: open a public
 discussion or PR.
 
-See also [THREAT_MODEL.md](THREAT_MODEL.md) for the attack-surface
-ranking. PRs touching ranks 1-4 should reference the threat model in
-their description.
+See also [`docs/threat-model.md`](../docs/threat-model.md) for the
+attack-surface ranking. PRs touching ranks 1-4 should reference the
+threat model in their description.
 
 ## Design language
 
@@ -105,11 +105,11 @@ consistently:
 - **Grid-based layouts.** Asymmetric balance, sharp lines, alignment
   to a consistent grid.
 - **Restraint over alarm.** Destructive actions (e.g. the reset
-  feature in IDEA-BANK Idea 004) are communicated through clear
+  feature in the idea bank) are communicated through clear
   language and explicit confirmation steps, not warning-coloured
   boxes that operators learn to dismiss.
 
-This direction will be promoted to a dedicated `DESIGN-LANGUAGE.md`
+This direction will be promoted to a dedicated `docs/design-language.md`
 once admin UI work begins in earnest (target: v0.3.0+) and there is
 enough component vocabulary, colour palette, and type scale to
 populate it. For now, contributors making UI proposals or sketches

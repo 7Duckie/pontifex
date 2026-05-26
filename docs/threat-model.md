@@ -10,7 +10,7 @@ future phases can refer to a single shared picture rather than each
 contributor reasoning from scratch.
 
 It is distinct from, and complementary to, the *format-level* threat
-model in [the archive format design doc](./ARCHIVE-FORMAT-DESIGN.md#5-threat-model).
+model in [the archive format design doc](./archive-format-design.md#5-threat-model).
 That document covers what cryptographic properties the `.wpmig`
 format provides and what attacks it explicitly does not defend
 against. This document is about the plugin as a running system:
@@ -76,7 +76,7 @@ is untrusted.
 **Mitigations in design:**
 
 - Magic/version/footer validated before any other parsing (see
-  [ARCHIVE-FORMAT.md §12](./ARCHIVE-FORMAT.md#12-integrity-and-tamper-detection)
+  [archive-format.md §12](./archive-format.md#12-integrity-and-tamper-detection)
   for the exact verification flow)
 - Manifest size capped at 100MB
 - Per-entry length checked against remaining file size
@@ -105,7 +105,7 @@ not safe to copy off-server without re-encryption.
   rather than cascading through the whole archive. A flipped bit
   produces one decryption failure, not a chain of garbage output
 - Argon2id KDF with strong parameters (see
-  [ARCHIVE-FORMAT.md §8.1](./ARCHIVE-FORMAT.md#81-key-derivation)
+  [archive-format.md §8.1](./archive-format.md#81-key-derivation)
   for the exact cost parameters)
 - Disk cap and retention window prevent unbounded accumulation
 
@@ -165,7 +165,7 @@ defend against, and stating them explicitly keeps the model honest.
   read `wp-config.php` (and therefore the per-site encryption key),
   modify the plugin's code, or replace archive files. Operators
   concerned about this case should rely on signed archives
-  ([ARCHIVE-FORMAT.md §11](./ARCHIVE-FORMAT.md#11-optional-detached-signature))
+  ([archive-format.md §11](./archive-format.md#11-optional-detached-signature))
   and verify signatures against a key not stored on the host.
 - **Side-channel attacks against the PHP implementation.** Timing,
   cache, and similar side channels that leak information through
