@@ -87,6 +87,8 @@ What follows from this choice — positive, negative, and neutral?
 
 - [ADR 0001](./0001-wordpress-context-abstraction.md) —
   WordPressContext as a separate abstraction from Environment.
+- [ADR 0002](./0002-composer-audit-strictness.md) —
+  Composer audit strictness: report abandoned, fail on advisories.
 
 ## Further reading
 
