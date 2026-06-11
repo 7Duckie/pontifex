@@ -11,7 +11,9 @@ namespace Pontifex\Cli;
 
 use DateTimeImmutable;
 use RuntimeException;
+use Throwable;
 use WP_CLI;
+use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
@@ -20,6 +22,7 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\FileScanner;
@@ -107,6 +110,17 @@ final class ExportCommand {
 	private ?ManifestBuilderInterface $manifest_builder;
 
 	/**
+	 * The PSR-3 logger this command records run milestones to.
+	 *
+	 * Injected via the constructor so tests can substitute a spy or a
+	 * NullLogger. When null, the constructor builds a FileLogger writing
+	 * under wp-content/pontifex/logs.
+	 *
+	 * @var LoggerInterface
+	 */
+	private LoggerInterface $logger;
+
+	/**
 	 * Construct an ExportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not
@@ -116,15 +130,18 @@ final class ExportCommand {
 	 * @param Environment|null              $environment Optional. Defaults to a fresh RealEnvironment.
 	 * @param WordPressContext|null         $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
 	 * @param ManifestBuilderInterface|null $manifest_builder Optional. When null, the command builds a concrete ManifestBuilder from the exclusion rules at run time.
+	 * @param LoggerInterface|null          $logger Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
-		?ManifestBuilderInterface $manifest_builder = null
+		?ManifestBuilderInterface $manifest_builder = null,
+		?LoggerInterface $logger = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 		$this->manifest_builder  = $manifest_builder;
+		$this->logger            = $logger ?? $this->build_default_logger();
 	}
 
 	/**
@@ -138,6 +155,7 @@ final class ExportCommand {
 	 * @param array<int, string>         $positional_args  Positional arguments passed on the CLI. Unused for `export`.
 	 * @param array<string, string|bool> $associative_args Associative `--key=value` and `--flag` arguments.
 	 * @return void
+	 * @throws Throwable Re-thrown after logging if the archive write fails.
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
@@ -162,6 +180,14 @@ final class ExportCommand {
 			WP_CLI::confirm( sprintf( 'Export to %s?', $output_path ), $associative_args );
 		}
 
+		$this->logger->info(
+			'Export started.',
+			array(
+				'output'     => $output_path,
+				'exclusions' => count( $exclusion_rules->patterns() ),
+			)
+		);
+
 		// 4. Build the Provenance block.
 		$provenance = $this->build_provenance();
 
@@ -179,8 +205,26 @@ final class ExportCommand {
 			$archive_writer = self::build_archive_writer();
 			$bytes_written  = $archive_writer->write_archive( $provenance, $entry_plans, $destination );
 
+			$this->logger->info(
+				'Export complete.',
+				array(
+					'output'  => $output_path,
+					'entries' => count( $entry_plans ),
+					'bytes'   => $bytes_written,
+				)
+			);
+
 			// 8. Print the summary.
 			$this->print_summary( $output_path, count( $entry_plans ), $bytes_written );
+		} catch ( Throwable $error ) {
+			$this->logger->error(
+				'Export failed.',
+				array(
+					'output'    => $output_path,
+					'exception' => $error,
+				)
+			);
+			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
 			fclose( $destination );
@@ -352,6 +396,26 @@ final class ExportCommand {
 		$database_adapter = new WpdbAdapter( $this->wordpress_context->wpdb_instance() );
 		$database_scanner = new DatabaseScanner( $database_adapter, $exclusion_rules );
 		return new ManifestBuilder( $file_scanner, $database_scanner );
+	}
+
+	/**
+	 * Build the default file logger when the caller supplies none.
+	 *
+	 * Reads WP_CONTENT_DIR and WP_DEBUG through the Environment seam so
+	 * the path and verbosity follow the host WordPress, and tests that
+	 * inject their own logger never reach this code.
+	 *
+	 * @return LoggerInterface A FileLogger writing under wp-content/pontifex/logs.
+	 */
+	private function build_default_logger(): LoggerInterface {
+		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
+			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
+			: sys_get_temp_dir();
+
+		$debug_enabled = $this->environment->is_constant_defined( 'WP_DEBUG' )
+			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
+
+		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled );
 	}
 
 	/**

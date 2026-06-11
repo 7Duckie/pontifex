@@ -30,7 +30,8 @@
   "prefer-stable": true,
   "require": {
     "php": ">=8.2",
-    "composer/installers": "^2.2"
+    "composer/installers": "^2.2",
+    "psr/log": "^3.0"
   },
   "require-dev": {
     "brain/monkey": "^2.7",
