@@ -5,7 +5,7 @@
  * Description:       A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
  * Version:           0.0.6
  * Requires at least: 6.5
- * Requires PHP:      8.1
+ * Requires PHP:      8.2
  * Author:            7Duckie
  * Author URI:        https://github.com/7Duckie
  * License:           GPL-2.0-or-later
@@ -44,7 +44,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Kept as a string for `version_compare()`, which is lexically aware of
  * version semantics (so '8.10.0' > '8.2.0' compares correctly).
  */
-$pontifex_minimum_php_version = '8.1.0';
+$pontifex_minimum_php_version = '8.2.0';
 
 /**
  * The minimum WordPress version Pontifex supports.
@@ -96,7 +96,7 @@ if ( version_compare( PHP_VERSION, $pontifex_minimum_php_version, '<' ) ) {
 define( 'PONTIFEX_PLUGIN_FILE', __FILE__ );
 define( 'PONTIFEX_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PONTIFEX_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'PONTIFEX_MINIMUM_PHP_VERSION', '8.1' );
+define( 'PONTIFEX_MINIMUM_PHP_VERSION', '8.2' );
 define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
 
 /**
