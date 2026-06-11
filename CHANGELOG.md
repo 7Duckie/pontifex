@@ -17,36 +17,38 @@ v0.0.x decision log for the reasoning.
 Work toward v0.1.0 — the round-trip baseline. The roadmap item list
 is in [`docs/roadmap.md`](docs/roadmap.md); the major remaining
 pieces are: `wp pontifex import` CLI wiring (Phase 5), WordPress
-integration tests across the PHP 8.1–8.4 matrix (Phase 6), round-
+integration tests across the PHP 8.1–8.5 matrix (Phase 6), round-
 trip tests proving export-then-import reconstructs the source byte-
-perfectly, and dedicated `FileWriter` unit tests (audit Finding
-F001). Intermediate v0.0.x tags may land along the way as each
+perfectly, plus the minimum logger and transfer counters pulled into
+v0.1.0. Intermediate v0.0.x tags may land along the way as each
 piece completes.
 
-## [0.0.6] — pre-alpha (tests strengthened; decisions recorded)
+## [0.0.6] — pre-alpha (tests strengthened; v0.1.0 scope settled)
 
 ### Added
 - 23 behavioural tests for `Restore\FileWriter` (closes audit
   finding F001) — every path-traversal and write defence now has a
   named test.
 - ADR 0004: v0.1.0 imports restore to the same URL; URL rewriting
-  ships in v0.2.0 together with its security defences.
-- `scripts/sync-state.sh` — guard against planning-document drift
-  (closes F014, opens-and-addresses F016).
+  ships in v0.2.0 together with its serialised-data defences.
+- wp-env development environment config (`.wp-env.json`) for a
+  reproducible local WordPress on Docker.
+- PHP 8.5 added to the CI test matrix.
 - Idea bank entries 009 (rollback) and 010 (archive verification);
   Idea 007 recorded as partially implemented (Sprint 1 close-out).
-- PHP 8.5 added to the CI test matrix.
 
 ### Changed
-- README gains a "Current implementation status" table and a "What
-  this is — and isn't yet" section; the rollback wording now says
-  v0.2.0 rather than implying the feature exists.
+- Roadmap aligned with ADR 0004: v0.1.0 is a same-URL restore
+  baseline; the minimum logger, transfer counters and export progress
+  bar are pulled into v0.1.0, with cross-URL migration, encryption and
+  the fuller observability surfaces in v0.2.0.
+- README rewritten for accuracy: a "What works today" status table,
+  rollback described as a v0.2.0 commitment rather than an existing
+  feature, and export documented as already shipped (v0.0.5).
 
 ### Notes
 - No plugin-behaviour changes; checkpoint release before Phase 5
   (ImportCommand). Exercises the ADR 0003 tag/version CI guard.
-
-[0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6
 
 ## [0.0.5] — pre-alpha: archive format + export half
 
@@ -217,7 +219,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.0.5...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.0.6...HEAD
+[0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6
 [0.0.5]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.5
 [0.0.4]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.4
 [0.0.3]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.3
