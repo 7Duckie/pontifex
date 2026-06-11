@@ -2,20 +2,25 @@
 <phpunit
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
-    bootstrap="tests/bootstrap.php"
+    bootstrap="tests/bootstrap-integration.php"
     cacheDirectory=".phpunit.cache"
     colors="true"
     failOnRisky="true"
-    failOnWarning="true"
-    beStrictAboutOutputDuringTests="true"
+    failOnWarning="false"
+    beStrictAboutOutputDuringTests="false"
     beStrictAboutTestsThatDoNotTestAnything="true"
     executionOrder="random">
 
+    <!--
+        Integration suite. Boots a real WordPress via wp-phpunit, so it
+        needs the wp-env "tests" database to be reachable. failOnWarning
+        and strict-output are OFF here on purpose: WordPress core emits
+        its own deprecation notices and boot output that the unit config
+        would (correctly) reject, but which are not Pontifex's concern.
+    -->
     <testsuites>
-        <!-- Fast, no WordPress runtime required. Runs pre-commit. -->
-        <!-- Integration tests live in their own config: phpunit-integration.xml.dist -->
-        <testsuite name="unit">
-            <directory>tests/Unit</directory>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
         </testsuite>
     </testsuites>
 
