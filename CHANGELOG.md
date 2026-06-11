@@ -23,6 +23,31 @@ perfectly, and dedicated `FileWriter` unit tests (audit Finding
 F001). Intermediate v0.0.x tags may land along the way as each
 piece completes.
 
+## [0.0.6] — pre-alpha (tests strengthened; decisions recorded)
+
+### Added
+- 23 behavioural tests for `Restore\FileWriter` (closes audit
+  finding F001) — every path-traversal and write defence now has a
+  named test.
+- ADR 0004: v0.1.0 imports restore to the same URL; URL rewriting
+  ships in v0.2.0 together with its security defences.
+- `scripts/sync-state.sh` — guard against planning-document drift
+  (closes F014, opens-and-addresses F016).
+- Idea bank entries 009 (rollback) and 010 (archive verification);
+  Idea 007 recorded as partially implemented (Sprint 1 close-out).
+- PHP 8.5 added to the CI test matrix.
+
+### Changed
+- README gains a "Current implementation status" table and a "What
+  this is — and isn't yet" section; the rollback wording now says
+  v0.2.0 rather than implying the feature exists.
+
+### Notes
+- No plugin-behaviour changes; checkpoint release before Phase 5
+  (ImportCommand). Exercises the ADR 0003 tag/version CI guard.
+
+[0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6
+
 ## [0.0.5] — pre-alpha: archive format + export half
 
 The archive format is implemented end-to-end as a library: writer
