@@ -239,6 +239,11 @@ WP.org submission flow (separate workstream).
   GitHub release-download counts until v1.0.0; target WP.org
   submission for the v1.0.0 era; defer or skip phone-home telemetry.
 
+- 2026-06-11: Confirmed parked until the v1.0 decision point — no
+  active planning carries it before then. GitHub release-download
+  counts remain the de facto adoption metric. (CONTINUITY Part 7,
+  decision 7.)
+
 ---
 
 ### Idea 002 — Track transfer metrics (count, success rate, total bytes)
@@ -351,6 +356,12 @@ the import feature (v0.2.0).
 - 2026-05-21: Captured. Initial analysis. Recommended: build aggregate
   counters in v0.1.0 alongside the first export; add history and CLI
   in v0.2.0.
+
+- 2026-06-11: The minimum-viable slice (attempted / succeeded /
+  failed / bytes counters as wp_options entries) is lifted ahead of
+  Phase 5 into Chunk 2, per the May DevOps review and the June
+  audit. Rolling history, `wp pontifex stats` and the admin tile
+  remain v0.2.0+ as analysed above.
 
 ---
 
@@ -476,6 +487,15 @@ bundle includes stats output, which presumes stats exist).
   and severity model in v0.1.0; diagnostics bundle in v0.2.0–v0.3.0;
   never auto-upload.
 
+- 2026-06-11: The minimum-viable slice (hand-rolled PSR-3 logger,
+  six severities, file at wp-content/pontifex/logs/ with 5 MB
+  rotation, WP_DEBUG-aware) is lifted ahead of Phase 5 into
+  Chunk 2, so import failures are diagnosable from day one. The
+  diagnostics bundle remains v0.2.0 as analysed above. This
+  resolves the drift between this entry ("v0.1.0, alongside the
+  ArchiveWriter") and the old sprint plan ("post-v0.1.0") in favour
+  of this entry's original intent.
+
 ---
 
 ### Idea 004 — `--passphrase` encryption flag for `wp pontifex export`
@@ -576,7 +596,7 @@ this; needs cross-checking when this idea is picked up).
 
 - **Status:** Active
 - **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
-- **Last reviewed:** 2026-05-26
+- **Last reviewed:** 2026-06-11
 
 **The concept.** During `wp pontifex export`, print a progress
 indicator that updates as each entry is written. At minimum a
@@ -644,6 +664,15 @@ existing WP_CLI progress bar utility (already available).
 - 2026-05-26: Captured during commit 19c planning. Recommended:
   defer to v0.2.0+; design the ArchiveWriter callback hook at
   that point.
+
+- 2026-06-11: Pulled out of the "probably v0.2.0" slot and folded
+  into the Chunk 2 counters work — it shares the per-entry
+  ArchiveWriter callback the counters already need. Surfaced
+  concretely when the first real export (12,515 entries, 305 MB)
+  ran with no terminal output for 22 seconds; a blinking cursor
+  reads as "frozen" on a trust-first tool. Folded into v0.1.0
+  (Chunk 2) rather than a standalone sprint. (CONTINUITY Part 7,
+  decision 9.)
 
 ---
 
@@ -725,9 +754,9 @@ either sidecar progress files or in-place resume markers.
 
 ### Idea 007 — Full behavioural test coverage of CLI commands' `__invoke`
 
-- **Status:** Active
+- **Status:** Partially implemented (Sprint 1, 2026-05-26)
 - **Proposed:** 2026-05-26 by 7Duckie (surfaced during commit 19c planning)
-- **Last reviewed:** 2026-05-26
+- **Last reviewed:** 2026-06-11
 
 **The concept.** Add behavioural tests that exercise each CLI
 command's `__invoke` method end-to-end with mocked dependencies,
@@ -807,6 +836,15 @@ tests by leaking state).
   dedicated follow-up commit after 19c lands. The gap was
   deliberately accepted at the time of building 19c on the
   understanding it would be closed in this follow-up.
+- 2026-05-26: Sprint 1 delivered the infrastructure half: the
+  INVOKE_TESTING.md pattern document plus two surgical `__invoke`
+  tests for ExportCommand. Deliberately deferred: DoctorCommand's
+  `__invoke` coverage and the third ExportCommand candidate.
+  Architectural side-effect: ManifestBuilderInterface was extracted
+  so the final ManifestBuilder could be faked in tests.
+- 2026-06-11: Status recorded as Partially implemented (this entry
+  was Sprint 1 / Commit 6, landed late). Remaining candidates stay
+  in this entry for a future sprint; not scheduled before v0.1.0.
 
 
 ### Idea 008 — Migrate to PHPUnit 11 or 12 (drop abandoned transitive deps)
@@ -924,3 +962,121 @@ later, with reasoning recorded.*
 *None yet. Entries arrive here when an active idea is decided against,
 with reasoning recorded so the same idea doesn't return without new
 information.*
+
+
+### Idea 009 — Rollback: pre-import safety archive + restore command
+
+- **Status:** Active (committed direction: v0.2.0 — see decision log)
+- **Proposed:** 2026-06-11 by 7Duckie (from audit finding IDEA-1)
+- **Last reviewed:** 2026-06-11
+
+**The concept.** Before `wp pontifex import` touches anything, it
+exports the destination site to a timestamped safety archive (e.g.
+`pre-import-rollback-20260612-1430.wpmig`) alongside the import. A
+new command, `wp pontifex rollback`, restores the most recent safety
+archive — an undo button for imports. The safety export is on by
+default and skippable only with an explicit `--no-rollback-archive`
+flag, consistent with the default-vs-user-control philosophy
+(defaults exist, are surfaced before action, are overridable).
+
+**Motivation.** The project's public pitch has promised "first-class
+rollback" since the beginning, and import is the most dangerous thing
+the plugin will ever do — a mistyped path turns a five-minute mistake
+into a destroyed site. Rollback converts that worst case back into a
+five-minute mistake. The 2026-06-11 audit (IDEA-1) found the promise
+existed nowhere in the plan; this entry is where it now lives.
+
+**Feasibility.** High — it is largely a composition of engines that
+already exist. The safety export reuses ExportCommand's machinery;
+the rollback command reuses ImportCommand's. New work: a free-disk
+preflight (doctor-style check that there is room for the safety
+archive), naming/retention of safety archives, and the wiring plus
+tests. The planned `wp pontifex reset` already specifies a mandatory
+pre-reset backup — same pattern, so this generalises rather than
+invents.
+
+**Benefit.** Large for users (the trust feature for a destructive
+command) and for the brand (the pitch becomes true). Cost is modest
+once import exists.
+
+**Alternative implementations.** (a) Database-only snapshot before
+import — cheaper and faster, but a half-undo that surprises people
+when files aren't restored; rejected as dishonest-by-surprise.
+(b) Rely on host backups — abdicates the promise entirely.
+(c) Full safety archive as described — chosen.
+
+**Concerns and constraints.** Doubles transient disk usage during an
+import (site + archive + safety archive); the preflight must check
+this and fail loudly *before* starting. Safety archives must be
+clearly named and their retention understandable.
+
+**When in the build.** v0.2.0, as part of the safety-era work. For
+v0.1.0 the public wording is corrected instead (README packet §7) so
+nothing over-claims in the meantime.
+
+**Dependencies.** Phase 5 ImportCommand (Chunk 3). Free-disk check.
+
+**Open questions.** Retention policy — keep last N safety archives?
+Auto-delete on user-confirmed success, or never auto-delete? Should
+`rollback` accept an explicit archive path as well as "most recent"?
+
+**Decision log.**
+
+- 2026-06-11: Captured from audit IDEA-1. Decided (7Duckie, via
+  audit adoption): reword the public pitch now; build the feature in
+  v0.2.0. Recorded alongside CONTINUITY Part 7, decision 5.
+
+
+### Idea 010 — `wp pontifex verify <archive>`: check a backup without restoring it
+
+- **Status:** Active (target v0.2.0; may ride along Chunk 4 if
+  nearly free — see decision log)
+- **Proposed:** 2026-06-11 by 7Duckie (from audit finding IDEA-6),
+  adopted by 7Duckie
+- **Last reviewed:** 2026-06-11
+
+**The concept.** A read-only command that opens a `.wpmig` archive,
+walks every entry, checks every hash, writes nothing, and exits with
+a loud verdict: sound, or broken (and where). Optional `--list` to
+show the archive's contents. Distinct exit codes so it can run in
+scripts and cron.
+
+**Motivation.** A custom format can't be sanity-checked with the
+tools people already trust (`tar -t`, unzip listing), so archives sit
+unverified until restore day — the worst possible moment to discover
+months of silently corrupted backups on a flaky NAS. Verification
+converts "Schrödinger's backup" into a ten-second check, and turns
+the format's local-first stance into a marketable line ("verify your
+backups in seconds, locally") that locked-box competitors can't
+easily match.
+
+**Feasibility.** High and cheap: the reader, the hash machinery and
+the verification-order contract already exist and are tested. This
+is a thin CLI wrapper plus output formatting plus tests.
+
+**Benefit.** Outsized trust value per unit of effort; also a useful
+diagnostic step in bug reports ("run verify, paste the output").
+
+**Alternative implementations.** Folding verification into
+`import --dry-run` only — rejected as the sole home, because verify
+should be runnable against cold storage with no destination site
+involved at all.
+
+**Concerns and constraints.** Must share the reader's defensive
+limits (F015) — a verify command is exactly where someone will point
+a hostile archive first.
+
+**When in the build.** v0.2.0. Explicitly *not* in the v0.1.0
+definition of done; it may ride along Chunk 4 only if the
+negative-test work makes it nearly free.
+
+**Dependencies.** ArchiveReader (exists). F015 defensive limits.
+
+**Open questions.** Should `--list` show per-entry sizes and mtimes,
+or names only? JSON output flag for tooling?
+
+**Decision log.**
+
+- 2026-06-11: Captured from audit IDEA-6. Accepted into the bank,
+  target v0.2.0, opportunistic earlier landing allowed but not
+  planned for. CONTINUITY Part 7, decision 6.

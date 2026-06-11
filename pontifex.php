@@ -114,7 +114,7 @@ define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
  * formalises this with a CI guard that fails the workflow on tag
  * push if the values disagree with the tag.
  */
-define( 'PONTIFEX_VERSION', '0.0.5' );
+define( 'PONTIFEX_VERSION', '0.0.6' );
 
 // -----------------------------------------------------------------------------
 // Autoloader
