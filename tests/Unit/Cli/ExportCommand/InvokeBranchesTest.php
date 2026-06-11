@@ -15,6 +15,8 @@ use Pontifex\Environment\Environment;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use RuntimeException;
 
 /**
@@ -45,6 +47,10 @@ use RuntimeException;
  *     the destination) without swallowing the exception. Helper
  *     tests cannot exercise this; integration tests would catch a
  *     hung file handle eventually but not pinpoint the cause.
+ *
+ * The logging assertions (info on success, error on failure) live
+ * here for the same reason: they are __invoke control-flow facts
+ * that the helper and structural layers cannot see.
  *
  * A third candidate branch — confirming that build_default_manifest_builder()
  * wires up the right collaborators when no ManifestBuilder is
@@ -116,7 +122,7 @@ final class InvokeBranchesTest extends TestCase {
 		// Verified by Mockery::close() in the parent tearDown.
 		$wp_cli->shouldNotReceive( 'confirm' );
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger() );
 
 		$command(
 			array(),
@@ -168,7 +174,85 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger() );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
+
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+	}
+
+	/**
+	 * A successful export records informational log lines and no error.
+	 *
+	 * The command logs an "Export started" line and an "Export
+	 * complete" line on the happy path. A regression that dropped the
+	 * logging, or that logged an error on success, would fail here.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_logs_info_on_success(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+		$manifest_builder  = $this->build_manifest_builder_mock_returning_empty();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->atLeast()->once();
+		$logger->shouldReceive( 'error' )->never();
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger );
+
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertFileExists(
+			$this->temp_output_path,
+			'ExportCommand should have written the output archive on the happy path.'
+		);
+	}
+
+	/**
+	 * A failing export records an error log line and re-throws unchanged.
+	 *
+	 * When the manifest builder throws, the command logs an "Export
+	 * failed" line at error level and then re-throws the original
+	 * exception, so the failure still reaches WP-CLI. This guards both
+	 * halves: that the error is logged, and that it is not swallowed.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_logs_error_when_build_fails(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder
+			->shouldReceive( 'build' )
+			->once()
+			->andThrow( new RuntimeException( 'simulated manifest-builder failure' ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'error' )->once();
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
