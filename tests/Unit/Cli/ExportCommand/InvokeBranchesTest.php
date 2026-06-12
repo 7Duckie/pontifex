@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
 use Mockery;
 use Pontifex\Cli\ExportCommand;
+use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Tests\TestCase;
@@ -122,7 +123,7 @@ final class InvokeBranchesTest extends TestCase {
 		// Verified by Mockery::close() in the parent tearDown.
 		$wp_cli->shouldNotReceive( 'confirm' );
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger() );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
 
 		$command(
 			array(),
@@ -174,7 +175,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger() );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
@@ -209,7 +210,7 @@ final class InvokeBranchesTest extends TestCase {
 		$logger->shouldReceive( 'info' )->atLeast()->once();
 		$logger->shouldReceive( 'error' )->never();
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
 
 		$command(
 			array(),
@@ -252,7 +253,7 @@ final class InvokeBranchesTest extends TestCase {
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
 		$logger->shouldReceive( 'error' )->once();
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
