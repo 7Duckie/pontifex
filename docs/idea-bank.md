@@ -1163,3 +1163,87 @@ same treatment as soon as it has progress reporting of its own?
   logging complement. Deferred to v0.2.0 to keep the v0.1.0 MVP lean
   (PATH-5 scope discipline). Time-based throttling provisionally
   preferred over count-based.
+
+### Idea 012 — Scan-phase progress reporting
+
+- **Status:** Parked
+- **Proposed:** 2026-06-12 by 7Duckie
+- **Last reviewed:** 2026-06-12
+
+**The concept.** During export, the live progress bar covers only the
+archive-write phase. The phase before it — scanning the filesystem and
+building the manifest (walking every file, hashing it, listing the
+database rows) — runs with no indicator at all. On a large site that
+is several seconds in which the command appears frozen before the bar
+ever shows. This idea adds a progress indication for that
+scan/manifest-build phase, so the user sees the command working from
+the first moment rather than staring at silence.
+
+**Motivation.** Observed directly on the dev site: a ~13,800-entry
+export sat silent for several seconds before "Writing archive"
+appeared. To a user, silence reads as "stuck" or "broken" — and on a
+backup tool that is precisely the wrong impression at the moment trust
+matters most. Filling the gap turns "is it hung?" into visible
+reassurance that the scan is making progress.
+
+**Feasibility.** More involved than the write-phase bar. That bar
+rides on ArchiveWriter's per-entry callback, which already exists. The
+scan/manifest phase has no equivalent hook, so the scanner / manifest
+builder would need its own progress seam — a plain callback, mirroring
+the ProgressReporter pattern already used for the write. A wrinkle:
+during the scan the total is not yet known (you discover the count as
+you walk), so a determinate percentage bar is not possible there
+without a wasteful pre-count pass — a running count or a spinner fits
+better. No new dependencies. Rough effort: half a day to a day, most
+of it the scanner hook and its test.
+
+**Benefit.** Removes the dead-air that makes every export look broken
+at the start, most painfully on large sites. Pure responsiveness /
+operability for the CLI user; pairs with the existing write-phase bar
+so the whole command feels alive end to end.
+
+**Alternative implementations.** (a) Indeterminate spinner — an
+animated "Scanning files…" with no count. Cheapest; gives liveness but
+no sense of scale. (b) Running count — "Scanned N files…" updated as
+the walk proceeds, via a scanner callback, throttled so it does not
+redraw per file. More informative; preferred. (c) Two-pass
+determinate bar — count everything first, then show a real percentage.
+Most polished, but doubles the filesystem walk (a real cost on large
+sites) and is probably not worth it. Lean: (b), with (a) as the cheap
+fallback.
+
+**Concerns and constraints.** No known total up front during the scan,
+hence the running-count/spinner approach rather than a percentage bar.
+Same TTY caveat as the write bar: only draw on an interactive
+terminal, fall back to silence when piped or redirected. Must add no
+measurable overhead to the scan itself — throttle the redraw. Keep the
+scanner's progress seam a plain callback, never a CLI type, so the
+archive and scan layers stay free of WP-CLI coupling — exactly the
+separation the write-phase ProgressReporter already follows.
+
+**When in the build.** Post-v0.1.0; candidate for v0.2.0, naturally
+grouped with the diagnostics/stats surface and Idea 011, since all
+three serve the same "make long runs observable" theme. Not a v0.1.0
+item — the milestone is the round trip, and this is responsiveness
+polish (PATH-5 scope discipline). Blocks nothing.
+
+**Dependencies.** The ProgressReporter seam (shipped with the export
+progress-bar slice) as the template. A new progress hook on the
+scanner / manifest builder, which does not exist yet. Extends
+naturally to the import command's own scan and verification phases
+once Chunk 3 gives import its progress reporting.
+
+**Open questions.** Spinner, running count, or determinate two-pass
+bar (lean: running count)? What redraw interval stays live without
+overhead? Should import get the same scan-phase treatment once it has
+progress reporting? Is the dead-air long enough on typical (smaller)
+sites to justify the work, or is it mainly a large-site concern?
+
+**Decision log.**
+- 2026-06-12 — Proposed and parked after 7Duckie observed the silent
+  scan/manifest phase during the export progress-bar smoke test
+  (several seconds of no output before the write bar appears).
+  Deferred to v0.2.0 to keep v0.1.0 focused on the round trip
+  (PATH-5). Running-count via a scanner callback provisionally
+  preferred; the determinate two-pass bar likely not worth the
+  double-walk cost.
