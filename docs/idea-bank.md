@@ -1080,3 +1080,86 @@ or names only? JSON output flag for tooling?
 - 2026-06-11: Captured from audit IDEA-6. Accepted into the bank,
   target v0.2.0, opportunistic earlier landing allowed but not
   planned for. CONTINUITY Part 7, decision 6.
+
+### Idea 011 — Throttled debug progress logging
+
+- **Status:** Parked
+- **Proposed:** 2026-06-12 by 7Duckie
+- **Last reviewed:** 2026-06-12
+
+**The concept.** When WP_DEBUG is enabled, the export (and later the
+import) writes an occasional progress line to pontifex.log — something
+like "Wrote 5,000 of 12,515 entries…" — at a sensible interval rather
+than for every entry. To a developer debugging a slow or stuck run,
+the log then carries a timestamped trail of how far the operation got
+and how fast it was moving, instead of going silent for the whole
+write. To an everyday user (WP_DEBUG off) nothing changes: the log
+stays quiet and only the live terminal bar is shown.
+
+**Motivation.** The live progress bar shipped with the export slice is
+terminal-only and ephemeral. If someone looks away, the SSH session
+drops, or the process is later inspected from its log alone, there is
+no record of progress — only the start line, then silence, then either
+success or an error. A periodic debug line turns "it hung somewhere"
+into "it reached entry 8,400 of 12,515 at 14:03:11 and then stopped",
+which is the difference between a guess and a diagnosis. It directly
+eases the support burden flagged in IDEA-5.
+
+**Feasibility.** Straightforward in the current shape. ArchiveWriter's
+per-entry callback already carries (done, total) — the exact data this
+needs — so no archive-layer change is required. The work is a second
+listener alongside the progress bar that writes a throttled line via
+the existing FileLogger. No new dependencies, no infrastructure, no
+hosting implications. Rough effort: an evening, most of it the
+throttling logic and its test.
+
+**Benefit.** Real diagnostic value for large, slow, or stuck runs, for
+both the maintainer answering support threads and any developer-user
+filing a bug. The cost is small and the value lands precisely in the
+support era the project will enter after launch, so the trade is
+favourable. It is not user-facing polish; it is operability.
+
+**Alternative implementations.** (a) Throttle by count — log every N
+entries. Simple, but N that suits a 12,000-entry site spams a
+200-entry one. (b) Throttle by elapsed time — log at most once every
+few seconds using a monotonic clock. Robust across wildly different
+site sizes; preferred. (c) Log at percentage milestones (10%, 20%…).
+Clean output but uneven cadence on lopsided archives (one huge entry).
+The listener could live as a small dedicated progress-logging class or
+as a method on the command; the dedicated class keeps ExportCommand
+thin.
+
+**Concerns and constraints.** The hard rule: it must NEVER be
+per-entry. One line per entry means ~12,500 lines for a single real
+export, which buries the start/success/error lines that actually
+matter — the opposite of the goal. Gating it behind WP_DEBUG keeps the
+quiet-by-default ethos intact (no extra noise in normal operation). It
+is pure local file logging — no cloud, no phone-home — so it sits
+cleanly inside the project's privacy and no-cloud-dependency
+principles. Minor interaction to keep in mind: the FileLogger's 2 MB
+rotation already bounds total volume, and the throttle keeps line
+counts low, so the two reinforce rather than fight.
+
+**When in the build.** Post-v0.1.0; target v0.2.0, grouped with the
+diagnostics/stats surface (the old Chunk 6). It needs two things that
+will already exist by then: the ArchiveWriter per-entry callback
+(shipping now in the export progress-bar slice) and the FileLogger
+(already shipped in the logger slice). It blocks nothing and unblocks
+better support diagnostics.
+
+**Dependencies.** The ArchiveWriter per-entry callback (export
+progress-bar slice); the FileLogger (done). Naturally bundles with the
+v0.2.0 diagnostics work, and would extend to the import command once
+that has its own progress reporting (Chunk 3).
+
+**Open questions.** Throttle by time or by count (lean: time)? What
+interval — every 2 seconds, 5 seconds? Should the line include bytes
+written as well as entry counts, or counts alone? Should import get the
+same treatment as soon as it has progress reporting of its own?
+
+**Decision log.**
+- 2026-06-12 — Proposed and parked during the export progress-bar
+  slice. The live terminal bar shipped; this is its WP_DEBUG-only
+  logging complement. Deferred to v0.2.0 to keep the v0.1.0 MVP lean
+  (PATH-5 scope discipline). Time-based throttling provisionally
+  preferred over count-based.

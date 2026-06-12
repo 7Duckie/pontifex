@@ -130,6 +130,17 @@ final class ExportCommand {
 	private LoggerInterface $logger;
 
 	/**
+	 * The progress reporter that shows archive-writing progress.
+	 *
+	 * Injected via the constructor so tests can substitute a silent
+	 * NullProgressBar. When null, a WpCliProgressBar driving WP-CLI's
+	 * native progress bar is used.
+	 *
+	 * @var ProgressReporter
+	 */
+	private ProgressReporter $progress;
+
+	/**
 	 * Construct an ExportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not
@@ -140,17 +151,20 @@ final class ExportCommand {
 	 * @param WordPressContext|null         $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
 	 * @param ManifestBuilderInterface|null $manifest_builder Optional. When null, the command builds a concrete ManifestBuilder from the exclusion rules at run time.
 	 * @param LoggerInterface|null          $logger Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
+	 * @param ProgressReporter|null         $progress Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
 		?ManifestBuilderInterface $manifest_builder = null,
-		?LoggerInterface $logger = null
+		?LoggerInterface $logger = null,
+		?ProgressReporter $progress = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 		$this->manifest_builder  = $manifest_builder;
 		$this->logger            = $logger ?? $this->build_default_logger();
+		$this->progress          = $progress ?? new WpCliProgressBar();
 	}
 
 	/**
@@ -214,7 +228,17 @@ final class ExportCommand {
 			$entry_plans    = $manifest_builder->build( $wordpress_root );
 
 			$archive_writer = self::build_archive_writer();
-			$bytes_written  = $archive_writer->write_archive( $provenance, $entry_plans, $destination );
+
+			$this->progress->start( count( $entry_plans ), 'Writing archive' );
+			$bytes_written = $archive_writer->write_archive(
+				$provenance,
+				$entry_plans,
+				$destination,
+				function (): void {
+					$this->progress->advance();
+				}
+			);
+			$this->progress->finish();
 
 			$this->logger->info(
 				'Export complete.',

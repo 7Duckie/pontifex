@@ -633,4 +633,77 @@ final class ArchiveWriterTest extends TestCase {
 		$manifest = ArchiveManifest::from_bytes( $manifest_block );
 		$this->assertSame( 1, $manifest->entry_count() );
 	}
+
+	/**
+	 * The write_archive method must invoke the per-entry callback once per entry, in order.
+	 *
+	 * The callback receives the running completed-count and the fixed
+	 * total, so a three-entry archive must produce exactly (1,3),
+	 * (2,3), (3,3) — proving both the per-entry cadence and the
+	 * correct progression a progress bar relies on.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_invokes_callback_once_per_entry(): void {
+		$plans = array(
+			new EntryPlan(
+				EntryHeader::for_file( 'a.txt', 5, 0644, 0, 'application/octet-stream', 0 ),
+				0,
+				self::zero_nonce(),
+				self::memory_stream_with( 'first' )
+			),
+			new EntryPlan(
+				EntryHeader::for_file( 'b.txt', 6, 0644, 0, 'application/octet-stream', 0 ),
+				0,
+				self::zero_nonce(),
+				self::memory_stream_with( 'second' )
+			),
+			new EntryPlan(
+				EntryHeader::for_file( 'c.txt', 5, 0644, 0, 'application/octet-stream', 0 ),
+				0,
+				self::zero_nonce(),
+				self::memory_stream_with( 'third' )
+			),
+		);
+
+		$calls = array();
+		$dest  = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			$plans,
+			$dest,
+			static function ( int $done, int $total ) use ( &$calls ): void {
+				$calls[] = array( $done, $total );
+			}
+		);
+
+		$this->assertSame(
+			array( array( 1, 3 ), array( 2, 3 ), array( 3, 3 ) ),
+			$calls
+		);
+	}
+
+	/**
+	 * The write_archive method must not invoke the callback for an empty archive.
+	 *
+	 * An export with no entries produces a valid empty archive; with
+	 * nothing written, the progress callback must never fire, so a
+	 * caller can safely show no bar.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_does_not_invoke_callback_when_empty(): void {
+		$called = false;
+		$dest   = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			array(),
+			$dest,
+			static function () use ( &$called ): void {
+				$called = true;
+			}
+		);
+
+		$this->assertFalse( $called );
+	}
 }
