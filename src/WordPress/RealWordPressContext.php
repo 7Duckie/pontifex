@@ -158,4 +158,27 @@ final class RealWordPressContext implements WordPressContext {
 		$formatted = size_format( $bytes );
 		return false === $formatted ? '' : (string) $formatted;
 	}
+
+	/**
+	 * Read a stored WordPress option, or a default when it is absent.
+	 *
+	 * @param string $name     The option name.
+	 * @param mixed  $fallback Value to return when the option is absent.
+	 * @return mixed The stored value, or $fallback if the option is absent.
+	 */
+	public function option_value( string $name, mixed $fallback = false ): mixed {
+		return get_option( $name, $fallback );
+	}
+
+	/**
+	 * Create or update a stored WordPress option.
+	 *
+	 * @param string $name     The option name.
+	 * @param mixed  $value    The value to store.
+	 * @param bool   $autoload Whether WordPress should autoload it.
+	 * @return void
+	 */
+	public function save_option( string $name, mixed $value, bool $autoload = false ): void {
+		update_option( $name, $value, $autoload );
+	}
 }
