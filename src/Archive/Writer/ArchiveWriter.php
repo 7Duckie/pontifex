@@ -99,12 +99,13 @@ final class ArchiveWriter {
 	 * @param resource         $destination Writable stream resource. Bytes are written sequentially
 	 *                                      from the destination's current seek position. The
 	 *                                      destination is advanced by the returned byte count.
+	 * @param callable|null    $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
 	 * @return int Total bytes written to the destination during this call.
 	 * @throws InvalidArgumentException If $destination is not a stream resource or any element
 	 *                                  of $entry_plans is not an EntryPlan.
 	 * @throws RuntimeException         If any block fails to serialise or any write fails.
 	 */
-	public function write_archive( Provenance $provenance, array $entry_plans, $destination ): int {
+	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null ): int {
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
 		}
@@ -115,6 +116,8 @@ final class ArchiveWriter {
 				);
 			}
 		}
+
+		$total = count( $entry_plans );
 
 		// Serialise the variable-length blocks that we can build up front.
 		// Provenance can throw JsonException in principle.
@@ -159,6 +162,10 @@ final class ArchiveWriter {
 				$result->entry_hash(),
 				$plan
 			);
+
+			if ( null !== $on_entry_written ) {
+				$on_entry_written( $i + 1, $total );
+			}
 		}
 
 		// Manifest.
