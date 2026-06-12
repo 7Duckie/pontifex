@@ -389,4 +389,99 @@ final class RestoreRunnerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
 		$this->assertSame( 'first', file_get_contents( $this->fixture_root . '/note.txt' ) );
 	}
+
+	/**
+	 * The restore() callback fires once per entry as (done, total).
+	 *
+	 * Mirrors the per-entry callback contract on ArchiveWriter: three
+	 * entries yield (1, 3), (2, 3), (3, 3).
+	 *
+	 * @return void
+	 */
+	public function test_restore_invokes_progress_callback_per_entry(): void {
+		$runner = $this->make_runner();
+		$plans  = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana' ),
+			self::file_plan( 'c.txt', 'cherry' ),
+		);
+		$calls  = array();
+
+		$runner->restore(
+			self::build_archive_stream( $plans ),
+			static function ( int $done, int $total ) use ( &$calls ): void {
+				$calls[] = array( $done, $total );
+			}
+		);
+
+		$this->assertSame(
+			array( array( 1, 3 ), array( 2, 3 ), array( 3, 3 ) ),
+			$calls
+		);
+	}
+
+	/**
+	 * An empty archive never invokes the progress callback.
+	 *
+	 * @return void
+	 */
+	public function test_restore_empty_archive_does_not_invoke_callback(): void {
+		$runner = $this->make_runner();
+		$calls  = array();
+
+		$runner->restore(
+			self::build_archive_stream( array() ),
+			static function ( int $done, int $total ) use ( &$calls ): void {
+				$calls[] = array( $done, $total );
+			}
+		);
+
+		$this->assertSame( array(), $calls );
+	}
+
+	/**
+	 * The verify() walk reads and checks every entry but writes nothing.
+	 *
+	 * A mixed archive (a file and a db_chunk) is verified; afterwards the
+	 * destination filesystem is empty and the adapter executed no SQL.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reads_without_writing(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array(
+			self::file_plan( 'note.txt', 'hello world' ),
+			self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ),
+		);
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+
+		$entries = array_diff( scandir( $this->fixture_root ), array( '.', '..' ) );
+		$this->assertSame( array(), array_values( $entries ) );
+		$this->assertSame( array(), $db->executed_statements() );
+	}
+
+	/**
+	 * The verify() callback fires once per entry as (done, total).
+	 *
+	 * @return void
+	 */
+	public function test_verify_invokes_progress_callback_per_entry(): void {
+		$runner = $this->make_runner();
+		$plans  = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana' ),
+		);
+		$calls  = array();
+
+		$runner->verify(
+			self::build_archive_stream( $plans ),
+			static function ( int $done, int $total ) use ( &$calls ): void {
+				$calls[] = array( $done, $total );
+			}
+		);
+
+		$this->assertSame( array( array( 1, 2 ), array( 2, 2 ) ), $calls );
+	}
 }

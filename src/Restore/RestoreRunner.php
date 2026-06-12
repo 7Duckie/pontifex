@@ -19,6 +19,9 @@ use Pontifex\Archive\Reader\EntryReadResult;
 /**
  * Drives a full restore from a Pontifex archive stream.
  *
+ * Implements {@see RestoreRunnerInterface} so callers (the CLI layer)
+ * can depend on the contract rather than on this final class.
+ *
  * The mirror of {@see \Pontifex\Manifest\ManifestBuilder}. Where the
  * builder orchestrated FileScanner and DatabaseScanner into an
  * EntryPlan list for the writer, RestoreRunner orchestrates
@@ -31,8 +34,12 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *    collaborators that do the actual work. Stateless after
  *    construction; safe to reuse across many archives.
  *  - {@see RestoreRunner::restore()} — given a seekable readable
- *    stream containing a Pontifex archive, restore every entry in
- *    manifest order.
+ *    stream containing a Pontifex archive, read, verify, and write
+ *    every entry in manifest order. Accepts an optional per-entry
+ *    progress callback.
+ *  - {@see RestoreRunner::verify()} — the same read-and-verify walk
+ *    as restore(), but writes nothing; the engine behind a dry-run
+ *    import. Also accepts the optional progress callback.
  *
  * Behaviour:
  *
@@ -59,12 +66,14 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *  - Routing is by entry kind, not by codec or any other field.
  *    Files, directories, and symlinks all go to FileWriter; only
  *    db_chunks go to DatabaseWriter.
- *  - No transaction wrapping; no progress callbacks; no
- *    parallelism. These belong in higher layers (Phase 4 CLI).
+ *  - No transaction wrapping and no parallelism; these belong in
+ *    higher layers (Phase 4 CLI). Progress is surfaced only through
+ *    an optional per-entry callback that the CLI layer drives; the
+ *    runner itself stays unaware of any progress UI.
  *  - Stateless after construction. Safe to call restore() multiple
  *    times with different archive sources.
  */
-final class RestoreRunner {
+final class RestoreRunner implements RestoreRunnerInterface {
 
 	/**
 	 * The decoder that reads and verifies individual entry records.
@@ -101,24 +110,86 @@ final class RestoreRunner {
 	}
 
 	/**
-	 * Restore every entry from the archive stream.
+	 * Read, verify, and write every entry from the archive stream.
 	 *
-	 * Opens an ArchiveReader around the source (which eagerly
-	 * validates header and footer), reads the manifest, then
-	 * iterates each ManifestEntry in order: decode via EntryReader,
-	 * route to FileWriter or DatabaseWriter by kind.
+	 * Opens an ArchiveReader around the source (which eagerly validates
+	 * header and footer), reads the manifest, then walks each
+	 * ManifestEntry in order: decode and verify via EntryReader, then
+	 * route to FileWriter or DatabaseWriter by kind. When a callback is
+	 * supplied it is invoked once per entry, after that entry is written,
+	 * as `( int $done, int $total ): void`.
 	 *
-	 * @param resource $archive_source A seekable, readable stream containing a Pontifex archive.
+	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
+	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
 	 */
-	public function restore( $archive_source ): void {
+	public function restore( $archive_source, ?callable $on_entry_restored = null ): void {
+		$this->walk(
+			$archive_source,
+			$on_entry_restored,
+			function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
+				$this->dispatch( $manifest_entry, $result );
+			}
+		);
+	}
+
+	/**
+	 * Read and verify every entry from the archive stream, writing nothing.
+	 *
+	 * Runs the identical read-and-verify walk as {@see self::restore()} —
+	 * opening the archive, reading the manifest, decoding and
+	 * hash-verifying each entry — but never routes an entry to a writer,
+	 * so the destination filesystem and database are left untouched. The
+	 * engine behind a dry-run import.
+	 *
+	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
+	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
+	 * @throws RuntimeException         If the archive is malformed or hash verification fails.
+	 */
+	public function verify( $archive_source, ?callable $on_entry_verified = null ): void {
+		$this->walk(
+			$archive_source,
+			$on_entry_verified,
+			static function (): void {
+				// Read and verify only: nothing is written to the destination.
+			}
+		);
+	}
+
+	/**
+	 * Walk every manifest entry once: read-and-verify it, then hand it to $handle.
+	 *
+	 * The shared core of {@see self::restore()} and {@see self::verify()}.
+	 * Opens the ArchiveReader (which validates header and footer), reads
+	 * the manifest, then for each entry in manifest order reads and
+	 * verifies the entry via EntryReader and passes it to $handle. After
+	 * each entry the optional progress callback is invoked with the
+	 * running count and the total.
+	 *
+	 * @param resource      $archive_source A seekable, readable stream containing a Pontifex archive.
+	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable      $handle         Receives each decoded entry as `( ManifestEntry $entry, EntryReadResult $result ): void`.
+	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
+	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or $handle fails.
+	 */
+	private function walk( $archive_source, ?callable $on_entry, callable $handle ): void {
 		$reader   = new ArchiveReader( $archive_source );
 		$manifest = $reader->manifest();
 
-		foreach ( $manifest->entries() as $manifest_entry ) {
+		$entries = $manifest->entries();
+		$total   = count( $entries );
+		$done    = 0;
+
+		foreach ( $entries as $manifest_entry ) {
 			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry );
-			$this->dispatch( $manifest_entry, $result );
+			$handle( $manifest_entry, $result );
+
+			++$done;
+			if ( null !== $on_entry ) {
+				$on_entry( $done, $total );
+			}
 		}
 	}
 
