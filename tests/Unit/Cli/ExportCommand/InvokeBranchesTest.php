@@ -306,6 +306,8 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$mock->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
+		$mock->shouldReceive( 'option_value' )->andReturn( array() );
+		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
 		return $mock;
 	}
 

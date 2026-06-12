@@ -166,4 +166,33 @@ interface WordPressContext {
 	 *                Returns an empty string if size_format cannot format the value (e.g. zero or negative).
 	 */
 	public function format_size( int $bytes ): string;
+
+	/**
+	 * Read a stored WordPress option, or a default when it is absent.
+	 *
+	 * Equivalent to get_option(). Pontifex reads its own persisted
+	 * state through this method (for example the export counters). The
+	 * value is returned as stored; callers coerce it to the shape they
+	 * expect.
+	 *
+	 * @param string $name     The option name.
+	 * @param mixed  $fallback Value to return when the option is absent. Defaults to false, matching get_option.
+	 * @return mixed The stored value, or $fallback if the option is absent.
+	 */
+	public function option_value( string $name, mixed $fallback = false ): mixed;
+
+	/**
+	 * Create or update a stored WordPress option.
+	 *
+	 * Equivalent to update_option(). Pontifex persists its own state
+	 * (for example the export counters) through this method. Autoload
+	 * defaults to false: this state is read rarely and should stay out
+	 * of the alloptions cache.
+	 *
+	 * @param string $name     The option name.
+	 * @param mixed  $value    The value to store.
+	 * @param bool   $autoload Whether WordPress should autoload it. Defaults to false.
+	 * @return void
+	 */
+	public function save_option( string $name, mixed $value, bool $autoload = false ): void;
 }

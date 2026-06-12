@@ -75,6 +75,15 @@ final class ExportCommand {
 
 
 	/**
+	 * The wp_options key under which the export counters are stored.
+	 *
+	 * One option holds all four counters as an array, autoload off:
+	 * the stats are written occasionally and read almost never, so
+	 * they have no business in the alloptions cache.
+	 */
+	private const STATS_OPTION = 'pontifex_export_stats';
+
+	/**
 	 * The Environment abstraction this command queries.
 	 *
 	 * Injected via the constructor so tests can substitute a mock that
@@ -188,6 +197,8 @@ final class ExportCommand {
 			)
 		);
 
+		$this->bump_counters( array( 'attempted' => 1 ) );
+
 		// 4. Build the Provenance block.
 		$provenance = $this->build_provenance();
 
@@ -214,6 +225,13 @@ final class ExportCommand {
 				)
 			);
 
+			$this->bump_counters(
+				array(
+					'succeeded'      => 1,
+					'bytes_exported' => $bytes_written,
+				)
+			);
+
 			// 8. Print the summary.
 			$this->print_summary( $output_path, count( $entry_plans ), $bytes_written );
 		} catch ( Throwable $error ) {
@@ -224,6 +242,7 @@ final class ExportCommand {
 					'exception' => $error,
 				)
 			);
+			$this->bump_counters( array( 'failed' => 1 ) );
 			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
@@ -467,6 +486,68 @@ final class ExportCommand {
 			);
 		}
 		return $destination;
+	}
+
+	// -------------------------------------------------------------------------
+	// Counters.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Read-modify-write the stored export counters by a delta.
+	 *
+	 * Reads the single stats option through the WordPress-context
+	 * seam, merges the delta in, and writes it back. The arithmetic
+	 * lives in merge_counters so this method is only the I/O.
+	 *
+	 * @param array<string, int> $delta The amounts to add, keyed by counter name.
+	 * @return void
+	 */
+	private function bump_counters( array $delta ): void {
+		$current = $this->wordpress_context->option_value(
+			self::STATS_OPTION,
+			array(
+				'attempted'      => 0,
+				'succeeded'      => 0,
+				'failed'         => 0,
+				'bytes_exported' => 0,
+			)
+		);
+
+		$merged = self::merge_counters( is_array( $current ) ? $current : array(), $delta );
+		$this->wordpress_context->save_option( self::STATS_OPTION, $merged );
+	}
+
+	/**
+	 * Combine the stored counters with a delta into a clean four-key set.
+	 *
+	 * Pure function. Tolerant of a missing, partial, or corrupt stored
+	 * value: every counter coerces through counter_int, so a garbage
+	 * option can never throw. Only the four known keys are returned.
+	 *
+	 * @param array<array-key, mixed> $current The counters as currently stored.
+	 * @param array<array-key, mixed> $delta   The amounts to add per key.
+	 * @return array<string, int> The merged counters.
+	 */
+	private static function merge_counters( array $current, array $delta ): array {
+		$merged = array();
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported' ) as $key ) {
+			$merged[ $key ] = self::counter_int( $current, $key ) + self::counter_int( $delta, $key );
+		}
+		return $merged;
+	}
+
+	/**
+	 * Read one counter from an array as a non-negative-safe integer.
+	 *
+	 * Returns 0 when the key is absent or its value is non-numeric,
+	 * so corrupt stored data degrades to zero rather than a type error.
+	 *
+	 * @param array<array-key, mixed> $values The array to read from.
+	 * @param string                  $key    The counter key.
+	 * @return int The value as an int, or 0.
+	 */
+	private static function counter_int( array $values, string $key ): int {
+		return isset( $values[ $key ] ) && is_numeric( $values[ $key ] ) ? (int) $values[ $key ] : 0;
 	}
 
 	// -------------------------------------------------------------------------
