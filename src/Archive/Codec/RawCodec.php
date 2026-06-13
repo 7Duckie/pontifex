@@ -61,21 +61,25 @@ final class RawCodec implements Codec {
 	 * @throws CodecException On read or write failure.
 	 */
 	public function encode( $input, $output ): int {
-		return $this->stream_copy( $input, $output );
+		return $this->stream_copy( $input, $output, null );
 	}
 
 	/**
 	 * Read raw bytes from the input stream and write them to the output stream unchanged.
 	 *
-	 * Decoding is symmetric with encoding for the raw codec.
+	 * Decoding is symmetric with encoding for the raw codec. Raw bytes
+	 * cannot expand, so a cap is largely belt-and-braces here, but it is
+	 * honoured for contract consistency: if more than $max_output_bytes
+	 * bytes are present, the copy is refused with a CodecException.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * @param resource $input            A readable stream resource.
+	 * @param resource $output           A writable stream resource.
+	 * @param int|null $max_output_bytes Maximum bytes to write before refusing, or null for no limit.
 	 * @return int The number of bytes written to $output.
-	 * @throws CodecException On read or write failure.
+	 * @throws CodecException On read or write failure, or decoded output exceeding $max_output_bytes.
 	 */
-	public function decode( $input, $output ): int {
-		return $this->stream_copy( $input, $output );
+	public function decode( $input, $output, ?int $max_output_bytes = null ): int {
+		return $this->stream_copy( $input, $output, $max_output_bytes );
 	}
 
 	/**
@@ -86,12 +90,17 @@ final class RawCodec implements Codec {
 	 * whole payload in memory. This is what gives RawCodec its
 	 * streaming guarantee.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $max_output_bytes is non-null, at most that many bytes are
+	 * copied; if any input remains afterwards the payload was larger
+	 * than the ceiling and a CodecException is raised.
+	 *
+	 * @param resource $input            A readable stream resource.
+	 * @param resource $output           A writable stream resource.
+	 * @param int|null $max_output_bytes Maximum bytes to copy before refusing, or null for no limit.
 	 * @return int The number of bytes written to $output.
-	 * @throws CodecException If either argument is not a stream resource, or if the copy fails mid-stream.
+	 * @throws CodecException If either argument is not a stream resource, the copy fails mid-stream, or the input exceeds $max_output_bytes.
 	 */
-	private function stream_copy( $input, $output ): int {
+	private function stream_copy( $input, $output, ?int $max_output_bytes ): int {
 		if ( ! is_resource( $input ) ) {
 			throw new CodecException( 'RawCodec: input argument is not a valid stream resource.' );
 		}
@@ -99,10 +108,26 @@ final class RawCodec implements Codec {
 			throw new CodecException( 'RawCodec: output argument is not a valid stream resource.' );
 		}
 
-		$written = stream_copy_to_stream( $input, $output );
+		if ( null === $max_output_bytes ) {
+			$written = stream_copy_to_stream( $input, $output );
+			if ( false === $written ) {
+				throw new CodecException( 'RawCodec: stream_copy_to_stream() failed during codec operation.' );
+			}
+			return $written;
+		}
 
+		$written = stream_copy_to_stream( $input, $output, $max_output_bytes );
 		if ( false === $written ) {
 			throw new CodecException( 'RawCodec: stream_copy_to_stream() failed during codec operation.' );
+		}
+
+		// Any bytes still readable mean the payload exceeded the ceiling.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Probing an in-process codec stream for overflow; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
+		$overflow = fread( $input, 1 );
+		if ( false !== $overflow && '' !== $overflow ) {
+			throw new CodecException(
+				sprintf( 'RawCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+			);
 		}
 
 		return $written;

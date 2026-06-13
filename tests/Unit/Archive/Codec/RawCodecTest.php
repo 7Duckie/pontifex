@@ -215,4 +215,34 @@ final class RawCodecTest extends TestCase {
 
 		$codec->encode( $input, null );
 	}
+
+	/**
+	 * Decoding must abort with a CodecException when input exceeds the cap.
+	 *
+	 * @return void
+	 */
+	public function test_decode_aborts_when_output_exceeds_cap(): void {
+		$codec = new RawCodec();
+		$input = $this->readable_stream( str_repeat( 'Y', 200 ) );
+
+		$this->expectException( CodecException::class );
+
+		$codec->decode( $input, $this->writable_stream(), 50 );
+	}
+
+	/**
+	 * Decoding within the cap must pass bytes through unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_decode_within_cap_succeeds(): void {
+		$payload = str_repeat( 'Z', 200 );
+		$codec   = new RawCodec();
+		$output  = $this->writable_stream();
+
+		$written = $codec->decode( $this->readable_stream( $payload ), $output, 1000 );
+
+		$this->assertSame( strlen( $payload ), $written );
+		$this->assertSame( $payload, $this->drain( $output ) );
+	}
 }

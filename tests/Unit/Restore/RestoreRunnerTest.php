@@ -21,6 +21,7 @@ use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
@@ -483,5 +484,79 @@ final class RestoreRunnerTest extends TestCase {
 		);
 
 		$this->assertSame( array( array( 1, 2 ), array( 2, 2 ) ), $calls );
+	}
+
+	/**
+	 * Build a RestoreRunner with explicit defensive limits.
+	 *
+	 * @param ArchiveLimits      $limits The limits to enforce.
+	 * @param FakeDbAdapter|null $db     Optional adapter; if null, a fresh one is created.
+	 * @return RestoreRunner Ready to call restore() on.
+	 */
+	private function make_runner_with_limits( ArchiveLimits $limits, ?FakeDbAdapter $db = null ): RestoreRunner {
+		$db = $db ?? new FakeDbAdapter();
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db ),
+			$limits
+		);
+	}
+
+	/**
+	 * Restoring must refuse an archive that declares more entries than allowed.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_too_many_entries(): void {
+		$limits = new ArchiveLimits( 2, 2147483648, 100, 1099511627776 );
+		$runner = $this->make_runner_with_limits( $limits );
+		$plans  = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana' ),
+			self::file_plan( 'c.txt', 'cherry' ),
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Restoring must refuse once the running decoded total exceeds the budget.
+	 *
+	 * A tiny absolute ceiling forces the shared budget to bite partway
+	 * through: the first entries fit, a later one pushes the running
+	 * total over and is refused.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_total_exceeding_budget(): void {
+		$limits = new ArchiveLimits( 50000, 2147483648, 100, 15 );
+		$runner = $this->make_runner_with_limits( $limits );
+		$plans  = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana' ),
+			self::file_plan( 'c.txt', 'cherry' ),
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * A restore comfortably within explicit limits must still succeed.
+	 *
+	 * @return void
+	 */
+	public function test_restore_within_limits_succeeds(): void {
+		$limits = new ArchiveLimits( 100, 1048576, 100, 10485760 );
+		$runner = $this->make_runner_with_limits( $limits );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
 	}
 }

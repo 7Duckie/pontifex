@@ -12,6 +12,7 @@ namespace Pontifex\Restore;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
@@ -31,8 +32,9 @@ use Pontifex\Archive\Reader\EntryReadResult;
  * Public API (locked for v0.1.0):
  *
  *  - {@see RestoreRunner::__construct()} — takes the three
- *    collaborators that do the actual work. Stateless after
- *    construction; safe to reuse across many archives.
+ *    collaborators that do the actual work, plus an optional set of
+ *    defensive limits (defaulting to the conservative ArchiveLimits).
+ *    Stateless after construction; safe to reuse across many archives.
  *  - {@see RestoreRunner::restore()} — given a seekable readable
  *    stream containing a Pontifex archive, read, verify, and write
  *    every entry in manifest order. Accepts an optional per-entry
@@ -97,16 +99,25 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private DatabaseWriter $database_writer;
 
 	/**
-	 * Construct a RestoreRunner with its three collaborators.
+	 * Defensive limits enforced while reading the archive.
 	 *
-	 * @param EntryReader    $entry_reader    Decodes individual entry records.
-	 * @param FileWriter     $file_writer     Writes filesystem entries to disk.
-	 * @param DatabaseWriter $database_writer Replays db_chunk entries into the database.
+	 * @var ArchiveLimits
 	 */
-	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer ) {
+	private ArchiveLimits $limits;
+
+	/**
+	 * Construct a RestoreRunner with its collaborators and optional limits.
+	 *
+	 * @param EntryReader        $entry_reader    Decodes individual entry records.
+	 * @param FileWriter         $file_writer     Writes filesystem entries to disk.
+	 * @param DatabaseWriter     $database_writer Replays db_chunk entries into the database.
+	 * @param ArchiveLimits|null $limits          Defensive limits to enforce; null applies the conservative defaults.
+	 */
+	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null ) {
 		$this->entry_reader    = $entry_reader;
 		$this->file_writer     = $file_writer;
 		$this->database_writer = $database_writer;
+		$this->limits          = $limits ?? ArchiveLimits::defaults();
 	}
 
 	/**
@@ -168,11 +179,15 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * each entry the optional progress callback is invoked with the
 	 * running count and the total.
 	 *
+	 * Defensive limits are enforced here: the entry count is checked up
+	 * front, each entry is decoded under a per-entry byte budget drawn
+	 * from the archive's total budget, and the walk is refused if the
+	 * running total of decoded bytes exceeds that budget.
+	 *
 	 * @param resource      $archive_source A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable      $handle         Receives each decoded entry as `( ManifestEntry $entry, EntryReadResult $result ): void`.
-	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or $handle fails.
+	 * @throws RuntimeException If the archive is malformed, hash verification fails, a defensive limit is exceeded, or $handle fails.
 	 */
 	private function walk( $archive_source, ?callable $on_entry, callable $handle ): void {
 		$reader   = new ArchiveReader( $archive_source );
@@ -182,8 +197,35 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		$total   = count( $entries );
 		$done    = 0;
 
+		if ( $total > $this->limits->max_entry_count() ) {
+			throw new RuntimeException(
+				sprintf(
+					'RestoreRunner: archive declares %d entries, exceeding the maximum of %d.',
+					(int) $total,
+					(int) $this->limits->max_entry_count()
+				)
+			);
+		}
+
+		$total_budget   = $this->limits->max_total_for_archive( $this->stream_size( $archive_source ) );
+		$decoded_so_far = 0;
+
 		foreach ( $entries as $manifest_entry ) {
-			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry );
+			$remaining   = $total_budget - $decoded_so_far;
+			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
+
+			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit );
+
+			$decoded_so_far += strlen( $result->payload() );
+			if ( $decoded_so_far > $total_budget ) {
+				throw new RuntimeException(
+					sprintf(
+						'RestoreRunner: restored data exceeds the maximum of %d bytes permitted for this archive.',
+						(int) $total_budget
+					)
+				);
+			}
+
 			$handle( $manifest_entry, $result );
 
 			++$done;
@@ -218,5 +260,28 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $manifest_entry->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
 			sprintf( 'RestoreRunner: unsupported entry kind "%s" at manifest index %d.', $manifest_entry->kind(), (int) $manifest_entry->index() )
 		);
+	}
+	/**
+	 * Measure the on-disk size of the archive stream, in bytes.
+	 *
+	 * Used to derive the total decoded-byte budget. Seeks to the end and
+	 * reports the position; the caller does not rely on the position
+	 * being preserved, since each entry read re-seeks to its own offset.
+	 *
+	 * @param resource $archive_source A seekable stream containing the archive.
+	 * @return int The stream's total size in bytes.
+	 * @throws RuntimeException If the size cannot be determined.
+	 */
+	private function stream_size( $archive_source ): int {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Measuring an open archive stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $archive_source, 0, SEEK_END ) ) {
+			throw new RuntimeException( 'RestoreRunner: could not seek to the end of the archive to measure its size.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Measuring an open archive stream resource; WP_Filesystem has no equivalent.
+		$size = ftell( $archive_source );
+		if ( false === $size ) {
+			throw new RuntimeException( 'RestoreRunner: could not determine the archive size.' );
+		}
+		return $size;
 	}
 }
