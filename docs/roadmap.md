@@ -78,34 +78,64 @@ the reasons recorded in [ADR 0004](./adr/0004-same-url-import-scope.md).
 
 ### What is deliberately deferred
 
-- **URL rewriting / cross-domain migration** → v0.2.0, shipped
+- **URL rewriting / cross-domain migration** → v0.3.0, shipped
   together with its serialised-data defences (ADR 0004). v0.1.0
   restores to the same URL only; naive search-replace over
   PHP-serialised data is the highest-blast-radius operation in the
   threat model and must not ship without its guards.
 - **Encryption** (codecs `0x0100`, `0x0101`, `0x0102`; Argon2id KDF;
-  AES-256-GCM cipher) → v0.2.0. The format spec's "encrypt by default"
+  AES-256-GCM cipher) → v0.3.0. The format spec's "encrypt by default"
   promise is a property of v1.0 of the *format*; the *plugin* delivers
   it in stages. v0.1.0 archives are unencrypted, and the release notes
   call this out explicitly: archives deposited into untrusted storage
   are not protected by encryption.
-- **Zstd codec** (`0x0002`) → v0.2.0. The PHP `ext-zstd` extension is
+- **Zstd codec** (`0x0002`) → v0.3.0. The PHP `ext-zstd` extension is
   not universally available; gzip handles compression for v0.1.0.
-- **Ed25519 signatures** → v0.2.0, alongside the rest of the
+- **Ed25519 signatures** → v0.3.0, alongside the rest of the
   cryptographic dependency profile.
 - **Rolling transfer history and the admin metrics tile** (idea-bank
-  Idea 002, beyond the minimum counters above) → v0.2.0.
+  Idea 002, beyond the minimum counters above) → v0.3.0.
 - **Diagnostics bundle and per-transfer log files** (idea-bank Idea
-  003, beyond the minimum logger above) → v0.2.0. v0.1.0 keeps the
+  003, beyond the minimum logger above) → v0.3.0. v0.1.0 keeps the
   logger lean: a single rotating file, no bundling.
-- **`wp pontifex stats` CLI command** → v0.2.0–v0.3.0.
-- **`wp pontifex diagnostics` CLI command** → v0.2.0–v0.3.0.
+- **`wp pontifex stats` CLI command** → v0.3.0.
+- **`wp pontifex diagnostics` CLI command** → v0.3.0.
 
-## v0.2.0 — Migration, encryption and observability
+## v0.2.0 — Safety, verification and rollback
 
-The second release adds cross-domain migration and the security and
-operability properties that the format reserves space for but v0.1.0
-does not yet implement.
+The second release hardens the round trip with the two safety features
+that make a destructive import trustworthy: a way to check an archive
+before trusting it, and a way to undo an import after running it. The
+heavier migration and encryption work moves to v0.3.0, so these trust
+features can ship quickly and on their own.
+
+### What ships
+
+- **Archive verification** (idea-bank Idea 010). `wp pontifex verify
+  <archive>` opens an archive, walks every entry, checks every hash,
+  writes nothing, and exits with a clear verdict — answerable against
+  cold storage with no destination site involved. `--list` shows the
+  contents, with `--format=json` for tooling.
+- **Rollback** (idea-bank Idea 009,
+  [ADR 0005](./adr/0005-rollback-safety-archive-policy.md)).
+  `wp pontifex import` writes an automatic pre-import safety archive of
+  the current site before it restores (`--no-rollback-archive` to skip),
+  and `wp pontifex rollback` restores the most recent one — the undo
+  button for a destructive import. Safety archives are owner-only, named
+  by UTC timestamp, with the most recent retained.
+
+Alongside the two features, v0.2.0 carries the repository-hardening and
+open-source-health work done since v0.1.0: a protected `main`
+(PR-gated, CI-required), the community-health files (code of conduct,
+issue and pull-request templates, support guide), and a refreshed
+dependency floor.
+
+## v0.3.0 — Migration, encryption and observability
+
+Cross-domain migration and the security and operability properties that
+the format reserves space for but earlier releases do not yet implement.
+This is the highest-blast-radius work in the project, which is why it
+ships on its own, only with its defences.
 
 ### What ships
 
@@ -114,14 +144,6 @@ does not yet implement.
   unserialize (`allowed_classes => false`), round-trip verification of
   rewritten values, and a pre-import scan (ADR 0004). Each defence is
   proven by tests before the feature is callable.
-- **Rollback** (idea-bank Idea 009). An automatic pre-import safety
-  archive of the destination site, with `wp pontifex rollback` to
-  restore the most recent one — the undo button for a destructive
-  import.
-- **Archive verification** (idea-bank Idea 010). `wp pontifex verify
-  <archive>` opens an archive, walks every entry, checks every hash,
-  writes nothing, and exits with a clear verdict — answerable against
-  cold storage with no destination site involved.
 - **Encryption.** Argon2id-derived keys with the parameters in
   [`archive-format.md §8.1`](./archive-format.md#81-key-derivation);
   AES-256-GCM per-entry encryption; codecs `0x0100`, `0x0101`, `0x0102`
@@ -145,7 +167,7 @@ does not yet implement.
   `doctor` output, `stats` output, and an environment summary; never
   auto-uploads; the operator decides what to share.
 
-## v0.3.0 and beyond — Admin UI and operational maturity
+## v0.4.0 and beyond — Admin UI and operational maturity
 
 Once the CLI is solid, the admin UI work begins. This is also where
 the longer-running operational features land.
