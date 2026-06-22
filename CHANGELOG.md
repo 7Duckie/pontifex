@@ -14,9 +14,21 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Early v0.2.0 work. The remaining v0.2.0 work — cross-URL migration with
-its serialised-data defences, and encryption — follows. See
+Nothing yet. Work toward v0.3.0 — cross-URL migration with its
+serialised-data defences (ADR 0004), encryption, and the fuller
+observability surface — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.2.0] — 2026-06-22 — Safety, verification and rollback
+
+The trust release. Two safety features make a destructive import
+something you can recover from: `wp pontifex verify` checks an archive
+before you rely on it, and rollback gives you an undo — every import now
+takes a safety archive of the current site first, restorable with
+`wp pontifex rollback`. Cross-URL migration and encryption move to
+v0.3.0 ([`docs/roadmap.md`](docs/roadmap.md)). This release also lands
+the repository hardening done since v0.1.0: a protected `main`, the
+open-source community-health files, and a refreshed dependency floor.
 
 ### Added
 
@@ -328,6 +340,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/7Duckie/pontifex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/7Duckie/pontifex/compare/v0.0.6...v0.1.0
 [0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6
 [0.0.5]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.5
