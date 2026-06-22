@@ -104,6 +104,26 @@ its serialised-data defences) arrives in v0.2.0. See the
 > you produced or fully trust — see
 > [the import trust boundary](.github/SECURITY.md#the-import-trust-boundary).
 
+### A full round trip
+
+On the source site, pack it into one archive:
+
+```bash
+wp pontifex export --output=site.wpmig
+```
+
+Move `site.wpmig` to the destination (over any channel you control),
+then on a WordPress at the **same URL**:
+
+```bash
+wp pontifex import site.wpmig --dry-run   # preview: verify the whole archive, write nothing
+wp pontifex import site.wpmig             # restore for real (confirms first, unless --yes)
+```
+
+You end up with a site that matches the source — files byte-for-byte and
+the database intact. That round trip is proven in CI by an integration
+test against real WordPress.
+
 ## Roadmap
 
 - **v0.1.0 — Round-trip baseline (same URL).** WP-CLI `export` and
