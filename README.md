@@ -1,15 +1,17 @@
 # Pontifex
 
 A free, open-source WordPress migration and backup plugin built around
-a documented archive format (`.wpmig`). Rollback is designed in and
-arrives in v0.2.0.
+a documented archive format (`.wpmig`). Every import takes a safety
+archive first, so it can be rolled back.
 
 **Status: pre-alpha.** Pontifex is in early development. Today it can
 audit an environment (`wp pontifex doctor`), pack a whole site into a
 single `.wpmig` archive (`wp pontifex export`), restore that archive
-onto a WordPress at the same URL (`wp pontifex import`), and check an
-archive without restoring it (`wp pontifex verify`) — the round trip
-is proven end-to-end by an integration test against a real WordPress. Cross-URL migration and rollback arrive in v0.2.0. Do not
+onto a WordPress at the same URL (`wp pontifex import`, which takes a
+safety archive first), check an archive without restoring it
+(`wp pontifex verify`), and undo a mistaken import (`wp pontifex
+rollback`) — the round trip is proven end-to-end by an integration test
+against a real WordPress. Cross-URL migration arrives in v0.2.0. Do not
 rely on Pontifex for production data yet.
 
 ## What Pontifex will be
@@ -22,11 +24,9 @@ Pontifex aims to be the WordPress migration plugin that does it right:
 2. **Documented, versioned archive format.** The `.wpmig` format is a
    public specification ([`docs/archive-format.md`](docs/archive-format.md)).
    Your migration artefacts belong to you, not to a vendor.
-3. **Rollback as a first-class feature (arriving v0.2.0).** Before any
-   destructive step, Pontifex will take an automatic pre-import safety
-   archive, with one command to restore it. This point describes a
-   committed v0.2.0 goal, not today's behaviour — see the status table
-   below for the honest current picture.
+3. **Rollback as a first-class feature.** Before any destructive import,
+   Pontifex takes an automatic safety archive of the current site, with
+   one command (`wp pontifex rollback`) to restore it.
 
 ## What works today
 
@@ -40,7 +40,7 @@ is the honest difference, updated at every release.
 | Export a site to `.wpmig` (`wp pontifex export`) | ✅ | ✅ |
 | Import / restore (`wp pontifex import`, same URL) | ✅ | ✅ |
 | Round trip proven end-to-end | — | ✅ — same-URL, integration-tested |
-| Rollback (pre-import safety archive + undo) | — | ❌ — v0.2.0 |
+| Rollback (pre-import safety archive + undo) | — | ✅ |
 | Cross-URL migration (URL rewriting) | ✅ | ❌ — v0.2.0, shipped with its security defences |
 | Archive verification (`wp pontifex verify`) | — | ✅ |
 | Encryption (`--passphrase`) | ✅ | ❌ — not yet; **archives today are written unencrypted** |

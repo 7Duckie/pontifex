@@ -27,13 +27,13 @@ its serialised-data defences, and encryption — follows. See
   scripts or cron. `--list` prints the archive's contents as a table or
   `--format=json`. The same read-and-verify engine that already backs
   `import --dry-run`, exposed as a command (idea-bank Idea 010).
-- **`wp pontifex rollback` and the pre-import safety-archive machinery**
+- **Rollback — automatic pre-import safety archive and `wp pontifex rollback`**
   (idea-bank Idea 009, [ADR 0005](docs/adr/0005-rollback-safety-archive-policy.md)).
-  `wp pontifex rollback` restores the most recent safety archive — the undo for
-  a destructive import — with `--yes` and `--dry-run`. Safety archives live in
-  `wp-content/pontifex/rollback/` (owner-only), named by UTC timestamp, with the
-  most recent retained. Wiring `import` to take a safety archive automatically
-  before it restores lands next.
+  `import` now writes a safety archive of the current site before it restores
+  (`--no-rollback-archive` to skip), and `wp pontifex rollback` restores the most
+  recent one — the undo for a destructive import — with `--yes` and `--dry-run`.
+  Safety archives live in `wp-content/pontifex/rollback/` (owner-only), named by
+  UTC timestamp, with the most recent retained.
 
 ## [0.1.0] — 2026-06-22 — the round-trip baseline (same URL)
 
