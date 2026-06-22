@@ -174,6 +174,55 @@ final class RoundTripTest extends TestCase {
 		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Scratch table rows should be byte-identical after the round trip.' );
 	}
 
+	/**
+	 * A failed statement must halt the restore before a later one runs.
+	 *
+	 * Real $wpdb returns false (it does not throw) on a failed query, so code
+	 * that ignores the result silently drops tables. Here a db_chunk's first
+	 * statement fails — it inserts into a missing table — and is followed by a
+	 * DROP of a sentinel table. The restore must fail closed on the failure and
+	 * never reach the DROP, leaving the sentinel intact.
+	 *
+	 * @return void
+	 */
+	public function test_failed_statement_halts_before_a_destructive_one_runs(): void {
+		global $wpdb;
+
+		$sentinel = $wpdb->prefix . 'pontifex_sentinel';
+		$missing  = $wpdb->prefix . 'pontifex_missing_xyz';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: clear any leftover sentinel table.
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $sentinel ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: create the sentinel table.
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i ( id INT PRIMARY KEY )', $sentinel ) );
+
+		try {
+			$chunk_sql = sprintf( "INSERT INTO `%s` (id) VALUES (1);\nDROP TABLE `%s`;\n", $missing, $sentinel );
+			$plans     = array( self::db_chunk_plan( $missing, self::count_statements( $chunk_sql ), $chunk_sql ) );
+
+			$runner = new RestoreRunner(
+				new EntryReader( CodecRegistry::with_defaults() ),
+				new FileWriter( $this->restore_root ),
+				new DatabaseWriter( new WpdbAdapter( $wpdb ) )
+			);
+
+			$failed = false;
+			try {
+				$runner->restore( self::build_archive_stream( $plans ) );
+			} catch ( RuntimeException $e ) {
+				$failed = true;
+			}
+
+			$this->assertTrue( $failed, 'A failed SQL statement must make the restore fail closed.' );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: confirm the sentinel survived.
+			$still_there = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $sentinel ) );
+			$this->assertSame( $sentinel, $still_there, 'No statement after a failure may run — the sentinel table must survive.' );
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop the sentinel.
+			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $sentinel ) );
+		}
+	}
+
 
 	// -------------------------------------------------------------------------
 	// Fixture and archive helpers.
