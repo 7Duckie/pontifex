@@ -23,6 +23,9 @@ use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Rollback\RollbackStore;
+use Pontifex\Rollback\SafetyArchiver;
+use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
@@ -39,6 +42,10 @@ use Pontifex\WordPress\WordPressContext;
  * --dry-run, which reads and verifies the whole archive but writes
  * nothing.
  *
+ * Before restoring, it writes a safety archive of the current site (unless
+ * --no-rollback-archive), so a mistaken import can be undone with
+ * `wp pontifex rollback`.
+ *
  * ## OPTIONS
  *
  * <archive>
@@ -51,11 +58,16 @@ use Pontifex\WordPress\WordPressContext;
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
  *
+ * [--no-rollback-archive]
+ * : Skip the automatic pre-import safety archive. Faster and uses less
+ *   disk, but the import cannot be undone with `wp pontifex rollback`.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
  *     wp pontifex import /tmp/site.wpmig --dry-run
  *     wp pontifex import /tmp/site.wpmig --yes
+ *     wp pontifex import /tmp/site.wpmig --no-rollback-archive
  *
  * @when after_wp_load
  */
@@ -129,30 +141,43 @@ final class ImportCommand {
 	private ProgressReporter $progress;
 
 	/**
+	 * The safety archiver that writes a pre-import undo archive.
+	 *
+	 * Optional in the constructor: when null, the command wires one rooted at
+	 * WP_CONTENT_DIR. Tests inject a fake fulfilling SafetyArchiverInterface.
+	 *
+	 * @var SafetyArchiverInterface|null
+	 */
+	private ?SafetyArchiverInterface $safety_archiver;
+
+	/**
 	 * Construct an ImportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
 	 * constructor arguments, so all parameters are optional and default
 	 * to real implementations. Tests pass mocks explicitly.
 	 *
-	 * @param Environment|null            $environment       Optional. Defaults to a fresh RealEnvironment.
-	 * @param WordPressContext|null       $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
-	 * @param RestoreRunnerInterface|null $restore_runner    Optional. When null, the command builds a concrete RestoreRunner at run time.
-	 * @param LoggerInterface|null        $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
-	 * @param ProgressReporter|null       $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
+	 * @param Environment|null             $environment       Optional. Defaults to a fresh RealEnvironment.
+	 * @param WordPressContext|null        $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
+	 * @param RestoreRunnerInterface|null  $restore_runner    Optional. When null, the command builds a concrete RestoreRunner at run time.
+	 * @param LoggerInterface|null         $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
+	 * @param ProgressReporter|null        $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
+	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a SafetyArchiver rooted at WP_CONTENT_DIR is built.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
 		?RestoreRunnerInterface $restore_runner = null,
 		?LoggerInterface $logger = null,
-		?ProgressReporter $progress = null
+		?ProgressReporter $progress = null,
+		?SafetyArchiverInterface $safety_archiver = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 		$this->restore_runner    = $restore_runner;
 		$this->logger            = $logger ?? $this->build_default_logger();
 		$this->progress          = $progress ?? new WpCliProgressBar();
+		$this->safety_archiver   = $safety_archiver;
 	}
 
 	/**
@@ -175,6 +200,7 @@ final class ImportCommand {
 		$archive_path = $this->require_archive_path( $positional_args );
 		$dry_run      = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
 		$skip_confirm = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
+		$no_rollback  = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
 
 		$this->validate_archive_path( $archive_path );
 
@@ -222,6 +248,10 @@ final class ImportCommand {
 			} else {
 				$this->logger->info( 'Import started.', array( 'archive' => $archive_path ) );
 				$this->bump_counters( array( 'attempted' => 1 ) );
+
+				if ( ! $no_rollback ) {
+					$this->take_safety_archive();
+				}
 
 				$restore_runner->restore( $source, $on_entry );
 				$this->progress->finish();
@@ -343,6 +373,47 @@ final class ImportCommand {
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+	}
+
+	/**
+	 * Take a pre-import safety archive of the current site.
+	 *
+	 * Writes a full safety archive before the restore overwrites anything, so a
+	 * mistaken import can be undone with `wp pontifex rollback`. It runs before
+	 * the destructive restore: if it fails (the free-disk preflight refuses, or
+	 * the write fails), the exception propagates and the import aborts before
+	 * touching the site.
+	 *
+	 * @return void
+	 */
+	private function take_safety_archive(): void {
+		$safety_archiver = $this->safety_archiver ?? $this->build_default_safety_archiver();
+
+		$on_entry = function ( int $done, int $total ): void {
+			if ( 1 === $done ) {
+				$this->progress->start( $total, 'Writing safety archive' );
+			}
+			$this->progress->advance();
+		};
+
+		$path = $safety_archiver->create( $this->resolve_wordpress_root(), $on_entry );
+		$this->progress->finish();
+
+		$this->logger->info( 'Safety archive written.', array( 'safety_archive' => $path ) );
+		WP_CLI::log( sprintf( 'Safety archive written: %s (undo this import with: wp pontifex rollback)', $path ) );
+	}
+
+	/**
+	 * Build a SafetyArchiver rooted at WP_CONTENT_DIR.
+	 *
+	 * @return SafetyArchiver
+	 */
+	private function build_default_safety_archiver(): SafetyArchiver {
+		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
+			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
+			: sys_get_temp_dir();
+
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ) );
 	}
 
 	/**

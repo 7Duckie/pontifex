@@ -14,6 +14,7 @@ use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
@@ -23,29 +24,21 @@ use RuntimeException;
 /**
  * Behavioural coverage of the genuine __invoke branches.
  *
- * As with ExportCommand, the bulk of orchestration is not worth a
- * behavioural __invoke test — mocking every collaborator only to assert
- * "the code calls the methods I made it call" is coverage theatre. The
- * branches that genuinely escape the helper/integration layers and earn
- * a surgical unit test are:
+ * As with ExportCommand, the bulk of orchestration is not worth a behavioural
+ * __invoke test. The branches that genuinely earn a surgical unit test are:
  *
- *  1. The --yes short-circuit: confirm() is never called when --yes is
- *     set, because __invoke reads the flag before delegating.
- *  2. The try-finally exception path: the source archive is opened
- *     before the restore runs; if restore() throws, the finally must
- *     close the handle and the exception must propagate unswallowed.
- *  3. The --dry-run branch: it calls verify() (not restore()) and writes
- *     no counters — the "touch nothing" contract.
+ *  1. The --yes short-circuit: confirm() is never called when --yes is set.
+ *  2. The try-finally exception path: a restore failure closes the handle and
+ *     propagates unswallowed.
+ *  3. The --dry-run branch: it calls verify() (not restore()), writes no
+ *     counters, and takes no safety archive.
+ *  4. The safety archive (v0.2.0): a real import takes one before restoring;
+ *     --no-rollback-archive skips it; and a safety-archive failure aborts the
+ *     import before the destructive restore runs.
  *
- * The logging assertions (info on success, error on failure) live here
- * for the same reason: they are __invoke control-flow facts.
- *
- * The restore runner is injected as a RestoreRunnerInterface mock — the
- * interface that exists precisely so this final-class engine can be
- * faked here. With a runner injected, the default wiring
- * (build_default_restore_runner) is never reached, so FileWriter,
- * DatabaseWriter, WpdbAdapter and the Environment seam are not exercised
- * by these tests; Phase 6 integration tests cover that wiring for free.
+ * The restore engine and the safety archiver are injected as their interfaces —
+ * the seams that exist precisely so these final-class collaborators can be faked
+ * here. With them injected, the default wiring is never reached.
  */
 final class InvokeBranchesTest extends TestCase {
 
@@ -53,20 +46,12 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * A real temporary archive file used as the import source.
 	 *
-	 * Created in setUp (empty is fine — the runner is mocked, so the
-	 * bytes are never parsed) and removed in tearDown. Real path, not
-	 * mocked, because ImportCommand calls fopen() against it directly
-	 * and Mockery cannot intercept stream resources.
-	 *
 	 * @var string|null
 	 */
 	private ?string $temp_archive_path = null;
 
 	/**
 	 * Create a real, readable temp archive file for the import source.
-	 *
-	 * Empty file: ImportCommand fopen()s it for reading, but the injected
-	 * runner mock never parses its contents.
 	 *
 	 * @return void
 	 */
@@ -94,26 +79,23 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * Passing --yes must short-circuit WP_CLI::confirm so it is never invoked.
 	 *
-	 * The check sits in __invoke before the confirm call. A regression
-	 * that dropped the if-statement would still pass every helper test.
-	 *
 	 * @return void
 	 */
 	public function test_invoke_with_yes_flag_short_circuits_confirmation(): void {
-		$environment       = $this->build_environment_mock();
-		$wordpress_context = $this->build_wordpress_context_mock();
-		$restore_runner    = $this->build_restore_runner_mock_succeeding();
-
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'confirm' );
 
-		$command = new ImportCommand( $environment, $wordpress_context, $restore_runner, new NullLogger(), new NullProgressBar() );
-
-		$command(
-			array( $this->temp_archive_path ),
-			array( 'yes' => true )
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
 		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
 
 		$this->assertFileExists(
 			$this->temp_archive_path,
@@ -124,50 +106,36 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * An exception thrown by RestoreRunner::restore must propagate out of __invoke.
 	 *
-	 * The source archive is opened before the restore runs. A try-finally
-	 * closes the handle on failure as well as success; a regression that
-	 * swallowed the exception would hide the failure from the user.
-	 *
 	 * @return void
 	 */
 	public function test_invoke_propagates_restore_exception(): void {
-		$environment       = $this->build_environment_mock();
-		$wordpress_context = $this->build_wordpress_context_mock();
-
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
-		$restore_runner
-			->shouldReceive( 'restore' )
-			->once()
-			->andThrow( new RuntimeException( 'simulated restore failure' ) );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 
-		$command = new ImportCommand( $environment, $wordpress_context, $restore_runner, new NullLogger(), new NullProgressBar() );
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'simulated restore failure' );
 
-		$command(
-			array( $this->temp_archive_path ),
-			array( 'yes' => true )
-		);
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
 	}
 
 	/**
 	 * A successful import records informational log lines and no error.
 	 *
-	 * The command logs an "Import started" line and an "Import complete"
-	 * line on the happy path. A regression that dropped the logging, or
-	 * logged an error on success, would fail here.
-	 *
 	 * @return void
 	 */
 	public function test_invoke_logs_info_on_success(): void {
-		$environment       = $this->build_environment_mock();
-		$wordpress_context = $this->build_wordpress_context_mock();
-		$restore_runner    = $this->build_restore_runner_mock_succeeding();
-
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 
@@ -175,12 +143,16 @@ final class InvokeBranchesTest extends TestCase {
 		$logger->shouldReceive( 'info' )->atLeast()->once();
 		$logger->shouldReceive( 'error' )->never();
 
-		$command = new ImportCommand( $environment, $wordpress_context, $restore_runner, $logger, new NullProgressBar() );
-
-		$command(
-			array( $this->temp_archive_path ),
-			array( 'yes' => true )
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			$logger,
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
 		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
 
 		$this->assertFileExists(
 			$this->temp_archive_path,
@@ -191,21 +163,11 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * A failing import records an error log line and re-throws unchanged.
 	 *
-	 * When restore() throws, the command logs an "Import failed" line at
-	 * error level and re-throws the original exception so it reaches
-	 * WP-CLI. Guards both halves: the error is logged, and not swallowed.
-	 *
 	 * @return void
 	 */
 	public function test_invoke_logs_error_when_restore_fails(): void {
-		$environment       = $this->build_environment_mock();
-		$wordpress_context = $this->build_wordpress_context_mock();
-
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
-		$restore_runner
-			->shouldReceive( 'restore' )
-			->once()
-			->andThrow( new RuntimeException( 'simulated restore failure' ) );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
@@ -214,31 +176,27 @@ final class InvokeBranchesTest extends TestCase {
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
 		$logger->shouldReceive( 'error' )->once();
 
-		$command = new ImportCommand( $environment, $wordpress_context, $restore_runner, $logger, new NullProgressBar() );
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			$logger,
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'simulated restore failure' );
 
-		$command(
-			array( $this->temp_archive_path ),
-			array( 'yes' => true )
-		);
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
 	}
 
 	/**
-	 * A --dry-run calls verify(), never restore(), and writes no counters.
-	 *
-	 * This is the "touch nothing" contract: dry-run reads and verifies
-	 * the archive but performs no write — not to the site, and not to the
-	 * counters option. It also skips the confirmation prompt, since there
-	 * is nothing to confirm.
+	 * A --dry-run calls verify(), never restore(), writes no counters, and takes no safety archive.
 	 *
 	 * @return void
 	 */
 	public function test_invoke_dry_run_verifies_without_restoring_or_counting(): void {
-		$environment = $this->build_environment_mock();
-
-		// No counters must be written, so save_option must never be called.
 		$wordpress_context = Mockery::mock( WordPressContext::class );
 		$wordpress_context->shouldNotReceive( 'save_option' );
 
@@ -246,16 +204,23 @@ final class InvokeBranchesTest extends TestCase {
 		$restore_runner->shouldReceive( 'verify' )->once();
 		$restore_runner->shouldNotReceive( 'restore' );
 
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'confirm' );
 
-		$command = new ImportCommand( $environment, $wordpress_context, $restore_runner, new NullLogger(), new NullProgressBar() );
-
-		$command(
-			array( $this->temp_archive_path ),
-			array( 'dry-run' => true )
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$wordpress_context,
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
 		);
+
+		$command( array( $this->temp_archive_path ), array( 'dry-run' => true ) );
 
 		$this->assertFileExists(
 			$this->temp_archive_path,
@@ -264,24 +229,128 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * Build a bare Environment mock.
+	 * A real import takes a safety archive before it restores.
 	 *
-	 * With a RestoreRunner injected, __invoke never reaches the default
-	 * wiring, so it makes no Environment calls; the mock needs no
-	 * expectations.
+	 * Ordering is asserted: create() must be called before restore(), so the
+	 * undo exists before the destructive write begins.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_takes_a_safety_archive_before_restoring(): void {
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->ordered()->andReturn( '/var/www/html/wp-content/pontifex/rollback/safety.wpmig' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->ordered();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
+	 * --no-rollback-archive skips the safety archive but still restores.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_no_rollback_archive_flag_skips_the_safety_archive(): void {
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'                 => true,
+				'no-rollback-archive' => true,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
+	 * A safety-archive failure aborts the import before the restore runs.
+	 *
+	 * The safety archive is written before the destructive restore, so if it
+	 * throws (e.g. the disk preflight refuses), restore() must never be reached;
+	 * the failure is logged and re-thrown.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_safety_archive_failure_aborts_before_restore(): void {
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'not enough free disk space' ) );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'error' )->once();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			$logger,
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'not enough free disk space' );
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * Build an Environment mock that answers the ABSPATH lookup.
+	 *
+	 * The take_safety_archive step resolves the WordPress root through ABSPATH to
+	 * feed the archiver; the restore path never reaches the Environment because a
+	 * runner is injected.
 	 *
 	 * @return Environment&\Mockery\MockInterface
 	 */
 	private function build_environment_mock() {
-		return Mockery::mock( Environment::class );
+		$mock = Mockery::mock( Environment::class );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/var/www/html' );
+		return $mock;
 	}
 
 	/**
-	 * Build a WordPressContext mock for the happy (real-run) path.
-	 *
-	 * The bump_counters path reads option_value and writes save_option;
-	 * print_summary calls format_size. All permissive — the tests assert
-	 * control flow, not stored values.
+	 * Build a WordPressContext mock for the real-run path.
 	 *
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
@@ -296,14 +365,22 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * Build a RestoreRunnerInterface mock whose restore() succeeds silently.
 	 *
-	 * The mock does not invoke the progress callback; the per-entry
-	 * callback contract is proven in RestoreRunnerTest, not here.
-	 *
 	 * @return RestoreRunnerInterface&\Mockery\MockInterface
 	 */
 	private function build_restore_runner_mock_succeeding() {
 		$mock = Mockery::mock( RestoreRunnerInterface::class );
 		$mock->shouldReceive( 'restore' )->once();
+		return $mock;
+	}
+
+	/**
+	 * Build a SafetyArchiverInterface mock whose create() succeeds, returning a path.
+	 *
+	 * @return SafetyArchiverInterface&\Mockery\MockInterface
+	 */
+	private function build_safety_archiver_succeeding() {
+		$mock = Mockery::mock( SafetyArchiverInterface::class );
+		$mock->shouldReceive( 'create' )->once()->andReturn( '/var/www/html/wp-content/pontifex/rollback/safety.wpmig' );
 		return $mock;
 	}
 }
