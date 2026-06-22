@@ -40,9 +40,10 @@ and rely on CI to catch issues.
 | `composer lint` | PHPCS (WordPress coding standards) |
 | `composer lint:fix` | PHPCBF (autofix what PHPCS can) |
 | `composer analyse` | PHPStan |
-| `composer test` | Full PHPUnit suite |
-| `composer test:unit` | Unit tests only — fast, no WP runtime |
-| `composer check` | Lint + analyse + test + audit, the full pre-PR sweep |
+| `composer test` | Unit suite (PHPUnit; no WordPress runtime) |
+| `composer test:unit` | Unit tests only — same as `composer test` |
+| `composer test:integration` | Integration suite — real WordPress via wp-env (see below) |
+| `composer check` | Lint + analyse + unit tests + audit — the pre-PR sweep |
 
 ## Pre-commit / pre-push budget
 
@@ -52,7 +53,7 @@ than tolerate the slowdown — a hook everyone disables protects nobody.
 
 ## Commit conventions
 
-- Subject ≤50 characters, imperative, no trailing period.
+- Subject ≤72 characters, imperative, no trailing period.
 - Blank line, then body explaining the *why*.
 - One logical change per commit.
 
@@ -70,8 +71,10 @@ on disk to scan.
 ## Branches
 
 - `main` is the integration branch. CI must be green for any merge.
-- Feature branches: `feature/<short-description>`
-- Fix branches: `fix/<short-description>`
+- Work on short-lived `type/scope` branches off `main`, using
+  Conventional Commits types — `feat/`, `fix/`, `test/`, `ci/`,
+  `docs/`, `refactor/`, `chore/` (e.g. `feat/import`,
+  `ci/integration-suite`). No version numbers in branch names.
 - Security branches: kept private until disclosed; coordinate via the
   email in SECURITY.md.
 
@@ -120,7 +123,8 @@ anything they build.
 
 - Code style — `phpcs.xml.dist` (WordPress-Extra + Pontifex prefix rules)
 - Static analysis — `phpstan.neon.dist` (level 6, ratcheting to 8 by v1.0)
-- Tests — `phpunit.xml.dist` (unit + integration suites)
+- Tests — `phpunit.xml.dist` (unit) and `phpunit-integration.xml.dist`
+  (integration, via wp-env)
 - Pre-commit — `.pre-commit-config.yaml`
 - CI — `.github/workflows/ci.yml`
 
@@ -160,205 +164,80 @@ need no equivalent step.
 
 ## Local development environment
 
-Pontifex is developed against a real WordPress installation, not against
-mocked WordPress functions. The recommended setup uses
-[Local](https://localwp.com) by Flywheel, which is free, has a friendly
-GUI, and handles PHP, the web server, and MySQL/MariaDB for you. Other
-WordPress dev environments (wp-env, Valet, Lando) work too, but the
-instructions below assume Local.
-
-### 1. Create a Local site for Pontifex
-
-In Local, create a new site:
-
-- **Name**: anything, but `pontifex-dev` is the convention used in the
-  rest of these docs.
-- **Domain**: `pontifex-dev.local` (Local sets this automatically from
-  the name).
-- **PHP version**: any version from 8.1 upward. The CI matrix tests
-  against 8.1, 8.2, 8.3, and 8.4 — matching one of these means
-  "works locally" implies "works in CI." This document was written
-  against a site running PHP 8.1.29 to match the CI floor; pick
-  whichever version makes sense for what you are debugging.
-- **Web server and database**: the defaults (nginx + MySQL) are fine.
-
-Once created, click "Open site" once to confirm WordPress loads. You
-should see the default WordPress welcome screen.
-
-### 2. Symlink the project into the site
-
-This is what lets WordPress see your project as an installed plugin
-without needing to copy files. Edits to your project's files take effect
-immediately, because the plugin directory inside the Local site is a
-symbolic link pointing back at your working tree.
-
-From your project's parent directory, run:
+Pontifex is developed against a real WordPress, not against mocked
+functions. The repository ships a
+[wp-env](https://www.npmjs.com/package/@wordpress/env) configuration
+(`.wp-env.json`) that runs WordPress, the web server, and
+MySQL/MariaDB in Docker for you. With Docker running:
 
 ```bash
-ln -s "$(pwd)/pontifex" \
-      "$HOME/Local Sites/pontifex-dev/app/public/wp-content/plugins/pontifex"
+npx @wordpress/env start
 ```
 
-Adjust the path on the right if your Local site has a different name or
-your `Local Sites` directory lives elsewhere.
+This boots a development site on `http://localhost:8910` with Pontifex
+already mounted and active (`.wp-env.json` maps the project in as a
+plugin), plus a separate test site on `http://localhost:8911` that the
+integration suite uses. The bare `wp-env` command is not on the PATH —
+always invoke it as `npx @wordpress/env …`.
 
-Verify it worked:
+### Run WP-CLI against the site
+
+Pontifex registers a `wp pontifex` command tree. Run it inside the
+development container:
 
 ```bash
-ls -la "$HOME/Local Sites/pontifex-dev/app/public/wp-content/plugins/"
+npx @wordpress/env run cli wp pontifex doctor
+npx @wordpress/env run cli wp pontifex export --output=/tmp/site.wpmig --yes
 ```
 
-You should see `pontifex` listed with an `->` arrow pointing back at
-your project directory.
+If you see "Command 'pontifex' is not registered," confirm the plugin
+is active with `npx @wordpress/env run cli wp plugin list`.
 
-### 3. Activate the plugin
-
-In Local, click "WP Admin" to open `pontifex-dev.local/wp-admin`. Log in
-(Local pre-creates an admin user; the credentials are visible in Local's
-site dashboard). Navigate to **Plugins**. Pontifex should appear in the
-list. Click **Activate**.
-
-### 4. Run WP-CLI against the site
-
-Pontifex registers a `wp pontifex` command tree via WP-CLI. The
-easiest way to invoke it is through Local's built-in site shell:
-
-1. In Local, right-click the site in the sidebar.
-2. Choose **Open site shell**.
-3. A terminal opens, pre-configured with the right PHP version and the
-   `wp` command pointed at this site.
-4. Run:
+### Run the tests
 
 ```bash
-   wp pontifex doctor
+composer test          # unit suite, on your host PHP — fast, no Docker
+# integration suite — must run inside the wp-env tests container:
+npx @wordpress/env run tests-cli --env-cwd=wp-content/plugins/pontifex composer test:integration
 ```
 
-You should see the doctor command's environment checklist. If you see
-"Command 'pontifex' is not registered," confirm the plugin is activated
-in WP Admin and re-run.
+The unit suite mocks WordPress and runs directly on your machine. The
+integration suite boots a real WordPress, so it must run inside the
+wp-env *tests* container, where `WP_TESTS_DIR` and the test database
+exist — running `composer test:integration` on the host fails with a
+missing-constants error. To exercise a specific PHP version, drop a
+`.wp-env.override.json` containing `{ "phpVersion": "8.5" }` next to
+`.wp-env.json` and restart wp-env; CI does exactly this across the
+8.2–8.5 matrix.
 
-### 5. Working with the project
+### Your daily cycle
 
-From this point on, your daily cycle is:
+1. Edit code in your editor of choice (pointed at the project root).
+2. Run `composer check` to lint, analyse and unit-test before
+   committing.
+3. Use `npx @wordpress/env run cli wp pontifex …` to drive the commands
+   against real WordPress.
 
-1. Edit code in your usual location (e.g., PhpStorm pointed at the
-   project root).
-2. Run `composer check` from the project directory to lint, analyse,
-   and test before committing.
-3. Use the Local site shell to invoke `wp pontifex` commands against a
-   real WordPress install.
-4. Use WP Admin (browser) to confirm anything that affects the
-   admin UI.
-
-The symlink means there's no "deploy" step between editing and running.
-What you save is what WordPress sees.
-
-### Other Local sites
-
-If you want to test Pontifex against another existing Local site (a
-WooCommerce installation, a multisite setup, a site you've been
-building separately), symlink the plugin into that site's
-`wp-content/plugins/` directory using the same command pattern as
-above, substituting the other site's name. One project, many sites.
+Edits take effect immediately — wp-env mounts your working tree, so
+there is no "deploy" step between saving and running.
 
 ## Step debugging with Xdebug
 
-When a test fails or a check method returns an unexpected row, stepping
-through the failing code is dramatically faster than scattering
-`var_dump()` calls and re-running. Xdebug is the PHP step debugger; Local
-bundles it, PhpStorm has first-class support, and the integration is
-mostly configuration once you do it the first time.
-
-This section assumes you have the Local site from "Local development
-environment" already working and the PhpStorm hints from "PhpStorm
-setup" already applied.
-
-### 1. Enable Xdebug in Local
-
-In Local, click your `pontifex-dev` site in the sidebar, then click the
-**Tools** tab at the top. Find the **Xdebug** entry and toggle it on.
-Local restarts the site's PHP-FPM and CLI processes with Xdebug loaded.
-
-Xdebug runs in `debug` mode by default in Local — i.e. it listens for
-PhpStorm to connect when an HTTP request or CLI command runs. This is
-the mode you want for stepping through code. Other modes (`profile`,
-`trace`) exist but aren't needed for the workflow described here.
-
-### 2. Configure PhpStorm
-
-Open **Settings** → **PHP** in PhpStorm. Two configurations matter.
-
-**CLI Interpreter.** Point PhpStorm at the PHP binary Local ships, not
-your system PHP. To find the path, open Local's site shell and run:
+Stepping through failing code beats scattering `var_dump()` calls.
+wp-env ships Xdebug; start the environment with it enabled:
 
 ```bash
-which php
+npx @wordpress/env start --xdebug
 ```
 
-Copy the path it returns. In PhpStorm, click the **...** beside the CLI
-Interpreter dropdown, add a new interpreter from the local path, and
-paste it in. Once configured, PhpStorm displays the interpreter's PHP
-version and detected extensions — you should see `xdebug` in the list.
-
-**Debug port.** Open **Settings** → **PHP** → **Debug**. Confirm the
-Xdebug port is set to `9003` (the modern default; the older `9000` is
-no longer used). Make sure **Can accept external connections** is
-ticked.
-
-### 3. Set a breakpoint and listen for connections
-
-Open any PHP file in PhpStorm and click in the left gutter next to a
-line. A red dot appears — that's a breakpoint. Pick something the doctor
-command actually hits, e.g. inside `check_php_version()`.
-
-Click the small **phone-with-a-bug** icon in the top-right toolbar to
-start listening for debug connections. The icon turns green to indicate
-PhpStorm is waiting.
-
-### 4. Run the code under debug
-
-From Local's site shell:
-
-```bash
-wp pontifex doctor
-```
-
-When PHP reaches the breakpoint, PhpStorm pulls itself to the
-foreground and pauses execution there. You can:
-
-- Hover any variable in the source pane to see its current value.
-- Use the Variables panel (bottom of the Debug tool window) to inspect
-  the full scope, including `$this->environment` and any nested mock
-  state.
-- Step **Over** (F8), **Into** (F7), or **Out** (Shift-F8) one line at a
-  time.
-- Click **Resume** (F9) to continue running until the next breakpoint
-  or the program ends.
-
-### 5. Debugging tests
-
-The same setup debugs the test suite. From the project directory, with
-PhpStorm listening for connections:
-
-```bash
-composer test
-```
-
-Or `composer test:unit` for just the unit suite. PHPUnit runs each test
-under Xdebug; breakpoints in both test code and production code are hit
-in execution order. Useful when a behavioural test fails and you want
-to inspect the mock Environment state at the moment the check method
-returns.
-
-### 6. Disable Xdebug when you're not actively debugging
-
-Xdebug adds significant overhead even when no breakpoints are set —
-roughly 5-10× slower test execution. The 80ms test run becomes 500-800ms
-with Xdebug active. Toggle Xdebug off in Local's Tools tab when you're
-done debugging, so the daily `composer check` stays fast.
-
-Local remembers the last-used setting per site, so re-enabling is a
-single click whenever the next bug appears.
+Xdebug then listens on the standard port `9003`. Point your editor's
+PHP debugger at the wp-env container (in PhpStorm: a CLI interpreter on
+the Docker image, port `9003`, "Can accept external connections"
+ticked), set a breakpoint, and run a command — for example
+`npx @wordpress/env run cli wp pontifex doctor` — to hit it. The
+[wp-env Xdebug guide](https://www.npmjs.com/package/@wordpress/env#using-xdebug)
+covers editor-specific setup. Start without `--xdebug` for everyday
+work, since Xdebug slows execution noticeably.
 
 
 ## Troubleshooting
