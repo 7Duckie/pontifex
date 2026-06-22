@@ -5,11 +5,12 @@ a documented archive format (`.wpmig`). Rollback is designed in and
 arrives in v0.2.0.
 
 **Status: pre-alpha.** Pontifex is in early development. Today it can
-audit an environment (`wp pontifex doctor`) and pack a whole site into
-a single `.wpmig` archive (`wp pontifex export`). The matching
-`import` — and with it the first provable round trip — is the v0.1.0
-milestone, in progress now. Do not rely on Pontifex for production
-data yet.
+audit an environment (`wp pontifex doctor`), pack a whole site into a
+single `.wpmig` archive (`wp pontifex export`), and restore that
+archive onto a WordPress at the same URL (`wp pontifex import`) — the
+round trip is proven end-to-end by an integration test against a real
+WordPress. Cross-URL migration and rollback arrive in v0.2.0. Do not
+rely on Pontifex for production data yet.
 
 ## What Pontifex will be
 
@@ -37,8 +38,8 @@ is the honest difference, updated at every release.
 |---|---|---|
 | Environment audit (`wp pontifex doctor`) | — | ✅ |
 | Export a site to `.wpmig` (`wp pontifex export`) | ✅ | ✅ |
-| Import / restore (`wp pontifex import`) | ✅ | ❌ — v0.1.0, in progress |
-| Round trip proven end-to-end | — | ❌ — the v0.1.0 gate |
+| Import / restore (`wp pontifex import`, same URL) | ✅ | ✅ |
+| Round trip proven end-to-end | — | ✅ — same-URL, integration-tested |
 | Rollback (pre-import safety archive + undo) | — | ❌ — v0.2.0 |
 | Cross-URL migration (URL rewriting) | ✅ | ❌ — v0.2.0, shipped with its security defences |
 | Archive verification (`wp pontifex verify`) | — | ❌ — v0.2.0 |
@@ -52,7 +53,7 @@ tools that have them — and watch the table above as it fills in.
 
 ## Requirements
 
-- PHP 8.1 or newer
+- PHP 8.2 or newer
 - WordPress 6.5 or newer
 - MySQL 5.7+ or MariaDB 10.4+
 
@@ -89,11 +90,39 @@ wp pontifex doctor --fields=category,name,status
 
 # Pack the whole site into a single archive
 wp pontifex export --output=/path/to/site.wpmig
+
+# Restore an archive onto a WordPress at the same URL
+wp pontifex import /path/to/site.wpmig --dry-run   # preview: verify only, write nothing
+wp pontifex import /path/to/site.wpmig             # restore (prompts before writing)
 ```
 
-`import` arrives with v0.1.0; until then an exported `.wpmig` cannot
-yet be restored by the plugin. See the [roadmap](docs/roadmap.md) for
-what ships when.
+`import` restores to the **same URL** only; cross-URL migration (with
+its serialised-data defences) arrives in v0.2.0. See the
+[roadmap](docs/roadmap.md) for what ships when.
+
+> **Importing writes an entire site onto yours.** Only import a `.wpmig`
+> you produced or fully trust — see
+> [the import trust boundary](.github/SECURITY.md#the-import-trust-boundary).
+
+### A full round trip
+
+On the source site, pack it into one archive:
+
+```bash
+wp pontifex export --output=site.wpmig
+```
+
+Move `site.wpmig` to the destination (over any channel you control),
+then on a WordPress at the **same URL**:
+
+```bash
+wp pontifex import site.wpmig --dry-run   # preview: verify the whole archive, write nothing
+wp pontifex import site.wpmig             # restore for real (confirms first, unless --yes)
+```
+
+You end up with a site that matches the source — files byte-for-byte and
+the database intact. That round trip is proven in CI by an integration
+test against real WordPress.
 
 ## Roadmap
 

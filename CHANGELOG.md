@@ -14,14 +14,105 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Work toward v0.1.0 — the round-trip baseline. The roadmap item list
-is in [`docs/roadmap.md`](docs/roadmap.md); the major remaining
-pieces are: `wp pontifex import` CLI wiring (Phase 5), WordPress
-integration tests across the PHP 8.1–8.5 matrix (Phase 6), round-
-trip tests proving export-then-import reconstructs the source byte-
-perfectly, plus the minimum logger and transfer counters pulled into
-v0.1.0. Intermediate v0.0.x tags may land along the way as each
-piece completes.
+Work toward v0.2.0 (cross-URL migration with its serialised-data
+defences, encryption, rollback, verify) begins after this tag. See
+[`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.1.0] — 2026-06-22 — the round-trip baseline (same URL)
+
+The headline release: a complete, proven round trip. Export a real
+WordPress site to a `.wpmig` archive and restore it onto another
+WordPress at the **same URL**, with byte-faithful files and database.
+Cross-URL migration, encryption, rollback and verify stay deferred to
+v0.2.0 and beyond ([`docs/roadmap.md`](docs/roadmap.md)); v0.1.0
+archives are **unencrypted**.
+
+### Added
+
+- **`wp pontifex import <archive>` command.** Restores a `.wpmig`
+  onto the current site. It surfaces the same-URL-only scope — no URL
+  rewriting ([ADR 0004](docs/adr/0004-same-url-import-scope.md)) —
+  before acting, confirms unless `--yes`, and offers `--dry-run`,
+  which reads and verifies the whole archive end to end while writing
+  nothing to the filesystem or database. Each run is logged.
+  Registered in `pontifex.php` beside `export` and `doctor`.
+- **First same-URL round-trip integration test.** Packs real file
+  bytes and a real `utf8mb4` database table into an archive and
+  restores it against a real WordPress, asserting byte-for-byte file
+  fidelity and an identical row dump with multibyte content intact.
+  The round-trip guarantee is now proven, not merely asserted — the
+  first time the writer and reader meet over a real archive.
+- **WordPress integration test harness, running in CI.** PHPUnit 11
+  with a separate integration suite that boots a real WordPress through
+  `wp-env` (`wp-phpunit`) and runs in CI across PHP 8.2–8.5, plus a
+  WordPress-booting smoke test. Test counts are reported as two
+  numbers — unit and integration.
+- **Rotating PSR-3 file logger (`FileLogger`).** Writes to
+  `wp-content/pontifex/logs/pontifex.log`, rotates at 2 MB (four
+  backups, 10 MB cap), respects `WP_DEBUG` for its level floor, and
+  never throws — all log I/O is failure-tolerant. Wired into both
+  export and import.
+- **Export run counters.** A single autoload-off `wp_option`
+  (`pontifex_export_stats`) recording attempted / succeeded / failed
+  / bytes_exported; import records its own run counters the same way.
+- **Export progress bar.** A `ProgressReporter` seam (interface +
+  WP-CLI bar + null no-op) that draws per-entry progress during an
+  archive write without leaking a CLI type into the archive layer.
+- **Restore seam.** `RestoreRunnerInterface` extracted so the CLI
+  depends on a contract, not a `final` class; the runner gains
+  `verify()` — the read-and-verify-only walk behind `--dry-run` —
+  alongside `restore()`, both with an optional per-entry progress
+  callback.
+- **Release tooling.** `scripts/bump-version.php` and
+  `scripts/check-release.php` keep `PONTIFEX_VERSION`, the plugin
+  header `Version:` line and the git tag consistent
+  ([ADR 0003](docs/adr/0003-strict-version-stamping.md)).
+- Idea-bank entries 011 (throttled debug progress logging), 012
+  (scan-phase progress reporting) and 013 (a deferred
+  `import --max-size` override).
+
+### Changed
+
+- **PHP floor raised to 8.2** (from 8.1); the CI test matrix is now
+  PHP 8.2–8.5.
+- Adopted **PHPUnit 11** and added the integration stack
+  (`wp-phpunit`, PHPUnit polyfills).
+- The `RawCodec` and `GzipCodec` decoders now honour an optional
+  decoded-byte ceiling, so an over-large or over-compressed payload
+  is refused *during* decode rather than after it has been
+  materialised.
+- README, CONTRIBUTING and the package description corrected to match
+  what actually ships — no claim exceeds the code (the "first-class
+  rollback" pitch reworded to its true v0.2.0 status).
+
+### Fixed
+
+- **Symlink path-traversal escape in the restore writer.** A hostile
+  archive could write files *outside* the destination root via a
+  symlink entry followed by a file that descends through it (the
+  Zip-Slip-via-symlink class). `FileWriter` now refuses any entry with
+  a symlinked ancestor and clears a conflicting symlink at the write
+  target; five path-traversal vectors are tested.
+
+### Security
+
+- **Reader defensive limits (`ArchiveLimits`), each proven against a
+  hostile archive.** The restore walk refuses a hostile or malformed
+  archive *before* it touches the destination, enforcing four
+  conservative ceilings borrowed from mature backup tooling: at most
+  50,000 entries, 2 GiB per decoded entry, a 100× decompression ratio,
+  and 1 TiB total decoded size — a decompression bomb is refused
+  mid-stream. This is the one MVP-blocking safety item (audit finding
+  F015): the reader treats every byte as attacker-suppliable.
+- **A failed database statement fails closed.** Real `$wpdb` returns
+  `false` (it does not throw) on a failed query; an integration test
+  proves a failed statement halts the restore before any later
+  statement runs, so a corrupt chunk can never silently drop a table.
+- **Import trust boundary documented** in
+  [`.github/SECURITY.md`](.github/SECURITY.md): importing a `.wpmig`
+  grants its author full write access to the target, so only trusted
+  archives should be imported. A peer-CVE security review (Wordfence /
+  WPScan / Patchstack) informed the hardening above.
 
 ## [0.0.6] — pre-alpha (tests strengthened; v0.1.0 scope settled)
 
@@ -219,7 +310,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.0.6...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/7Duckie/pontifex/compare/v0.0.6...v0.1.0
 [0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6
 [0.0.5]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.5
 [0.0.4]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.4

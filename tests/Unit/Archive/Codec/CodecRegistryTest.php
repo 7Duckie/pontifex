@@ -84,11 +84,12 @@ final class CodecRegistryTest extends TestCase {
 			/**
 			 * No-op decode for stub purposes.
 			 *
-			 * @param resource $input  A readable stream resource.
-			 * @param resource $output A writable stream resource.
+			 * @param resource $input            A readable stream resource.
+			 * @param resource $output           A writable stream resource.
+			 * @param int|null $max_output_bytes Ignored by this stub.
 			 * @return int Always zero.
 			 */
-			public function decode( $input, $output ): int {
+			public function decode( $input, $output, ?int $max_output_bytes = null ): int {
 				return 0;
 			}
 		};

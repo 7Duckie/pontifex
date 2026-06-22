@@ -327,4 +327,21 @@ final class EntryReaderTest extends TestCase {
 
 		$reader->read_entry( $stream, $manifest_entry );
 	}
+
+	/**
+	 * Reading an entry must refuse to decode beyond the supplied byte cap.
+	 *
+	 * The cap is threaded through to the codec, so a payload larger than
+	 * the cap surfaces as a RuntimeException rather than decoding in
+	 * full. This is the per-entry half of the decompression-bomb guard.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_enforces_decoded_byte_cap(): void {
+		$fixture = self::write_file_entry_to_fixture( 'big.txt', str_repeat( 'A', 1000 ), RawCodec::ID );
+
+		$this->expectException( RuntimeException::class );
+
+		self::make_reader()->read_entry( $fixture[0], $fixture[1], 100 );
+	}
 }

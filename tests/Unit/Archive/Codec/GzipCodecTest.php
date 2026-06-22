@@ -288,4 +288,42 @@ final class GzipCodecTest extends TestCase {
 
 		$codec->encode( $input, null );
 	}
+
+	/**
+	 * Decoding must abort with a CodecException once output exceeds the cap.
+	 *
+	 * A highly compressible payload (far larger than the cap once
+	 * inflated) is encoded, then decoded with a tiny ceiling; the codec
+	 * must refuse rather than inflate the whole stream.
+	 *
+	 * @return void
+	 */
+	public function test_decode_aborts_when_output_exceeds_cap(): void {
+		$payload = str_repeat( 'A', 100000 );
+		$codec   = new GzipCodec();
+		$encoded = $this->writable_stream();
+		$codec->encode( $this->readable_stream( $payload ), $encoded );
+
+		$this->expectException( CodecException::class );
+
+		$codec->decode( $this->readable_stream( $this->drain( $encoded ) ), $this->writable_stream(), 100 );
+	}
+
+	/**
+	 * Decoding within the cap must succeed and reproduce the payload exactly.
+	 *
+	 * @return void
+	 */
+	public function test_decode_within_cap_succeeds(): void {
+		$payload = str_repeat( 'B', 4096 );
+		$codec   = new GzipCodec();
+		$encoded = $this->writable_stream();
+		$codec->encode( $this->readable_stream( $payload ), $encoded );
+
+		$output  = $this->writable_stream();
+		$written = $codec->decode( $this->readable_stream( $this->drain( $encoded ) ), $output, 1048576 );
+
+		$this->assertSame( strlen( $payload ), $written );
+		$this->assertSame( $payload, $this->drain( $output ) );
+	}
 }

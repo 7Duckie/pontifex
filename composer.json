@@ -16,7 +16,7 @@
     },
     "sort-packages": true
   },
-  "description": "A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.",
+  "description": "A free, open-source WordPress migration and backup plugin with a documented archive format.",
   "homepage": "https://github.com/7Duckie/pontifex",
   "keywords": [
     "wordpress",

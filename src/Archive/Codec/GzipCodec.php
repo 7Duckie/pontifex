@@ -156,12 +156,19 @@ final class GzipCodec implements Codec {
 	 * for empty inputs across all codecs. A non-empty but malformed
 	 * input raises CodecException.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $max_output_bytes is non-null, decoding aborts with a
+	 * CodecException the moment the running output count exceeds it.
+	 * The check runs after each inflated chunk, so a hostile payload can
+	 * overshoot by at most one chunk before being refused. This is the
+	 * defence against gzip decompression bombs.
+	 *
+	 * @param resource $input            A readable stream resource.
+	 * @param resource $output           A writable stream resource.
+	 * @param int|null $max_output_bytes Maximum bytes to write before refusing, or null for no limit.
 	 * @return int The number of bytes written to $output.
-	 * @throws CodecException On read failure, write failure, or malformed gzip input.
+	 * @throws CodecException On read failure, write failure, decoded output exceeding $max_output_bytes, or malformed gzip input.
 	 */
-	public function decode( $input, $output ): int {
+	public function decode( $input, $output, ?int $max_output_bytes = null ): int {
 		$this->assert_streams( $input, $output );
 
 		$ctx = inflate_init( ZLIB_ENCODING_GZIP );
@@ -190,6 +197,12 @@ final class GzipCodec implements Codec {
 			}
 
 			$written += $this->write_to_stream( $output, $decompressed );
+
+			if ( null !== $max_output_bytes && $written > $max_output_bytes ) {
+				throw new CodecException(
+					sprintf( 'GzipCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+				);
+			}
 		}
 
 		if ( $any_data ) {
@@ -199,6 +212,12 @@ final class GzipCodec implements Codec {
 				throw new CodecException( 'GzipCodec: inflate_add() failed to finalise the decode stream; input may be truncated.' );
 			}
 			$written += $this->write_to_stream( $output, $final );
+
+			if ( null !== $max_output_bytes && $written > $max_output_bytes ) {
+				throw new CodecException(
+					sprintf( 'GzipCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+				);
+			}
 		}
 
 		return $written;

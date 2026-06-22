@@ -59,10 +59,18 @@ interface Codec {
 	 * Writes to the current position of $output. The caller is
 	 * responsible for stream positioning before and after the call.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $max_output_bytes is non-null, the implementation must stop
+	 * and raise a CodecException as soon as the bytes written to $output
+	 * would exceed that ceiling, rather than decoding the whole input.
+	 * This is the defence against decompression bombs: a small payload
+	 * that would otherwise inflate without bound. Null means no limit,
+	 * which is the historical behaviour.
+	 *
+	 * @param resource $input            A readable stream resource.
+	 * @param resource $output           A writable stream resource.
+	 * @param int|null $max_output_bytes Maximum bytes to write before refusing, or null for no limit.
 	 * @return int The number of bytes written to $output.
-	 * @throws CodecException On read failure, write failure, or codec-internal error.
+	 * @throws CodecException On read failure, write failure, decoded output exceeding $max_output_bytes, or codec-internal error.
 	 */
-	public function decode( $input, $output ): int;
+	public function decode( $input, $output, ?int $max_output_bytes = null ): int;
 }

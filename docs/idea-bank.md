@@ -1247,3 +1247,82 @@ sites to justify the work, or is it mainly a large-site concern?
   (PATH-5). Running-count via a scanner callback provisionally
   preferred; the determinate two-pass bar likely not worth the
   double-walk cost.
+
+### Idea 013 — `wp pontifex import --max-size` override for the total ceiling
+
+- **Status:** Parked
+- **Proposed:** 2026-06-14 by 7Duckie
+- **Last reviewed:** 2026-06-14
+
+**The concept.** The reader's defensive limits (F015) cap a restore at
+the smaller of a ratio bound (100x the archive's on-disk size) and an
+absolute ceiling (1 TiB). Those defaults refuse a decompression bomb
+without ever troubling a real site. This idea adds an opt-in flag,
+`wp pontifex import --max-size=<bytes>`, that raises the absolute
+ceiling for the rare operator who knows their archive is a genuine,
+unusually large site rather than an attack. It is an escape hatch, not
+a default: absent the flag, the conservative ceiling stands.
+
+**Motivation.** A handful of legitimate sites are enormous — large
+media libraries or enterprise multisites can run to several terabytes.
+For those, the 1 TiB absolute ceiling could refuse an honest restore.
+The operator in that position knows their own data and needs a way to
+say "yes, I expect this to be large, proceed", without us weakening
+the protection everyone else relies on by default.
+
+**Feasibility.** Cheap, because the seam already exists. ArchiveLimits
+is immutable and exposes `with_max_total_bytes()`; the import command
+would read the flag, call the wither to produce a raised limits
+object, and pass it as the fourth argument to RestoreRunner. No
+enforcement code changes — the existing budget logic simply works
+against the larger number. Purely additive: nothing to backfill.
+Rough effort: an hour, most of it argument parsing and a test.
+
+**Benefit.** Unblocks the rare legitimate giant while keeping the safe
+default intact for everyone. The cost is tiny (the plumbing is already
+there) and the value is "the tool does not get in the way of a real,
+if large, migration".
+
+**Alternative implementations.** (a) A `--no-limits` switch that
+disables the guard entirely — rejected as too blunt; it throws away
+the per-entry and ratio defences too, turning one awkward restore into
+a permanent foot-gun. (b) An environment variable or wp-config
+constant rather than a flag — viable, but a per-invocation flag is
+clearer and leaves no lingering relaxed state. (c) Extend the override
+to the ratio and per-entry ceilings as well — possible later if a real
+need appears, but the absolute ceiling is the one most likely to bite
+a legitimate site, so start there. Lean: a single `--max-size` flag
+raising only the absolute ceiling, with `with_max_total_bytes()` as
+its seam.
+
+**Concerns and constraints.** Must stay opt-in and loud: the flag
+raises a safety ceiling, so its help text should say so plainly, and
+an over-limit refusal should hint that the flag exists. It must never
+become the default or be persisted. Consider whether even the
+flagged ceiling deserves a sane upper bound so a fat-fingered value
+cannot reintroduce an unbounded restore. Accepting a human-friendly
+size ("2T", "500G") would be friendlier than raw bytes but is pure
+polish.
+
+**When in the build.** Post-v0.1.0; candidate for v0.2.0, after F015
+has landed and the import command exists. Blocks nothing; the seam is
+deliberately built now (F015) so this stays a small additive change
+whenever it is wanted.
+
+**Dependencies.** F015 reader defensive limits and its ArchiveLimits
+value object (shipping now, with `with_max_total_bytes()` added as
+this flag's seam). The `wp pontifex import` command (Chunk 3).
+
+**Open questions.** Raw bytes or a human-readable size string? Should
+the flag raise only the absolute ceiling, or also the ratio and
+per-entry limits? Should there be an absolute hard maximum that even
+the flag cannot exceed? Is an env/constant form wanted alongside the
+flag for unattended runs?
+
+**Decision log.**
+- 2026-06-14 — Proposed during the F015 build. The override itself is
+  deferred (no import-time need yet, and v0.1.0 is the round trip,
+  PATH-5), but the seam was built ahead of time: ArchiveLimits is
+  immutable and ships `with_max_total_bytes()` specifically so this
+  flag can be added later as a purely additive change in the import
+  command, with zero backfilling. Parked for v0.2.0.

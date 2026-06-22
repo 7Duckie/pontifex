@@ -75,6 +75,36 @@ above applies uniformly. A Dependabot alert against a dev-only
 dependency, for example, is typically marked **Not applicable** with
 a note explaining that the package is not shipped to users.
 
+## The import trust boundary
+
+`wp pontifex import` writes an entire site — every file and the whole
+database — from a `.wpmig` archive onto the destination WordPress.
+**Importing an archive grants its author full write access to this
+site's files and database.** A hostile or tampered archive can carry a
+malicious `wp-config.php`, a webshell at a legitimate path, or hostile
+rows in `wp_options` — none of which is malformed, so the reader cannot
+tell them apart from a genuine backup.
+
+Pontifex's job is to refuse *malformed and escaping* input — it verifies
+the archive's integrity hashes, enforces defensive size/entry/ratio
+limits, and confines every path against traversal and symlink escapes
+before touching the destination — not to vouch for the *intent* of a
+well-formed archive you chose to restore. Therefore:
+
+- **Only import a `.wpmig` you produced yourself or fully trust.** Treat
+  an archive from an untrusted source exactly as you would treat shell
+  access to your server.
+- **Verify integrity in transit.** Move archives over channels you
+  control; the per-entry and whole-file SHA-256 hashes detect corruption
+  or tampering on import.
+- **Store archives securely.** A `.wpmig` contains your entire database —
+  user accounts, password hashes, secret keys — so keep it outside the
+  web root and delete it securely when you are done with it.
+
+Cross-URL migration (with the serialised-data defences it requires)
+arrives in v0.2.0; archive verification (`wp pontifex verify`) and
+optional signing are planned — see [`docs/roadmap.md`](../docs/roadmap.md).
+
 ## Threat model
 
 See [`docs/threat-model.md`](../docs/threat-model.md) for Pontifex's
