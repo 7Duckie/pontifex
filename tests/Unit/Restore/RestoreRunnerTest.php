@@ -17,6 +17,7 @@ use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
@@ -510,16 +511,20 @@ final class RestoreRunnerTest extends TestCase {
 	 */
 	public function test_restore_rejects_too_many_entries(): void {
 		$limits = new ArchiveLimits( 2, 2147483648, 100, 1099511627776 );
-		$runner = $this->make_runner_with_limits( $limits );
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_limits( $limits, $db );
 		$plans  = array(
 			self::file_plan( 'a.txt', 'apple' ),
 			self::file_plan( 'b.txt', 'banana' ),
 			self::file_plan( 'c.txt', 'cherry' ),
 		);
 
-		$this->expectException( RuntimeException::class );
-
-		$runner->restore( self::build_archive_stream( $plans ) );
+		// The entry-count ceiling is checked up front, before any entry is
+		// read or written, so the destination must be left untouched.
+		$this->assert_refused(
+			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
+			$db
+		);
 	}
 
 	/**
@@ -558,5 +563,199 @@ final class RestoreRunnerTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * Restoring must refuse a single entry that decodes larger than the per-entry ceiling.
+	 *
+	 * A raw entry of five bytes is fed under a three-byte per-entry limit. The
+	 * reader refuses it while decoding — before the entry is ever dispatched to
+	 * a writer — so the destination is left untouched.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_oversized_entry(): void {
+		$limits = new ArchiveLimits( 50000, 3, 100, 1099511627776 );
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_limits( $limits, $db );
+		$plans  = array( self::file_plan( 'big.txt', 'apple' ) );
+
+		$this->assert_refused(
+			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
+			$db
+		);
+	}
+
+	/**
+	 * Restoring must refuse a decompression bomb before it can exhaust memory or disk.
+	 *
+	 * A hundred thousand identical bytes compress to a few hundred bytes on
+	 * disk, so against this tiny archive the decompression-ratio bound is blown
+	 * long before the payload is fully inflated. The gzip codec aborts
+	 * mid-stream — overshooting by at most one chunk — and nothing is written.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_decompression_bomb(): void {
+		$limits = new ArchiveLimits( 50000, 2147483648, 2, 1099511627776 );
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_limits( $limits, $db );
+		$plans  = array( self::gzip_file_plan( 'bomb.txt', str_repeat( 'A', 100000 ) ) );
+
+		$this->assert_refused(
+			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
+			$db
+		);
+	}
+
+	/**
+	 * Build a gzip-compressed file EntryPlan from raw (compressible) contents.
+	 *
+	 * The ArchiveWriter compresses the raw stream through the gzip codec, so a
+	 * highly repetitive payload yields a tiny archive that decodes back to the
+	 * full size — the shape of a decompression bomb.
+	 *
+	 * @param string $path     Relative path inside the archive.
+	 * @param string $contents Raw (uncompressed) file contents.
+	 * @return EntryPlan A plan ready to feed to ArchiveWriter.
+	 */
+	private static function gzip_file_plan( string $path, string $contents ): EntryPlan {
+		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan( $header, GzipCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $contents ) );
+	}
+
+	/**
+	 * Assert that a restore action is refused and leaves the destination untouched.
+	 *
+	 * Runs $restore, requires it to throw a RuntimeException (the refusal), then
+	 * asserts that no file landed under the fixture root and that the database
+	 * adapter executed no statements.
+	 *
+	 * @param callable      $restore The restore call expected to be refused.
+	 * @param FakeDbAdapter $db      The adapter that must have executed nothing.
+	 * @return void
+	 */
+	private function assert_refused( callable $restore, FakeDbAdapter $db ): void {
+		$refused = false;
+		try {
+			$restore();
+		} catch ( RuntimeException $e ) {
+			$refused = true;
+		}
+
+		$this->assertTrue( $refused, 'Expected the hostile archive to be refused with a RuntimeException.' );
+
+		$entries = array_diff( scandir( $this->fixture_root ), array( '.', '..' ) );
+		$this->assertSame( array(), array_values( $entries ), 'A refused archive must not write any files.' );
+		$this->assertSame( array(), $db->executed_statements(), 'A refused archive must not execute any SQL.' );
+	}
+
+	/**
+	 * A file must never escape the destination root through a restored symlink.
+	 *
+	 * A hostile archive places a symlink pointing outside the root, then a file
+	 * whose path traverses that symlink. If the writer follows the link it
+	 * writes outside the root — the Zip-Slip-via-symlink class (cf. the Bower
+	 * archive-extraction CVE). The restore must refuse, and nothing may appear
+	 * at the symlink's target.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_to_write_through_an_escaping_symlink(): void {
+		$outside = sys_get_temp_dir() . '/pontifex-escape-target-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture: an out-of-root directory the hostile archive tries to write into.
+		mkdir( $outside, 0o755, true );
+
+		try {
+			$runner = $this->make_runner();
+			$plans  = array(
+				self::symlink_plan( 'breakout', $outside ),
+				self::file_plan( 'breakout/escaped.txt', 'PWNED' ),
+			);
+
+			$refused = false;
+			try {
+				$runner->restore( self::build_archive_stream( $plans ) );
+			} catch ( InvalidArgumentException | RuntimeException $e ) {
+				$refused = true;
+			}
+
+			$this->assertFileDoesNotExist(
+				$outside . '/escaped.txt',
+				'A file must never be written outside the destination root through a symlink.'
+			);
+			$this->assertTrue( $refused, 'Writing a file through an escaping symlink must be refused.' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
+			@unlink( $outside . '/escaped.txt' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
+			@rmdir( $outside );
+		}
+	}
+
+	/**
+	 * A file entry must not clobber an out-of-root file by reusing a symlink's path.
+	 *
+	 * A hostile archive places a symlink pointing at a sensitive out-of-root
+	 * file, then a file entry at the same path. Writing the file must replace
+	 * the symlink in place — never follow it and overwrite the target.
+	 *
+	 * @return void
+	 */
+	public function test_restore_does_not_overwrite_a_file_through_a_symlink(): void {
+		$outside = sys_get_temp_dir() . '/pontifex-symlink-target-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture: a sensitive out-of-root file the hostile archive tries to clobber.
+		file_put_contents( $outside, 'ORIGINAL' );
+
+		try {
+			$runner = $this->make_runner();
+			$plans  = array(
+				self::symlink_plan( 'victim', $outside ),
+				self::file_plan( 'victim', 'OVERWRITTEN' ),
+			);
+
+			$runner->restore( self::build_archive_stream( $plans ) );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion that the out-of-root file is untouched.
+			$this->assertSame( 'ORIGINAL', file_get_contents( $outside ), 'A file write must not follow a symlink out of the root.' );
+			$in_root = $this->fixture_root . '/victim';
+			$this->assertFalse( is_link( $in_root ), 'The conflicting symlink must be replaced by a real file.' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against the in-root file.
+			$this->assertSame( 'OVERWRITTEN', file_get_contents( $in_root ) );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root file.
+			@unlink( $outside );
+		}
+	}
+
+	/**
+	 * Restoring must refuse an absolute entry path.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_an_absolute_entry_path(): void {
+		$runner = $this->make_runner();
+		$plans  = array( self::file_plan( '/etc/pontifex-evil', 'nope' ) );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Restoring must refuse a backslash-style traversal path, even on non-Windows hosts.
+	 *
+	 * FileWriter normalises backslashes before scanning for ".." segments, so
+	 * "..\\..\\evil.txt" is caught on Linux CI just as "../../evil.txt" would be.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_a_backslash_traversal_path(): void {
+		$runner = $this->make_runner();
+		$plans  = array( self::file_plan( '..\\..\\evil.txt', 'nope' ) );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
 	}
 }

@@ -153,6 +153,7 @@ final class FileWriter {
 
 		$relative_path = (string) $header->path();
 		$target_path   = $this->resolve_safe_path( $relative_path );
+		$this->assert_no_symlinked_ancestor( $relative_path );
 		$this->ensure_parent_directory( $target_path );
 
 		if ( $header->is_file() ) {
@@ -213,6 +214,58 @@ final class FileWriter {
 	}
 
 	/**
+	 * Refuse an entry whose path descends through a symlinked directory.
+	 *
+	 * Although resolve_safe_path() blocks ".." and absolute paths textually,
+	 * a hostile archive can still escape the root by placing a symlink as an
+	 * earlier entry and then writing a file *through* it — neither path
+	 * contains ".." nor is absolute (the Zip-Slip-via-symlink class). Walk
+	 * every ancestor component of the entry and refuse if any is a symlink.
+	 * is_link() is true for a symlink whether or not its target exists, so
+	 * both live and dangling escapes are caught. The scanner never descends
+	 * into symlinks (it records them as KIND_SYMLINK entries and does not
+	 * follow them), so a legitimate archive never has a symlinked ancestor —
+	 * only a crafted one does.
+	 *
+	 * @param string $relative_path The entry path, relative to the root.
+	 * @throws InvalidArgumentException If any ancestor component is a symlink.
+	 */
+	private function assert_no_symlinked_ancestor( string $relative_path ): void {
+		$segments = explode( '/', $relative_path );
+		array_pop( $segments );
+
+		$current = $this->destination_root;
+		foreach ( $segments as $segment ) {
+			$current .= '/' . $segment;
+			if ( is_link( $current ) ) {
+				throw new InvalidArgumentException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'FileWriter: entry path "%s" descends through a symlink and is refused.', $relative_path )
+				);
+			}
+		}
+	}
+
+	/**
+	 * Remove a symlink sitting at the target path so a write lands in place.
+	 *
+	 * A hostile archive may place a symlink and then write a file or directory
+	 * at the same path; without this, the file/dir operation would follow the
+	 * link and act outside the root. Unlinking the link (never its target)
+	 * makes the subsequent write land inside the destination tree. A
+	 * legitimate archive never has two entries at one path.
+	 *
+	 * @param string $target_path The absolute path about to be written.
+	 * @return void
+	 */
+	private function remove_conflicting_symlink( string $target_path ): void {
+		if ( is_link( $target_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time removal of a conflicting symlink; WP_Filesystem cannot remove symlinks reliably.
+			@unlink( $target_path );
+		}
+	}
+
+	/**
 	 * Ensure the parent directory of $target_path exists, creating it if necessary.
 	 *
 	 * Created directories get PARENT_DIR_MODE (0755). If the parent
@@ -245,6 +298,7 @@ final class FileWriter {
 	 * @throws RuntimeException If writing, chmod, or touch fails.
 	 */
 	private function write_file( string $target_path, string $payload, int $mode, int $mtime ): void {
+		$this->remove_conflicting_symlink( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
 		$written = @file_put_contents( $target_path, $payload );
 		if ( false === $written ) {
@@ -280,6 +334,7 @@ final class FileWriter {
 	 * @throws RuntimeException If the directory cannot be created or its mode cannot be set.
 	 */
 	private function write_directory( string $target_path, int $mode ): void {
+		$this->remove_conflicting_symlink( $target_path );
 		if ( ! is_dir( $target_path ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
 			if ( ! @mkdir( $target_path, $mode, true ) && ! is_dir( $target_path ) ) {
