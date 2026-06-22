@@ -1,0 +1,27 @@
+name: Feature request or idea
+description: Suggest a capability or change. Please check the roadmap and idea bank first.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim the [roadmap](https://github.com/7Duckie/pontifex/blob/main/docs/roadmap.md) and the [idea bank](https://github.com/7Duckie/pontifex/blob/main/docs/idea-bank.md) — your idea may already be planned, or recorded there with a decision and its reasoning.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Pontifex makes hard or impossible today? Describe the need, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered (optional)
+    validations:
+      required: false
