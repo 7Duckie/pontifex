@@ -6,10 +6,10 @@ arrives in v0.2.0.
 
 **Status: pre-alpha.** Pontifex is in early development. Today it can
 audit an environment (`wp pontifex doctor`), pack a whole site into a
-single `.wpmig` archive (`wp pontifex export`), and restore that
-archive onto a WordPress at the same URL (`wp pontifex import`) — the
-round trip is proven end-to-end by an integration test against a real
-WordPress. Cross-URL migration and rollback arrive in v0.2.0. Do not
+single `.wpmig` archive (`wp pontifex export`), restore that archive
+onto a WordPress at the same URL (`wp pontifex import`), and check an
+archive without restoring it (`wp pontifex verify`) — the round trip
+is proven end-to-end by an integration test against a real WordPress. Cross-URL migration and rollback arrive in v0.2.0. Do not
 rely on Pontifex for production data yet.
 
 ## What Pontifex will be
@@ -42,7 +42,7 @@ is the honest difference, updated at every release.
 | Round trip proven end-to-end | — | ✅ — same-URL, integration-tested |
 | Rollback (pre-import safety archive + undo) | — | ❌ — v0.2.0 |
 | Cross-URL migration (URL rewriting) | ✅ | ❌ — v0.2.0, shipped with its security defences |
-| Archive verification (`wp pontifex verify`) | — | ❌ — v0.2.0 |
+| Archive verification (`wp pontifex verify`) | — | ✅ |
 | Encryption (`--passphrase`) | ✅ | ❌ — not yet; **archives today are written unencrypted** |
 
 **What Pontifex is _not_ yet:** a scheduled-backup system (no cron, no
