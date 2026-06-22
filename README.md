@@ -100,6 +100,10 @@ wp pontifex import /path/to/site.wpmig             # restore (prompts before wri
 its serialised-data defences) arrives in v0.2.0. See the
 [roadmap](docs/roadmap.md) for what ships when.
 
+> **Importing writes an entire site onto yours.** Only import a `.wpmig`
+> you produced or fully trust — see
+> [the import trust boundary](.github/SECURITY.md#the-import-trust-boundary).
+
 ## Roadmap
 
 - **v0.1.0 — Round-trip baseline (same URL).** WP-CLI `export` and
