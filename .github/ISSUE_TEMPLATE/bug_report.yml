@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a defect in Pontifex — export, import, the round trip, the archive format, or the CLI.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        **Please do not paste secrets, credentials, or the contents of a `.wpmig` archive.** A Pontifex log never records them, and neither should a bug report — a `.wpmig` contains your entire database.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: A clear description of the bug, including the exact error message if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact `wp pontifex …` command(s) you ran. Redact any paths or values you would rather not share.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+  - type: input
+    id: pontifex-version
+    attributes:
+      label: Pontifex version
+      description: The release tag you installed, or the `Version:` line from the plugin header (e.g. v0.1.0).
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: wordpress-version
+    attributes:
+      label: WordPress version
+      placeholder: "6.5"
+    validations:
+      required: true
+  - type: input
+    id: php-version
+    attributes:
+      label: PHP version
+      placeholder: "8.2"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log lines (optional)
+      description: Lines from `wp-content/pontifex/logs/pontifex.log` around the failure — with any secrets removed.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (optional)
+      description: Hosting type, operating system, MySQL/MariaDB version, or anything else unusual about the setup.
+    validations:
+      required: false
