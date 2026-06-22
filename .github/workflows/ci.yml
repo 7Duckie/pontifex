@@ -104,3 +104,60 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  integration:
+    name: Integration suite (PHP ${{ matrix.php_version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php_version: ['8.2', '8.3', '8.4', '8.5']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up PHP ${{ matrix.php_version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php_version }}
+          extensions: mbstring, openssl, sodium, zlib, json, pcre
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v5
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-${{ matrix.php_version }}-
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The integration suite needs a real WordPress and database. wp-env
+      # provides both (the same setup used locally), so CI reuses it rather
+      # than reconstructing a WordPress install and a MySQL service by hand.
+      - name: Pin the wp-env PHP version to the matrix entry
+        run: |
+          echo '{ "phpVersion": "${{ matrix.php_version }}" }' > .wp-env.override.json
+
+      - name: Start wp-env (real WordPress + a throwaway test database)
+        run: npx --yes @wordpress/env start
+
+      - name: Confirm the container honoured PHP ${{ matrix.php_version }}
+        run: |
+          npx --yes @wordpress/env run tests-cli php -v
+          actual="$(npx --yes @wordpress/env run tests-cli php -v 2>/dev/null | grep -oE 'PHP [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')"
+          echo "Detected container PHP: ${actual} (expected ${{ matrix.php_version }})"
+          [ "${actual}" = "${{ matrix.php_version }}" ] || { echo "::error::wp-env did not honour PHP ${{ matrix.php_version }} (got ${actual})"; exit 1; }
+
+      - name: Run the integration suite against real WordPress
+        run: npx --yes @wordpress/env run tests-cli --env-cwd=wp-content/plugins/pontifex composer test:integration
