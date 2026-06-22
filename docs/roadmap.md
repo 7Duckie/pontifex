@@ -60,8 +60,8 @@ the reasons recorded in [ADR 0004](./adr/0004-same-url-import-scope.md).
   order on read.
 - Round-trip tests proving write-then-read reconstructs the source
   byte-perfectly.
-- WordPress integration tests across PHP 8.1–8.5 and at least two
-  WordPress versions, running in CI.
+- WordPress integration tests running in CI across PHP 8.2–8.5 (the
+  supported floor through current), against a current WordPress.
 - **Minimum diagnostic logger** (idea-bank Idea 003, minimum slice):
   a hand-rolled PSR-3 file logger writing to
   `wp-content/pontifex/logs/`, so import failures — the most dangerous
