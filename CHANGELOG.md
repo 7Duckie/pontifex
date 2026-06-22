@@ -14,9 +14,19 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Work toward v0.2.0 (cross-URL migration with its serialised-data
-defences, encryption, rollback, verify) begins after this tag. See
-[`docs/roadmap.md`](docs/roadmap.md).
+The first v0.2.0 slice. The remaining v0.2.0 work — cross-URL migration
+with its serialised-data defences, encryption, and rollback — follows.
+See [`docs/roadmap.md`](docs/roadmap.md).
+
+### Added
+
+- **`wp pontifex verify <archive>` command.** Opens a `.wpmig` archive,
+  walks every entry and checks every SHA-256 hash, writing nothing, and
+  exits 0 when the archive is sound or non-zero when it is broken or
+  refused — so a backup can be checked against cold storage and gated in
+  scripts or cron. `--list` prints the archive's contents as a table or
+  `--format=json`. The same read-and-verify engine that already backs
+  `import --dry-run`, exposed as a command (idea-bank Idea 010).
 
 ## [0.1.0] — 2026-06-22 — the round-trip baseline (same URL)
 
