@@ -39,6 +39,10 @@ Thumbs.db
 .env
 .env.local
 
+# wp-env per-checkout PHP/version override (created locally and in CI; never
+# committed — the tracked .wp-env.json is the shared baseline)
+/.wp-env.override.json
+
 # Local working state (Claude session context)
 STATE.md
 AUDIT-FINDINGS.md
