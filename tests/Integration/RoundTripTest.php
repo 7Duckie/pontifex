@@ -223,6 +223,78 @@ final class RoundTripTest extends TestCase {
 		}
 	}
 
+	/**
+	 * Awkward filenames and empty files must round-trip byte-for-byte.
+	 *
+	 * Spaces, unicode path segments, deep nesting, a zero-byte file and a
+	 * dotfile each survive pack-then-restore unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_round_trip_preserves_awkward_filenames_and_empty_files(): void {
+		global $wpdb;
+
+		$files = array(
+			'a file with spaces.txt'       => 'spaces are fine',
+			'café/naïve/日本語.txt'           => "unicode path and content: 日本語 ☕\n",
+			'deep/a/b/c/d/e/f/leaf.txt'    => 'deeply nested',
+			'zero-byte.txt'                => '',
+			'wp-content/uploads/.htaccess' => "deny from all\n",
+		);
+
+		$plans = array();
+		foreach ( $files as $path => $contents ) {
+			$plans[] = self::file_plan( $path, $contents );
+		}
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->restore_root ),
+			new DatabaseWriter( new WpdbAdapter( $wpdb ) )
+		);
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		foreach ( $files as $path => $contents ) {
+			$restored = $this->restore_root . '/' . $path;
+			$this->assertFileExists( $restored, sprintf( 'Restored file missing: %s', $path ) );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading a restored fixture file for assertion.
+			$this->assertSame( $contents, file_get_contents( $restored ), sprintf( 'Restored content differs: %s', $path ) );
+		}
+	}
+
+	/**
+	 * A table with no rows must round-trip and come back empty.
+	 *
+	 * @return void
+	 */
+	public function test_round_trip_restores_a_table_with_no_rows(): void {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'pontifex_empty';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: clear any leftover.
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: create an empty table.
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i ( id INT PRIMARY KEY )', $table ) );
+
+		try {
+			$adapter = new WpdbAdapter( $wpdb );
+			$sql     = $adapter->dump_table_schema( $table ) . $adapter->dump_table_rows( $table, 0, 100 );
+			$plans   = array( self::db_chunk_plan( $table, self::count_statements( $sql ), $sql ) );
+
+			$runner = new RestoreRunner(
+				new EntryReader( CodecRegistry::with_defaults() ),
+				new FileWriter( $this->restore_root ),
+				new DatabaseWriter( new WpdbAdapter( $wpdb ) )
+			);
+			$runner->restore( self::build_archive_stream( $plans ) );
+
+			$this->assertSame( 0, $adapter->row_count( $table ), 'An empty table must round-trip with zero rows.' );
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup.
+			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
+		}
+	}
+
 
 	// -------------------------------------------------------------------------
 	// Fixture and archive helpers.
