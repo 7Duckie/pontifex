@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Pontifex
  * Plugin URI:        https://github.com/7Duckie/pontifex
- * Description:       A free, open-source WordPress migration plugin with a documented archive format and first-class rollback.
+ * Description:       A free, open-source WordPress migration and backup plugin with a documented archive format.
  * Version:           0.0.6
  * Requires at least: 6.5
  * Requires PHP:      8.2
