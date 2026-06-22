@@ -649,4 +649,113 @@ final class RestoreRunnerTest extends TestCase {
 		$this->assertSame( array(), array_values( $entries ), 'A refused archive must not write any files.' );
 		$this->assertSame( array(), $db->executed_statements(), 'A refused archive must not execute any SQL.' );
 	}
+
+	/**
+	 * A file must never escape the destination root through a restored symlink.
+	 *
+	 * A hostile archive places a symlink pointing outside the root, then a file
+	 * whose path traverses that symlink. If the writer follows the link it
+	 * writes outside the root — the Zip-Slip-via-symlink class (cf. the Bower
+	 * archive-extraction CVE). The restore must refuse, and nothing may appear
+	 * at the symlink's target.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_to_write_through_an_escaping_symlink(): void {
+		$outside = sys_get_temp_dir() . '/pontifex-escape-target-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture: an out-of-root directory the hostile archive tries to write into.
+		mkdir( $outside, 0o755, true );
+
+		try {
+			$runner = $this->make_runner();
+			$plans  = array(
+				self::symlink_plan( 'breakout', $outside ),
+				self::file_plan( 'breakout/escaped.txt', 'PWNED' ),
+			);
+
+			$refused = false;
+			try {
+				$runner->restore( self::build_archive_stream( $plans ) );
+			} catch ( InvalidArgumentException | RuntimeException $e ) {
+				$refused = true;
+			}
+
+			$this->assertFileDoesNotExist(
+				$outside . '/escaped.txt',
+				'A file must never be written outside the destination root through a symlink.'
+			);
+			$this->assertTrue( $refused, 'Writing a file through an escaping symlink must be refused.' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
+			@unlink( $outside . '/escaped.txt' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
+			@rmdir( $outside );
+		}
+	}
+
+	/**
+	 * A file entry must not clobber an out-of-root file by reusing a symlink's path.
+	 *
+	 * A hostile archive places a symlink pointing at a sensitive out-of-root
+	 * file, then a file entry at the same path. Writing the file must replace
+	 * the symlink in place — never follow it and overwrite the target.
+	 *
+	 * @return void
+	 */
+	public function test_restore_does_not_overwrite_a_file_through_a_symlink(): void {
+		$outside = sys_get_temp_dir() . '/pontifex-symlink-target-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture: a sensitive out-of-root file the hostile archive tries to clobber.
+		file_put_contents( $outside, 'ORIGINAL' );
+
+		try {
+			$runner = $this->make_runner();
+			$plans  = array(
+				self::symlink_plan( 'victim', $outside ),
+				self::file_plan( 'victim', 'OVERWRITTEN' ),
+			);
+
+			$runner->restore( self::build_archive_stream( $plans ) );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion that the out-of-root file is untouched.
+			$this->assertSame( 'ORIGINAL', file_get_contents( $outside ), 'A file write must not follow a symlink out of the root.' );
+			$in_root = $this->fixture_root . '/victim';
+			$this->assertFalse( is_link( $in_root ), 'The conflicting symlink must be replaced by a real file.' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against the in-root file.
+			$this->assertSame( 'OVERWRITTEN', file_get_contents( $in_root ) );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root file.
+			@unlink( $outside );
+		}
+	}
+
+	/**
+	 * Restoring must refuse an absolute entry path.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_an_absolute_entry_path(): void {
+		$runner = $this->make_runner();
+		$plans  = array( self::file_plan( '/etc/pontifex-evil', 'nope' ) );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Restoring must refuse a backslash-style traversal path, even on non-Windows hosts.
+	 *
+	 * FileWriter normalises backslashes before scanning for ".." segments, so
+	 * "..\\..\\evil.txt" is caught on Linux CI just as "../../evil.txt" would be.
+	 *
+	 * @return void
+	 */
+	public function test_restore_rejects_a_backslash_traversal_path(): void {
+		$runner = $this->make_runner();
+		$plans  = array( self::file_plan( '..\\..\\evil.txt', 'nope' ) );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+	}
 }
