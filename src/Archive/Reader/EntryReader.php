@@ -108,13 +108,14 @@ final class EntryReader {
 	 * unspecified. The stream is owned by the caller; EntryReader
 	 * does not close it.
 	 *
-	 * @param resource      $source         A seekable, readable stream containing the archive.
-	 * @param ManifestEntry $manifest_entry The manifest entry pointing at the on-disk record to read.
+	 * @param resource      $source            A seekable, readable stream containing the archive.
+	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record to read.
+	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce, or null for no limit.
 	 * @return EntryReadResult The parsed header and decoded payload.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, or the codec is not registered.
+	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, or the decoded payload exceeds $max_decoded_bytes.
 	 */
-	public function read_entry( $source, ManifestEntry $manifest_entry ): EntryReadResult {
+	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = null ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
 		}
@@ -188,7 +189,7 @@ final class EntryReader {
 
 		// Decode the payload through the codec.
 		$encoded_payload = substr( $record_bytes, $payload_start, $payload_length );
-		$decoded_payload = $this->decode_payload( $codec_id, $encoded_payload );
+		$decoded_payload = $this->decode_payload( $codec_id, $encoded_payload, $max_decoded_bytes );
 
 		return new EntryReadResult( $header, $decoded_payload );
 	}
@@ -228,12 +229,13 @@ final class EntryReader {
 	 * reads the decoded bytes back. Mirrors EntryWriter's
 	 * encoding-via-temp-buffer pattern in reverse.
 	 *
-	 * @param int    $codec_id        The codec id to use.
-	 * @param string $encoded_payload The bytes to decode.
+	 * @param int      $codec_id          The codec id to use.
+	 * @param string   $encoded_payload   The bytes to decode.
+	 * @param int|null $max_decoded_bytes Maximum decoded bytes to allow, or null for no limit.
 	 * @return string The decoded bytes.
 	 * @throws RuntimeException If a stream cannot be opened or the codec fails.
 	 */
-	private function decode_payload( int $codec_id, string $encoded_payload ): string {
+	private function decode_payload( int $codec_id, string $encoded_payload, ?int $max_decoded_bytes ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
 		$input = fopen( 'php://temp', 'r+b' );
 		if ( false === $input ) {
@@ -253,7 +255,7 @@ final class EntryReader {
 		}
 
 		try {
-			$this->codec_registry->get( $codec_id )->decode( $input, $output );
+			$this->codec_registry->get( $codec_id )->decode( $input, $output, $max_decoded_bytes );
 		} catch ( CodecException $e ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of php://temp buffer; not a filesystem path.
 			fclose( $input );
