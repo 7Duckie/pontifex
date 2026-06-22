@@ -14,9 +14,9 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-The first v0.2.0 slice. The remaining v0.2.0 work — cross-URL migration
-with its serialised-data defences, encryption, and rollback — follows.
-See [`docs/roadmap.md`](docs/roadmap.md).
+Early v0.2.0 work. The remaining v0.2.0 work — cross-URL migration with
+its serialised-data defences, and encryption — follows. See
+[`docs/roadmap.md`](docs/roadmap.md).
 
 ### Added
 
@@ -27,6 +27,13 @@ See [`docs/roadmap.md`](docs/roadmap.md).
   scripts or cron. `--list` prints the archive's contents as a table or
   `--format=json`. The same read-and-verify engine that already backs
   `import --dry-run`, exposed as a command (idea-bank Idea 010).
+- **`wp pontifex rollback` and the pre-import safety-archive machinery**
+  (idea-bank Idea 009, [ADR 0005](docs/adr/0005-rollback-safety-archive-policy.md)).
+  `wp pontifex rollback` restores the most recent safety archive — the undo for
+  a destructive import — with `--yes` and `--dry-run`. Safety archives live in
+  `wp-content/pontifex/rollback/` (owner-only), named by UTC timestamp, with the
+  most recent retained. Wiring `import` to take a safety archive automatically
+  before it restores lands next.
 
 ## [0.1.0] — 2026-06-22 — the round-trip baseline (same URL)
 
