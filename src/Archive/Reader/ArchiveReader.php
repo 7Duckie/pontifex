@@ -11,7 +11,9 @@ namespace Pontifex\Archive\Reader;
 
 use InvalidArgumentException;
 use RuntimeException;
+use Pontifex\Archive\Crypto\Ed25519Verifier;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ArchiveSignature;
 use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\Footer;
 use Pontifex\Archive\Format\Header;
@@ -51,6 +53,13 @@ use Pontifex\Archive\Integrity\Sha256;
  *    (source-site facts, including the source URL used by cross-URL
  *    migration), read and cached on first access; bounds-checked and
  *    hash-verified, so a corrupt block is refused.
+ *  - {@see ArchiveReader::signature()} — the parsed signature block, or
+ *    null when the archive is unsigned (header signed flag clear). Read
+ *    eagerly at construction for a signed archive, so the footer is then
+ *    located 64 bytes before it rather than at end of file.
+ *  - {@see ArchiveReader::verify_signature()} — verify the Ed25519
+ *    signature against a trusted public key; false means unsigned, wrong
+ *    key, or tampered.
  *
  * Internal choices (implementation details; may change without
  * breaking the public API):
@@ -74,6 +83,16 @@ use Pontifex\Archive\Integrity\Sha256;
 final class ArchiveReader {
 
 	/**
+	 * Bytes read per chunk when streaming the archive to recompute the signed digest.
+	 *
+	 * Sized well under the reader's memory budget; a larger value only reduces the
+	 * number of read calls.
+	 *
+	 * @var int
+	 */
+	private const SIGNED_DIGEST_CHUNK_SIZE = 1048576;
+
+	/**
 	 * The readable, seekable stream the archive is read from.
 	 *
 	 * @var resource
@@ -93,6 +112,13 @@ final class ArchiveReader {
 	 * @var Footer
 	 */
 	private Footer $footer;
+
+	/**
+	 * The parsed signature block, populated eagerly when the header's signed flag is set; null otherwise.
+	 *
+	 * @var ArchiveSignature|null
+	 */
+	private ?ArchiveSignature $signature = null;
 
 	/**
 	 * The parsed ArchiveManifest, populated lazily on first access via manifest().
@@ -142,6 +168,11 @@ final class ArchiveReader {
 
 		$this->source = $source;
 		$this->header = $this->read_header();
+		// A signed archive ends with a 100-byte signature block; read it first so
+		// the footer is then located 64 bytes before it rather than at end of file.
+		if ( $this->header->is_signed() ) {
+			$this->signature = $this->read_signature();
+		}
 		$this->footer = $this->read_footer();
 	}
 
@@ -238,6 +269,45 @@ final class ArchiveReader {
 	}
 
 	/**
+	 * Return the parsed signature block, or null if the archive is unsigned.
+	 *
+	 * Populated eagerly at construction when the header's signed flag is set. The
+	 * key id it carries is a hint — it is not itself covered by the signature — so
+	 * the authoritative check is {@see self::verify_signature()} against a public
+	 * key the operator trusts.
+	 *
+	 * @return ArchiveSignature|null The signature block, or null when unsigned.
+	 */
+	public function signature(): ?ArchiveSignature {
+		return $this->signature;
+	}
+
+	/**
+	 * Verify the archive's Ed25519 signature against a trusted public key.
+	 *
+	 * Recomputes the SHA-256 over every byte through the footer (streamed, so
+	 * memory stays bounded) and checks the stored signature against it and the
+	 * supplied public key. Returns false for an unsigned archive or a signature
+	 * that does not verify (wrong key, or any byte altered), so a caller can treat
+	 * false as "untrusted or tampered". The stored key id is deliberately not
+	 * consulted: the operator's trusted key is the authority, not a field that
+	 * sits outside the signed range.
+	 *
+	 * @param string               $public_key The trusted Ed25519 public key (SigningKeypair::PUBLIC_KEY_SIZE bytes).
+	 * @param Ed25519Verifier|null $verifier   Optional verifier; a fresh Ed25519Verifier is used when null.
+	 * @return bool True if the archive is signed and the signature verifies against $public_key.
+	 * @throws \Pontifex\Archive\Crypto\SignatureException If ext-sodium is unavailable or the public key is the wrong length.
+	 * @throws RuntimeException If the stream cannot be re-read to recompute the digest.
+	 */
+	public function verify_signature( string $public_key, ?Ed25519Verifier $verifier = null ): bool {
+		if ( null === $this->signature ) {
+			return false;
+		}
+		$verifier = $verifier ?? new Ed25519Verifier();
+		return $verifier->verify( $this->signed_digest(), $this->signature->signature(), $public_key );
+	}
+
+	/**
 	 * Read and parse the Header from offset 0 of the source stream.
 	 *
 	 * @return Header The parsed Header.
@@ -285,19 +355,23 @@ final class ArchiveReader {
 		if ( false === $end ) {
 			throw new RuntimeException( 'ArchiveReader: could not determine stream length.' );
 		}
-		if ( $end < Header::SIZE + Footer::SIZE ) {
+		$tail = $this->signature_tail_size();
+		if ( $end < Header::SIZE + Footer::SIZE + $tail ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: stream length %d is shorter than the minimum header (%d) + footer (%d) size.',
+					'ArchiveReader: stream length %d is shorter than the minimum header (%d) + footer (%d) + signature (%d) size.',
 					(int) $end,
 					(int) Header::SIZE,
-					(int) Footer::SIZE
+					(int) Footer::SIZE,
+					(int) $tail
 				)
 			);
 		}
 
+		// The footer sits at the very end of an unsigned archive, or immediately
+		// before the trailing signature block of a signed one.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
-		if ( -1 === fseek( $this->source, $end - Footer::SIZE ) ) {
+		if ( -1 === fseek( $this->source, $end - $tail - Footer::SIZE ) ) {
 			throw new RuntimeException( 'ArchiveReader: could not seek to footer position.' );
 		}
 
@@ -347,16 +421,18 @@ final class ArchiveReader {
 			throw new RuntimeException( 'ArchiveReader: could not determine stream length for manifest bounds check.' );
 		}
 
-		// The manifest must sit entirely between the Header and the Footer.
+		// The manifest must sit entirely between the Header and the Footer (which is
+		// itself before the trailing signature block, when the archive is signed).
 		// Anything else means the Footer's recorded offset/length is inconsistent with the stream.
-		if ( $offset < Header::SIZE || $offset + $length > $stream_length - Footer::SIZE ) {
+		$footer_start = $stream_length - $this->signature_tail_size() - Footer::SIZE;
+		if ( $offset < Header::SIZE || $offset + $length > $footer_start ) {
 			throw new RuntimeException(
 				sprintf(
 					'ArchiveReader: manifest at offset %d length %d does not fit between header (%d) and footer (start at %d).',
 					(int) $offset,
 					(int) $length,
 					(int) Header::SIZE,
-					(int) ( $stream_length - Footer::SIZE )
+					(int) $footer_start
 				)
 			);
 		}
@@ -455,5 +531,109 @@ final class ArchiveReader {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
 			throw new RuntimeException( 'ArchiveReader: archive provenance block is malformed.', 0, $e );
 		}
+	}
+
+	/**
+	 * Read and parse the 100-byte signature block from the end of the source stream.
+	 *
+	 * Called only when the header's signed flag is set. The block is the last
+	 * ArchiveSignature::SIZE bytes of the stream.
+	 *
+	 * @return ArchiveSignature The parsed signature block.
+	 * @throws RuntimeException If the stream is too short, a seek or read fails, or the block is malformed.
+	 */
+	private function read_signature(): ArchiveSignature {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to read the signature block.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$end = ftell( $this->source );
+		if ( false === $end ) {
+			throw new RuntimeException( 'ArchiveReader: could not determine stream length to read the signature block.' );
+		}
+		if ( $end < Header::SIZE + Footer::SIZE + ArchiveSignature::SIZE ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: stream length %d is shorter than the minimum for a signed archive (header %d + footer %d + signature %d).',
+					(int) $end,
+					(int) Header::SIZE,
+					(int) Footer::SIZE,
+					(int) ArchiveSignature::SIZE
+				)
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, $end - ArchiveSignature::SIZE ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to the signature block position.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$bytes = fread( $this->source, ArchiveSignature::SIZE );
+		if ( false === $bytes || strlen( $bytes ) !== ArchiveSignature::SIZE ) {
+			throw new RuntimeException(
+				sprintf( 'ArchiveReader: could not read %d signature bytes; stream may be truncated.', (int) ArchiveSignature::SIZE )
+			);
+		}
+
+		try {
+			return ArchiveSignature::from_bytes( $bytes );
+		} catch ( InvalidArgumentException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+			throw new RuntimeException( 'ArchiveReader: archive signature block is malformed.', 0, $e );
+		}
+	}
+
+	/**
+	 * Return the byte length of the trailing signature block.
+	 *
+	 * ArchiveSignature::SIZE when the archive is signed, 0 otherwise. Used to place
+	 * the footer and bound the manifest.
+	 *
+	 * @return int The trailing signature block size in bytes.
+	 */
+	private function signature_tail_size(): int {
+		return null !== $this->signature ? ArchiveSignature::SIZE : 0;
+	}
+
+	/**
+	 * Stream the signed byte range (offset 0 through the footer) and return its SHA-256.
+	 *
+	 * Reads in bounded chunks so memory stays within budget regardless of archive
+	 * size. The signed range excludes the trailing signature block itself.
+	 *
+	 * @return string The raw 32-byte SHA-256 digest.
+	 * @throws RuntimeException If a seek or read fails.
+	 */
+	private function signed_digest(): string {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to compute the signed digest.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$end = ftell( $this->source );
+		if ( false === $end ) {
+			throw new RuntimeException( 'ArchiveReader: could not determine stream length to compute the signed digest.' );
+		}
+		$signed_length = $end - $this->signature_tail_size();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, 0 ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to offset 0 to compute the signed digest.' );
+		}
+		$context   = hash_init( 'sha256' );
+		$remaining = $signed_length;
+		while ( $remaining > 0 ) {
+			$want = (int) min( self::SIGNED_DIGEST_CHUNK_SIZE, $remaining );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+			$chunk = fread( $this->source, $want );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new RuntimeException( 'ArchiveReader: could not read the archive to compute the signed digest; stream may be truncated.' );
+			}
+			hash_update( $context, $chunk );
+			$remaining -= strlen( $chunk );
+		}
+
+		return hash_final( $context, true );
 	}
 }
