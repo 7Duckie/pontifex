@@ -195,4 +195,24 @@ interface WordPressContext {
 	 * @return void
 	 */
 	public function save_option( string $name, mixed $value, bool $autoload = false ): void;
+
+	/**
+	 * The class allowlist for unserialising during a cross-URL migration.
+	 *
+	 * Resolves the `pontifex_serialized_classes` filter (threat-model §1,
+	 * ADR 0006) into the list of class names that
+	 * {@see \Pontifex\Migrate\SerialisedReplacer} may decode. The default is
+	 * empty — no classes are allowed, so every serialised object decodes to a
+	 * harmless incomplete class — and a site owner opts specific trusted
+	 * classes back in through the filter.
+	 *
+	 * The result is always a list of class-name strings. A filter that returns
+	 * a non-array (for example `true`, meaning "allow everything") or
+	 * non-string entries is coerced away, so a misbehaving filter can never
+	 * widen the unserialise allowlist to the gadget-chain surface this guard
+	 * exists to close.
+	 *
+	 * @return string[] Class names permitted when unserialising; empty allows none.
+	 */
+	public function serialised_classes_allowlist(): array;
 }

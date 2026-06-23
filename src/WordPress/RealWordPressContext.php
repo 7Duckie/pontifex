@@ -181,4 +181,43 @@ final class RealWordPressContext implements WordPressContext {
 	public function save_option( string $name, mixed $value, bool $autoload = false ): void {
 		update_option( $name, $value, $autoload );
 	}
+
+	/**
+	 * Resolve the cross-URL migration class allowlist from the filter.
+	 *
+	 * Reads `apply_filters( 'pontifex_serialized_classes', array() )` and keeps
+	 * only non-empty string entries. This is the one method here that is not a
+	 * pure passthrough: it deliberately coerces the filter's output, because
+	 * the value guards a security boundary — the unserialise allowlist in
+	 * {@see \Pontifex\Migrate\SerialisedReplacer} — and must never be widened
+	 * to "all classes" or polluted with non-class junk by a misbehaving filter.
+	 *
+	 * @return string[] Class names permitted when unserialising; empty allows none.
+	 */
+	public function serialised_classes_allowlist(): array {
+		/**
+		 * Filters the classes Pontifex permits when unserialising during a cross-URL migration.
+		 *
+		 * Return an array of fully-qualified class names to opt them into the
+		 * allowlist. The default — an empty array — allows no classes, so every
+		 * serialised object decodes to a harmless incomplete class.
+		 *
+		 * @since 0.3.0
+		 *
+		 * @param string[] $classes Class names to permit when unserialising. Default empty.
+		 */
+		$allowed = apply_filters( 'pontifex_serialized_classes', array() );
+
+		if ( ! is_array( $allowed ) ) {
+			return array();
+		}
+
+		$classes = array();
+		foreach ( $allowed as $class ) {
+			if ( is_string( $class ) && '' !== $class ) {
+				$classes[] = $class;
+			}
+		}
+		return array_values( $classes );
+	}
 }

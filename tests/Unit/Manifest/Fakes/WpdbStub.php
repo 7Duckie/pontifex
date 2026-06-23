@@ -110,6 +110,20 @@ if ( ! class_exists( 'wpdb' ) ) {
 		public function _real_escape( string $value ): string {
 			return str_replace( "'", "''", $value );
 		}
+
+		/**
+		 * Stub for the real wpdb::update(). Replaced via PHPUnit mock in tests.
+		 *
+		 * @param string               $table        Table name (unused in the stub).
+		 * @param array<string, mixed> $data         Column => value pairs (unused in the stub).
+		 * @param array<string, mixed> $where        Column => value WHERE conditions (unused in the stub).
+		 * @param mixed                $format       Value formats (unused in the stub).
+		 * @param mixed                $where_format WHERE formats (unused in the stub).
+		 * @return int|false Rows affected, or false on error.
+		 */
+		public function update( string $table, array $data, array $where, $format = null, $where_format = null ) {
+			return 0;
+		}
 	}
 }
 

@@ -140,4 +140,22 @@ final class RealWordPressContextTest extends TestCase {
 		$this->assertInstanceOf( ReflectionNamedType::class, $return_type );
 		$this->assertSame( 'wpdb', $return_type->getName() );
 	}
+
+	/**
+	 * The serialised_classes_allowlist method must declare array as its return type.
+	 *
+	 * The allowlist is always a list of class-name strings, never a bool or
+	 * other type, so the migration replacer can be constructed from it
+	 * directly and a misbehaving filter cannot widen it to "all classes". An
+	 * empty list means no classes are permitted.
+	 *
+	 * @return void
+	 */
+	public function test_serialised_classes_allowlist_returns_array(): void {
+		$method      = new ReflectionMethod( RealWordPressContext::class, 'serialised_classes_allowlist' );
+		$return_type = $method->getReturnType();
+
+		$this->assertInstanceOf( ReflectionNamedType::class, $return_type );
+		$this->assertSame( 'array', $return_type->getName() );
+	}
 }
