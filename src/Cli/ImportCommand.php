@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
@@ -71,6 +72,11 @@ use Pontifex\WordPress\WordPressContext;
  * : Skip the automatic pre-import safety archive. Faster and uses less
  *   disk, but the import cannot be undone with `wp pontifex rollback`.
  *
+ * [--passphrase-stdin]
+ * : Read the decryption passphrase as one line from STDIN instead of
+ *   prompting. Needed for an encrypted archive in a non-interactive run;
+ *   ignored for an unencrypted archive.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
@@ -78,6 +84,7 @@ use Pontifex\WordPress\WordPressContext;
  *     wp pontifex import /tmp/site.wpmig --dry-run
  *     wp pontifex import /tmp/site.wpmig --yes
  *     wp pontifex import /tmp/site.wpmig --no-rollback-archive
+ *     pass show backup | wp pontifex import /tmp/site.wpmig --passphrase-stdin
  *
  * @when after_wp_load
  */
@@ -172,6 +179,16 @@ final class ImportCommand {
 	private ?UrlMigratorInterface $url_migrator;
 
 	/**
+	 * The source of the operator's decryption passphrase.
+	 *
+	 * Injected so tests can supply a fixed passphrase without a terminal or a
+	 * piped STDIN. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
+	 *
+	 * @var PassphraseSource
+	 */
+	private PassphraseSource $passphrase_source;
+
+	/**
 	 * Construct an ImportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
@@ -185,6 +202,7 @@ final class ImportCommand {
 	 * @param ProgressReporter|null        $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a SafetyArchiver rooted at WP_CONTENT_DIR is built.
 	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and --url is given, a UrlMigrator over the real $wpdb is built.
+	 * @param PassphraseSource|null        $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -193,7 +211,8 @@ final class ImportCommand {
 		?LoggerInterface $logger = null,
 		?ProgressReporter $progress = null,
 		?SafetyArchiverInterface $safety_archiver = null,
-		?UrlMigratorInterface $url_migrator = null
+		?UrlMigratorInterface $url_migrator = null,
+		?PassphraseSource $passphrase_source = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
@@ -202,6 +221,7 @@ final class ImportCommand {
 		$this->progress          = $progress ?? new WpCliProgressBar();
 		$this->safety_archiver   = $safety_archiver;
 		$this->url_migrator      = $url_migrator;
+		$this->passphrase_source = $passphrase_source ?? new CliPassphraseSource();
 	}
 
 	/**
@@ -221,11 +241,12 @@ final class ImportCommand {
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
 		// 1. Read and validate the archive path and flags.
-		$archive_path = $this->require_archive_path( $positional_args );
-		$dry_run      = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
-		$skip_confirm = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
-		$no_rollback  = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
-		$target_url   = $this->require_target_url( $associative_args );
+		$archive_path     = $this->require_archive_path( $positional_args );
+		$dry_run          = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
+		$skip_confirm     = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
+		$no_rollback      = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
+		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
+		$target_url       = $this->require_target_url( $associative_args );
 
 		$this->validate_archive_path( $archive_path );
 
@@ -240,9 +261,10 @@ final class ImportCommand {
 		// 4. Open the source archive for reading.
 		$source = $this->open_source( $archive_path );
 
-		// 5. Wire up the restore engine, and the URL migrator when --url was given.
-		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
-		$url_migrator   = '' !== $target_url ? ( $this->url_migrator ?? $this->build_default_url_migrator() ) : null;
+		// 5. Wire up the URL migrator when --url was given. The restore engine is wired
+		// inside the try below, where opening the archive (to detect encryption and
+		// collect the passphrase) is covered by the failure logging.
+		$url_migrator = '' !== $target_url ? ( $this->url_migrator ?? $this->build_default_url_migrator() ) : null;
 
 		// Import learns its entry total from the first callback (unlike export,
 		// which counts entry plans up front), so the bar starts on entry one.
@@ -256,6 +278,10 @@ final class ImportCommand {
 		};
 
 		try {
+			// Wire the restore engine. For an encrypted archive this reads the salt and
+			// collects the passphrase, so it sits inside the try where a failure is logged.
+			$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin );
+
 			// With --url, read the source URL from the archive's provenance and
 			// announce the migration before anything is written. Reading the
 			// provenance also validates the archive up front.
@@ -423,15 +449,31 @@ final class ImportCommand {
 	/**
 	 * Build a RestoreRunner from the default collaborators.
 	 *
-	 * Used when no RestoreRunner was injected. Wires an EntryReader (with
-	 * the v0.1.0 default codecs), a FileWriter rooted at the WordPress
-	 * installation (ABSPATH), and a DatabaseWriter backed by a WpdbAdapter
-	 * wrapping the real $wpdb.
+	 * Used when no RestoreRunner was injected. Reads the archive header to see
+	 * whether it is encrypted; if so, collects the passphrase and builds a keyed
+	 * EntryReader (the key derived from the footer salt), otherwise a plain one.
+	 * Then wires a FileWriter rooted at the WordPress installation (ABSPATH) and
+	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb.
 	 *
+	 * @param resource $source           The open archive stream, read for its header and footer.
+	 * @param bool     $passphrase_stdin True to read the passphrase from STDIN rather than prompt.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner(): RestoreRunner {
-		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
+	private function build_default_restore_runner( $source, bool $passphrase_stdin ): RestoreRunner {
+		$archive_reader = new ArchiveReader( $source );
+		$passphrase     = $archive_reader->header()->is_encrypted()
+			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
+			: null;
+		$entry_reader   = Encryption::entry_reader( $archive_reader, CodecRegistry::with_defaults(), $passphrase );
+		if ( null !== $passphrase ) {
+			sodium_memzero( $passphrase );
+		}
+
+		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
+		// reader starts from a known position.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
+		rewind( $source );
+
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );

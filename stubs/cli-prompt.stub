@@ -1,0 +1,21 @@
+<?php
+/**
+ * PHPStan stub for php-cli-tools' cli\prompt().
+ *
+ * Pontifex reads a hidden passphrase via php-cli-tools' \cli\prompt() at run
+ * time (php-cli-tools ships as a WP-CLI dependency), but the main
+ * php-stubs/wp-cli-stubs file does not include the cli\ namespace, so PHPStan
+ * cannot see the function. This describes its signature. Read by PHPStan only;
+ * never autoloaded or executed.
+ */
+
+namespace cli;
+
+/**
+ * @param string       $question
+ * @param string|false $default
+ * @param string       $marker
+ * @param bool         $hide
+ * @return string
+ */
+function prompt( $question, $default = false, $marker = ': ', $hide = false ) {}

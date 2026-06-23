@@ -62,12 +62,23 @@ use Pontifex\WordPress\WordPressContext;
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
  *
+ * [--encrypt]
+ * : Encrypt the archive. Prompts for a passphrase (entered twice, not echoed)
+ *   and derives an AES-256-GCM key with Argon2id. There is no passphrase
+ *   recovery: lose it and the archive is unreadable.
+ *
+ * [--passphrase-stdin]
+ * : Encrypt the archive, reading the passphrase as one line from STDIN (for
+ *   scripts and pipes). Implies --encrypt.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex export --output=/tmp/site.wpmig
  *     wp pontifex export --output=/tmp/site.wpmig --yes
  *     wp pontifex export --output=/tmp/site.wpmig --exclude-file=/tmp/extras.txt
  *     wp pontifex export --output=/tmp/site.wpmig --no-defaults --exclude-file=/tmp/only.txt
+ *     wp pontifex export --output=/tmp/site.wpmig --encrypt
+ *     pass show backup | wp pontifex export --output=/tmp/site.wpmig --passphrase-stdin
  *
  * @when after_wp_load
  */
@@ -82,6 +93,16 @@ final class ExportCommand {
 	 * they have no business in the alloptions cache.
 	 */
 	private const STATS_OPTION = 'pontifex_export_stats';
+
+	/**
+	 * The reason recorded in provenance when the archive is written unencrypted.
+	 *
+	 * The format requires a non-empty explanation when encryption is disabled
+	 * (`ARCHIVE-FORMAT.md` §8.5); this is it for the export path.
+	 *
+	 * @var string
+	 */
+	private const ENCRYPTION_DISABLED_REASON = 'Encryption was not requested at export time (--encrypt / --passphrase-stdin not supplied).';
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -141,6 +162,16 @@ final class ExportCommand {
 	private ProgressReporter $progress;
 
 	/**
+	 * The source of the operator's encryption passphrase.
+	 *
+	 * Injected so tests can supply a fixed passphrase without a terminal or a
+	 * piped STDIN. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
+	 *
+	 * @var PassphraseSource
+	 */
+	private PassphraseSource $passphrase_source;
+
+	/**
 	 * Construct an ExportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not
@@ -152,19 +183,22 @@ final class ExportCommand {
 	 * @param ManifestBuilderInterface|null $manifest_builder Optional. When null, the command builds a concrete ManifestBuilder from the exclusion rules at run time.
 	 * @param LoggerInterface|null          $logger Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null         $progress Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
+	 * @param PassphraseSource|null         $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
 		?ManifestBuilderInterface $manifest_builder = null,
 		?LoggerInterface $logger = null,
-		?ProgressReporter $progress = null
+		?ProgressReporter $progress = null,
+		?PassphraseSource $passphrase_source = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 		$this->manifest_builder  = $manifest_builder;
 		$this->logger            = $logger ?? $this->build_default_logger();
 		$this->progress          = $progress ?? new WpCliProgressBar();
+		$this->passphrase_source = $passphrase_source ?? new CliPassphraseSource();
 	}
 
 	/**
@@ -187,6 +221,8 @@ final class ExportCommand {
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
 		$use_defaults      = ! ( isset( $associative_args['no-defaults'] ) && false !== $associative_args['no-defaults'] );
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
+		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
+		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
 
 		$this->validate_output_path( $output_path );
 
@@ -203,18 +239,34 @@ final class ExportCommand {
 			WP_CLI::confirm( sprintf( 'Export to %s?', $output_path ), $associative_args );
 		}
 
+		// 3a. Collect the passphrase and build the encryption context, if encrypting.
+		// The passphrase and derived key are secrets — never logged; the passphrase is
+		// scrubbed once the key is derived.
+		$encryption                 = null;
+		$encryption_disabled_reason = self::ENCRYPTION_DISABLED_REASON;
+		if ( $encrypting ) {
+			if ( ! $passphrase_stdin ) {
+				WP_CLI::warning( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.' );
+			}
+			$passphrase                 = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
+			$encryption                 = Encryption::context( $passphrase );
+			$encryption_disabled_reason = null;
+			sodium_memzero( $passphrase );
+		}
+
 		$this->logger->info(
 			'Export started.',
 			array(
 				'output'     => $output_path,
 				'exclusions' => count( $exclusion_rules->patterns() ),
+				'encrypted'  => null !== $encryption,
 			)
 		);
 
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
 		// 4. Build the Provenance block.
-		$provenance = $this->build_provenance();
+		$provenance = $this->build_provenance( $encryption_disabled_reason );
 
 		// 5. Wire up the manifest builder if the caller did not supply one.
 		$manifest_builder = $this->manifest_builder ?? $this->build_default_manifest_builder( $exclusion_rules );
@@ -236,7 +288,8 @@ final class ExportCommand {
 				$destination,
 				function (): void {
 					$this->progress->advance();
-				}
+				},
+				$encryption
 			);
 			$this->progress->finish();
 
@@ -404,9 +457,10 @@ final class ExportCommand {
 	 * name is the hardcoded literal "pontifex"; the version comes
 	 * from the PONTIFEX_VERSION constant defined in pontifex.php.
 	 *
+	 * @param string|null $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null when encrypting.
 	 * @return Provenance A fully-populated provenance value object.
 	 */
-	private function build_provenance(): Provenance {
+	private function build_provenance( ?string $encryption_disabled_reason ): Provenance {
 		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
 			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
 			: '0.0.0-dev';
@@ -420,7 +474,8 @@ final class ExportCommand {
 			$this->wordpress_context->wpdb_charset(),
 			$this->wordpress_context->wpdb_collation(),
 			$exporter_info,
-			new DateTimeImmutable()
+			new DateTimeImmutable(),
+			$encryption_disabled_reason
 		);
 	}
 
