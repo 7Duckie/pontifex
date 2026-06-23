@@ -131,12 +131,15 @@ open-source-health work done since v0.1.0: a protected `main`
 issue and pull-request templates, support guide), and a refreshed
 dependency floor.
 
-## v0.3.0 — Migration, encryption and observability
+## v0.3.0 — Migration, encryption and signatures
 
-Cross-domain migration and the security and operability properties that
-the format reserves space for but earlier releases do not yet implement.
-This is the highest-blast-radius work in the project, which is why it
-ships on its own, only with its defences.
+Cross-domain migration and the cryptographic properties the format reserves
+space for: encryption and signatures. This is the highest-blast-radius work in
+the project, which is why it ships on its own, only with its defences. The
+observability surface originally grouped here — fuller logging and metrics,
+`stats`, `diagnostics` — **moved to v0.4.0** so this release could ship on the
+cryptographic work alone; the release boundary was decided as the tag neared,
+per the release principles above.
 
 ### What ships
 
@@ -148,25 +151,14 @@ ships on its own, only with its defences.
 - **Encryption.** Argon2id-derived keys with the parameters in
   [`archive-format.md §8.1`](./archive-format.md#81-key-derivation);
   AES-256-GCM per-entry encryption; codecs `0x0100`, `0x0101`, `0x0102`
-  available in the codec registry; `--passphrase` flag on export and
-  import (idea-bank Idea 004).
+  available in the codec registry; `--encrypt` / `--passphrase-stdin` on export
+  and a passphrase prompt on import and verify (idea-bank Idea 004).
 - **Zstd compression.** Codec `0x0002` when `ext-zstd` is available,
   with graceful fallback to gzip when absent.
-- **Optional Ed25519 signatures.** Detached signature appended after
-  the footer; verification at import when a trusted public key is
-  supplied.
-- **Full structured logging.** The minimum v0.1.0 logger grows a
-  diagnostics bundle and per-transfer log files alongside each
-  archive.
-- **Full transfer metrics.** The minimum v0.1.0 counters gain a
-  rolling history of recent transfers, all local, all
-  user-controllable.
-- **`wp pontifex stats`** — local activity readout, `--json` flag for
-  bug-report attachment.
-- **`wp pontifex diagnostics`** — sanitised diagnostic bundle command
-  for support workflows. Generates a tar.gz that bundles recent logs,
-  `doctor` output, `stats` output, and an environment summary; never
-  auto-uploads; the operator decides what to share.
+- **Optional Ed25519 signatures.** A detached signature — Ed25519 over a
+  streamed SHA-256 prehash of the archive — appended after the footer, with
+  `wp pontifex keygen`, `export --sign --signing-key`, and `--public-key`
+  verification on `verify` and `import`.
 
 ## v0.4.0 and beyond — Admin UI and operational maturity
 
@@ -175,6 +167,13 @@ the longer-running operational features land.
 
 ### What ships, in roughly this order
 
+- **Fuller observability** (moved from v0.3.0): a richer structured-logging
+  surface (a diagnostics bundle and per-transfer log files beyond the v0.1.0
+  minimum logger); full transfer metrics (a rolling history of recent transfers
+  beyond the minimum counters); **`wp pontifex stats`** (local activity readout,
+  `--json` for bug reports); and **`wp pontifex diagnostics`** (a sanitised
+  support bundle — recent logs, `doctor` and `stats` output, and an environment
+  summary; never auto-uploads).
 - **Admin UI** for non-CLI users, following the Swiss-design language
   documented in [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md#design-language).
   Promotion of design-language guidance to a dedicated
