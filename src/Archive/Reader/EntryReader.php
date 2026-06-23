@@ -12,7 +12,10 @@ namespace Pontifex\Archive\Reader;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecException;
+use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Crypto\Cipher;
+use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
@@ -82,17 +85,38 @@ final class EntryReader {
 	private CodecRegistry $codec_registry;
 
 	/**
-	 * Construct an EntryReader with a codec registry.
+	 * Cipher used to decrypt encrypted entries, or null when no key is held.
 	 *
-	 * The registry must contain every codec id that might appear in
-	 * archives the reader will be asked to handle. For v0.1.0 that's
-	 * RawCodec (id 0) and GzipCodec (id 1); both are registered by
-	 * {@see CodecRegistry::with_defaults()}.
+	 * @var Cipher|null
+	 */
+	private ?Cipher $cipher;
+
+	/**
+	 * Encryption key for decrypting encrypted entries, or null when none is held.
+	 *
+	 * @var string|null
+	 */
+	private ?string $key;
+
+	/**
+	 * Construct an EntryReader with a codec registry and optional decryption key.
+	 *
+	 * The registry must contain every compression codec id that might appear in
+	 * the archives the reader will handle; RawCodec, GzipCodec and ZstdCodec are
+	 * all registered by {@see CodecRegistry::with_defaults()}.
+	 *
+	 * To read an encrypted archive, supply the cipher and derived key as well.
+	 * Without them the reader still verifies hashes, but refuses to decode an
+	 * encrypted entry, raising a clear "a passphrase is required" error.
 	 *
 	 * @param CodecRegistry $codec_registry The registry to consult on decode.
+	 * @param Cipher|null   $cipher         Cipher for decrypting encrypted entries, or null.
+	 * @param string|null   $key            Derived key for decryption, or null.
 	 */
-	public function __construct( CodecRegistry $codec_registry ) {
+	public function __construct( CodecRegistry $codec_registry, ?Cipher $cipher = null, ?string $key = null ) {
 		$this->codec_registry = $codec_registry;
+		$this->cipher         = $cipher;
+		$this->key            = $key;
 	}
 
 	/**
@@ -154,28 +178,43 @@ final class EntryReader {
 		}
 
 		// Read codec_id and verify it matches the manifest entry.
-		$codec_id = ByteOrder::unpack_uint16( substr( $record_bytes, $header_end, 2 ) );
+		$codec_id = ByteOrder::unpack_uint16( substr( $record_bytes, $header_end, ByteOrder::UINT16_SIZE ) );
 		if ( $codec_id !== $manifest_entry->codec_id() ) {
 			throw new RuntimeException(
 				sprintf( 'EntryReader: codec_id mismatch — on-disk %d, manifest %d.', (int) $codec_id, (int) $manifest_entry->codec_id() )
 			);
 		}
 
-		if ( ! $this->codec_registry->has( $codec_id ) ) {
+		// The codec id's low byte selects the compression codec; its high byte selects
+		// encryption (0x0100 = AES-256-GCM).
+		$compression_codec_id = CodecId::compression( $codec_id );
+		if ( CodecId::is_encrypted( $codec_id ) && CodecId::ENCRYPTION_AES_GCM !== CodecId::encryption_family( $codec_id ) ) {
 			throw new RuntimeException(
-				sprintf( 'EntryReader: codec id %d is not registered.', (int) $codec_id )
+				sprintf( 'EntryReader: unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
+			);
+		}
+		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
 			);
 		}
 
+		// The nonce and the plaintext header bytes are inputs to decryption: the nonce
+		// sits between codec_id and the payload, and the header bytes (with their length
+		// prefix) are the AES-GCM additional authenticated data (AAD).
+		$nonce        = substr( $record_bytes, $header_end + ByteOrder::UINT16_SIZE, EntryWriter::NONCE_SIZE );
+		$header_bytes = substr( $record_bytes, 0, $header_end );
+
 		// Locate the payload and the trailing hash.
-		$payload_start  = $header_end + 2 + EntryWriter::NONCE_SIZE;
+		$payload_start  = $header_end + ByteOrder::UINT16_SIZE + EntryWriter::NONCE_SIZE;
 		$payload_end    = $record_len - Sha256::DIGEST_SIZE;
 		$payload_length = $payload_end - $payload_start;
 		if ( $payload_length < 0 ) {
 			throw new RuntimeException( 'EntryReader: entry record layout is inconsistent; payload has negative length.' );
 		}
 
-		// Verify the trailing hash: SHA-256 of everything before it.
+		// Verify the trailing hash: SHA-256 of everything before it. It is computed over
+		// the as-stored bytes, so it holds whether or not the payload is encrypted.
 		$expected_hash = substr( $record_bytes, $payload_end, Sha256::DIGEST_SIZE );
 		$computed_hash = Sha256::of( substr( $record_bytes, 0, $payload_end ) );
 		if ( ! hash_equals( $expected_hash, $computed_hash ) ) {
@@ -187,11 +226,67 @@ final class EntryReader {
 			throw new RuntimeException( 'EntryReader: on-disk entry hash does not match the manifest entry_hash.' );
 		}
 
-		// Decode the payload through the codec.
-		$encoded_payload = substr( $record_bytes, $payload_start, $payload_length );
-		$decoded_payload = $this->decode_payload( $codec_id, $encoded_payload, $max_decoded_bytes );
+		// Decode the stored payload. For an encrypted entry, decrypt first (AES-256-GCM,
+		// header bytes as AAD) then decompress; otherwise decompress directly.
+		$stored_payload = substr( $record_bytes, $payload_start, $payload_length );
+		if ( CodecId::is_encrypted( $codec_id ) ) {
+			$decoded_payload = $this->decrypt_then_decompress(
+				$compression_codec_id,
+				$stored_payload,
+				$nonce,
+				$header_bytes,
+				$manifest_entry,
+				$max_decoded_bytes
+			);
+		} else {
+			$decoded_payload = $this->decode_payload( $compression_codec_id, $stored_payload, $max_decoded_bytes );
+		}
 
 		return new EntryReadResult( $header, $decoded_payload );
+	}
+
+	/**
+	 * Decrypt an encrypted stored payload, then decompress it.
+	 *
+	 * Requires the cipher and key supplied at construction; without them the
+	 * entry cannot be read and a clear "a passphrase is required" error is
+	 * raised (the reader still verified the hash before reaching here, so the
+	 * archive's integrity can be checked without the key). A decryption failure
+	 * — wrong passphrase, or ciphertext/tag/nonce/AAD tampering — surfaces as a
+	 * clear error too.
+	 *
+	 * @param int           $compression_codec_id The low-byte compression codec to decompress with.
+	 * @param string        $stored_payload       The ciphertext with the 16-byte GCM tag appended.
+	 * @param string        $nonce                The per-entry nonce read from the record.
+	 * @param string        $aad                  The plaintext header bytes used as AAD.
+	 * @param ManifestEntry $manifest_entry       The entry being read, for diagnostic context.
+	 * @param int|null      $max_decoded_bytes    Maximum decompressed bytes to allow, or null.
+	 * @return string The decompressed plaintext payload.
+	 * @throws RuntimeException If no key is held, decryption fails, or decompression fails or overflows.
+	 */
+	private function decrypt_then_decompress(
+		int $compression_codec_id,
+		string $stored_payload,
+		string $nonce,
+		string $aad,
+		ManifestEntry $manifest_entry,
+		?int $max_decoded_bytes
+	): string {
+		if ( null === $this->cipher || null === $this->key ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: entry %d is encrypted; a passphrase is required to read it.', (int) $manifest_entry->index() )
+			);
+		}
+
+		try {
+			$compressed = $this->cipher->decrypt( $stored_payload, $nonce, $aad, $this->key );
+		} catch ( CipherException $e ) {
+			$message = sprintf( 'EntryReader: entry %d failed to decrypt; the passphrase is wrong or the entry has been tampered with.', (int) $manifest_entry->index() );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying cipher exception, chained as the previous exception for diagnostics; not HTML output.
+			throw new RuntimeException( $message, 0, $e );
+		}
+
+		return $this->decode_payload( $compression_codec_id, $compressed, $max_decoded_bytes );
 	}
 
 	/**
@@ -222,20 +317,21 @@ final class EntryReader {
 	}
 
 	/**
-	 * Decode the encoded payload bytes through the codec registered for $codec_id.
+	 * Decode payload bytes through the compression codec registered for the given id.
 	 *
-	 * Uses a php://temp buffer for the encoded input and another for
-	 * the decoded output so the codec can operate on streams, then
-	 * reads the decoded bytes back. Mirrors EntryWriter's
-	 * encoding-via-temp-buffer pattern in reverse.
+	 * Uses a php://temp buffer for the input and another for the decoded
+	 * output so the codec can operate on streams, then reads the decoded bytes
+	 * back. Mirrors EntryWriter's encoding-via-temp-buffer pattern in reverse.
+	 * The id is the compression-family codec id; any encryption has already
+	 * been removed by the caller before this runs.
 	 *
-	 * @param int      $codec_id          The codec id to use.
-	 * @param string   $encoded_payload   The bytes to decode.
-	 * @param int|null $max_decoded_bytes Maximum decoded bytes to allow, or null for no limit.
+	 * @param int      $compression_codec_id The compression codec id to decode with.
+	 * @param string   $encoded_payload      The (already-decrypted) compressed bytes to decode.
+	 * @param int|null $max_decoded_bytes    Maximum decoded bytes to allow, or null for no limit.
 	 * @return string The decoded bytes.
 	 * @throws RuntimeException If a stream cannot be opened or the codec fails.
 	 */
-	private function decode_payload( int $codec_id, string $encoded_payload, ?int $max_decoded_bytes ): string {
+	private function decode_payload( int $compression_codec_id, string $encoded_payload, ?int $max_decoded_bytes ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
 		$input = fopen( 'php://temp', 'r+b' );
 		if ( false === $input ) {
@@ -255,7 +351,7 @@ final class EntryReader {
 		}
 
 		try {
-			$this->codec_registry->get( $codec_id )->decode( $input, $output, $max_decoded_bytes );
+			$this->codec_registry->get( $compression_codec_id )->decode( $input, $output, $max_decoded_bytes );
 		} catch ( CodecException $e ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of php://temp buffer; not a filesystem path.
 			fclose( $input );

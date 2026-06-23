@@ -12,7 +12,10 @@ namespace Pontifex\Archive\Writer;
 use InvalidArgumentException;
 use JsonException;
 use RuntimeException;
+use Pontifex\Archive\Codec\CodecId;
+use Pontifex\Archive\Crypto\EncryptionContext;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Footer;
 use Pontifex\Archive\Format\Header;
@@ -48,9 +51,11 @@ use Pontifex\Archive\Integrity\Sha256;
  * digest, so ArchiveWriter reuses it via substr() rather than
  * recomputing — the bytes are right there.
  *
- * v0.1.0 archives are unencrypted, so the footer's argon2id_salt
- * slot carries Footer::ZERO_SALT (sixteen zero bytes). The layout
- * stays the same when encryption arrives in v0.2.0.
+ * An archive is encrypted when an EncryptionContext is supplied to
+ * write_archive(): the header's encrypted flag is set, each entry is
+ * encrypted with a unique per-entry nonce, and the random salt is written
+ * into the footer. Without a context the archive is unencrypted and the
+ * footer's argon2id_salt slot carries Footer::ZERO_SALT (sixteen zero bytes).
  *
  * Threading and reuse: ArchiveWriter is stateless after
  * construction. The write_archive() method is safe to call any
@@ -94,18 +99,17 @@ final class ArchiveWriter {
 	 * written. Each EntryPlan's source stream is read from its
 	 * current seek position to EOF.
 	 *
-	 * @param Provenance       $provenance  Source-site context to embed in the provenance block.
-	 * @param array<EntryPlan> $entry_plans Entries to write, in archive order. May be empty.
-	 * @param resource         $destination Writable stream resource. Bytes are written sequentially
-	 *                                      from the destination's current seek position. The
-	 *                                      destination is advanced by the returned byte count.
-	 * @param callable|null    $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
+	 * @param Provenance             $provenance       Source-site context to embed in the provenance block.
+	 * @param array<EntryPlan>       $entry_plans      Entries to write, in archive order. May be empty.
+	 * @param resource               $destination      Writable stream resource; bytes are written from its current seek position and it is advanced by the returned byte count.
+	 * @param callable|null          $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
+	 * @param EncryptionContext|null $encryption       Encryption inputs (cipher, key, salt); when supplied the header's encrypted flag is set, every entry is encrypted with a per-entry nonce, and the salt is written into the footer; null produces an unencrypted archive.
 	 * @return int Total bytes written to the destination during this call.
 	 * @throws InvalidArgumentException If $destination is not a stream resource or any element
 	 *                                  of $entry_plans is not an EntryPlan.
-	 * @throws RuntimeException         If any block fails to serialise or any write fails.
+	 * @throws RuntimeException         If any block fails to serialise, any write fails, or a nonce cannot be generated.
 	 */
-	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null ): int {
+	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null ): int {
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
 		}
@@ -131,7 +135,13 @@ final class ArchiveWriter {
 			);
 		}
 
-		$header_bytes  = Header::current_version()->to_bytes();
+		// An encrypted archive sets the encrypted flag in the header; an unencrypted one
+		// uses the default (no flags). The salt and per-entry encryption are applied below.
+		$header = null !== $encryption
+			? new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_0, Header::FLAG_ENCRYPTED )
+			: Header::current_version();
+
+		$header_bytes  = $header->to_bytes();
 		$bytes_written = 0;
 
 		// Header.
@@ -146,12 +156,28 @@ final class ArchiveWriter {
 		foreach ( $entry_plans as $i => $plan ) {
 			$offset_before = $bytes_written;
 
+			// For an encrypted archive, upgrade the codec id to its encrypted variant,
+			// derive a unique per-entry nonce, and pass the cipher and key to the entry
+			// writer. For an unencrypted archive these stay at the plan's values.
+			$codec_id = $plan->codec_id();
+			$nonce    = $plan->nonce();
+			$cipher   = null;
+			$key      = null;
+			if ( null !== $encryption ) {
+				$codec_id = CodecId::with_aes_gcm( $codec_id );
+				$nonce    = self::encryption_nonce( $i );
+				$cipher   = $encryption->cipher();
+				$key      = $encryption->key();
+			}
+
 			$result = $this->entry_writer->write_entry(
 				$plan->header(),
-				$plan->codec_id(),
-				$plan->nonce(),
+				$codec_id,
+				$nonce,
 				$plan->source(),
-				$destination
+				$destination,
+				$cipher,
+				$key
 			);
 
 			$bytes_written     += $result->total_entry_length();
@@ -160,7 +186,8 @@ final class ArchiveWriter {
 				$offset_before,
 				$result->total_entry_length(),
 				$result->entry_hash(),
-				$plan
+				$plan,
+				$codec_id
 			);
 
 			if ( null !== $on_entry_written ) {
@@ -184,11 +211,12 @@ final class ArchiveWriter {
 		// Footer reuses the manifest's internal SHA-256, at offset 4 within the manifest block.
 		// The bytes are identical, so a substr is correct and cheaper than recomputing.
 		$manifest_hash  = substr( $manifest_bytes, ArchiveManifest::LENGTH_PREFIX_SIZE, Sha256::DIGEST_SIZE );
+		$salt           = null !== $encryption ? $encryption->salt() : Footer::ZERO_SALT;
 		$footer         = new Footer(
 			$manifest_offset,
 			strlen( $manifest_bytes ),
 			$manifest_hash,
-			Footer::ZERO_SALT
+			$salt
 		);
 		$bytes_written += $this->footer_writer->write_footer( $footer, $destination );
 
@@ -205,11 +233,12 @@ final class ArchiveWriter {
 	 * dispatch so the per-entry loop in write_archive() stays
 	 * focused on byte-counting.
 	 *
-	 * @param int       $index               The 0-based position of this entry.
-	 * @param int       $offset              Offset in the archive where the entry record started.
-	 * @param int       $total_entry_length  Total length of the written entry record on disk.
-	 * @param string    $entry_hash          32 raw bytes — the SHA-256 of the entry record.
-	 * @param EntryPlan $plan                The plan that produced this entry.
+	 * @param int       $index              The 0-based position of this entry.
+	 * @param int       $offset             Offset in the archive where the entry record started.
+	 * @param int       $total_entry_length Total length of the written entry record on disk.
+	 * @param string    $entry_hash         32 raw bytes — the SHA-256 of the entry record.
+	 * @param EntryPlan $plan               The plan that produced this entry.
+	 * @param int       $codec_id           The codec id the payload was written with (the encrypted variant when encrypting).
 	 * @return ManifestEntry A ManifestEntry of the appropriate kind.
 	 * @throws RuntimeException If the entry's header kind is not one of EntryHeader::ALL_KINDS.
 	 */
@@ -218,10 +247,10 @@ final class ArchiveWriter {
 		int $offset,
 		int $total_entry_length,
 		string $entry_hash,
-		EntryPlan $plan
+		EntryPlan $plan,
+		int $codec_id
 	): ManifestEntry {
-		$header   = $plan->header();
-		$codec_id = $plan->codec_id();
+		$header = $plan->header();
 
 		switch ( $header->kind() ) {
 			case EntryHeader::KIND_FILE:
@@ -266,6 +295,31 @@ final class ArchiveWriter {
 					sprintf( 'ArchiveWriter: entry %d has unknown header kind "%s"; expected one of: %s.', (int) $index, $header->kind(), implode( ', ', EntryHeader::ALL_KINDS ) )
 				);
 		}
+	}
+
+	/**
+	 * Build a unique per-entry nonce: the entry index, then random bytes.
+	 *
+	 * Per spec §8.3 a nonce is the 0-based entry index as four big-endian bytes
+	 * followed by eight random bytes. The index half guarantees uniqueness
+	 * within the archive (no two entries collide), and the random half guards
+	 * against accidental reuse across different archives that share a key — the
+	 * reuse that is catastrophic for AES-GCM.
+	 *
+	 * @param int $index The 0-based entry index.
+	 * @return string A NONCE_SIZE-byte nonce.
+	 * @throws RuntimeException If the system source of randomness fails.
+	 */
+	private static function encryption_nonce( int $index ): string {
+		try {
+			$random = random_bytes( EntryWriter::NONCE_SIZE - ByteOrder::UINT32_SIZE );
+		} catch ( \Exception $e ) {
+			// random_bytes() throws Random\RandomException (a subclass of Exception) when the
+			// system CSPRNG fails; catching Exception keeps this portable across PHP versions.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying randomness-source exception, chained as the previous exception for diagnostics; not HTML output.
+			throw new RuntimeException( 'ArchiveWriter: could not generate a random nonce for an encrypted entry.', 0, $e );
+		}
+		return ByteOrder::pack_uint32( $index ) . $random;
 	}
 
 	/**
