@@ -164,4 +164,5 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex rollback', \Pontifex\Cli\RollbackCommand::class );
 	\WP_CLI::add_command( 'pontifex keygen', \Pontifex\Cli\KeygenCommand::class );
 	\WP_CLI::add_command( 'pontifex stats', \Pontifex\Cli\StatsCommand::class );
+	\WP_CLI::add_command( 'pontifex diagnostics', \Pontifex\Cli\DiagnosticsCommand::class );
 }
