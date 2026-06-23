@@ -68,6 +68,8 @@
     "test:unit": "phpunit --testsuite=unit"
   },
   "suggest": {
+    "ext-openssl": "AES-256-GCM for archive encryption on hosts whose CPU lacks the hardware AES support libsodium needs; the software fallback cipher.",
+    "ext-sodium": "Argon2id key derivation and AES-256-GCM for archive encryption; required to produce or read an encrypted archive.",
     "ext-zstd": "Faster, denser compression than gzip for archive entries (codec 0x0002); Pontifex falls back to gzip when it is absent."
   },
   "type": "wordpress-plugin"
