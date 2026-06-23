@@ -59,11 +59,16 @@ use Pontifex\WordPress\WordPressContext;
  *   - json
  * ---
  *
+ * [--passphrase-stdin]
+ * : Read the passphrase to verify an encrypted archive as one line from STDIN
+ *   instead of prompting. Ignored for an unencrypted archive.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex verify /backups/site.wpmig
  *     wp pontifex verify /backups/site.wpmig --list
  *     wp pontifex verify /backups/site.wpmig --list --format=json
+ *     pass show backup | wp pontifex verify /backups/encrypted.wpmig --passphrase-stdin
  *
  * @when after_wp_load
  */
@@ -127,6 +132,16 @@ final class VerifyCommand {
 	private ProgressReporter $progress;
 
 	/**
+	 * The source of the operator's decryption passphrase.
+	 *
+	 * Injected so tests can supply a fixed passphrase without a terminal or a
+	 * piped STDIN. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
+	 *
+	 * @var PassphraseSource
+	 */
+	private PassphraseSource $passphrase_source;
+
+	/**
 	 * Construct a VerifyCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
@@ -138,19 +153,22 @@ final class VerifyCommand {
 	 * @param RestoreRunnerInterface|null $restore_runner    Optional. When null, the command builds a concrete RestoreRunner at run time.
 	 * @param LoggerInterface|null        $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null       $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
+	 * @param PassphraseSource|null       $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
 	 */
 	public function __construct(
 		?Environment $environment = null,
 		?WordPressContext $wordpress_context = null,
 		?RestoreRunnerInterface $restore_runner = null,
 		?LoggerInterface $logger = null,
-		?ProgressReporter $progress = null
+		?ProgressReporter $progress = null,
+		?PassphraseSource $passphrase_source = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
 		$this->restore_runner    = $restore_runner;
 		$this->logger            = $logger ?? $this->build_default_logger();
 		$this->progress          = $progress ?? new WpCliProgressBar();
+		$this->passphrase_source = $passphrase_source ?? new CliPassphraseSource();
 	}
 
 	/**
@@ -169,17 +187,15 @@ final class VerifyCommand {
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
 		// 1. Read and validate the archive path.
-		$archive_path = $this->require_archive_path( $positional_args );
-		$show_list    = isset( $associative_args['list'] ) && false !== $associative_args['list'];
-		$format       = isset( $associative_args['format'] ) ? (string) $associative_args['format'] : 'table';
+		$archive_path     = $this->require_archive_path( $positional_args );
+		$show_list        = isset( $associative_args['list'] ) && false !== $associative_args['list'];
+		$format           = isset( $associative_args['format'] ) ? (string) $associative_args['format'] : 'table';
+		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 
 		$this->validate_archive_path( $archive_path );
 
 		// 2. Open the source archive for reading.
 		$source = $this->open_source( $archive_path );
-
-		// 3. Wire up the verify engine if the caller did not supply one.
-		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
 
 		// Verify learns its entry total from the first callback, so the bar
 		// starts on entry one (the same shape as import's restore bar).
@@ -202,7 +218,12 @@ final class VerifyCommand {
 				rewind( $source );
 			}
 
-			// 5. Read and verify every entry. Writes nothing.
+			// 5. Wire the verify engine. For an encrypted archive this reads the salt
+			// and collects the passphrase; --list above needs none (the manifest is
+			// unencrypted), so only the verify walk prompts.
+			$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin );
+
+			// 6. Read and verify every entry. Writes nothing.
 			$this->logger->info( 'Verify started.', array( 'archive' => $archive_path ) );
 
 			$restore_runner->verify( $source, $on_entry );
@@ -301,17 +322,32 @@ final class VerifyCommand {
 	/**
 	 * Build a RestoreRunner from the default collaborators.
 	 *
-	 * Used when no RestoreRunner was injected. Identical to ImportCommand's
-	 * wiring so both commands share one verified construction path: an
-	 * EntryReader with the v0.1.0 default codecs, a FileWriter rooted at the
-	 * WordPress installation, and a DatabaseWriter over the real $wpdb. The
-	 * two writers are never invoked by verify() — it writes nothing — but
-	 * RestoreRunner's constructor requires them.
+	 * Used when no RestoreRunner was injected. Reads the archive header to see
+	 * whether it is encrypted; if so, collects the passphrase and builds a keyed
+	 * EntryReader (the key derived from the footer salt), otherwise a plain one —
+	 * identical to ImportCommand's wiring. A FileWriter and DatabaseWriter are
+	 * also wired because RestoreRunner's constructor requires them, but verify()
+	 * never invokes them: it writes nothing.
 	 *
+	 * @param resource $source           The open archive stream, read for its header and footer.
+	 * @param bool     $passphrase_stdin True to read the passphrase from STDIN rather than prompt.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner(): RestoreRunner {
-		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
+	private function build_default_restore_runner( $source, bool $passphrase_stdin ): RestoreRunner {
+		$archive_reader = new ArchiveReader( $source );
+		$passphrase     = $archive_reader->header()->is_encrypted()
+			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
+			: null;
+		$entry_reader   = Encryption::entry_reader( $archive_reader, CodecRegistry::with_defaults(), $passphrase );
+		if ( null !== $passphrase ) {
+			sodium_memzero( $passphrase );
+		}
+
+		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
+		// reader starts from a known position.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
+		rewind( $source );
+
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );

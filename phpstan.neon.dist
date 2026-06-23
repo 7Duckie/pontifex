@@ -17,12 +17,14 @@ parameters:
     # stubs package. phpstan-wordpress's bootstrap only covers core WP
     # functions and classes; we add the WP-CLI stubs explicitly here so
     # PHPStan can resolve calls like WP_CLI::add_command() and the
-    # WP_CLI\Formatter constructor. We also scan a tiny local stub for
-    # php-cli-tools' cli\progress\Bar (returned by make_progress_bar),
-    # which wp-cli-stubs does not include.
+    # WP_CLI\Formatter constructor. We also scan tiny local stubs for the
+    # php-cli-tools cli\ symbols Pontifex uses — cli\progress\Bar (returned
+    # by make_progress_bar) and cli\prompt (the hidden passphrase prompt) —
+    # which the main wp-cli-stubs file does not include.
     scanFiles:
         - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
         - stubs/cli-progress-bar.stub
+        - stubs/cli-prompt.stub
 
     # Treat these as known global constants defined by our bootstrap.
     # PHPStan analyses src/ files in isolation and wouldn't otherwise
