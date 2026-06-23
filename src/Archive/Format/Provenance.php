@@ -138,16 +138,30 @@ final class Provenance {
 	private DateTimeImmutable $timestamp;
 
 	/**
-	 * Construct a Provenance with the seven required fields.
+	 * Reason encryption was disabled, or null when the archive is encrypted or the field is unset.
 	 *
-	 * @param string            $wp_version    WordPress version string; must be non-empty.
-	 * @param string            $php_version   PHP version string; must be non-empty.
-	 * @param string            $url           Source-site URL; must be non-empty; stored verbatim.
-	 * @param string            $db_charset    Database character set; must be non-empty.
-	 * @param string            $db_collation  Database collation; must be non-empty.
-	 * @param ExporterInfo      $exporter      Exporter tool name and version.
-	 * @param DateTimeImmutable $timestamp     Moment of export; serialised with second precision.
-	 * @throws InvalidArgumentException If any string argument is the empty string.
+	 * The archive format requires a non-empty explanation when an unencrypted
+	 * archive is produced (`ARCHIVE-FORMAT.md` §8.5); this value object carries
+	 * it. Enforcing "non-empty when unencrypted" is the writer's job (it knows
+	 * whether encryption is on); null here means the archive is encrypted, or it
+	 * predates this field.
+	 *
+	 * @var string|null
+	 */
+	private ?string $encryption_disabled_reason;
+
+	/**
+	 * Construct a Provenance with the seven required fields and an optional reason.
+	 *
+	 * @param string            $wp_version                 WordPress version string; must be non-empty.
+	 * @param string            $php_version                PHP version string; must be non-empty.
+	 * @param string            $url                        Source-site URL; must be non-empty; stored verbatim.
+	 * @param string            $db_charset                 Database character set; must be non-empty.
+	 * @param string            $db_collation               Database collation; must be non-empty.
+	 * @param ExporterInfo      $exporter                   Exporter tool name and version.
+	 * @param DateTimeImmutable $timestamp                  Moment of export; serialised with second precision.
+	 * @param string|null       $encryption_disabled_reason Reason encryption was disabled (non-empty when producing an unencrypted archive, per §8.5), or null when encrypted.
+	 * @throws InvalidArgumentException If any required string argument is the empty string.
 	 */
 	public function __construct(
 		string $wp_version,
@@ -156,7 +170,8 @@ final class Provenance {
 		string $db_charset,
 		string $db_collation,
 		ExporterInfo $exporter,
-		DateTimeImmutable $timestamp
+		DateTimeImmutable $timestamp,
+		?string $encryption_disabled_reason = null
 	) {
 		if ( '' === $wp_version ) {
 			throw new InvalidArgumentException( 'Provenance: wp_version must not be empty.' );
@@ -174,13 +189,14 @@ final class Provenance {
 			throw new InvalidArgumentException( 'Provenance: db_collation must not be empty.' );
 		}
 
-		$this->wp_version   = $wp_version;
-		$this->php_version  = $php_version;
-		$this->url          = $url;
-		$this->db_charset   = $db_charset;
-		$this->db_collation = $db_collation;
-		$this->exporter     = $exporter;
-		$this->timestamp    = $timestamp;
+		$this->wp_version                 = $wp_version;
+		$this->php_version                = $php_version;
+		$this->url                        = $url;
+		$this->db_charset                 = $db_charset;
+		$this->db_collation               = $db_collation;
+		$this->exporter                   = $exporter;
+		$this->timestamp                  = $timestamp;
+		$this->encryption_disabled_reason = $encryption_disabled_reason;
 	}
 
 	/**
@@ -244,6 +260,15 @@ final class Provenance {
 	 */
 	public function timestamp(): DateTimeImmutable {
 		return $this->timestamp;
+	}
+
+	/**
+	 * Return the reason encryption was disabled, or null.
+	 *
+	 * @return string|null The reason, or null when the archive is encrypted or the field is unset.
+	 */
+	public function encryption_disabled_reason(): ?string {
+		return $this->encryption_disabled_reason;
 	}
 
 	/**
@@ -350,6 +375,14 @@ final class Provenance {
 			'timestamp'    => $this->timestamp->format( DateTimeInterface::ATOM ),
 		);
 
+		// Emitted only when set, so an unencrypted archive that records no reason (and any
+		// archive written before this field existed) keeps byte-identical provenance. The
+		// writer populates a non-empty reason for an unencrypted archive (§8.5) and leaves
+		// it null — omitted here — for an encrypted one.
+		if ( null !== $this->encryption_disabled_reason ) {
+			$data['encryption_disabled_reason'] = $this->encryption_disabled_reason;
+		}
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- Deterministic byte output required for hash stability; wp_json_encode wraps json_encode without adding anything needed here, and depends on WordPress being loaded.
 		return json_encode( $data, self::JSON_ENCODE_FLAGS );
 	}
@@ -425,6 +458,16 @@ final class Provenance {
 			);
 		}
 
+		// Optional on read: absent or null means unset (back-compatible with archives
+		// written before this field existed); when present it must be a string.
+		$encryption_disabled_reason = null;
+		if ( array_key_exists( 'encryption_disabled_reason', $data ) && null !== $data['encryption_disabled_reason'] ) {
+			if ( ! is_string( $data['encryption_disabled_reason'] ) ) {
+				throw new InvalidArgumentException( 'Provenance: field "encryption_disabled_reason" must be a string or null.' );
+			}
+			$encryption_disabled_reason = $data['encryption_disabled_reason'];
+		}
+
 		return new self(
 			$data['wp_version'],
 			$data['php_version'],
@@ -432,7 +475,8 @@ final class Provenance {
 			$data['db_charset'],
 			$data['db_collation'],
 			new ExporterInfo( $data['exporter']['name'], $data['exporter']['version'] ),
-			$timestamp
+			$timestamp,
+			$encryption_disabled_reason
 		);
 	}
 }

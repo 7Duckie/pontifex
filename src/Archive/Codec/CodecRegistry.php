@@ -94,9 +94,11 @@ final class CodecRegistry {
 	 * Registers RawCodec (0x0000), GzipCodec (0x0001), and ZstdCodec
 	 * (0x0002). ZstdCodec is registered even when ext-zstd is absent, so the
 	 * registry can always resolve codec 0x0002; the extension is required
-	 * only when a 0x0002 entry is actually encoded or decoded. The
-	 * encrypted-codec variants (0x0100-0x0102) join this set when encryption
-	 * lands.
+	 * only when a 0x0002 entry is actually encoded or decoded. The registry
+	 * holds compression codecs only; encryption (codec ids 0x0100-0x0102) is
+	 * applied separately by the cipher seam, which the writer and reader select
+	 * from the codec id's high byte (see CodecId), so no encrypted codec is
+	 * registered here.
 	 *
 	 * The optional gzip chunk size is forwarded to GzipCodec's
 	 * constructor. The default matches GzipCodec's own default; callers
