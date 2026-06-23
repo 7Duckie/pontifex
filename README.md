@@ -8,11 +8,13 @@ archive first, so it can be rolled back.
 audit an environment (`wp pontifex doctor`), pack a whole site into a
 single `.wpmig` archive (`wp pontifex export`), restore that archive
 onto a WordPress at the same URL (`wp pontifex import`, which takes a
-safety archive first), check an archive without restoring it
-(`wp pontifex verify`), and undo a mistaken import (`wp pontifex
-rollback`) — the round trip is proven end-to-end by an integration test
-against a real WordPress. Cross-URL migration arrives in v0.2.0. Do not
-rely on Pontifex for production data yet.
+safety archive first), migrate a site to a new URL
+(`wp pontifex import --url=`) with serialised-data-safe search-replace,
+check an archive without restoring it (`wp pontifex verify`), and undo a
+mistaken import (`wp pontifex rollback`) — the round trip is proven
+end-to-end by an integration test against a real WordPress. Encryption
+(`--passphrase`) and the admin UI are still to come; see the roadmap. Do
+not rely on Pontifex for production data yet.
 
 ## What Pontifex will be
 
@@ -41,15 +43,18 @@ is the honest difference, updated at every release.
 | Import / restore (`wp pontifex import`, same URL) | ✅ | ✅ |
 | Round trip proven end-to-end | — | ✅ — same-URL, integration-tested |
 | Rollback (pre-import safety archive + undo) | — | ✅ |
-| Cross-URL migration (URL rewriting) | ✅ | ❌ — v0.2.0, shipped with its security defences |
 | Archive verification (`wp pontifex verify`) | — | ✅ |
-| Encryption (`--passphrase`) | ✅ | ❌ — not yet; **archives today are written unencrypted** |
+| Cross-URL migration (`wp pontifex import --url=`) | ✅ | ✅ — serialised-safe search-replace + gadget defences |
+| zstd compression (codec `0x0002`) | ✅ | ✅ — when `ext-zstd` is present, else gzip |
+| Encryption (`--passphrase`) | ✅ | ❌ — not yet; lands in v0.3.0 (**archives today are written unencrypted**) |
+| Ed25519 signatures | ✅ | ❌ — planned for v0.3.0 |
 
 **What Pontifex is _not_ yet:** a scheduled-backup system (no cron, no
-retention policies), a cross-domain migrator (URL rewriting lands in
-v0.2.0 together with the defences it needs), or a point-and-click tool
-(the admin UI is v0.3.0). If you need those today, pair Pontifex with
-tools that have them — and watch the table above as it fills in.
+retention policies), an encrypting tool (the `--passphrase` flag is the
+next slice; archives today are written unencrypted), or a point-and-click
+tool (the admin UI lands in v0.4.0). If you need those today, pair
+Pontifex with tools that have them — and watch the table above as it
+fills in.
 
 ## Requirements
 
@@ -94,11 +99,16 @@ wp pontifex export --output=/path/to/site.wpmig
 # Restore an archive onto a WordPress at the same URL
 wp pontifex import /path/to/site.wpmig --dry-run   # preview: verify only, write nothing
 wp pontifex import /path/to/site.wpmig             # restore (prompts before writing)
+
+# Restore, then migrate the site to a new URL (serialised-data-safe)
+wp pontifex import /path/to/site.wpmig --url=https://new-site.example
 ```
 
-`import` restores to the **same URL** only; cross-URL migration (with
-its serialised-data defences) arrives in v0.2.0. See the
-[roadmap](docs/roadmap.md) for what ships when.
+`import` restores to the **same URL** by default; pass `--url=<new-url>`
+to also migrate the site to a new URL with serialised-data-safe
+search-replace (the defences behind it are recorded in
+[ADR 0006](docs/adr/0006-cross-url-via-post-restore-search-replace.md)).
+See the [roadmap](docs/roadmap.md) for what ships when.
 
 > **Importing writes an entire site onto yours.** Only import a `.wpmig`
 > you produced or fully trust — see
@@ -126,32 +136,52 @@ test against real WordPress.
 
 ## Roadmap
 
-- **v0.1.0 — Round-trip baseline (same URL).** WP-CLI `export` and
-  `import`. Restores to the **same URL** — a true backup-and-restore
-  baseline; cross-domain migration is v0.2.0's job. Unencrypted
-  archives, gzip compression, all four entry kinds, full integrity
-  contract (per-entry SHA-256, manifest hash, footer hash,
-  verification order).
-- **v0.2.0 — Migration, safety, encryption and observability.**
-  Cross-URL migration (URL rewriting) shipped *together with* its
-  serialised-data defences; rollback (automatic pre-import safety
-  archive); archive verification (`wp pontifex verify`); Argon2id +
-  AES-256-GCM encryption; zstd compression; optional Ed25519
-  signatures; structured logging, transfer metrics, `wp pontifex
-  stats` and `wp pontifex diagnostics`.
-- **v0.3.0 and beyond — Admin UI and operational maturity.** Admin UI
-  for non-CLI users, scheduled exports, push/pull transports,
-  multisite, selective content.
-- **v1.0.0 — Stable surface.** Public API frozen, WordPress.org
-  submission, long-term support guarantees.
-- **v2.0 — Go reference reader.** Standalone Go CLI implementing the
-  format spec, validating that the spec is unambiguous and providing
-  a recovery path that does not require a working WordPress install.
+Released and planned, version by version, with status. The source of
+truth — including why each deferred item waits — is
+[`docs/roadmap.md`](docs/roadmap.md).
 
-Full design rationale lives in [`docs/`](docs/). The version-by-version
-roadmap with deferred-item reasoning is in
-[`docs/roadmap.md`](docs/roadmap.md), which is the authoritative source
-for what each version means.
+- **v0.1.0 — Round-trip baseline (same URL). ✅ Released.** WP-CLI
+  `export` and `import` (same-URL restore); the `.wpmig` writer and
+  reader; gzip and no-compression codecs; all four entry kinds
+  (`file`, `db_chunk`, `directory`, `symlink`); the full integrity
+  contract (per-entry SHA-256, manifest hash, footer hash, mandatory
+  verification order); a minimum diagnostic logger and persistent
+  transfer counters.
+- **v0.2.0 — Safety, verification and rollback. ✅ Released.**
+  `wp pontifex verify` (walk an archive and check every hash against
+  cold storage, writing nothing); rollback (an automatic pre-import
+  safety archive, undone with `wp pontifex rollback`); a protected
+  `main` and the open-source-health files.
+- **v0.3.0 — Migration, encryption and observability. 🚧 In progress.**
+  - Cross-URL migration — `wp pontifex import --url=`, a serialised-safe
+    search-replace with allowlist-disabled unserialize, round-trip
+    verification, and a pre-import scan. **✅ Done.**
+  - zstd compression — codec `0x0002`, preferred when `ext-zstd` is
+    present, gzip otherwise. **✅ Done.**
+  - Encryption — Argon2id-derived keys, per-entry AES-256-GCM, codecs
+    `0x0100`/`0x0101`/`0x0102`, and a `--passphrase` flag on `export`
+    and `import`. **🚧 In progress** — the format and cipher layers are
+    built and tested; the `--passphrase` CLI is the next slice.
+  - Optional Ed25519 detached signatures, verified at import against a
+    trusted public key. **Planned.**
+  - Full structured logging (a diagnostics bundle and per-transfer
+    logs), full transfer metrics (a rolling history), `wp pontifex
+    stats`, and `wp pontifex diagnostics`. **Planned.**
+- **v0.4.0 and beyond — Admin UI and operational maturity. Planned.**
+  An admin UI for non-CLI users; resumable exports (surviving PHP
+  timeouts and lost SSH sessions); scheduled exports; push/pull
+  host-to-host transports; selective content (export-without-database,
+  single-table, content-type filters); multisite support.
+- **v1.0.0 — Stable surface. Planned.** The public API frozen;
+  submission to the WordPress.org plugin directory; the `.wpmig` spec
+  graduating from DRAFT to LOCKED with published test vectors.
+- **v2.0 — Go reference reader. Planned.** A standalone Go CLI
+  implementing read, verify, list and conversion from the format spec —
+  independent verification and emergency recovery without a working
+  WordPress, and proof that the specification is unambiguous.
+
+Full design rationale lives in [`docs/`](docs/); the authoritative
+version-by-version roadmap is [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Documentation
 

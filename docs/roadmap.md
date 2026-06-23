@@ -39,8 +39,9 @@ The headline of v0.1.0 is a complete round trip: a user can export a
 real WordPress site to a `.wpmig` archive, take that archive to a
 different machine, and import it onto a fresh WordPress installation
 **at the same URL**, ending up with a site that matches the source.
-Cross-domain migration (URL rewriting) is explicitly v0.2.0's job, for
-the reasons recorded in [ADR 0004](./adr/0004-same-url-import-scope.md).
+Cross-domain migration (URL rewriting) is explicitly v0.3.0's job, for
+the reasons recorded in [ADR 0004](./adr/0004-same-url-import-scope.md)
+and [ADR 0006](./adr/0006-cross-url-via-post-restore-search-replace.md).
 
 ### What ships
 
