@@ -13,6 +13,8 @@ use Mockery;
 use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
+use Pontifex\Migrate\RewriteReport;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
@@ -331,6 +333,120 @@ final class InvokeBranchesTest extends TestCase {
 		$this->expectExceptionMessage( 'not enough free disk space' );
 
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * With --url, the command migrates the database after restoring.
+	 *
+	 * Ordering is asserted: restore() runs before migrate(), so the URL rewrite
+	 * only touches data the restore has already put in place.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_with_url_migrates_after_restoring(): void {
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->ordered();
+
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+		$url_migrator->shouldReceive( 'source_url' )->andReturn( 'https://old.test' );
+		$url_migrator->shouldReceive( 'migrate' )
+			->once()
+			->ordered()
+			->with( 'https://old.test', 'https://new.example' )
+			->andReturn( new RewriteReport( 1, array(), 1, 1, 1, 0 ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding(),
+			$url_migrator
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes' => true,
+				'url' => 'https://new.example',
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
+	 * Without --url, the migrator is never consulted.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_without_url_never_migrates(): void {
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+		$url_migrator->shouldNotReceive( 'source_url' );
+		$url_migrator->shouldNotReceive( 'migrate' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding(),
+			$url_migrator
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
+	 * A --dry-run with --url reads the source URL to announce the plan but migrates nothing.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_dry_run_with_url_announces_but_does_not_migrate(): void {
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+		$url_migrator->shouldReceive( 'source_url' )->once()->andReturn( 'https://old.test' );
+		$url_migrator->shouldNotReceive( 'migrate' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'confirm' );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver,
+			$url_migrator
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'dry-run' => true,
+				'url'     => 'https://new.example',
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path );
 	}
 
 	/**

@@ -447,4 +447,71 @@ final class ArchiveReaderTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$reader->manifest();
 	}
+
+	/**
+	 * The provenance() accessor must return the source provenance, including the source URL.
+	 *
+	 * @return void
+	 */
+	public function test_provenance_accessor_returns_the_source_provenance(): void {
+		$reader     = new ArchiveReader( self::build_sample_archive_stream() );
+		$provenance = $reader->provenance();
+
+		$this->assertInstanceOf( Provenance::class, $provenance );
+		$this->assertSame( 'https://example.test', $provenance->url() );
+		$this->assertSame( '6.6.1', $provenance->wp_version() );
+	}
+
+	/**
+	 * The provenance() method must return the same instance on repeated calls (caching).
+	 *
+	 * @return void
+	 */
+	public function test_provenance_is_cached(): void {
+		$reader = new ArchiveReader( self::build_sample_archive_stream() );
+
+		$this->assertSame( $reader->provenance(), $reader->provenance() );
+	}
+
+	/**
+	 * A custom source URL must round-trip through provenance() intact.
+	 *
+	 * @return void
+	 */
+	public function test_provenance_round_trips_a_custom_source_url(): void {
+		$provenance = new Provenance(
+			'6.7',
+			'8.3.0',
+			'https://migrate-source.example',
+			'utf8mb4',
+			'utf8mb4_general_ci',
+			new ExporterInfo( 'pontifex', '0.3.0' ),
+			new DateTimeImmutable( '2026-06-23T00:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( $provenance, array(), $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+
+		$this->assertSame( 'https://migrate-source.example', ( new ArchiveReader( $dest ) )->provenance()->url() );
+	}
+
+	/**
+	 * A corrupt provenance payload must be refused by provenance().
+	 *
+	 * @return void
+	 */
+	public function test_provenance_rejects_a_corrupt_block(): void {
+		$bytes = self::read_all( self::build_sample_archive_stream() );
+
+		// The provenance JSON payload starts after the header, its 4-byte length prefix, and its 32-byte hash.
+		$payload_start = Header::SIZE + Provenance::LENGTH_PREFIX_SIZE + Sha256::DIGEST_SIZE;
+		$tampered      = substr( $bytes, 0, $payload_start ) . "\xFF" . substr( $bytes, $payload_start + 1 );
+
+		$reader = new ArchiveReader( self::bytes_to_stream( $tampered ) );
+
+		$this->expectException( RuntimeException::class );
+		$reader->provenance();
+	}
 }

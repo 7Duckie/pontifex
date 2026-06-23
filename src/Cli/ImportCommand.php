@@ -19,6 +19,9 @@ use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
+use Pontifex\Migrate\RewriteReport;
+use Pontifex\Migrate\UrlMigrator;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -33,9 +36,10 @@ use Pontifex\WordPress\WordPressContext;
  * `wp pontifex import` — restore a Pontifex archive over the current WordPress site.
  *
  * Reads a single .wpmig archive and replays every entry: files back onto
- * the WordPress root, database chunks back into the database. The restore
- * is to the **same site URL only** — no URL rewriting (ADR 0004);
- * cross-URL migration arrives in v0.2.0 with its security defences.
+ * the WordPress root, database chunks back into the database. By default the
+ * restore is to the **same site URL**; passing --url=<new-url> additionally
+ * runs a serialised-safe cross-URL migration over the restored database
+ * (ADR 0006), with the pre-import safety archive as its undo.
  *
  * This is the dangerous half of Pontifex: it overwrites the live site.
  * It therefore confirms before acting (unless --yes), and offers
@@ -51,6 +55,11 @@ use Pontifex\WordPress\WordPressContext;
  * <archive>
  * : Absolute filesystem path to the .wpmig archive to restore.
  *
+ * [--url=<new-url>]
+ * : Migrate the site to a new URL after restoring. Runs a serialised-safe
+ *   search-replace over the restored database, rewriting the archive's source
+ *   URL to <new-url>. Omit for a same-URL restore.
+ *
  * [--dry-run]
  * : Read and verify the entire archive without writing anything to the
  *   site. Reports what would be restored, then stops. Touches nothing.
@@ -65,6 +74,7 @@ use Pontifex\WordPress\WordPressContext;
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
+ *     wp pontifex import /tmp/site.wpmig --url=https://new-site.example
  *     wp pontifex import /tmp/site.wpmig --dry-run
  *     wp pontifex import /tmp/site.wpmig --yes
  *     wp pontifex import /tmp/site.wpmig --no-rollback-archive
@@ -151,6 +161,17 @@ final class ImportCommand {
 	private ?SafetyArchiverInterface $safety_archiver;
 
 	/**
+	 * The cross-URL migrator used when --url is supplied.
+	 *
+	 * Optional in the constructor: when null and --url is given, the command
+	 * wires a UrlMigrator over the real $wpdb. Tests inject a fake fulfilling
+	 * UrlMigratorInterface — the seam that exists for exactly that.
+	 *
+	 * @var UrlMigratorInterface|null
+	 */
+	private ?UrlMigratorInterface $url_migrator;
+
+	/**
 	 * Construct an ImportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
@@ -163,6 +184,7 @@ final class ImportCommand {
 	 * @param LoggerInterface|null         $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null        $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a SafetyArchiver rooted at WP_CONTENT_DIR is built.
+	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and --url is given, a UrlMigrator over the real $wpdb is built.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -170,7 +192,8 @@ final class ImportCommand {
 		?RestoreRunnerInterface $restore_runner = null,
 		?LoggerInterface $logger = null,
 		?ProgressReporter $progress = null,
-		?SafetyArchiverInterface $safety_archiver = null
+		?SafetyArchiverInterface $safety_archiver = null,
+		?UrlMigratorInterface $url_migrator = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
@@ -178,6 +201,7 @@ final class ImportCommand {
 		$this->logger            = $logger ?? $this->build_default_logger();
 		$this->progress          = $progress ?? new WpCliProgressBar();
 		$this->safety_archiver   = $safety_archiver;
+		$this->url_migrator      = $url_migrator;
 	}
 
 	/**
@@ -196,16 +220,17 @@ final class ImportCommand {
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
-		// 1. Read and validate the archive path.
+		// 1. Read and validate the archive path and flags.
 		$archive_path = $this->require_archive_path( $positional_args );
 		$dry_run      = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
 		$skip_confirm = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$no_rollback  = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
+		$target_url   = $this->require_target_url( $associative_args );
 
 		$this->validate_archive_path( $archive_path );
 
-		// 2. Announce the restore scope (same URL only — ADR 0004), always.
-		$this->print_scope();
+		// 2. Announce the restore (and, with --url, the migration) scope, always.
+		$this->print_scope( $target_url );
 
 		// 3. Confirm with the user (unless --yes, or --dry-run which changes nothing).
 		if ( ! $dry_run && ! $skip_confirm ) {
@@ -215,8 +240,9 @@ final class ImportCommand {
 		// 4. Open the source archive for reading.
 		$source = $this->open_source( $archive_path );
 
-		// 5. Wire up the restore engine if the caller did not supply one.
+		// 5. Wire up the restore engine, and the URL migrator when --url was given.
 		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
+		$url_migrator   = '' !== $target_url ? ( $this->url_migrator ?? $this->build_default_url_migrator() ) : null;
 
 		// Import learns its entry total from the first callback (unlike export,
 		// which counts entry plans up front), so the bar starts on entry one.
@@ -230,6 +256,17 @@ final class ImportCommand {
 		};
 
 		try {
+			// With --url, read the source URL from the archive's provenance and
+			// announce the migration before anything is written. Reading the
+			// provenance also validates the archive up front.
+			$source_url = '';
+			if ( null !== $url_migrator ) {
+				$source_url = $url_migrator->source_url( $source );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the stream before the restore/verify walk re-reads it; not a WP_Filesystem operation.
+				rewind( $source );
+				$this->print_migration_plan( $source_url, $target_url );
+			}
+
 			if ( $dry_run ) {
 				$this->logger->info( 'Import dry-run started.', array( 'archive' => $archive_path ) );
 
@@ -244,7 +281,7 @@ final class ImportCommand {
 					)
 				);
 
-				$this->print_dry_run_summary( $archive_path, $entry_total );
+				$this->print_dry_run_summary( $archive_path, $entry_total, $target_url );
 			} else {
 				$this->logger->info( 'Import started.', array( 'archive' => $archive_path ) );
 				$this->bump_counters( array( 'attempted' => 1 ) );
@@ -255,6 +292,11 @@ final class ImportCommand {
 
 				$restore_runner->restore( $source, $on_entry );
 				$this->progress->finish();
+
+				// 6. With --url, migrate the restored database to the new URL.
+				if ( null !== $url_migrator ) {
+					$this->run_migration( $url_migrator, $source_url, $target_url );
+				}
 
 				$bytes_imported = $this->archive_size( $archive_path );
 
@@ -312,6 +354,26 @@ final class ImportCommand {
 			WP_CLI::error( 'An archive path is required: wp pontifex import <archive>.' );
 		}
 		return (string) $positional_args[0];
+	}
+
+	/**
+	 * Extract and validate the optional --url migration target.
+	 *
+	 * Returns an empty string when --url is absent (a same-URL restore). When
+	 * present, it must carry a non-empty value; a bare --url is rejected via
+	 * WP_CLI::error, which halts the command.
+	 *
+	 * @param array<string, string|bool> $associative_args The CLI's associative args.
+	 * @return string The target URL, or '' when --url was not supplied.
+	 */
+	private function require_target_url( array $associative_args ): string {
+		if ( ! isset( $associative_args['url'] ) ) {
+			return '';
+		}
+		if ( ! is_string( $associative_args['url'] ) || '' === $associative_args['url'] ) {
+			WP_CLI::error( '--url requires a new site URL, e.g. --url=https://new-site.example.' );
+		}
+		return (string) $associative_args['url'];
 	}
 
 	/**
@@ -373,6 +435,19 @@ final class ImportCommand {
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+	}
+
+	/**
+	 * Build a UrlMigrator over the real $wpdb for the --url migration.
+	 *
+	 * Used when --url is given and no migrator was injected. The migrator walks
+	 * every prefixed table (the wp search-replace default) with the class
+	 * allowlist resolved from the pontifex_serialized_classes filter.
+	 *
+	 * @return UrlMigrator
+	 */
+	private function build_default_url_migrator(): UrlMigrator {
+		return new UrlMigrator( $this->wordpress_context );
 	}
 
 	/**
@@ -540,10 +615,75 @@ final class ImportCommand {
 	/**
 	 * Print the restore scope so the user knows what import does — and does not — do.
 	 *
+	 * @param string $target_url The migration target, or '' for a same-URL restore.
 	 * @return void
 	 */
-	private function print_scope(): void {
-		WP_CLI::log( 'Restoring to the same site URL only; no URL rewriting (cross-URL migration arrives in v0.2.0).' );
+	private function print_scope( string $target_url ): void {
+		if ( '' === $target_url ) {
+			WP_CLI::log( 'Restoring to the same site URL; no URL rewriting.' );
+			return;
+		}
+		WP_CLI::log( sprintf( 'Restoring, then migrating the site URL to %s.', $target_url ) );
+	}
+
+	/**
+	 * Run the cross-URL migration over the restored database and report it.
+	 *
+	 * @param UrlMigratorInterface $url_migrator The migrator to run.
+	 * @param string               $source_url   The URL the archive was exported from.
+	 * @param string               $target_url   The new URL to migrate to.
+	 * @return void
+	 * @throws RuntimeException If the migration fails.
+	 */
+	private function run_migration( UrlMigratorInterface $url_migrator, string $source_url, string $target_url ): void {
+		$report = $url_migrator->migrate( $source_url, $target_url );
+
+		$this->logger->info(
+			'Cross-URL migration complete.',
+			array(
+				'from'           => $source_url,
+				'to'             => $target_url,
+				'rows_changed'   => $report->rows_changed(),
+				'values_changed' => $report->values_changed(),
+				'tables_skipped' => count( $report->skipped_tables() ),
+				'values_skipped' => $report->skipped_values(),
+			)
+		);
+
+		$this->print_migration_summary( $source_url, $target_url, $report );
+	}
+
+	/**
+	 * Announce the migration plan before any database write.
+	 *
+	 * @param string $source_url The URL the archive was exported from.
+	 * @param string $target_url The new URL to migrate to.
+	 * @return void
+	 */
+	private function print_migration_plan( string $source_url, string $target_url ): void {
+		WP_CLI::log( sprintf( 'Migrating URLs from %s to %s.', $source_url, $target_url ) );
+	}
+
+	/**
+	 * Print the counts-only migration summary — no row contents.
+	 *
+	 * @param string        $source_url The URL the archive was exported from.
+	 * @param string        $target_url The new URL migrated to.
+	 * @param RewriteReport $report     The counts the migration produced.
+	 * @return void
+	 */
+	private function print_migration_summary( string $source_url, string $target_url, RewriteReport $report ): void {
+		WP_CLI::log(
+			sprintf(
+				'Migrated %s to %s: rewrote %d value(s) across %d row(s); %d table(s) skipped (no single-column key); %d value(s) kept unchanged for safety.',
+				$source_url,
+				$target_url,
+				$report->values_changed(),
+				$report->rows_changed(),
+				count( $report->skipped_tables() ),
+				$report->skipped_values()
+			)
+		);
 	}
 
 	/**
@@ -570,14 +710,20 @@ final class ImportCommand {
 	 *
 	 * @param string $archive_path The archive that was verified.
 	 * @param int    $entry_count  How many entries were verified.
+	 * @param string $target_url   The migration target, or '' when --url was not given.
 	 * @return void
 	 */
-	private function print_dry_run_summary( string $archive_path, int $entry_count ): void {
+	private function print_dry_run_summary( string $archive_path, int $entry_count, string $target_url ): void {
+		$migration_note = '' === $target_url
+			? ''
+			: sprintf( ' The site URL would be migrated to %s after a real restore.', $target_url );
+
 		WP_CLI::log(
 			sprintf(
-				'Dry run complete: %d entries verified in %s. No changes were made.',
+				'Dry run complete: %d entries verified in %s. No changes were made.%s',
 				$entry_count,
-				$archive_path
+				$archive_path,
+				$migration_note
 			)
 		);
 	}
