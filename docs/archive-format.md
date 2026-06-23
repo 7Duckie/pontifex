@@ -371,9 +371,9 @@ When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25
 
 - **key id:** SHA-256 of the public key used.
 - **sig length:** uint32 big-endian; for Ed25519 always `0x00000040`.
-- **sig bytes:** Ed25519 signature over the bytes from offset 0 through the end of the footer.
+- **sig bytes:** Ed25519 signature over the **SHA-256 digest** of the bytes from offset 0 through the end of the footer — that is, `Ed25519( SHA-256( bytes[0 … end of footer] ) )`. The digest is computed by streaming those bytes, so neither signing nor verifying ever holds the whole archive in memory; this is what keeps signed archives within the streamable-in-both-directions goal (§2) and the writer's memory budget. Signing a digest rather than the raw bytes is the standard construction for messages too large to buffer — it is what minisign does, and the role RFC 8032's Ed25519ph fills — and is sound here because SHA-256 is collision-resistant and the signed bytes begin with the magic and version, so a signature cannot be transferred to another context. The digest covers everything but the signature block itself: the header (including the signed flag), the provenance, every entry, the manifest, and the footer.
 
-**Verification:** an operator who trusts a particular public key can verify the signature to prove the archive was produced by the holder of the corresponding private key. This is independent of encryption: an archive can be signed without being encrypted, and vice versa.
+**Verification:** an operator who trusts a particular public key can verify the signature — by recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key — to prove the archive was produced by the holder of the corresponding private key. This is independent of encryption: an archive can be signed without being encrypted, and vice versa.
 
 The signature is **detached and optional**. v1 archives are not required to carry one; readers are not required to verify one when present, though they should warn the operator if a signature is present and not verified.
 
@@ -398,7 +398,7 @@ A conforming reader performs verification in this order:
 4. **Read manifest.** Compute and verify manifest hash against the value in the footer.
 5. **Walk entries from manifest.** For each entry, seek to its offset, read the stored bytes, compute SHA-256, and compare to the manifest's expected hash.
 6. **If encrypted:** decrypt each entry's payload using the derived key, the per-entry nonce, and the entry header as AAD. AES-GCM will fail the authentication tag check if any byte has been modified.
-7. **If signed:** verify the Ed25519 signature against the trusted public key, if the operator has supplied one.
+7. **If signed:** verify the Ed25519 signature — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against the trusted public key — if the operator has supplied one.
 
 Any failure at any step halts the import. The reader must report which step failed, which entry or block was affected, and what the expected versus actual values were. Specifically: "Entry #1273 (`wp-content/uploads/2024/01/banner.jpg`): expected hash `a1b2…`, got `f7e8…`" — not "Import failed."
 
@@ -464,12 +464,12 @@ The bits on disk. Any change here would prevent old readers from parsing new arc
 
 The primitives chosen for security. These are locked because changing any of them would invalidate the security analysis and require re-auditing every implementation.
 
-- **SHA-256** as the integrity hash algorithm everywhere it is used: per-entry hashes, manifest hash in footer, provenance hash, signature key id.
+- **SHA-256** as the integrity hash algorithm everywhere it is used: per-entry hashes, manifest hash in footer, provenance hash, signature key id, and the prehash digest the detached signature is computed over.
 - **AES-256-GCM** as the only authenticated encryption mode used in v1.
 - **Argon2id** with the exact v1 parameters as the only key derivation function. The parameters are: 4 iterations, 65 536 KiB memory, 1 thread, 32-byte output, 16-byte salt.
 - **Nonce construction**: 4-byte big-endian entry index, followed by 8 random bytes. No other construction is permitted.
 - **AAD binding**: the plaintext entry header (including its length prefix) is the AAD for each encrypted entry. No other AAD scheme is permitted.
-- **Ed25519** as the only signature algorithm for the optional detached signature.
+- **Ed25519** as the only signature algorithm for the optional detached signature, computed over the SHA-256 prehash of the archive (§11), never the raw bytes directly.
 - **The verification order on import** (header → provenance → footer → manifest → entries → signature). Reordering creates exploitable race conditions; the order is part of the security contract.
 
 #### 13.2.3 Semantic invariants

@@ -14,7 +14,9 @@ use JsonException;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Crypto\EncryptionContext;
+use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ArchiveSignature;
 use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Footer;
@@ -32,7 +34,8 @@ use Pontifex\Archive\Integrity\Sha256;
  *   [16]                    Provenance    (variable; HEADER_SIZE + JSON)
  *   [...]                   Entry records (variable; written by EntryWriter)
  *   [manifest_offset]       Manifest      (4 length + 32 hash + JSON)
- *   [total - 64]            Footer        (64 bytes)
+ *   [before signature]      Footer        (64 bytes)
+ *   [end - 100]             Signature     (100 bytes; only when the archive is signed)
  *
  * For each EntryPlan supplied by the caller, ArchiveWriter delegates
  * the actual entry-writing to {@see EntryWriter}, then constructs a
@@ -57,6 +60,14 @@ use Pontifex\Archive\Integrity\Sha256;
  * into the footer. Without a context the archive is unencrypted and the
  * footer's argon2id_salt slot carries Footer::ZERO_SALT (sixteen zero bytes).
  *
+ * An archive is signed when a SigningContext is supplied to write_archive():
+ * the header's signed flag is set and, once the footer is written, an Ed25519
+ * signature over the SHA-256 of every byte through the footer is appended as a
+ * 100-byte ArchiveSignature block. The digest is computed by streaming the
+ * just-written bytes, so signing stays within the writer's memory budget — but
+ * it therefore needs a seekable, readable destination. Signing is independent
+ * of encryption: either, both, or neither may be requested.
+ *
  * Threading and reuse: ArchiveWriter is stateless after
  * construction. The write_archive() method is safe to call any
  * number of times. Each call reads from each plan's source stream
@@ -65,6 +76,16 @@ use Pontifex\Archive\Integrity\Sha256;
  * to write_archive().
  */
 final class ArchiveWriter {
+
+	/**
+	 * Bytes read per chunk when streaming the archive to compute the signing digest.
+	 *
+	 * Sized well under the writer's memory budget; a larger value only reduces the
+	 * number of read calls.
+	 *
+	 * @var int
+	 */
+	private const SIGNATURE_HASH_CHUNK_SIZE = 1048576;
 
 	/**
 	 * Writer responsible for emitting each entry record.
@@ -104,12 +125,14 @@ final class ArchiveWriter {
 	 * @param resource               $destination      Writable stream resource; bytes are written from its current seek position and it is advanced by the returned byte count.
 	 * @param callable|null          $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
 	 * @param EncryptionContext|null $encryption       Encryption inputs (cipher, key, salt); when supplied the header's encrypted flag is set, every entry is encrypted with a per-entry nonce, and the salt is written into the footer; null produces an unencrypted archive.
+	 * @param SigningContext|null    $signing          Signing inputs (signer, secret key, key id); when supplied the header's signed flag is set and a 100-byte Ed25519 signature block over the SHA-256 of every byte through the footer is appended. Requires a seekable, readable destination. null produces an unsigned archive.
 	 * @return int Total bytes written to the destination during this call.
-	 * @throws InvalidArgumentException If $destination is not a stream resource or any element
-	 *                                  of $entry_plans is not an EntryPlan.
-	 * @throws RuntimeException         If any block fails to serialise, any write fails, or a nonce cannot be generated.
+	 * @throws InvalidArgumentException If $destination is not a stream resource, any element
+	 *                                  of $entry_plans is not an EntryPlan, or signing was requested
+	 *                                  but the destination is not seekable and readable.
+	 * @throws RuntimeException         If any block fails to serialise, any write fails, a nonce cannot be generated, or signing fails.
 	 */
-	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null ): int {
+	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null ): int {
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
 		}
@@ -119,6 +142,9 @@ final class ArchiveWriter {
 					sprintf( 'ArchiveWriter: $entry_plans[%d] must be an EntryPlan instance.', (int) $i )
 				);
 			}
+		}
+		if ( null !== $signing ) {
+			self::assert_signable_destination( $destination );
 		}
 
 		$total = count( $entry_plans );
@@ -135,11 +161,18 @@ final class ArchiveWriter {
 			);
 		}
 
-		// An encrypted archive sets the encrypted flag in the header; an unencrypted one
-		// uses the default (no flags). The salt and per-entry encryption are applied below.
-		$header = null !== $encryption
-			? new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_0, Header::FLAG_ENCRYPTED )
-			: Header::current_version();
+		// Set the header flags: encrypted (salt and per-entry encryption applied below)
+		// and/or signed (the signature appended after the footer below). The signed flag
+		// must be set here so it is part of the bytes the signature covers. Flags of 0
+		// reproduce Header::current_version().
+		$flags = 0;
+		if ( null !== $encryption ) {
+			$flags |= Header::FLAG_ENCRYPTED;
+		}
+		if ( null !== $signing ) {
+			$flags |= Header::FLAG_SIGNED;
+		}
+		$header = new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_0, $flags );
 
 		$header_bytes  = $header->to_bytes();
 		$bytes_written = 0;
@@ -219,6 +252,13 @@ final class ArchiveWriter {
 			$salt
 		);
 		$bytes_written += $this->footer_writer->write_footer( $footer, $destination );
+
+		// Sign last: the signature covers every byte written so far (header through
+		// footer). The digest is streamed from the just-written bytes so memory stays
+		// bounded, and the 100-byte block is appended after the footer.
+		if ( null !== $signing ) {
+			$bytes_written += self::sign_and_append( $destination, $bytes_written, $signing );
+		}
 
 		return $bytes_written;
 	}
@@ -320,6 +360,86 @@ final class ArchiveWriter {
 			throw new RuntimeException( 'ArchiveWriter: could not generate a random nonce for an encrypted entry.', 0, $e );
 		}
 		return ByteOrder::pack_uint32( $index ) . $random;
+	}
+
+	/**
+	 * Sign the bytes already written and append the 100-byte signature block.
+	 *
+	 * Streams the destination from offset 0 through $signed_length to compute the
+	 * SHA-256 the signature is taken over, signs that digest, and writes the
+	 * resulting ArchiveSignature block after the footer.
+	 *
+	 * @param resource       $destination   The archive stream, already written through the footer.
+	 * @param int            $signed_length Number of bytes (header through footer) the signature covers.
+	 * @param SigningContext $signing       The signer, secret key and key id.
+	 * @return int The number of bytes the signature block added.
+	 * @throws RuntimeException If the stream cannot be re-read or signing fails.
+	 */
+	private static function sign_and_append( $destination, int $signed_length, SigningContext $signing ): int {
+		$digest    = self::digest_stream_prefix( $destination, $signed_length );
+		$signature = $signing->signer()->sign( $digest, $signing->secret_key() );
+		$block     = new ArchiveSignature( $signing->key_id(), $signature );
+		return self::write_bytes( $destination, $block->to_bytes() );
+	}
+
+	/**
+	 * Compute the SHA-256 of the first $length bytes of a stream, by streaming.
+	 *
+	 * Reads from offset 0 in bounded chunks so memory stays within budget no matter
+	 * how large the archive is, then seeks back to the end so the caller can append.
+	 *
+	 * @param resource $destination A seekable, readable stream.
+	 * @param int      $length      Number of bytes from offset 0 to hash.
+	 * @return string The raw 32-byte SHA-256 digest.
+	 * @throws RuntimeException If a seek or read fails, or the stream is shorter than $length.
+	 */
+	private static function digest_stream_prefix( $destination, int $length ): string {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Seeking within the archive stream to re-read it for the signing digest; WP_Filesystem has no streaming API.
+		if ( -1 === fseek( $destination, 0 ) ) {
+			throw new RuntimeException( 'ArchiveWriter: could not seek to offset 0 to compute the signing digest.' );
+		}
+
+		$context   = hash_init( 'sha256' );
+		$remaining = $length;
+		while ( $remaining > 0 ) {
+			$want = (int) min( self::SIGNATURE_HASH_CHUNK_SIZE, $remaining );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading the archive stream back to compute the signing digest; WP_Filesystem has no streaming API.
+			$chunk = fread( $destination, $want );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new RuntimeException( 'ArchiveWriter: could not re-read the archive to compute the signing digest; stream may be truncated.' );
+			}
+			hash_update( $context, $chunk );
+			$remaining -= strlen( $chunk );
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Returning to the end of the stream so the signature block appends after the footer.
+		if ( -1 === fseek( $destination, 0, SEEK_END ) ) {
+			throw new RuntimeException( 'ArchiveWriter: could not seek back to the end of the stream after computing the signing digest.' );
+		}
+
+		return hash_final( $context, true );
+	}
+
+	/**
+	 * Assert a destination is usable for signing: seekable and readable.
+	 *
+	 * Signing re-reads the written archive to compute its digest, so the stream must
+	 * be seekable and opened in a mode that permits reading (e.g. "w+b"). A
+	 * write-only stream would fail mid-write; this fails fast instead.
+	 *
+	 * @param resource $destination The stream to check.
+	 * @return void
+	 * @throws InvalidArgumentException If the stream is not seekable or not readable.
+	 */
+	private static function assert_signable_destination( $destination ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_meta_data -- Inspecting the destination stream's capabilities before signing; WP_Filesystem has no equivalent.
+		$meta = stream_get_meta_data( $destination );
+		if ( empty( $meta['seekable'] ) ) {
+			throw new InvalidArgumentException( 'ArchiveWriter: signing requires a seekable destination stream.' );
+		}
+		if ( false === strpbrk( (string) $meta['mode'], 'r+' ) ) {
+			throw new InvalidArgumentException( 'ArchiveWriter: signing requires a readable destination stream; open it with a mode that permits reading, e.g. "w+b".' );
+		}
 	}
 
 	/**
