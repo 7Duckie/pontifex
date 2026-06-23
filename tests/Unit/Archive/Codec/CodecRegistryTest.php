@@ -15,6 +15,7 @@ use Pontifex\Archive\Codec\CodecException;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Codec\ZstdCodec;
 
 /**
  * Behavioural tests for the CodecRegistry class.
@@ -26,8 +27,8 @@ use Pontifex\Archive\Codec\RawCodec;
  *  - has() reflects registration state correctly.
  *  - Duplicate registration raises CodecException.
  *  - Looking up an unknown ID raises CodecException.
- *  - with_defaults() returns a registry containing exactly RawCodec
- *    (0x0000) and GzipCodec (0x0001), and forwards a custom gzip
+ *  - with_defaults() returns a registry containing RawCodec
+ *    (0x0000), GzipCodec (0x0001), and ZstdCodec (0x0002), and forwards a custom gzip
  *    chunk size when supplied.
  */
 final class CodecRegistryTest extends TestCase {
@@ -172,7 +173,7 @@ final class CodecRegistryTest extends TestCase {
 	}
 
 	/**
-	 * The with_defaults() factory must register the v0.1.0 baseline codecs.
+	 * The with_defaults() factory must register the baseline codecs.
 	 *
 	 * @return void
 	 */
@@ -181,27 +182,28 @@ final class CodecRegistryTest extends TestCase {
 
 		$this->assertTrue( $registry->has( RawCodec::ID ) );
 		$this->assertTrue( $registry->has( GzipCodec::ID ) );
+		$this->assertTrue( $registry->has( ZstdCodec::ID ) );
 		$this->assertInstanceOf( RawCodec::class, $registry->get( RawCodec::ID ) );
 		$this->assertInstanceOf( GzipCodec::class, $registry->get( GzipCodec::ID ) );
+		$this->assertInstanceOf( ZstdCodec::class, $registry->get( ZstdCodec::ID ) );
 	}
 
 	/**
-	 * The with_defaults() factory must not register codecs beyond the v0.1.0 baseline.
+	 * The with_defaults() factory must not register the encrypted codecs yet.
 	 *
-	 * Locks the v0.1.0 codec set into a test that future changes will
-	 * trip over. If a v0.2.0 codec is added to with_defaults(), this
-	 * test breaks and demands deliberate acknowledgement.
+	 * Locks the current codec set into a test that future changes will trip
+	 * over. When an encrypted codec is added to with_defaults(), this test
+	 * breaks and demands deliberate acknowledgement.
 	 *
 	 * @return void
 	 */
-	public function test_with_defaults_does_not_register_other_codecs(): void {
+	public function test_with_defaults_does_not_register_encrypted_codecs(): void {
 		$registry = CodecRegistry::with_defaults();
 
-		// Codec IDs reserved by the spec but not part of v0.1.0.
-		$this->assertFalse( $registry->has( 0x0002 ), 'zstd (0x0002) is v0.2.0' );
-		$this->assertFalse( $registry->has( 0x0100 ), 'encrypted raw (0x0100) is v0.2.0' );
-		$this->assertFalse( $registry->has( 0x0101 ), 'encrypted gzip (0x0101) is v0.2.0' );
-		$this->assertFalse( $registry->has( 0x0102 ), 'encrypted zstd (0x0102) is v0.2.0' );
+		// Encryption codec IDs reserved by the spec but not yet implemented.
+		$this->assertFalse( $registry->has( 0x0100 ), 'encrypted raw (0x0100) not yet implemented' );
+		$this->assertFalse( $registry->has( 0x0101 ), 'encrypted gzip (0x0101) not yet implemented' );
+		$this->assertFalse( $registry->has( 0x0102 ), 'encrypted zstd (0x0102) not yet implemented' );
 	}
 
 	/**

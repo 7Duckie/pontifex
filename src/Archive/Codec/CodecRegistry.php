@@ -32,7 +32,7 @@ namespace Pontifex\Archive\Codec;
  *    the archive is corrupted. Refusing to proceed is the safe
  *    behaviour.
  *  - {@see CodecRegistry::with_defaults()} constructs a registry
- *    pre-populated with the v0.1.0 baseline (RawCodec, GzipCodec).
+ *    pre-populated with the baseline codecs (RawCodec, GzipCodec, ZstdCodec).
  *    Tests that need empty or partial registries construct the
  *    registry directly and call register() as required.
  */
@@ -89,11 +89,14 @@ final class CodecRegistry {
 	}
 
 	/**
-	 * Build a registry pre-populated with the v0.1.0 baseline codecs.
+	 * Build a registry pre-populated with the baseline codecs.
 	 *
-	 * Registers RawCodec (0x0000) and GzipCodec (0x0001). v0.2.0 will
-	 * extend this set with ZstdCodec and the encrypted-codec variants
-	 * once those land.
+	 * Registers RawCodec (0x0000), GzipCodec (0x0001), and ZstdCodec
+	 * (0x0002). ZstdCodec is registered even when ext-zstd is absent, so the
+	 * registry can always resolve codec 0x0002; the extension is required
+	 * only when a 0x0002 entry is actually encoded or decoded. The
+	 * encrypted-codec variants (0x0100-0x0102) join this set when encryption
+	 * lands.
 	 *
 	 * The optional gzip chunk size is forwarded to GzipCodec's
 	 * constructor. The default matches GzipCodec's own default; callers
@@ -108,6 +111,7 @@ final class CodecRegistry {
 		$registry = new self();
 		$registry->register( new RawCodec() );
 		$registry->register( new GzipCodec( $gzip_chunk_size ) );
+		$registry->register( new ZstdCodec() );
 		return $registry;
 	}
 }

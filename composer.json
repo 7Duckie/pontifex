@@ -67,5 +67,8 @@
     "test:integration": "phpunit -c phpunit-integration.xml.dist",
     "test:unit": "phpunit --testsuite=unit"
   },
+  "suggest": {
+    "ext-zstd": "Faster, denser compression than gzip for archive entries (codec 0x0002); Pontifex falls back to gzip when it is absent."
+  },
   "type": "wordpress-plugin"
 }
