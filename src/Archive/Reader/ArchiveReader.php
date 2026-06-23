@@ -12,8 +12,10 @@ namespace Pontifex\Archive\Reader;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\Footer;
 use Pontifex\Archive\Format\Header;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Integrity\Sha256;
 
 /**
@@ -45,6 +47,10 @@ use Pontifex\Archive\Integrity\Sha256;
  *    read and cached on first access. Verifies the manifest's
  *    internal hash matches the Footer's recorded hash; throws if
  *    they disagree.
+ *  - {@see ArchiveReader::provenance()} — the parsed Provenance block
+ *    (source-site facts, including the source URL used by cross-URL
+ *    migration), read and cached on first access; bounds-checked and
+ *    hash-verified, so a corrupt block is refused.
  *
  * Internal choices (implementation details; may change without
  * breaking the public API):
@@ -96,6 +102,15 @@ final class ArchiveReader {
 	 * @var ArchiveManifest|null
 	 */
 	private ?ArchiveManifest $manifest = null;
+
+	/**
+	 * The parsed Provenance block, populated lazily on first access via provenance().
+	 *
+	 * Null until the first provenance() call; cached thereafter.
+	 *
+	 * @var Provenance|null
+	 */
+	private ?Provenance $provenance = null;
 
 	/**
 	 * Open an ArchiveReader around an existing archive stream.
@@ -194,6 +209,32 @@ final class ArchiveReader {
 			$this->manifest = $this->read_manifest();
 		}
 		return $this->manifest;
+	}
+
+	/**
+	 * Return the archive's provenance block, reading it from offset Header::SIZE on first access.
+	 *
+	 * The provenance block records the source site's facts at export — the
+	 * WordPress and PHP versions, the **source-site URL** (the search term for
+	 * a cross-URL migration), the database charset and collation, the exporter,
+	 * and the export time. It sits immediately after the header (offset
+	 * {@see Header::SIZE}) and is self-describing: a 4-byte length prefix, a
+	 * 32-byte payload hash, then the JSON payload.
+	 *
+	 * Read lazily and cached, mirroring {@see self::manifest()}. The declared
+	 * payload length is capped at {@see Provenance::MAX_PAYLOAD_SIZE} and the
+	 * block is bounds-checked against the manifest offset before reading;
+	 * {@see Provenance::from_bytes()} then re-verifies the length and hash, so a
+	 * corrupt or tampered block is refused rather than trusted.
+	 *
+	 * @return Provenance The parsed provenance block.
+	 * @throws RuntimeException If the block cannot be read, is out of bounds, or fails verification.
+	 */
+	public function provenance(): Provenance {
+		if ( null === $this->provenance ) {
+			$this->provenance = $this->read_provenance();
+		}
+		return $this->provenance;
 	}
 
 	/**
@@ -348,5 +389,71 @@ final class ArchiveReader {
 		}
 
 		return $manifest;
+	}
+
+	/**
+	 * Read and parse the provenance block from offset Header::SIZE.
+	 *
+	 * Reads the 4-byte length prefix, caps it at Provenance::MAX_PAYLOAD_SIZE,
+	 * checks the block fits between the header and the manifest, then reads the
+	 * whole block (length prefix + hash + payload) and defers to
+	 * Provenance::from_bytes, which re-verifies the length and payload hash.
+	 *
+	 * @return Provenance The parsed provenance block.
+	 * @throws RuntimeException If the block cannot be read, is out of bounds, or fails verification.
+	 */
+	private function read_provenance(): Provenance {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, Header::SIZE ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to the provenance block.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$length_bytes = fread( $this->source, Provenance::LENGTH_PREFIX_SIZE );
+		if ( false === $length_bytes || strlen( $length_bytes ) !== Provenance::LENGTH_PREFIX_SIZE ) {
+			throw new RuntimeException( 'ArchiveReader: could not read the provenance length prefix; stream may be truncated.' );
+		}
+
+		$length = ByteOrder::unpack_uint32( $length_bytes );
+		if ( $length > Provenance::MAX_PAYLOAD_SIZE ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: provenance payload length %d exceeds the maximum of %d bytes.',
+					(int) $length,
+					(int) Provenance::MAX_PAYLOAD_SIZE
+				)
+			);
+		}
+
+		$total = Provenance::HEADER_SIZE + $length;
+
+		// The provenance block sits between the header and the manifest; it must not overrun the manifest offset.
+		if ( Header::SIZE + $total > $this->footer->manifest_offset() ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: provenance block of %d bytes overruns the manifest offset %d.',
+					(int) $total,
+					(int) $this->footer->manifest_offset()
+				)
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $this->source, Header::SIZE ) ) {
+			throw new RuntimeException( 'ArchiveReader: could not seek to the provenance block to read it.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$bytes = fread( $this->source, $total );
+		if ( false === $bytes || strlen( $bytes ) !== $total ) {
+			throw new RuntimeException(
+				sprintf( 'ArchiveReader: could not read %d provenance bytes; stream may be truncated.', (int) $total )
+			);
+		}
+
+		try {
+			return Provenance::from_bytes( $bytes );
+		} catch ( InvalidArgumentException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+			throw new RuntimeException( 'ArchiveReader: archive provenance block is malformed.', 0, $e );
+		}
 	}
 }
