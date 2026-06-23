@@ -14,10 +14,36 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.3.0 — cross-URL migration with its
-serialised-data defences (ADR 0004), encryption, and the fuller
-observability surface — begins after this tag. See
-[`docs/roadmap.md`](docs/roadmap.md).
+Nothing yet. Work toward v0.4.0 — the observability surface (fuller logging and
+metrics, `wp pontifex stats`, `wp pontifex diagnostics`) and the admin UI —
+begins after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.3.0] — 2026-06-23 — Migration, encryption and signatures
+
+The cryptographic release. Pontifex can now migrate a site to a new URL,
+encrypt an archive, and sign it — each with the defences the format reserved
+space for.
+
+- **Cross-URL migration.** `wp pontifex import --url=<new-url>` rewrites the
+  site URL across the restored database with a serialised-data-safe
+  search-replace: `unserialize()` runs with `allowed_classes => false`, every
+  rewritten value is round-trip re-serialised and verified, and a pre-import
+  scan reports what will change (ADR 0006).
+- **Encryption.** `wp pontifex export --encrypt` (or `--passphrase-stdin`)
+  writes an AES-256-GCM archive with an Argon2id-derived key (a per-archive
+  salt and a per-entry nonce); `import` and `verify` detect an encrypted
+  archive and prompt for the passphrase. There is no passphrase recovery.
+- **zstd compression.** Codec `0x0002`, preferred when `ext-zstd` is present and
+  falling back to gzip when it is not — the archive is readable either way.
+- **Ed25519 signatures.** `wp pontifex keygen` generates a keypair;
+  `export --sign --signing-key=<path>` signs the archive (Ed25519 over a
+  streamed SHA-256 prehash, so signing stays within memory on large archives);
+  `verify` and `import` take `--public-key=<path>` to verify, with import
+  refusing a bad signature before it writes anything.
+
+The observability surface originally planned for v0.3.0 — fuller logging and
+metrics, `wp pontifex stats`, `wp pontifex diagnostics` — moved to v0.4.0 so
+this release could ship on the cryptographic work alone.
 
 ## [0.2.0] — 2026-06-22 — Safety, verification and rollback
 
@@ -340,6 +366,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.1.0...HEAD
+[0.3.0]: https://github.com/7Duckie/pontifex/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/7Duckie/pontifex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/7Duckie/pontifex/compare/v0.0.6...v0.1.0
 [0.0.6]: https://github.com/7Duckie/pontifex/releases/tag/v0.0.6

@@ -46,15 +46,14 @@ is the honest difference, updated at every release.
 | Archive verification (`wp pontifex verify`) | — | ✅ |
 | Cross-URL migration (`wp pontifex import --url=`) | ✅ | ✅ — serialised-safe search-replace + gadget defences |
 | zstd compression (codec `0x0002`) | ✅ | ✅ — when `ext-zstd` is present, else gzip |
-| Encryption (`--passphrase`) | ✅ | ❌ — not yet; lands in v0.3.0 (**archives today are written unencrypted**) |
-| Ed25519 signatures | ✅ | ❌ — planned for v0.3.0 |
+| Encryption (`--encrypt`) | ✅ | ✅ — AES-256-GCM, Argon2id-derived key; `--encrypt` / `--passphrase-stdin` |
+| Ed25519 signatures | ✅ | ✅ — `wp pontifex keygen` + `export --sign`; `--public-key` verification on `verify` / `import` |
 
 **What Pontifex is _not_ yet:** a scheduled-backup system (no cron, no
-retention policies), an encrypting tool (the `--passphrase` flag is the
-next slice; archives today are written unencrypted), or a point-and-click
-tool (the admin UI lands in v0.4.0). If you need those today, pair
-Pontifex with tools that have them — and watch the table above as it
-fills in.
+retention policies) or a point-and-click tool (the admin UI lands in
+v0.4.0). It also does not yet surface its activity (`wp pontifex stats` /
+`diagnostics` land in v0.4.0). If you need those today, pair Pontifex with
+tools that have them — and watch the table above as it fills in.
 
 ## Requirements
 
@@ -152,26 +151,25 @@ truth — including why each deferred item waits — is
   cold storage, writing nothing); rollback (an automatic pre-import
   safety archive, undone with `wp pontifex rollback`); a protected
   `main` and the open-source-health files.
-- **v0.3.0 — Migration, encryption and observability. 🚧 In progress.**
+- **v0.3.0 — Migration, encryption and signatures. ✅ Released.**
   - Cross-URL migration — `wp pontifex import --url=`, a serialised-safe
     search-replace with allowlist-disabled unserialize, round-trip
-    verification, and a pre-import scan. **✅ Done.**
+    verification, and a pre-import scan.
   - zstd compression — codec `0x0002`, preferred when `ext-zstd` is
-    present, gzip otherwise. **✅ Done.**
+    present, gzip otherwise.
   - Encryption — Argon2id-derived keys, per-entry AES-256-GCM, codecs
-    `0x0100`/`0x0101`/`0x0102`, and a `--passphrase` flag on `export`
-    and `import`. **🚧 In progress** — the format and cipher layers are
-    built and tested; the `--passphrase` CLI is the next slice.
-  - Optional Ed25519 detached signatures, verified at import against a
-    trusted public key. **Planned.**
-  - Full structured logging (a diagnostics bundle and per-transfer
-    logs), full transfer metrics (a rolling history), `wp pontifex
-    stats`, and `wp pontifex diagnostics`. **Planned.**
+    `0x0100`/`0x0101`/`0x0102`, with `--encrypt` / `--passphrase-stdin` on
+    `export` and a passphrase prompt on `import` and `verify`.
+  - Optional Ed25519 detached signatures (Ed25519 over a streamed SHA-256
+    prehash) — `wp pontifex keygen`, `export --sign --signing-key`, and
+    `--public-key` verification on `verify` and `import`.
 - **v0.4.0 and beyond — Admin UI and operational maturity. Planned.**
-  An admin UI for non-CLI users; resumable exports (surviving PHP
-  timeouts and lost SSH sessions); scheduled exports; push/pull
-  host-to-host transports; selective content (export-without-database,
-  single-table, content-type filters); multisite support.
+  Fuller observability (richer structured logging, full transfer metrics,
+  `wp pontifex stats`, `wp pontifex diagnostics`), moved here from v0.3.0;
+  an admin UI for non-CLI users; resumable exports (surviving PHP timeouts
+  and lost SSH sessions); scheduled exports; push/pull host-to-host
+  transports; selective content (export-without-database, single-table,
+  content-type filters); multisite support.
 - **v1.0.0 — Stable surface. Planned.** The public API frozen;
   submission to the WordPress.org plugin directory; the `.wpmig` spec
   graduating from DRAFT to LOCKED with published test vectors.
