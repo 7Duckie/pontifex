@@ -63,12 +63,19 @@ use Pontifex\WordPress\WordPressContext;
  * : Read the passphrase to verify an encrypted archive as one line from STDIN
  *   instead of prompting. Ignored for an unencrypted archive.
  *
+ * [--public-key=<path>]
+ * : Verify the archive's Ed25519 signature against this public-key file (from
+ *   `wp pontifex keygen`). A signed archive whose signature fails is reported
+ *   BROKEN. Without it, a signed archive is checked for integrity only, with a
+ *   warning that its signature was not verified.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex verify /backups/site.wpmig
  *     wp pontifex verify /backups/site.wpmig --list
  *     wp pontifex verify /backups/site.wpmig --list --format=json
  *     pass show backup | wp pontifex verify /backups/encrypted.wpmig --passphrase-stdin
+ *     wp pontifex verify /backups/site.wpmig --public-key=/root/pontifex.pub
  *
  * @when after_wp_load
  */
@@ -191,6 +198,7 @@ final class VerifyCommand {
 		$show_list        = isset( $associative_args['list'] ) && false !== $associative_args['list'];
 		$format           = isset( $associative_args['format'] ) ? (string) $associative_args['format'] : 'table';
 		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
+		$public_key       = $this->resolve_public_key( $associative_args );
 
 		$this->validate_archive_path( $archive_path );
 
@@ -228,6 +236,11 @@ final class VerifyCommand {
 
 			$restore_runner->verify( $source, $on_entry );
 			$this->progress->finish();
+
+			// 7. Signature last (ARCHIVE-FORMAT.md §12.1). A signed archive whose
+			// signature fails against the supplied key throws here, so the verdict
+			// is BROKEN; signed-but-no-key warns and stays sound.
+			$this->check_signature( $source, $public_key );
 
 			$this->logger->info(
 				'Verify complete: archive is sound.',
@@ -389,6 +402,65 @@ final class VerifyCommand {
 			throw new RuntimeException( 'VerifyCommand: ABSPATH is not defined; is WordPress loaded?' );
 		}
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+	}
+
+	/**
+	 * Resolve the --public-key option to a loaded public key, or null when absent.
+	 *
+	 * A bad or unreadable key file is the operator's mistake, not a broken
+	 * archive, so it exits via WP_CLI::error rather than the broken-verdict path.
+	 *
+	 * @param array<string, string|bool> $associative_args The CLI's associative args.
+	 * @return string|null The 32-byte public key, or null when --public-key was not supplied.
+	 */
+	private function resolve_public_key( array $associative_args ): ?string {
+		if ( ! isset( $associative_args['public-key'] ) || '' === $associative_args['public-key'] || true === $associative_args['public-key'] ) {
+			return null;
+		}
+
+		$key = '';
+		try {
+			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
+		} catch ( \Exception $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+			WP_CLI::error( $e->getMessage() );
+		}
+		return $key;
+	}
+
+	/**
+	 * Check the archive's signature as the final verification step.
+	 *
+	 * Unsigned archive: nothing to check (a stray --public-key earns a warning).
+	 * Signed with no key: warn that the signature was not verified, stay sound.
+	 * Signed with a key: a failed signature throws (caught as a BROKEN verdict);
+	 * a good one logs that it verified.
+	 *
+	 * @param resource    $source     The open archive stream.
+	 * @param string|null $public_key The trusted public key, or null when none was supplied.
+	 * @return void
+	 * @throws RuntimeException If the archive is signed and the signature does not verify against $public_key.
+	 */
+	private function check_signature( $source, ?string $public_key ): void {
+		$reader = new ArchiveReader( $source );
+
+		if ( null === $reader->signature() ) {
+			if ( null !== $public_key ) {
+				WP_CLI::warning( 'A public key was supplied with --public-key, but this archive is not signed.' );
+			}
+			return;
+		}
+
+		if ( null === $public_key ) {
+			WP_CLI::warning( 'This archive is signed, but its signature was NOT verified. Pass --public-key=<path> to verify it.' );
+			return;
+		}
+
+		if ( ! $reader->verify_signature( $public_key ) ) {
+			throw new RuntimeException( 'the Ed25519 signature did not verify against the supplied public key (wrong key, or the archive was modified after signing).' );
+		}
+
+		WP_CLI::log( 'Signature verified against the supplied public key.' );
 	}
 
 

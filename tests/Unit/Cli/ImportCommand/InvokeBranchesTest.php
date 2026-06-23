@@ -9,9 +9,20 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\ImportCommand;
 
+use DateTimeImmutable;
+use DateTimeZone;
 use Mockery;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Crypto\SigningContext;
+use Pontifex\Archive\Crypto\SigningKeypair;
+use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
+use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
@@ -60,19 +71,60 @@ final class InvokeBranchesTest extends TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		$this->temp_archive_path = sys_get_temp_dir() . '/pontifex-import-invoke-test-' . uniqid( '', true ) . '.wpmig';
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Creating an empty, readable source file in sys_get_temp_dir() for the command to fopen; WP_Filesystem is not bootstrapped in unit tests.
-		touch( $this->temp_archive_path );
+		// A real (empty, unsigned) archive: ImportCommand now reads the header to
+		// check for a signature before restoring, so the source must parse as one.
+		self::write_unsigned_archive( $this->temp_archive_path );
 	}
 
 	/**
-	 * Remove the temp archive file the test created.
+	 * Write a minimal, valid, unsigned archive to the given path.
+	 *
+	 * @param string $path Destination path.
+	 * @return void
+	 */
+	private static function write_unsigned_archive( string $path ): void {
+		self::write_archive_to( $path, null );
+	}
+
+	/**
+	 * Write a minimal, valid archive to the given path, optionally signed.
+	 *
+	 * @param string              $path    Destination path.
+	 * @param SigningContext|null $signing Signing context, or null for an unsigned archive.
+	 * @return void
+	 */
+	private static function write_archive_to( string $path, ?SigningContext $signing ): void {
+		$provenance = new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			'utf8mb4_unicode_520_ci',
+			new ExporterInfo( 'pontifex', '0.3.0' ),
+			new DateTimeImmutable( '2026-06-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp source file for the command to read; WP_Filesystem is not bootstrapped in unit tests.
+		$destination = fopen( $path, 'w+b' );
+		$writer      = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
+		$writer->write_archive( $provenance, array(), $destination, null, null, $signing );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test's own handle.
+		fclose( $destination );
+	}
+
+	/**
+	 * Remove the temp archive file (and any sibling key files) the test created.
 	 *
 	 * @return void
 	 */
 	protected function tearDown(): void {
-		if ( null !== $this->temp_archive_path && file_exists( $this->temp_archive_path ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test-only cleanup of a file the test itself created in sys_get_temp_dir().
-			unlink( $this->temp_archive_path );
+		if ( null !== $this->temp_archive_path ) {
+			foreach ( array( $this->temp_archive_path, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' ) as $path ) {
+				if ( file_exists( $path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test-only cleanup of a file the test itself created in sys_get_temp_dir().
+					unlink( $path );
+				}
+			}
 		}
 		$this->temp_archive_path = null;
 		parent::tearDown();
@@ -447,6 +499,52 @@ final class InvokeBranchesTest extends TestCase {
 		);
 
 		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
+	 * A signed archive that fails the supplied public key is refused before any restore.
+	 *
+	 * The signature gate runs before the safety archive and the restore, so a
+	 * bad signature must reach neither: nothing is written.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_aborts_before_restore_on_a_bad_signature(): void {
+		$keypair = SigningKeypair::generate();
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		// A different keypair's public key — so the signature will not verify.
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing to restore' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'        => true,
+				'public-key' => $this->temp_archive_path . '.pub',
+			)
+		);
 	}
 
 	/**

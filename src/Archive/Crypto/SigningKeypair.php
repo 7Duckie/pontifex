@@ -119,6 +119,39 @@ final class SigningKeypair {
 	}
 
 	/**
+	 * Reconstruct a keypair from a secret key by deriving its public half.
+	 *
+	 * An Ed25519 secret key embeds the public key, so the public key (and hence
+	 * the key id) can be recovered from the secret key alone. This lets the CLI
+	 * sign from just a stored secret-key file, without a separate public-key file.
+	 *
+	 * @param string $secret_key The secret key; must be exactly SECRET_KEY_SIZE bytes.
+	 * @return self A keypair with the derived public key.
+	 * @throws SignatureException If ext-sodium is unavailable, the secret key is the wrong length, or derivation fails.
+	 */
+	public static function from_secret_key( string $secret_key ): self {
+		if ( ! function_exists( 'sodium_crypto_sign_publickey_from_secretkey' ) ) {
+			throw new SignatureException(
+				'SigningKeypair: ext-sodium is required to derive a public key from a secret key but is not available.'
+			);
+		}
+		if ( self::SECRET_KEY_SIZE !== strlen( $secret_key ) ) {
+			throw new SignatureException(
+				sprintf( 'SigningKeypair: secret key must be exactly %d bytes to derive a public key, got %d.', (int) self::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
+			);
+		}
+
+		try {
+			$public_key = sodium_crypto_sign_publickey_from_secretkey( $secret_key );
+		} catch ( SodiumException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
+			throw new SignatureException( 'SigningKeypair: could not derive the public key from the secret key.', 0, $e );
+		}
+
+		return new self( $public_key, $secret_key );
+	}
+
+	/**
 	 * Return the public key.
 	 *
 	 * @return string The 32-byte public key.

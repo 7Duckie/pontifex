@@ -71,6 +71,15 @@ use Pontifex\WordPress\WordPressContext;
  * : Encrypt the archive, reading the passphrase as one line from STDIN (for
  *   scripts and pipes). Implies --encrypt.
  *
+ * [--sign]
+ * : Sign the archive with an Ed25519 secret key. Requires --signing-key. A
+ *   detached signature is appended after the footer; verify it later with
+ *   `verify` / `import --public-key`. Independent of --encrypt.
+ *
+ * [--signing-key=<path>]
+ * : Path to the Ed25519 secret-key file (from `wp pontifex keygen`) to sign
+ *   with. Used with --sign.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex export --output=/tmp/site.wpmig
@@ -79,6 +88,7 @@ use Pontifex\WordPress\WordPressContext;
  *     wp pontifex export --output=/tmp/site.wpmig --no-defaults --exclude-file=/tmp/only.txt
  *     wp pontifex export --output=/tmp/site.wpmig --encrypt
  *     pass show backup | wp pontifex export --output=/tmp/site.wpmig --passphrase-stdin
+ *     wp pontifex export --output=/tmp/site.wpmig --sign --signing-key=/root/pontifex.key
  *
  * @when after_wp_load
  */
@@ -223,6 +233,8 @@ final class ExportCommand {
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
+		$signing_requested = isset( $associative_args['sign'] ) && false !== $associative_args['sign'];
+		$signing_key_path  = isset( $associative_args['signing-key'] ) ? (string) $associative_args['signing-key'] : '';
 
 		$this->validate_output_path( $output_path );
 
@@ -254,12 +266,31 @@ final class ExportCommand {
 			sodium_memzero( $passphrase );
 		}
 
+		// 3b. Load the signing key and build the signing context, if signing. The
+		// secret key is scrubbed once the context holds it; signing is independent
+		// of encryption.
+		$signing = null;
+		if ( $signing_requested ) {
+			if ( '' === $signing_key_path ) {
+				WP_CLI::error( '--sign requires --signing-key=<path> (the secret-key file from "wp pontifex keygen").' );
+			}
+			try {
+				$secret_key = SigningKeys::load_secret_key( $signing_key_path );
+				$signing    = SigningKeys::signing_context( $secret_key );
+				sodium_memzero( $secret_key );
+			} catch ( \Exception $e ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+				WP_CLI::error( $e->getMessage() );
+			}
+		}
+
 		$this->logger->info(
 			'Export started.',
 			array(
 				'output'     => $output_path,
 				'exclusions' => count( $exclusion_rules->patterns() ),
 				'encrypted'  => null !== $encryption,
+				'signed'     => null !== $signing,
 			)
 		);
 
@@ -289,7 +320,8 @@ final class ExportCommand {
 				function (): void {
 					$this->progress->advance();
 				},
-				$encryption
+				$encryption,
+				$signing
 			);
 			$this->progress->finish();
 
@@ -551,14 +583,19 @@ final class ExportCommand {
 	/**
 	 * Open the destination file for writing.
 	 *
+	 * Opened read+write ("w+b"): writing is all an unsigned export needs, but a
+	 * signed export re-reads the just-written bytes to compute the signature
+	 * digest, so the handle must also be readable. The mode truncates on open
+	 * either way.
+	 *
 	 * Exits via WP_CLI::error if fopen fails.
 	 *
 	 * @param string $output_path Absolute path to the file to create.
-	 * @return resource A writable binary stream resource.
+	 * @return resource A readable, writable binary stream resource.
 	 */
 	private function open_destination( string $output_path ) {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the destination archive file as a stream; @ traps an unopenable-file warning that we convert to a WP_CLI error below.
-		$destination = @fopen( $output_path, 'wb' );
+		$destination = @fopen( $output_path, 'w+b' );
 		if ( false === $destination ) {
 			WP_CLI::error(
 				sprintf( 'Could not open destination for writing: %s', $output_path )
