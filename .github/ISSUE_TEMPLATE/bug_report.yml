@@ -59,6 +59,10 @@ body:
       render: text
     validations:
       required: false
+  - type: markdown
+    attributes:
+      value: |
+        **Tip:** `wp pontifex diagnostics` writes a single sanitised `.tar.gz` — the environment audit, your activity stats, an environment summary, and recent logs, with the site URL, absolute paths, and secret-looking option values redacted. Attaching it gives a maintainer everything above in one go. It is never uploaded automatically; review it first.
   - type: textarea
     id: environment
     attributes:
