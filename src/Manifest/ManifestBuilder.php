@@ -12,6 +12,7 @@ namespace Pontifex\Manifest;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Codec\GzipCodec;
+use Pontifex\Archive\Codec\ZstdCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -43,7 +44,7 @@ use Pontifex\Archive\Writer\EntryWriter;
  * Internal choices (implementation details; may change between
  * versions without breaking the public API):
  *
- *  - Codec: gzip for every entry. Simple, predictable, well-tested.
+ *  - Codec: zstd for every entry when ext-zstd is available, else gzip.
  *    Future versions may choose codecs per entry kind or per file
  *    extension (e.g. skip gzip on already-compressed JPEGs).
  *  - Nonce: 12 zero bytes for every entry. v0.1.0 archives are
@@ -57,13 +58,6 @@ use Pontifex\Archive\Writer\EntryWriter;
  *    meaningful data lives in the EntryHeader, not the payload).
  */
 final class ManifestBuilder implements ManifestBuilderInterface {
-
-	/**
-	 * Codec id used for every entry in v0.1.0.
-	 *
-	 * @var int
-	 */
-	private const DEFAULT_CODEC_ID = GzipCodec::ID;
 
 	/**
 	 * Scanner that walks the filesystem.
@@ -137,7 +131,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	private static function plan_for_scanned_entry( ScannedEntry $entry ): EntryPlan {
 		$header = self::header_for_scanned_entry( $entry );
 		$source = self::open_source_for_scanned_entry( $entry );
-		return new EntryPlan( $header, self::DEFAULT_CODEC_ID, self::zero_nonce(), $source );
+		return new EntryPlan( $header, self::preferred_codec_id(), self::zero_nonce(), $source );
 	}
 
 	/**
@@ -216,7 +210,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 			0
 		);
 		$source = $chunk->open_sql_stream();
-		return new EntryPlan( $header, self::DEFAULT_CODEC_ID, self::zero_nonce(), $source );
+		return new EntryPlan( $header, self::preferred_codec_id(), self::zero_nonce(), $source );
 	}
 
 	/**
@@ -230,6 +224,20 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	 */
 	private static function zero_nonce(): string {
 		return str_repeat( "\0", EntryWriter::NONCE_SIZE );
+	}
+
+	/**
+	 * Choose the codec for every entry: zstd when ext-zstd is available, else gzip.
+	 *
+	 * The format prefers zstd (codec 0x0002) when the host can produce it and
+	 * falls back to gzip (0x0001) otherwise (`ARCHIVE-FORMAT.md` §7), so an
+	 * archive is always written with a codec the producing host can encode and
+	 * any conforming reader can decode. Applied uniformly to every entry.
+	 *
+	 * @return int The preferred codec id for this host.
+	 */
+	private static function preferred_codec_id(): int {
+		return extension_loaded( 'zstd' ) ? ZstdCodec::ID : GzipCodec::ID;
 	}
 
 	/**

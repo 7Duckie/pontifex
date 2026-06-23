@@ -13,6 +13,7 @@ require_once __DIR__ . '/Fakes/FakeDbAdapter.php';
 
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Codec\GzipCodec;
+use Pontifex\Archive\Codec\ZstdCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -129,11 +130,13 @@ final class ManifestBuilderTest extends TestCase {
 	}
 
 	/**
-	 * Every produced EntryPlan must use the gzip codec.
+	 * Every produced EntryPlan must use the preferred codec: zstd when ext-zstd is available, else gzip.
 	 *
 	 * @return void
 	 */
-	public function test_every_plan_uses_gzip_codec(): void {
+	public function test_every_plan_uses_the_preferred_codec(): void {
+		$expected_codec = extension_loaded( 'zstd' ) ? ZstdCodec::ID : GzipCodec::ID;
+
 		$this->write_file( 'wp-config.php', '<?php ?>' );
 		$db = new FakeDbAdapter();
 		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
@@ -142,7 +145,7 @@ final class ManifestBuilderTest extends TestCase {
 
 		$this->assertNotEmpty( $plans );
 		foreach ( $plans as $plan ) {
-			$this->assertSame( GzipCodec::ID, $plan->codec_id() );
+			$this->assertSame( $expected_codec, $plan->codec_id() );
 		}
 	}
 
