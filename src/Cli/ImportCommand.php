@@ -77,6 +77,12 @@ use Pontifex\WordPress\WordPressContext;
  *   prompting. Needed for an encrypted archive in a non-interactive run;
  *   ignored for an unencrypted archive.
  *
+ * [--public-key=<path>]
+ * : Verify the archive's Ed25519 signature against this public-key file (from
+ *   `wp pontifex keygen`) BEFORE restoring. A signed archive whose signature
+ *   fails is refused and nothing is written. Without it, a signed archive is
+ *   restored with a warning that its signature was not verified.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
@@ -85,6 +91,7 @@ use Pontifex\WordPress\WordPressContext;
  *     wp pontifex import /tmp/site.wpmig --yes
  *     wp pontifex import /tmp/site.wpmig --no-rollback-archive
  *     pass show backup | wp pontifex import /tmp/site.wpmig --passphrase-stdin
+ *     wp pontifex import /tmp/site.wpmig --public-key=/root/pontifex.pub
  *
  * @when after_wp_load
  */
@@ -246,6 +253,7 @@ final class ImportCommand {
 		$skip_confirm     = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$no_rollback      = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
 		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
+		$public_key       = $this->resolve_public_key( $associative_args );
 		$target_url       = $this->require_target_url( $associative_args );
 
 		$this->validate_archive_path( $archive_path );
@@ -260,6 +268,11 @@ final class ImportCommand {
 
 		// 4. Open the source archive for reading.
 		$source = $this->open_source( $archive_path );
+
+		// 4b. Signature gate: verify before anything is written, so a forged or
+		// tampered archive never reaches the restore. A signed archive with no key
+		// supplied is allowed but warned; an unsigned archive with a key is noted.
+		$this->verify_signature_gate( $source, $public_key );
 
 		// 5. Wire up the URL migrator when --url was given. The restore engine is wired
 		// inside the try below, where opening the archive (to detect encryption and
@@ -584,6 +597,65 @@ final class ImportCommand {
 	private function archive_size( string $archive_path ): int {
 		$size = filesize( $archive_path );
 		return false !== $size ? $size : 0;
+	}
+
+	/**
+	 * Resolve the --public-key option to a loaded public key, or null when absent.
+	 *
+	 * A bad or unreadable key file is the operator's mistake, so it exits via
+	 * WP_CLI::error rather than being treated as a restore failure.
+	 *
+	 * @param array<string, string|bool> $associative_args The CLI's associative args.
+	 * @return string|null The 32-byte public key, or null when --public-key was not supplied.
+	 */
+	private function resolve_public_key( array $associative_args ): ?string {
+		if ( ! isset( $associative_args['public-key'] ) || '' === $associative_args['public-key'] || true === $associative_args['public-key'] ) {
+			return null;
+		}
+
+		$key = '';
+		try {
+			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
+		} catch ( \Exception $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+			WP_CLI::error( $e->getMessage() );
+		}
+		return $key;
+	}
+
+	/**
+	 * Verify the archive's signature before restoring, refusing a bad one.
+	 *
+	 * Runs before any write. Unsigned archive: nothing to check (a stray
+	 * --public-key earns a warning). Signed with no key: warn that the signature
+	 * is unverified and proceed. Signed with a key: a failed signature aborts the
+	 * import via WP_CLI::error so nothing is written; a good one logs that it
+	 * verified.
+	 *
+	 * @param resource    $source     The open archive stream.
+	 * @param string|null $public_key The trusted public key, or null when none was supplied.
+	 * @return void
+	 */
+	private function verify_signature_gate( $source, ?string $public_key ): void {
+		$reader = new ArchiveReader( $source );
+
+		if ( null === $reader->signature() ) {
+			if ( null !== $public_key ) {
+				WP_CLI::warning( 'A public key was supplied with --public-key, but this archive is not signed.' );
+			}
+			return;
+		}
+
+		if ( null === $public_key ) {
+			WP_CLI::warning( 'This archive is signed, but its signature was NOT verified (no --public-key supplied). Proceeding with the restore.' );
+			return;
+		}
+
+		if ( ! $reader->verify_signature( $public_key ) ) {
+			WP_CLI::error( 'The Ed25519 signature did not verify against the supplied public key; refusing to restore (wrong key, or the archive was modified after signing).' );
+		}
+
+		WP_CLI::log( 'Signature verified against the supplied public key.' );
 	}
 
 

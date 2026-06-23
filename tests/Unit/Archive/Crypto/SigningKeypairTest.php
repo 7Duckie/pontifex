@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Archive\Crypto;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Pontifex\Archive\Crypto\SignatureException;
 use Pontifex\Archive\Crypto\SigningKeypair;
 
 /**
@@ -118,5 +119,30 @@ final class SigningKeypairTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		SigningKeypair::key_id_of( str_repeat( 'p', 10 ) );
+	}
+
+	/**
+	 * A keypair reconstructed from its secret key has the matching public key.
+	 *
+	 * @return void
+	 */
+	public function test_from_secret_key_derives_the_matching_public_key(): void {
+		$keypair = SigningKeypair::generate();
+
+		$reconstructed = SigningKeypair::from_secret_key( $keypair->secret_key() );
+
+		$this->assertSame( $keypair->public_key(), $reconstructed->public_key() );
+		$this->assertSame( $keypair->secret_key(), $reconstructed->secret_key() );
+	}
+
+	/**
+	 * A secret key of the wrong length is rejected by from_secret_key.
+	 *
+	 * @return void
+	 */
+	public function test_from_secret_key_rejects_wrong_length(): void {
+		$this->expectException( SignatureException::class );
+
+		SigningKeypair::from_secret_key( str_repeat( 's', 10 ) );
 	}
 }

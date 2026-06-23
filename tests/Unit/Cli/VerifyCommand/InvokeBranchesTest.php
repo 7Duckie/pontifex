@@ -9,8 +9,19 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\VerifyCommand;
 
+use DateTimeImmutable;
+use DateTimeZone;
 use Mockery;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Crypto\SigningContext;
+use Pontifex\Archive\Crypto\SigningKeypair;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\NullProgressBar;
+use Pontifex\Cli\SigningKeys;
 use Pontifex\Cli\VerifyCommand;
 use Pontifex\Environment\Environment;
 use Pontifex\Restore\RestoreRunnerInterface;
@@ -50,10 +61,10 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * A real temporary archive file used as the verify source.
 	 *
-	 * Created in setUp (empty is fine — the runner is mocked, so the bytes
-	 * are never parsed) and removed in tearDown. Real path, not mocked,
-	 * because VerifyCommand calls fopen() against it directly and Mockery
-	 * cannot intercept stream resources.
+	 * Created in setUp as a real (empty, unsigned) archive — VerifyCommand reads
+	 * the header to check for a signature, so the source must parse as one — and
+	 * removed in tearDown. Real path, not mocked, because VerifyCommand calls
+	 * fopen() against it directly and Mockery cannot intercept stream resources.
 	 *
 	 * @var string|null
 	 */
@@ -67,8 +78,45 @@ final class InvokeBranchesTest extends TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		$this->temp_archive_path = sys_get_temp_dir() . '/pontifex-verify-invoke-test-' . uniqid( '', true ) . '.wpmig';
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Creating an empty, readable source file in sys_get_temp_dir() for the command to fopen; WP_Filesystem is not bootstrapped in unit tests.
-		touch( $this->temp_archive_path );
+		// A real (empty, unsigned) archive: VerifyCommand now reads the header to
+		// check for a signature, so the source must parse as one.
+		self::write_unsigned_archive( $this->temp_archive_path );
+	}
+
+	/**
+	 * Write a minimal, valid, unsigned archive to the given path.
+	 *
+	 * @param string $path Destination path.
+	 * @return void
+	 */
+	private static function write_unsigned_archive( string $path ): void {
+		self::write_archive_to( $path, null );
+	}
+
+	/**
+	 * Write a minimal, valid archive to the given path, optionally signed.
+	 *
+	 * @param string              $path    Destination path.
+	 * @param SigningContext|null $signing Signing context, or null for an unsigned archive.
+	 * @return void
+	 */
+	private static function write_archive_to( string $path, ?SigningContext $signing ): void {
+		$provenance = new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			'utf8mb4_unicode_520_ci',
+			new ExporterInfo( 'pontifex', '0.3.0' ),
+			new DateTimeImmutable( '2026-06-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp source file for the command to read; WP_Filesystem is not bootstrapped in unit tests.
+		$destination = fopen( $path, 'w+b' );
+		$writer      = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
+		$writer->write_archive( $provenance, array(), $destination, null, null, $signing );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test's own handle.
+		fclose( $destination );
 	}
 
 	/**
@@ -77,9 +125,13 @@ final class InvokeBranchesTest extends TestCase {
 	 * @return void
 	 */
 	protected function tearDown(): void {
-		if ( null !== $this->temp_archive_path && file_exists( $this->temp_archive_path ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test-only cleanup of a file the test itself created in sys_get_temp_dir().
-			unlink( $this->temp_archive_path );
+		if ( null !== $this->temp_archive_path ) {
+			foreach ( array( $this->temp_archive_path, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' ) as $path ) {
+				if ( file_exists( $path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test-only cleanup of a file the test itself created in sys_get_temp_dir().
+					unlink( $path );
+				}
+			}
 		}
 		$this->temp_archive_path = null;
 		parent::tearDown();
@@ -121,6 +173,63 @@ final class InvokeBranchesTest extends TestCase {
 			$this->temp_archive_path,
 			'VerifyCommand should have run to completion on a sound archive.'
 		);
+	}
+
+	/**
+	 * A signed archive with the matching public key verifies and stays sound.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_verifies_a_good_signature_and_stays_sound(): void {
+		$keypair = SigningKeypair::generate();
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		SigningKeys::write_keypair( $keypair, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->atLeast()->once();
+		$wp_cli->shouldReceive( 'warning' )->never();
+		$wp_cli->shouldNotReceive( 'halt' );
+
+		$command = new VerifyCommand( Mockery::mock( Environment::class ), Mockery::mock( WordPressContext::class ), $restore_runner, new NullLogger(), new NullProgressBar() );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array( 'public-key' => $this->temp_archive_path . '.pub' )
+		);
+
+		$this->assertFileExists( $this->temp_archive_path, 'A good signature must leave the archive sound (halt is asserted never).' );
+	}
+
+	/**
+	 * A signed archive verified against the wrong public key is reported broken.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_rejects_a_bad_signature_as_broken(): void {
+		$keypair = SigningKeypair::generate();
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		// A different keypair's public key — so the signature will not verify.
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new VerifyCommand( Mockery::mock( Environment::class ), Mockery::mock( WordPressContext::class ), $restore_runner, new NullLogger(), new NullProgressBar() );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array( 'public-key' => $this->temp_archive_path . '.pub' )
+		);
+
+		$this->assertFileExists( $this->temp_archive_path, 'A bad signature must halt(1) as a broken verdict (halt is mocked).' );
 	}
 
 	/**

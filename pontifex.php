@@ -162,4 +162,5 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex import', \Pontifex\Cli\ImportCommand::class );
 	\WP_CLI::add_command( 'pontifex verify', \Pontifex\Cli\VerifyCommand::class );
 	\WP_CLI::add_command( 'pontifex rollback', \Pontifex\Cli\RollbackCommand::class );
+	\WP_CLI::add_command( 'pontifex keygen', \Pontifex\Cli\KeygenCommand::class );
 }
