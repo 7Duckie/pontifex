@@ -258,4 +258,39 @@ final class WpdbAdapterTest extends TestCase {
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'mysql.user', 0, 1 );
 	}
+
+	/**
+	 * A false query() return throws even with an empty last_error.
+	 *
+	 * A real $wpdb returns false on a failed query and, under suppress_errors,
+	 * leaves last_error empty — so checking last_error alone would let a failed
+	 * restore statement pass as success. This is the data-loss path.
+	 *
+	 * @return void
+	 */
+	public function test_execute_sql_throws_when_query_returns_false(): void {
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = '';
+		$wpdb->method( 'query' )->willReturn( false );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'query returned false' );
+
+		( new WpdbAdapter( $wpdb ) )->execute_sql( 'DROP TABLE wp_posts;' );
+	}
+
+	/**
+	 * A successful query (affected-row count) does not throw.
+	 *
+	 * @return void
+	 */
+	public function test_execute_sql_succeeds_on_a_successful_query(): void {
+		$this->expectNotToPerformAssertions();
+
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = '';
+		$wpdb->method( 'query' )->willReturn( 1 );
+
+		( new WpdbAdapter( $wpdb ) )->execute_sql( 'CREATE TABLE wp_x (id INT);' );
+	}
 }

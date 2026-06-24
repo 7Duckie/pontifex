@@ -262,4 +262,38 @@ final class HelperMethodsTest extends TestCase {
 
 		$this->assertSame( $user_patterns, $rules->patterns() );
 	}
+
+	// -------------------------------------------------------------------------
+	// should_use_defaults (the --no-defaults parsing)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * With no flag, the curated defaults are applied.
+	 *
+	 * @return void
+	 */
+	public function test_should_use_defaults_true_by_default(): void {
+		$this->assertTrue( $this->invoke_static( 'should_use_defaults', array() ) );
+	}
+
+	/**
+	 * The real WP-CLI parse of --no-defaults (defaults => false) disables the defaults.
+	 *
+	 * This is the regression guard for the --no-defaults bug: WP-CLI's --no-<name>
+	 * convention delivers the flag as defaults => false, not a no-defaults key.
+	 *
+	 * @return void
+	 */
+	public function test_should_use_defaults_false_when_no_defaults_passed(): void {
+		$this->assertFalse( $this->invoke_static( 'should_use_defaults', array( 'defaults' => false ) ) );
+	}
+
+	/**
+	 * An explicit --defaults (defaults => true) keeps the defaults on.
+	 *
+	 * @return void
+	 */
+	public function test_should_use_defaults_true_when_defaults_true(): void {
+		$this->assertTrue( $this->invoke_static( 'should_use_defaults', array( 'defaults' => true ) ) );
+	}
 }

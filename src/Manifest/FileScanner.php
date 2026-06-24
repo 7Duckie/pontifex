@@ -13,6 +13,7 @@ use InvalidArgumentException;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use RuntimeException;
+use UnexpectedValueException;
 use SplFileInfo;
 use Pontifex\Archive\Format\EntryHeader;
 
@@ -95,6 +96,7 @@ final class FileScanner {
 	 * @param string $root Absolute filesystem path of the directory to scan.
 	 * @return ScannedEntry[] All entries found, in stable lexicographic order by relative_path.
 	 * @throws InvalidArgumentException If $root is empty or is not an existing directory.
+	 * @throws RuntimeException If a directory cannot be read during the scan, or an entry is unreadable or unclassifiable.
 	 */
 	public function scan( string $root ): array {
 		if ( '' === $root ) {
@@ -121,34 +123,45 @@ final class FileScanner {
 		// This lets us record the directory entry and then prune the iterator if it is excluded.
 		$walker = new RecursiveIteratorIterator( $inner, RecursiveIteratorIterator::SELF_FIRST );
 
-		foreach ( $walker as $info ) {
-			$absolute_path = $info->getPathname();
-			$relative_path = substr( $absolute_path, $root_prefix_len );
+		// RecursiveDirectoryIterator throws UnexpectedValueException when it cannot
+		// open a sub-directory mid-walk (e.g. an unreadable directory). Translate it
+		// to the path-named RuntimeException this class documents, so an export
+		// fails loudly rather than aborting with PHP's own opaque message — and
+		// never silently skips an unreadable directory (which would be a silent
+		// hole in the backup).
+		try {
+			foreach ( $walker as $info ) {
+				$absolute_path = $info->getPathname();
+				$relative_path = substr( $absolute_path, $root_prefix_len );
 
-			// Normalise relative path to forward slashes regardless of host OS.
-			$relative_path = str_replace( '\\', '/', $relative_path );
+				// Normalise relative path to forward slashes regardless of host OS.
+				$relative_path = str_replace( '\\', '/', $relative_path );
 
-			$kind = self::classify( $info, $absolute_path );
+				$kind = self::classify( $info, $absolute_path );
 
-			// Structural recursion-prevention invariant: Pontifex's own working directory.
-			// Always excluded regardless of the ExclusionRules configuration.
-			// Prevents an existing Pontifex export from being recursively re-included in a new archive, which would produce an archive-of-archives.
-			if ( self::is_pontifex_working_path( $relative_path ) ) {
-				if ( EntryHeader::KIND_DIRECTORY === $kind ) {
-					$walker->next();
+				// Structural recursion-prevention invariant: Pontifex's own working directory.
+				// Always excluded regardless of the ExclusionRules configuration.
+				// Prevents an existing Pontifex export from being recursively re-included in a new archive, which would produce an archive-of-archives.
+				if ( self::is_pontifex_working_path( $relative_path ) ) {
+					if ( EntryHeader::KIND_DIRECTORY === $kind ) {
+						$walker->next();
+					}
+					continue;
 				}
-				continue;
-			}
 
-			if ( $this->exclusions->matches( $relative_path, $kind ) ) {
-				// If the excluded entry is a directory, do not descend into it.
-				if ( EntryHeader::KIND_DIRECTORY === $kind ) {
-					$walker->next();
+				if ( $this->exclusions->matches( $relative_path, $kind ) ) {
+					// If the excluded entry is a directory, do not descend into it.
+					if ( EntryHeader::KIND_DIRECTORY === $kind ) {
+						$walker->next();
+					}
+					continue;
 				}
-				continue;
-			}
 
-			$entries[] = self::build_scanned_entry( $kind, $relative_path, $absolute_path, $info );
+				$entries[] = self::build_scanned_entry( $kind, $relative_path, $absolute_path, $info );
+			}
+		} catch ( UnexpectedValueException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message (carrying the unreadable path from the iterator) for diagnostics; surfaced on the CLI, not HTML output.
+			throw new RuntimeException( sprintf( 'FileScanner: could not read a directory while scanning "%s": %s', $root, $e->getMessage() ), 0, $e );
 		}
 
 		usort(

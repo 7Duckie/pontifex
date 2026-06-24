@@ -1002,4 +1002,19 @@ final class EntryHeaderTest extends TestCase {
 
 		$entry->with_size_compressed( -1 );
 	}
+
+	/**
+	 * The estimated_bytes accessor reports size for a file, byte_count for a db_chunk, 0 otherwise.
+	 *
+	 * @return void
+	 */
+	public function test_estimated_bytes_covers_every_kind(): void {
+		$file      = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
+		$directory = EntryHeader::for_directory( 'wp-content', 0755, 0 );
+		$db_chunk  = EntryHeader::for_db_chunk( 0, 'wp_options', 5, 4096, 0 );
+
+		$this->assertSame( 1000, $file->estimated_bytes() );
+		$this->assertSame( 0, $directory->estimated_bytes() );
+		$this->assertSame( 4096, $db_chunk->estimated_bytes(), 'a db_chunk must contribute its byte_count, not zero' );
+	}
 }

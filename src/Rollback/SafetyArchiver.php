@@ -156,8 +156,21 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 			fclose( $destination );
 		}
 
+		// The archive holds the whole database, so it must be owner-only. On a
+		// POSIX host a failed chmod means it could not be secured; rather than
+		// leave a world-readable database backup on disk, remove it and fail
+		// closed (this runs before any destructive restore, so the import simply
+		// aborts). On non-POSIX hosts modes are not meaningful, so a false return
+		// is ignored — matching the secret-key handling in SigningKeys.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restricting the safety archive (it holds the whole database) to owner-only; WP_Filesystem is unavailable in CLI contexts.
-		chmod( $path, self::ARCHIVE_MODE );
+		if ( ! chmod( $path, self::ARCHIVE_MODE ) && '/' === DIRECTORY_SEPARATOR ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Removing the unsecurable backup; best-effort, failure must not mask the error below.
+			@unlink( $path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; surfaced on the CLI, not HTML output.
+				sprintf( 'SafetyArchiver: could not restrict the safety archive %s to owner-only; refusing to proceed with an insecure database backup.', $path )
+			);
+		}
 
 		$this->store->prune( $this->retention );
 
@@ -167,11 +180,13 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	/**
 	 * Refuse early when free disk space obviously will not fit the archive.
 	 *
-	 * Best-effort: the estimate is the sum of the plans' file sizes (a
-	 * conservative proxy, since the archive compresses them), and a free-space
-	 * reading that cannot be taken (false, e.g. under open_basedir) is treated
-	 * as "proceed" — the write itself is the hard backstop, since it runs before
-	 * any destructive restore.
+	 * Best-effort: the estimate is the sum of the plans' original sizes —
+	 * including the database, whose size lives in each db_chunk's byte_count()
+	 * rather than size(), so estimated_bytes() is used to avoid counting the
+	 * database (often the bulk of a backup) as zero. It is a conservative proxy,
+	 * since the archive compresses them. A free-space reading that cannot be taken
+	 * (false, e.g. under open_basedir) is treated as "proceed" — the write itself
+	 * is the hard backstop, since it runs before any destructive restore.
 	 *
 	 * @param array<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans The plans about to be written.
 	 * @return void
@@ -180,7 +195,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	private function preflight_disk_space( array $entry_plans ): void {
 		$estimate = 0;
 		foreach ( $entry_plans as $plan ) {
-			$estimate += $plan->header()->size() ?? 0;
+			$estimate += $plan->header()->estimated_bytes();
 		}
 
 		$free = $this->environment->disk_free_space( $this->store->directory() );
