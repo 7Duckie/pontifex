@@ -1,0 +1,146 @@
+/*
+ * Pontifex admin styles.
+ *
+ * Swiss / International Typographic Style: hierarchy through type weight, size
+ * and whitespace rather than boxes, borders or colour; a near-monochrome palette
+ * with a single restrained accent; a consistent spacing rhythm; sharp hairline
+ * rules. See docs/design-language.md. All selectors are scoped under
+ * .pontifex-admin so nothing leaks into the rest of wp-admin.
+ */
+
+.pontifex-admin {
+	--pontifex-ink: #111111;
+	--pontifex-muted: #6b6b6b;
+	--pontifex-rule: #e3e3e3;
+	--pontifex-fill: #f6f6f6;
+	--pontifex-paper: #ffffff;
+	--pontifex-accent: #1a3a8f;
+	--pontifex-step: 8px;
+
+	max-width: 960px;
+	margin-top: calc(var(--pontifex-step) * 3);
+	color: var(--pontifex-ink);
+	font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+/* Header -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-header {
+	padding-bottom: calc(var(--pontifex-step) * 2);
+	border-bottom: 2px solid var(--pontifex-ink);
+	margin-bottom: calc(var(--pontifex-step) * 4);
+}
+
+.pontifex-admin .pontifex-title {
+	margin: 0;
+	padding: 0;
+	font-size: 34px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	line-height: 1.1;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-subtitle {
+	margin: var(--pontifex-step) 0 0;
+	padding: 0;
+	font-size: 14px;
+	color: var(--pontifex-muted);
+}
+
+/* Sections ------------------------------------------------------------------ */
+
+.pontifex-admin .pontifex-section {
+	margin-bottom: calc(var(--pontifex-step) * 5);
+}
+
+.pontifex-admin .pontifex-section-title {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	padding: 0;
+	font-size: 12px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--pontifex-muted);
+}
+
+/* Transfer activity --------------------------------------------------------- */
+
+.pontifex-admin .pontifex-stat-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: calc(var(--pontifex-step) * 3);
+}
+
+.pontifex-admin .pontifex-stat {
+	display: flex;
+	flex-direction: column;
+	gap: var(--pontifex-step);
+	padding-top: calc(var(--pontifex-step) * 2);
+	border-top: 1px solid var(--pontifex-rule);
+}
+
+.pontifex-admin .pontifex-stat-operation {
+	font-size: 16px;
+	font-weight: 600;
+}
+
+.pontifex-admin .pontifex-stat-line {
+	font-size: 14px;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-figure {
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-stat-size {
+	font-size: 13px;
+	color: var(--pontifex-muted);
+}
+
+/* Tables -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 14px;
+}
+
+.pontifex-admin .pontifex-table th {
+	text-align: left;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+	border-bottom: 2px solid var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-table td {
+	padding: calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 2) calc(var(--pontifex-step) * 1.5) 0;
+	border-bottom: 1px solid var(--pontifex-rule);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Empty states -------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-empty {
+	margin: 0;
+	padding: calc(var(--pontifex-step) * 2) 0;
+	color: var(--pontifex-muted);
+	border-top: 1px solid var(--pontifex-rule);
+}
+
+/* Narrow screens ------------------------------------------------------------ */
+
+@media screen and (max-width: 600px) {
+	.pontifex-admin .pontifex-stat-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
