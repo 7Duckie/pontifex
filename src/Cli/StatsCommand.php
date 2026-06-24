@@ -125,12 +125,12 @@ final class StatsCommand {
 		$history = TransferHistory::recent( $this->wordpress_context );
 		if ( array() !== $history ) {
 			WP_CLI::log( '' );
-			WP_CLI::log( 'Recent transfers (most recent first):' );
+			WP_CLI::log( __( 'Recent transfers (most recent first):', 'pontifex' ) );
 			$recent_formatter = new Formatter( $associative_args, array( 'when', 'operation', 'outcome', 'size' ) );
 			$recent_formatter->display_items( $this->build_recent_rows( $history ) );
 		} elseif ( self::no_activity( $export_stats, $import_stats ) ) {
 			WP_CLI::log( '' );
-			WP_CLI::log( 'No transfers recorded yet. Run `wp pontifex export` or `wp pontifex import` to start the tally.' );
+			WP_CLI::log( __( 'No transfers recorded yet. Run `wp pontifex export` or `wp pontifex import` to start the tally.', 'pontifex' ) );
 		}
 	}
 

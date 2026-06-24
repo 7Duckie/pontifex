@@ -43,6 +43,11 @@ abstract class TestCase extends PHPUnitTestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		Monkey\setUp();
+
+		// The CLI presentation layer wraps user-facing strings in __(). No
+		// WordPress runtime is loaded here, so stub __() to return its first
+		// argument — the untranslated string the output assertions expect.
+		Monkey\Functions\stubs( array( '__' ) );
 	}
 
 	/**

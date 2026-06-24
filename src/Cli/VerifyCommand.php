@@ -283,7 +283,7 @@ final class VerifyCommand {
 	 */
 	private function require_archive_path( array $positional_args ): string {
 		if ( ! isset( $positional_args[0] ) || '' === $positional_args[0] ) {
-			WP_CLI::error( 'An archive path is required: wp pontifex verify <archive>.' );
+			WP_CLI::error( __( 'An archive path is required: wp pontifex verify <archive>.', 'pontifex' ) );
 		}
 		return (string) $positional_args[0];
 	}
@@ -446,13 +446,13 @@ final class VerifyCommand {
 
 		if ( null === $reader->signature() ) {
 			if ( null !== $public_key ) {
-				WP_CLI::warning( 'A public key was supplied with --public-key, but this archive is not signed.' );
+				WP_CLI::warning( __( 'A public key was supplied with --public-key, but this archive is not signed.', 'pontifex' ) );
 			}
 			return;
 		}
 
 		if ( null === $public_key ) {
-			WP_CLI::warning( 'This archive is signed, but its signature was NOT verified. Pass --public-key=<path> to verify it.' );
+			WP_CLI::warning( __( 'This archive is signed, but its signature was NOT verified. Pass --public-key=<path> to verify it.', 'pontifex' ) );
 			return;
 		}
 
@@ -460,7 +460,7 @@ final class VerifyCommand {
 			throw new RuntimeException( 'the Ed25519 signature did not verify against the supplied public key (wrong key, or the archive was modified after signing).' );
 		}
 
-		WP_CLI::log( 'Signature verified against the supplied public key.' );
+		WP_CLI::log( __( 'Signature verified against the supplied public key.', 'pontifex' ) );
 	}
 
 
@@ -525,7 +525,8 @@ final class VerifyCommand {
 	private function print_sound( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
 			sprintf(
-				'Archive is sound: %d entries verified, every hash checked. %s',
+				/* translators: 1: number of entries verified, 2: the archive path */
+				__( 'Archive is sound: %1$d entries verified, every hash checked. %2$s', 'pontifex' ),
 				$entry_count,
 				$archive_path
 			)
@@ -547,7 +548,8 @@ final class VerifyCommand {
 		$redactor = PathRedactor::from_environment();
 		WP_CLI::log(
 			sprintf(
-				'Archive is BROKEN: %s (%s)',
+				/* translators: 1: the failure message, 2: the archive path */
+				__( 'Archive is BROKEN: %1$s (%2$s)', 'pontifex' ),
 				$redactor->redact( $error->getMessage() ),
 				$redactor->redact( $archive_path )
 			)

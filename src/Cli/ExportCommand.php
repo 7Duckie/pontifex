@@ -267,7 +267,7 @@ final class ExportCommand {
 		// 3. Confirm with the user (unless --yes).
 		if ( ! $skip_confirmation ) {
 			$this->print_exclusion_summary( $exclusion_rules );
-			WP_CLI::confirm( sprintf( 'Export to %s?', $output_path ), $associative_args );
+			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
 		}
 
 		// 3a. Collect the passphrase and build the encryption context, if encrypting.
@@ -277,7 +277,7 @@ final class ExportCommand {
 		$encryption_disabled_reason = self::ENCRYPTION_DISABLED_REASON;
 		if ( $encrypting ) {
 			if ( ! $passphrase_stdin ) {
-				WP_CLI::warning( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.' );
+				WP_CLI::warning( __( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.', 'pontifex' ) );
 			}
 			$passphrase = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
 			try {
@@ -295,7 +295,7 @@ final class ExportCommand {
 		$signing = null;
 		if ( $signing_requested ) {
 			if ( '' === $signing_key_path ) {
-				WP_CLI::error( '--sign requires --signing-key=<path> (the secret-key file from "wp pontifex keygen").' );
+				WP_CLI::error( __( '--sign requires --signing-key=<path> (the secret-key file from "wp pontifex keygen").', 'pontifex' ) );
 			}
 			try {
 				$secret_key = SigningKeys::load_secret_key( $signing_key_path );
@@ -400,7 +400,7 @@ final class ExportCommand {
 	 */
 	private function require_output_path( array $associative_args ): string {
 		if ( ! isset( $associative_args['output'] ) || '' === $associative_args['output'] ) {
-			WP_CLI::error( '--output=<path> is required.' );
+			WP_CLI::error( __( '--output=<path> is required.', 'pontifex' ) );
 		}
 		return (string) $associative_args['output'];
 	}
@@ -767,10 +767,10 @@ final class ExportCommand {
 	private function print_exclusion_summary( ExclusionRules $exclusion_rules ): void {
 		$patterns = $exclusion_rules->patterns();
 		if ( empty( $patterns ) ) {
-			WP_CLI::log( 'No exclusion patterns are active.' );
+			WP_CLI::log( __( 'No exclusion patterns are active.', 'pontifex' ) );
 			return;
 		}
-		WP_CLI::log( sprintf( 'Active exclusion patterns (%d):', count( $patterns ) ) );
+		WP_CLI::log( sprintf( /* translators: %d: number of active exclusion patterns */ __( 'Active exclusion patterns (%d):', 'pontifex' ), count( $patterns ) ) );
 		foreach ( $patterns as $pattern ) {
 			WP_CLI::log( '  ' . $pattern );
 		}
@@ -787,7 +787,8 @@ final class ExportCommand {
 	private function print_summary( string $output_path, int $entry_count, int $bytes_written ): void {
 		WP_CLI::log(
 			sprintf(
-				'Exported %d entries (%s) to %s',
+				/* translators: 1: number of entries, 2: human-readable size, 3: the output file path */
+				__( 'Exported %1$d entries (%2$s) to %3$s', 'pontifex' ),
 				$entry_count,
 				$this->wordpress_context->format_size( $bytes_written ),
 				$output_path
