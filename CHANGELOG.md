@@ -19,6 +19,37 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.5] — 2026-06-24 — Quality cleanup
+
+Quality "leftovers" from the 2026-06-24 audit (findings 053–057): dead-code
+removal, type and analysis tightening, documentation re-sync, and small
+hardening. No archive-format, CLI-flag, or default changes.
+
+### Fixed
+
+- **A malformed export timestamp is now rejected.** Provenance parsing checked
+  only for a hard `false` from the date parser; a coercible-but-malformed
+  timestamp (e.g. trailing data) is now caught via `getLastErrors()`.
+- **The passphrase minimum is measured in characters.** It counted bytes while
+  the message and `ARCHIVE-FORMAT.md` §8.4 say "characters"; it now uses
+  `mb_strlen()`, falling back to `strlen()` only without ext-mbstring.
+
+### Security
+
+- **The confirmation copy of the passphrase is scrubbed.** `collect_for_export`
+  now `sodium_memzero`s the second (confirm) passphrase copy on every path —
+  defence-in-depth alongside the existing scrubbing.
+
+### Changed
+
+- Removed dead test-only API (the `ScannedEntry` kind predicates and the
+  `HashingStream` byte counter) and inlined a trivial private wrapper.
+- PHPStan now analyses at the PHP 8.2 floor; `RealEnvironment` gained native
+  return types; `ArchiveSignature`'s block size is composed from its parts, and
+  `FileLogger`'s log-directory mode and the JSON-decode depth are named.
+- Re-synced several drifted docblocks and two `doctor` reason strings with the
+  current code and roadmap, and tidied three coding-standard micro-nits.
+
 ## [0.4.4] — 2026-06-24 — Key-material wipe and path redaction
 
 The final hardening patch from the 2026-06-24 audit, completing two items
@@ -482,6 +513,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.3...HEAD
+[0.4.5]: https://github.com/7Duckie/pontifex/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/7Duckie/pontifex/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/7Duckie/pontifex/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/7Duckie/pontifex/compare/v0.4.1...v0.4.2
