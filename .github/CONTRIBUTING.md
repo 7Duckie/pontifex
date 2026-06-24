@@ -70,13 +70,20 @@ on disk to scan.
 
 ## Branches
 
-- `main` is the integration branch. CI must be green for any merge.
-- Work on short-lived `type/scope` branches off `main`, using
-  Conventional Commits types — `feat/`, `fix/`, `test/`, `ci/`,
-  `docs/`, `refactor/`, `chore/` (e.g. `feat/import`,
-  `ci/integration-suite`). No version numbers in branch names.
-- Security branches: kept private until disclosed; coordinate via the
-  email in SECURITY.md.
+Pontifex uses a three-tier promotion model (see
+[`../docs/adr/0007-branch-promotion-model.md`](../docs/adr/0007-branch-promotion-model.md)):
+
+- **`main`** — released code only; tags are cut here. CI must be green for any
+  merge, and merges use a merge commit (never squash).
+- **`staging`** — the release candidate, where a release is assembled and proven.
+- **`dev`** — the integration branch for the next version, where feature work
+  lands.
+- Work on short-lived `type/scope` branches off **`dev`**, using Conventional
+  Commits types — `feat/`, `fix/`, `test/`, `ci/`, `docs/`, `refactor/`,
+  `chore/` (e.g. `feat/import`). No version numbers in branch names. Open the
+  pull request against `dev`; promotions then run `dev → staging → main`.
+- Security branches: kept private until disclosed; coordinate via the email in
+  SECURITY.md.
 
 ## Security
 
@@ -93,7 +100,7 @@ threat model in their description.
 From v0.1.0 onward, Pontifex's UI follows Swiss design principles — the
 mid-20th-century typographic style associated with Helvetica, the
 Bauhaus school, and modern wayfinding systems. The plugin's admin
-screens, when they arrive in v0.3.0+, will reflect these principles
+screens, which begin arriving in v0.5.0, reflect these principles
 consistently:
 
 - **Typography over decoration.** Information hierarchy through type
@@ -112,12 +119,12 @@ consistently:
   language and explicit confirmation steps, not warning-coloured
   boxes that operators learn to dismiss.
 
-This direction will be promoted to a dedicated `docs/design-language.md`
-once admin UI work begins in earnest (target: v0.3.0+) and there is
-enough component vocabulary, colour palette, and type scale to
-populate it. For now, contributors making UI proposals or sketches
-should note the principles above and bring intentional restraint to
-anything they build.
+These principles are now codified in
+[`../docs/design-language.md`](../docs/design-language.md) — the concrete
+palette, type scale, spacing rhythm, and component vocabulary — alongside the
+admin UI that began in v0.5.0. Contributors making UI proposals or sketches
+should follow that document and bring intentional restraint to anything they
+build.
 
 ## Quality-gate reference
 
