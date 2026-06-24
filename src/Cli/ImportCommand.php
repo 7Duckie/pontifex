@@ -514,9 +514,13 @@ final class ImportCommand {
 		$passphrase     = $archive_reader->header()->is_encrypted()
 			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
 			: null;
-		$entry_reader   = Encryption::entry_reader( $archive_reader, CodecRegistry::with_defaults(), $passphrase );
-		if ( null !== $passphrase ) {
-			sodium_memzero( $passphrase );
+		try {
+			$entry_reader = Encryption::entry_reader( $archive_reader, CodecRegistry::with_defaults(), $passphrase );
+		} finally {
+			// Always scrub the passphrase, even if building the reader throws.
+			if ( null !== $passphrase ) {
+				sodium_memzero( $passphrase );
+			}
 		}
 
 		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
