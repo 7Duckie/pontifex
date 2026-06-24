@@ -140,14 +140,55 @@ final class SigningKeys {
 	 * @throws RuntimeException If the write fails.
 	 */
 	private static function write_file( string $path, string $contents, int $mode ): void {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Writing a key file to an operator-chosen path; @ traps a write-failure warning that becomes the exception below. WP_Filesystem is not loaded in a WP-CLI command.
-		$written = @file_put_contents( $path, $contents );
-		if ( false === $written ) {
+		// Create the file exclusively ('xb' = O_CREAT|O_EXCL): this fails if the
+		// path already exists or is a symlink, so a pre-placed link cannot redirect
+		// the write. The caller (write_keypair) has already refused existing paths.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Exclusive create of a key file at an operator-chosen path; @ traps the warning that becomes the exception below. WP_Filesystem is not loaded in a WP-CLI command.
+		$handle = @fopen( $path, 'xb' );
+		if ( false === $handle ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
+			throw new RuntimeException( sprintf( 'SigningKeys: could not create the key file: %s', $path ) );
+		}
+
+		// Tighten the mode BEFORE writing any bytes, so a secret key never exists
+		// in a world-readable file even momentarily.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Tightening key-file permissions before the write; @ traps a chmod warning on filesystems that do not support it.
+		@chmod( $path, $mode );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite,WordPress.PHP.NoSilencedErrors.Discouraged -- Writing the key body to the handle opened above.
+		$written = @fwrite( $handle, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the handle opened above.
+		fclose( $handle );
+
+		if ( false === $written || strlen( $contents ) !== $written ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
 			throw new RuntimeException( sprintf( 'SigningKeys: could not write the key file: %s', $path ) );
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort tightening of key-file permissions; @ traps a chmod warning on filesystems that do not support it.
-		@chmod( $path, $mode );
+
+		self::assert_mode( $path, $mode );
+	}
+
+	/**
+	 * Verify a key file ended up at the intended mode, failing loudly otherwise.
+	 *
+	 * A silent chmod failure must not leave a secret key more permissive than
+	 * intended. Skipped on Windows, where POSIX modes are not meaningful.
+	 *
+	 * @param string $path The file to check.
+	 * @param int    $mode The mode it must have.
+	 * @return void
+	 * @throws RuntimeException If the file's mode does not match on a POSIX host.
+	 */
+	private static function assert_mode( string $path, int $mode ): void {
+		if ( '/' !== DIRECTORY_SEPARATOR ) {
+			return;
+		}
+		clearstatcache( true, $path );
+		$actual = fileperms( $path );
+		if ( false === $actual || ( $actual & 0o777 ) !== $mode ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
+			throw new RuntimeException( sprintf( 'SigningKeys: could not secure the key file %s to mode %o.', $path, $mode ) );
+		}
 	}
 
 	/**

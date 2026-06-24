@@ -84,7 +84,7 @@ final class DiagnosticsCommand {
 	 *
 	 * @var string[]
 	 */
-	private const SAFE_OPTIONS = array( 'template', 'stylesheet', 'blog_charset', 'timezone_string', 'WPLANG', 'active_plugins' );
+	private const SAFE_OPTIONS = array( 'template', 'stylesheet', 'blog_charset', 'timezone_string', 'WPLANG' );
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -313,7 +313,10 @@ final class DiagnosticsCommand {
 		$directory = dirname( $output_path );
 		$this->ensure_dir( $directory );
 
-		$temp_tar = $directory . '/.pontifex-diagnostics-' . uniqid( '', true ) . '.tar';
+		// Unpredictable temp name (not time-based uniqid), so an attacker cannot
+		// pre-create or symlink the path before PharData writes the bundle. The
+		// .tar suffix is required for PharData to recognise the format.
+		$temp_tar = $directory . '/.pontifex-diagnostics-' . bin2hex( random_bytes( 16 ) ) . '.tar';
 
 		$phar = new PharData( $temp_tar );
 		foreach ( $artifacts as $name => $content ) {
