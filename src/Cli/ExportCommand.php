@@ -241,7 +241,7 @@ final class ExportCommand {
 		// 1. Parse and validate flags.
 		$output_path       = $this->require_output_path( $associative_args );
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
-		$use_defaults      = ! ( isset( $associative_args['no-defaults'] ) && false !== $associative_args['no-defaults'] );
+		$use_defaults      = self::should_use_defaults( $associative_args );
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
@@ -484,6 +484,22 @@ final class ExportCommand {
 			$patterns[] = $trimmed;
 		}
 		return $patterns;
+	}
+
+	/**
+	 * Whether the curated default exclusions should be applied.
+	 *
+	 * WP-CLI parses the documented `--no-defaults` flag with its --no-<name>
+	 * convention, delivering it as array( 'defaults' => false ), NOT as a
+	 * 'no-defaults' key — so reading 'no-defaults' would silently ignore the flag
+	 * (the same trap that hid the --no-rollback-archive bug). Defaults apply unless
+	 * WP-CLI delivered defaults => false.
+	 *
+	 * @param array<string, string|bool> $associative_args The CLI's associative args.
+	 * @return bool True if the curated defaults should be applied.
+	 */
+	private static function should_use_defaults( array $associative_args ): bool {
+		return ! ( array_key_exists( 'defaults', $associative_args ) && false === $associative_args['defaults'] );
 	}
 
 	/**
