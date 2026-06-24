@@ -2,6 +2,9 @@
 /vendor/
 composer.phar
 
+# Node (wp-env tooling; package.json and package-lock.json are committed)
+/node_modules/
+
 # IDE
 .idea/
 .vscode/
@@ -40,8 +43,9 @@ Thumbs.db
 .env.local
 
 # wp-env per-checkout PHP/version override (created locally and in CI; never
-# committed — the tracked .wp-env.json is the shared baseline)
+# committed — the tracked .wp-env.json / .wp-env.tests.json are the shared baseline)
 /.wp-env.override.json
+/.wp-env.tests.override.json
 
 # Local working state (Claude session context)
 STATE.md

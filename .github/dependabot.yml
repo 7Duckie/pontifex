@@ -31,3 +31,16 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+
+  # npm carries one development dependency only: @wordpress/env, which provides
+  # the WordPress + database environment the integration tests run against. It
+  # is pinned (package.json + package-lock.json) so CI cannot break on a surprise
+  # wp-env release; this keeps it current through the same dev gate.
+  - package-ecosystem: "npm"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
