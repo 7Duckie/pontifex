@@ -14,9 +14,34 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.4.0 — the observability surface (fuller logging and
-metrics, `wp pontifex stats`, `wp pontifex diagnostics`) and the admin UI —
-begins after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+Nothing yet. Work toward v0.5.0 — the admin UI and the longer-running
+operational features (resumable and scheduled exports, transports, selective
+content, multisite) — begins after this tag. See
+[`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.4.0] — 2026-06-24 — Stats, diagnostics and logging
+
+The observability release. Pontifex can now show what it has done, package a
+sanitised report when something goes wrong, and leave a self-contained log
+beside every transfer — all locally, with nothing uploaded. Split out from
+v0.3.0 so the cryptographic work could ship on its own.
+
+- **`wp pontifex stats`.** A local readout of the export and import counters —
+  how many transfers were attempted, succeeded and failed, and how many bytes
+  moved — as a table, or `--format=json` (also csv, yaml) for a bug report.
+  Read-only; no network.
+- **Rolling transfer history.** Alongside the totals, `stats` now shows a short
+  window of the most recent transfers (timestamp, kind, outcome, size — never
+  any content), kept in a single capped `wp_options` entry.
+- **`wp pontifex diagnostics`.** A sanitised support bundle — recent logs,
+  `doctor` and `stats` output, and an environment summary — written as a tar.gz.
+  The site URL, absolute paths and sensitive option values (anything ending in
+  `_key`, `_secret`, `_token`, `_password`) are redacted, and the bundle is
+  never auto-uploaded: it is yours to read and share.
+- **Per-transfer log files.** Beyond the central rotating `pontifex.log`, each
+  transfer now also writes a self-contained log — export's beside the archive as
+  `<output>.wpmig.log`, a real import's as `import-<UTC>.log` in the log
+  directory — so a single run's record can be read or shared on its own.
 
 ## [0.3.0] — 2026-06-23 — Migration, encryption and signatures
 
@@ -365,7 +390,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/7Duckie/pontifex/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/7Duckie/pontifex/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/7Duckie/pontifex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/7Duckie/pontifex/compare/v0.0.6...v0.1.0

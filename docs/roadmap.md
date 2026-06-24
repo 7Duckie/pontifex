@@ -160,20 +160,42 @@ per the release principles above.
   `wp pontifex keygen`, `export --sign --signing-key`, and `--public-key`
   verification on `verify` and `import`.
 
-## v0.4.0 and beyond — Admin UI and operational maturity
+## v0.4.0 — Observability
+
+The release that makes a Pontifex site legible to its operator: what has been
+transferred, whether it worked, and a self-contained record of each run — all
+read locally, nothing uploaded. Moved from v0.3.0 so the cryptographic release
+could ship on its own.
+
+### What ships
+
+- **`wp pontifex stats`** — a local readout of the export and import counters
+  (attempted, succeeded, failed, bytes moved), with `--format=json` (and csv,
+  yaml) for pasting into a bug report. Read-only, no network.
+- **Rolling transfer history** — a short window of the most recent transfers
+  (timestamp, kind, outcome, size; never any content), shown by `stats` beneath
+  the totals.
+- **`wp pontifex diagnostics`** — a sanitised support bundle (recent logs,
+  `doctor` and `stats` output, and an environment summary) as a tar.gz; the site
+  URL, absolute paths and sensitive option values are redacted, and it never
+  auto-uploads.
+- **Per-transfer log files** — beyond the central rotating `pontifex.log`, each
+  transfer also writes a self-contained log: export's beside the archive
+  (`<output>.wpmig.log`), import's as `import-<UTC>.log` in the log directory.
+
+### What is deliberately deferred
+
+The admin UI and the longer-running operational features move to v0.5.0 and
+beyond (below) — v0.4.0 ships on the CLI observability surface alone, mirroring
+the v0.3.0 boundary.
+
+## v0.5.0 and beyond — Admin UI and operational maturity
 
 Once the CLI is solid, the admin UI work begins. This is also where
 the longer-running operational features land.
 
 ### What ships, in roughly this order
 
-- **Fuller observability** (moved from v0.3.0): a richer structured-logging
-  surface (a diagnostics bundle and per-transfer log files beyond the v0.1.0
-  minimum logger); full transfer metrics (a rolling history of recent transfers
-  beyond the minimum counters); **`wp pontifex stats`** (local activity readout,
-  `--json` for bug reports); and **`wp pontifex diagnostics`** (a sanitised
-  support bundle — recent logs, `doctor` and `stats` output, and an environment
-  summary; never auto-uploads).
 - **Admin UI** for non-CLI users, following the Swiss-design language
   documented in [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md#design-language).
   Promotion of design-language guidance to a dedicated
