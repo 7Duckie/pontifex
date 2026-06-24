@@ -84,6 +84,12 @@ use Pontifex\WordPress\WordPressContext;
  *   fails is refused and nothing is written. Without it, a signed archive is
  *   restored with a warning that its signature was not verified.
  *
+ * [--allow-unsafe-symlinks]
+ * : Allow restoring symlink entries whose target points outside the site root
+ *   (or is an absolute path). Refused by default, because a hostile archive can
+ *   plant an escaping link that later code follows. Use only for an archive you
+ *   trust.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
@@ -269,6 +275,7 @@ final class ImportCommand {
 		$no_rollback      = array_key_exists( 'rollback-archive', $associative_args )
 			&& false === $associative_args['rollback-archive'];
 		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
+		$allow_unsafe     = isset( $associative_args['allow-unsafe-symlinks'] ) && false !== $associative_args['allow-unsafe-symlinks'];
 		$public_key       = $this->resolve_public_key( $associative_args );
 		$target_url       = $this->require_target_url( $associative_args );
 
@@ -320,7 +327,7 @@ final class ImportCommand {
 		try {
 			// Wire the restore engine. For an encrypted archive this reads the salt and
 			// collects the passphrase, so it sits inside the try where a failure is logged.
-			$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin );
+			$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin, $allow_unsafe );
 
 			// With --url, read the source URL from the archive's provenance and
 			// announce the migration before anything is written. Reading the
@@ -497,11 +504,12 @@ final class ImportCommand {
 	 * Then wires a FileWriter rooted at the WordPress installation (ABSPATH) and
 	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb.
 	 *
-	 * @param resource $source           The open archive stream, read for its header and footer.
-	 * @param bool     $passphrase_stdin True to read the passphrase from STDIN rather than prompt.
+	 * @param resource $source                The open archive stream, read for its header and footer.
+	 * @param bool     $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
+	 * @param bool     $allow_unsafe_symlinks True to allow symlink targets that escape the restore root.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner( $source, bool $passphrase_stdin ): RestoreRunner {
+	private function build_default_restore_runner( $source, bool $passphrase_stdin, bool $allow_unsafe_symlinks ): RestoreRunner {
 		$archive_reader = new ArchiveReader( $source );
 		$passphrase     = $archive_reader->header()->is_encrypted()
 			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
@@ -516,7 +524,7 @@ final class ImportCommand {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
-		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
+		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
 	}
