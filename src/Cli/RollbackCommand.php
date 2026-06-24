@@ -169,7 +169,7 @@ final class RollbackCommand {
 		// 3. Confirm (unless --yes, or --dry-run which changes nothing).
 		if ( ! $dry_run && ! $skip_confirm ) {
 			WP_CLI::confirm(
-				sprintf( 'Restore the safety archive %s over the current site? This undoes your most recent import.', $archive_path ),
+				sprintf( /* translators: %s: the safety archive path */ __( 'Restore the safety archive %s over the current site? This undoes your most recent import.', 'pontifex' ), $archive_path ),
 				$associative_args
 			);
 		}
@@ -353,8 +353,8 @@ final class RollbackCommand {
 	 * @return void
 	 */
 	private function print_scope( string $archive_path ): void {
-		WP_CLI::log( sprintf( 'Rolling back to the most recent safety archive: %s', PathRedactor::from_environment()->redact( $archive_path ) ) );
-		WP_CLI::log( 'Restoring to the same site URL only; no URL rewriting.' );
+		WP_CLI::log( sprintf( /* translators: %s: the safety archive path */ __( 'Rolling back to the most recent safety archive: %s', 'pontifex' ), PathRedactor::from_environment()->redact( $archive_path ) ) );
+		WP_CLI::log( __( 'Restoring to the same site URL only; no URL rewriting.', 'pontifex' ) );
 	}
 
 	/**
@@ -366,7 +366,7 @@ final class RollbackCommand {
 	 */
 	private function print_summary( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
-			sprintf( 'Rolled back %d entries from %s', $entry_count, $archive_path )
+			sprintf( /* translators: 1: number of entries restored, 2: the archive path */ __( 'Rolled back %1$d entries from %2$s', 'pontifex' ), $entry_count, $archive_path )
 		);
 	}
 
@@ -379,7 +379,7 @@ final class RollbackCommand {
 	 */
 	private function print_dry_run_summary( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
-			sprintf( 'Dry run complete: %d entries verified in %s. No changes were made.', $entry_count, $archive_path )
+			sprintf( /* translators: 1: number of entries verified, 2: the archive path */ __( 'Dry run complete: %1$d entries verified in %2$s. No changes were made.', 'pontifex' ), $entry_count, $archive_path )
 		);
 	}
 }

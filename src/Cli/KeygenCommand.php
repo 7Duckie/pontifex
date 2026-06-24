@@ -60,9 +60,9 @@ final class KeygenCommand {
 		try {
 			SigningKeys::write_keypair( $keypair, $secret_path, $public_path );
 
-			WP_CLI::log( sprintf( 'Generated Ed25519 signing keypair (key id %s).', bin2hex( $keypair->key_id() ) ) );
-			WP_CLI::log( sprintf( '  secret key: %s (mode 0600 — keep it safe and backed up; there is no passphrase)', $secret_path ) );
-			WP_CLI::log( sprintf( '  public key: %s (share this so others can verify)', $public_path ) );
+			WP_CLI::log( sprintf( /* translators: %s: the key id in hex */ __( 'Generated Ed25519 signing keypair (key id %s).', 'pontifex' ), bin2hex( $keypair->key_id() ) ) );
+			WP_CLI::log( '  ' . sprintf( /* translators: %s: the secret key file path */ __( 'secret key: %s (mode 0600 — keep it safe and backed up; there is no passphrase)', 'pontifex' ), $secret_path ) );
+			WP_CLI::log( '  ' . sprintf( /* translators: %s: the public key file path */ __( 'public key: %s (share this so others can verify)', 'pontifex' ), $public_path ) );
 		} catch ( Throwable $error ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( PathRedactor::from_environment()->redact( $error->getMessage() ) );
@@ -78,7 +78,7 @@ final class KeygenCommand {
 	 */
 	private function require_path( array $associative_args, string $key ): string {
 		if ( ! isset( $associative_args[ $key ] ) || '' === $associative_args[ $key ] || true === $associative_args[ $key ] ) {
-			WP_CLI::error( sprintf( '--%s=<path> is required.', $key ) );
+			WP_CLI::error( sprintf( /* translators: %s: the option name (e.g. secret-key) */ __( '--%s=<path> is required.', 'pontifex' ), $key ) );
 		}
 		$path = (string) $associative_args[ $key ];
 		if ( '/' !== substr( $path, 0, 1 ) ) {

@@ -297,7 +297,7 @@ final class ImportCommand {
 
 		// 3. Confirm with the user (unless --yes, or --dry-run which changes nothing).
 		if ( ! $dry_run && ! $skip_confirm ) {
-			WP_CLI::confirm( sprintf( 'Restore %s over the current site?', $archive_path ), $associative_args );
+			WP_CLI::confirm( sprintf( /* translators: %s: the archive path */ __( 'Restore %s over the current site?', 'pontifex' ), $archive_path ), $associative_args );
 		}
 
 		// 4. Open the source archive for reading.
@@ -426,7 +426,7 @@ final class ImportCommand {
 	 */
 	private function require_archive_path( array $positional_args ): string {
 		if ( ! isset( $positional_args[0] ) || '' === $positional_args[0] ) {
-			WP_CLI::error( 'An archive path is required: wp pontifex import <archive>.' );
+			WP_CLI::error( __( 'An archive path is required: wp pontifex import <archive>.', 'pontifex' ) );
 		}
 		return (string) $positional_args[0];
 	}
@@ -446,7 +446,7 @@ final class ImportCommand {
 			return '';
 		}
 		if ( ! is_string( $associative_args['url'] ) || '' === $associative_args['url'] ) {
-			WP_CLI::error( '--url requires a new site URL, e.g. --url=https://new-site.example.' );
+			WP_CLI::error( __( '--url requires a new site URL, e.g. --url=https://new-site.example.', 'pontifex' ) );
 		}
 		return (string) $associative_args['url'];
 	}
@@ -725,21 +725,21 @@ final class ImportCommand {
 
 		if ( null === $reader->signature() ) {
 			if ( null !== $public_key ) {
-				WP_CLI::warning( 'A public key was supplied with --public-key, but this archive is not signed.' );
+				WP_CLI::warning( __( 'A public key was supplied with --public-key, but this archive is not signed.', 'pontifex' ) );
 			}
 			return;
 		}
 
 		if ( null === $public_key ) {
-			WP_CLI::warning( 'This archive is signed, but its signature was NOT verified (no --public-key supplied). Proceeding with the restore.' );
+			WP_CLI::warning( __( 'This archive is signed, but its signature was NOT verified (no --public-key supplied). Proceeding with the restore.', 'pontifex' ) );
 			return;
 		}
 
 		if ( ! $reader->verify_signature( $public_key ) ) {
-			WP_CLI::error( 'The Ed25519 signature did not verify against the supplied public key; refusing to restore (wrong key, or the archive was modified after signing).' );
+			WP_CLI::error( __( 'The Ed25519 signature did not verify against the supplied public key; refusing to restore (wrong key, or the archive was modified after signing).', 'pontifex' ) );
 		}
 
-		WP_CLI::log( 'Signature verified against the supplied public key.' );
+		WP_CLI::log( __( 'Signature verified against the supplied public key.', 'pontifex' ) );
 	}
 
 
@@ -818,10 +818,10 @@ final class ImportCommand {
 	 */
 	private function print_scope( string $target_url ): void {
 		if ( '' === $target_url ) {
-			WP_CLI::log( 'Restoring to the same site URL; no URL rewriting.' );
+			WP_CLI::log( __( 'Restoring to the same site URL; no URL rewriting.', 'pontifex' ) );
 			return;
 		}
-		WP_CLI::log( sprintf( 'Restoring, then migrating the site URL to %s.', $target_url ) );
+		WP_CLI::log( sprintf( /* translators: %s: the target site URL */ __( 'Restoring, then migrating the site URL to %s.', 'pontifex' ), $target_url ) );
 	}
 
 	/**
@@ -859,7 +859,7 @@ final class ImportCommand {
 	 * @return void
 	 */
 	private function print_migration_plan( string $source_url, string $target_url ): void {
-		WP_CLI::log( sprintf( 'Migrating URLs from %s to %s.', $source_url, $target_url ) );
+		WP_CLI::log( sprintf( /* translators: 1: the source URL, 2: the target URL */ __( 'Migrating URLs from %1$s to %2$s.', 'pontifex' ), $source_url, $target_url ) );
 	}
 
 	/**
@@ -873,7 +873,8 @@ final class ImportCommand {
 	private function print_migration_summary( string $source_url, string $target_url, RewriteReport $report ): void {
 		WP_CLI::log(
 			sprintf(
-				'Migrated %s to %s: rewrote %d value(s) across %d row(s); %d table(s) skipped (no single-column key); %d value(s) kept unchanged for safety.',
+				/* translators: 1: source URL, 2: target URL, 3: values rewritten, 4: rows changed, 5: tables skipped, 6: values kept unchanged */
+				__( 'Migrated %1$s to %2$s: rewrote %3$d value(s) across %4$d row(s); %5$d table(s) skipped (no single-column key); %6$d value(s) kept unchanged for safety.', 'pontifex' ),
 				$source_url,
 				$target_url,
 				$report->values_changed(),
@@ -895,7 +896,8 @@ final class ImportCommand {
 	private function print_summary( string $archive_path, int $entry_count, int $bytes_imported ): void {
 		WP_CLI::log(
 			sprintf(
-				'Restored %d entries (%s) from %s',
+				/* translators: 1: number of entries, 2: human-readable size, 3: the archive path */
+				__( 'Restored %1$d entries (%2$s) from %3$s', 'pontifex' ),
 				$entry_count,
 				$this->wordpress_context->format_size( $bytes_imported ),
 				$archive_path
@@ -914,11 +916,12 @@ final class ImportCommand {
 	private function print_dry_run_summary( string $archive_path, int $entry_count, string $target_url ): void {
 		$migration_note = '' === $target_url
 			? ''
-			: sprintf( ' The site URL would be migrated to %s after a real restore.', $target_url );
+			: ' ' . sprintf( /* translators: %s: the target site URL */ __( 'The site URL would be migrated to %s after a real restore.', 'pontifex' ), $target_url );
 
 		WP_CLI::log(
 			sprintf(
-				'Dry run complete: %d entries verified in %s. No changes were made.%s',
+				/* translators: 1: number of entries, 2: the archive path, 3: optional migration note */
+				__( 'Dry run complete: %1$d entries verified in %2$s. No changes were made.%3$s', 'pontifex' ),
 				$entry_count,
 				$archive_path,
 				$migration_note

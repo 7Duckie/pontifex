@@ -120,7 +120,7 @@ final class DiagnosticsCommand {
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 		if ( ! class_exists( PharData::class ) ) {
-			WP_CLI::error( 'ext-phar is required to build a diagnostics bundle but is not available on this host.' );
+			WP_CLI::error( __( 'ext-phar is required to build a diagnostics bundle but is not available on this host.', 'pontifex' ) );
 		}
 
 		$output_path = $this->resolve_output_path( $associative_args );
@@ -131,11 +131,11 @@ final class DiagnosticsCommand {
 			$this->write_bundle( $output_path, $artifacts );
 		} catch ( Throwable $error ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders to the terminal; the message is our own plus the underlying error text.
-			WP_CLI::error( sprintf( 'Could not write the diagnostics bundle: %s', PathRedactor::from_environment()->redact( $error->getMessage() ) ) );
+			WP_CLI::error( sprintf( /* translators: %s: the underlying error message */ __( 'Could not write the diagnostics bundle: %s', 'pontifex' ), PathRedactor::from_environment()->redact( $error->getMessage() ) ) );
 		}
 
-		WP_CLI::log( sprintf( 'Diagnostics bundle written: %s', $output_path ) );
-		WP_CLI::log( 'It is sanitised (site URL, absolute paths, and *_key/_secret/_token/_password options redacted), but review it before sharing. Pontifex never uploads it.' );
+		WP_CLI::log( sprintf( /* translators: %s: the bundle file path */ __( 'Diagnostics bundle written: %s', 'pontifex' ), $output_path ) );
+		WP_CLI::log( __( 'It is sanitised (site URL, absolute paths, and *_key/_secret/_token/_password options redacted), but review it before sharing. Pontifex never uploads it.', 'pontifex' ) );
 	}
 
 	/**

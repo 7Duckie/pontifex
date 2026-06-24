@@ -603,7 +603,8 @@ final class DoctorCommand {
 		WP_CLI::log( '' );
 		WP_CLI::log(
 			sprintf(
-				'Summary: %d OK, %d warning(s), %d failure(s), %d informational.',
+				/* translators: 1: OK count, 2: warning count, 3: failure count, 4: informational count */
+				__( 'Summary: %1$d OK, %2$d warning(s), %3$d failure(s), %4$d informational.', 'pontifex' ),
 				$status_counts[ self::STATUS_OK ],
 				$status_counts[ self::STATUS_WARN ],
 				$status_counts[ self::STATUS_FAIL ],
