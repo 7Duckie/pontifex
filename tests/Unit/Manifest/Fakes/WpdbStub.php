@@ -124,6 +124,16 @@ if ( ! class_exists( 'wpdb' ) ) {
 		public function update( string $table, array $data, array $where, $format = null, $where_format = null ) {
 			return 0;
 		}
+
+		/**
+		 * Stub for the real wpdb::query(). Replaced via PHPUnit mock in tests.
+		 *
+		 * @param string $query SQL query (unused in the stub).
+		 * @return mixed Rows affected / true, or false on error.
+		 */
+		public function query( string $query ) {
+			return 0;
+		}
 	}
 }
 

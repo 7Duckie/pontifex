@@ -196,9 +196,14 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 *
 	 * The statement is sent verbatim; no preparation, escaping, or
 	 * placeholder substitution is applied because the SQL came from a
-	 * Pontifex-produced archive and is already in its final form. On
-	 * failure (non-empty $wpdb->last_error), a RuntimeException is
-	 * thrown carrying the database driver's error message.
+	 * Pontifex-produced archive and is already in its final form.
+	 *
+	 * Failure is detected by $wpdb->query() returning false, NOT only by a
+	 * non-empty $wpdb->last_error: a real $wpdb returns false on a failed query
+	 * and, if errors have been suppressed (suppress_errors), leaves last_error
+	 * empty. Relying on last_error alone would let a failed restore statement
+	 * pass as success and silently drop or skip a table. The migration writer
+	 * checks the same way.
 	 *
 	 * @param string $sql The SQL statement to execute. Must not be empty.
 	 * @throws RuntimeException If the statement fails to execute.
@@ -208,9 +213,9 @@ final class WpdbAdapter implements DatabaseAdapter {
 			throw new RuntimeException( 'WpdbAdapter::execute_sql: sql must not be empty.' );
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql came from a Pontifex-produced archive; preparation/caching does not apply to schema-modifying restore statements.
-		$this->wpdb->query( $sql );
-		if ( '' !== $this->wpdb->last_error ) {
-			$last_error = (string) $this->wpdb->last_error;
+		$result = $this->wpdb->query( $sql );
+		if ( false === $result || '' !== $this->wpdb->last_error ) {
+			$last_error = '' !== $this->wpdb->last_error ? (string) $this->wpdb->last_error : 'query returned false';
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $last_error is the database driver's error message, reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'WpdbAdapter::execute_sql: query failed: %s', $last_error )
