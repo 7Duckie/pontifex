@@ -268,7 +268,7 @@ final class RollbackCommand {
 		$source = @fopen( $archive_path, 'rb' );
 		if ( false === $source ) {
 			WP_CLI::error(
-				sprintf( 'Could not open the safety archive for reading: %s', $archive_path )
+				sprintf( 'Could not open the safety archive for reading: %s', PathRedactor::from_environment()->redact( $archive_path ) )
 			);
 		}
 		return $source;
@@ -353,7 +353,7 @@ final class RollbackCommand {
 	 * @return void
 	 */
 	private function print_scope( string $archive_path ): void {
-		WP_CLI::log( sprintf( 'Rolling back to the most recent safety archive: %s', $archive_path ) );
+		WP_CLI::log( sprintf( 'Rolling back to the most recent safety archive: %s', PathRedactor::from_environment()->redact( $archive_path ) ) );
 		WP_CLI::log( 'Restoring to the same site URL only; no URL rewriting.' );
 	}
 

@@ -65,7 +65,7 @@ final class KeygenCommand {
 			WP_CLI::log( sprintf( '  public key: %s (share this so others can verify)', $public_path ) );
 		} catch ( Throwable $error ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
-			WP_CLI::error( $error->getMessage() );
+			WP_CLI::error( PathRedactor::from_environment()->redact( $error->getMessage() ) );
 		}
 	}
 
@@ -82,7 +82,7 @@ final class KeygenCommand {
 		}
 		$path = (string) $associative_args[ $key ];
 		if ( '/' !== substr( $path, 0, 1 ) ) {
-			WP_CLI::error( sprintf( '--%s must be an absolute path; got "%s".', $key, $path ) );
+			WP_CLI::error( sprintf( '--%s must be an absolute path; got "%s".', $key, PathRedactor::from_environment()->redact( $path ) ) );
 		}
 		return $path;
 	}

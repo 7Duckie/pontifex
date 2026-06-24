@@ -307,7 +307,7 @@ final class ExportCommand {
 				}
 			} catch ( \Exception $e ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
-				WP_CLI::error( $e->getMessage() );
+				WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
 			}
 		}
 

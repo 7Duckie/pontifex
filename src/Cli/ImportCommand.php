@@ -465,7 +465,7 @@ final class ImportCommand {
 	private function validate_archive_path( string $archive_path ): void {
 		if ( '/' !== substr( $archive_path, 0, 1 ) ) {
 			WP_CLI::error(
-				sprintf( 'The archive path must be absolute; got "%s".', $archive_path )
+				sprintf( 'The archive path must be absolute; got "%s".', PathRedactor::from_environment()->redact( $archive_path ) )
 			);
 		}
 	}
@@ -484,7 +484,7 @@ final class ImportCommand {
 		$source = @fopen( $archive_path, 'rb' );
 		if ( false === $source ) {
 			WP_CLI::error(
-				sprintf( 'Could not open archive for reading (does it exist and is it readable?): %s', $archive_path )
+				sprintf( 'Could not open archive for reading (does it exist and is it readable?): %s', PathRedactor::from_environment()->redact( $archive_path ) )
 			);
 		}
 		return $source;
@@ -571,7 +571,7 @@ final class ImportCommand {
 		$this->progress->finish();
 
 		$this->logger->info( 'Safety archive written.', array( 'safety_archive' => $path ) );
-		WP_CLI::log( sprintf( 'Safety archive written: %s (undo this import with: wp pontifex rollback)', $path ) );
+		WP_CLI::log( sprintf( 'Safety archive written: %s (undo this import with: wp pontifex rollback)', PathRedactor::from_environment()->redact( $path ) ) );
 	}
 
 	/**
@@ -702,7 +702,7 @@ final class ImportCommand {
 			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
-			WP_CLI::error( $e->getMessage() );
+			WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
 		}
 		return $key;
 	}

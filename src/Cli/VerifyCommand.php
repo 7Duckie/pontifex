@@ -321,7 +321,7 @@ final class VerifyCommand {
 		$source = @fopen( $archive_path, 'rb' );
 		if ( false === $source ) {
 			WP_CLI::error(
-				sprintf( 'Could not open archive for reading (does it exist and is it readable?): %s', $archive_path )
+				sprintf( 'Could not open archive for reading (does it exist and is it readable?): %s', PathRedactor::from_environment()->redact( $archive_path ) )
 			);
 		}
 		return $source;
@@ -423,7 +423,7 @@ final class VerifyCommand {
 			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
-			WP_CLI::error( $e->getMessage() );
+			WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
 		}
 		return $key;
 	}
@@ -544,11 +544,12 @@ final class VerifyCommand {
 	 * @return void
 	 */
 	private function print_broken( string $archive_path, Throwable $error ): void {
+		$redactor = PathRedactor::from_environment();
 		WP_CLI::log(
 			sprintf(
 				'Archive is BROKEN: %s (%s)',
-				$error->getMessage(),
-				$archive_path
+				$redactor->redact( $error->getMessage() ),
+				$redactor->redact( $archive_path )
 			)
 		);
 	}
