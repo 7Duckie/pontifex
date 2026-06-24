@@ -256,6 +256,47 @@ final class FileLoggerTest extends TestCase {
 		$this->assertStringStartsWith( 'LLL', (string) file_get_contents( $base . '.1' ) );
 	}
 
+	/**
+	 * Control characters in a message are neutralised, preventing log injection.
+	 *
+	 * An embedded newline must not start a second line (which could forge a log
+	 * entry); it becomes a space, so the whole event stays on one line.
+	 *
+	 * @return void
+	 */
+	public function test_neutralises_control_characters(): void {
+		$logger = new FileLogger( $this->temp_dir, false );
+
+		$logger->info( "started\r\n[2099-01-01T00:00:00+00:00] ERROR: forged entry" );
+
+		$body = $this->read_log();
+		$this->assertSame( 1, substr_count( $body, "\n" ), 'Only the single trailing newline should remain.' );
+		$this->assertStringContainsString( 'forged entry', $body );
+		$this->assertStringContainsString( 'started', $body );
+	}
+
+	/**
+	 * A symlinked log path is refused rather than followed.
+	 *
+	 * If an attacker places a symlink where the log file should be, appending
+	 * through it would write to the link's target. The logger must refuse.
+	 *
+	 * @return void
+	 */
+	public function test_refuses_to_follow_a_symlinked_log_path(): void {
+		$this->make_dir( $this->temp_dir );
+		$target = $this->temp_dir . '/outside-target.txt';
+		$this->put( $target, 'ORIGINAL' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture: a symlink at the log path is the subject under test.
+		symlink( $target, $this->temp_dir . '/pontifex.log' );
+
+		$logger = new FileLogger( $this->temp_dir, false );
+		$logger->error( 'this must not be written through the symlink' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading back a fixture file the test wrote in the system temp path.
+		$this->assertSame( 'ORIGINAL', (string) file_get_contents( $target ), 'The symlink target must be untouched.' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Test helpers.
 	// -------------------------------------------------------------------------
@@ -302,7 +343,9 @@ final class FileLoggerTest extends TestCase {
 	 * @return void
 	 */
 	private function remove_tree( string $path ): void {
-		if ( is_file( $path ) ) {
+		// is_link first: a dangling symlink (its target already removed) is neither
+		// a file nor a dir, so it must be unlinked here or it blocks the rmdir.
+		if ( is_link( $path ) || is_file( $path ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a fixture the test created in the system temp path.
 			unlink( $path );
 			return;

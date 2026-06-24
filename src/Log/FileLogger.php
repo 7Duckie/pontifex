@@ -214,7 +214,26 @@ final class FileLogger extends AbstractLogger {
 			}
 		}
 
-		return $line . "\n";
+		// Neutralise control characters before adding the single real newline.
+		// An attacker-influenced value (an archive path, a provenance URL, a table
+		// name, a $wpdb error) could otherwise carry its own CR/LF to forge extra
+		// log lines, or terminal escapes that fire when an operator views the log.
+		// The JSON tail already escapes control characters, so only the message and
+		// exception text are affected.
+		return self::strip_control_characters( $line ) . "\n";
+	}
+
+	/**
+	 * Replace every C0 control character (and DEL) with a space.
+	 *
+	 * This collapses embedded newlines, carriage returns, and terminal escape
+	 * introducers to spaces, keeping each logged event on exactly one line.
+	 *
+	 * @param string $line The assembled line content (without the trailing newline).
+	 * @return string The line with control characters neutralised.
+	 */
+	private static function strip_control_characters( string $line ): string {
+		return (string) preg_replace( '/[\x00-\x1F\x7F]/', ' ', $line );
 	}
 
 	/**
@@ -260,6 +279,15 @@ final class FileLogger extends AbstractLogger {
 		}
 
 		$path = $this->log_dir . '/' . $this->filename;
+
+		// Refuse to follow a symlinked log path: if an attacker placed a symlink
+		// where the log file should be, appending through it would write to the
+		// link's target. Disable rather than follow it.
+		if ( is_link( $path ) ) {
+			$this->disabled = true;
+			return;
+		}
+
 		$this->maybe_rotate( $path );
 
 		$this->silently(
