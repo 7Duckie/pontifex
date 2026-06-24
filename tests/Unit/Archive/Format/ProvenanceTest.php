@@ -415,6 +415,25 @@ final class ProvenanceTest extends TestCase {
 	}
 
 	/**
+	 * Parsing must reject a timestamp that parses only with warnings (e.g. trailing data).
+	 *
+	 * The createFromFormat() call returns an object for such a value rather than false, so the
+	 * parser must also consult getLastErrors() — otherwise a malformed timestamp slips through.
+	 *
+	 * @return void
+	 */
+	public function test_from_bytes_rejects_timestamp_with_trailing_data(): void {
+		$bad_json = '{"wp_version":"6.5.0","php_version":"8.2.10","url":"https://example.com","db_charset":"utf8mb4","db_collation":"utf8mb4_unicode_520_ci","exporter":{"name":"pontifex","version":"0.1.0"},"timestamp":"2026-05-21T22:21:02+00:00 trailing"}';
+		$length   = ByteOrder::pack_uint32( strlen( $bad_json ) );
+		$hash     = Sha256::of( $bad_json );
+		$bytes    = $length . $hash . $bad_json;
+
+		$this->expectException( InvalidArgumentException::class );
+
+		Provenance::from_bytes( $bytes );
+	}
+
+	/**
 	 * Parsing must reject a JSON payload whose exporter sub-object is missing a field.
 	 *
 	 * @return void

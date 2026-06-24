@@ -450,8 +450,15 @@ final class Provenance {
 			}
 		}
 
-		$timestamp = DateTimeImmutable::createFromFormat( DateTimeInterface::ATOM, $data['timestamp'] );
-		if ( false === $timestamp ) {
+		$timestamp    = DateTimeImmutable::createFromFormat( DateTimeInterface::ATOM, $data['timestamp'] );
+		$parse_errors = DateTimeImmutable::getLastErrors();
+		// createFromFormat returns false on a hard failure, but for a coercible-but-malformed
+		// value (e.g. trailing data, out-of-range parts) it returns an object and records the
+		// problem in getLastErrors(); reject both so a wrong timestamp cannot slip through.
+		if (
+			false === $timestamp
+			|| ( false !== $parse_errors && ( $parse_errors['warning_count'] > 0 || $parse_errors['error_count'] > 0 ) )
+		) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- User-supplied value embedded in exception message for diagnostic context; this is an exception path, not HTML output to a browser.
 				sprintf( 'Provenance: timestamp "%s" is not a valid ISO 8601 string with timezone offset.', $data['timestamp'] )
