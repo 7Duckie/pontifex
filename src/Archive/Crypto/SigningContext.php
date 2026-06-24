@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Archive\Crypto;
 
 use InvalidArgumentException;
+use LogicException;
 
 /**
  * Immutable bundle of the inputs a signed archive needs.
@@ -38,11 +39,11 @@ final class SigningContext {
 	private Ed25519Signer $signer;
 
 	/**
-	 * The 64-byte Ed25519 secret key.
+	 * The 64-byte Ed25519 secret key, or null once wiped.
 	 *
-	 * @var string
+	 * @var string|null
 	 */
-	private string $secret_key;
+	private ?string $secret_key;
 
 	/**
 	 * The 32-byte key id (SHA-256 of the public key) recorded in the signature block.
@@ -77,6 +78,20 @@ final class SigningContext {
 	}
 
 	/**
+	 * Wipe the secret key from memory when the context is destroyed.
+	 *
+	 * Defence-in-depth: the CLI scrubs its own copy of the secret key once this
+	 * context holds it, but the copy this object keeps for its lifetime is
+	 * zeroed here too so it does not linger until garbage collection.
+	 * Best-effort — only when ext-sodium is available.
+	 */
+	public function __destruct() {
+		if ( null !== $this->secret_key && function_exists( 'sodium_memzero' ) ) {
+			sodium_memzero( $this->secret_key );
+		}
+	}
+
+	/**
 	 * Build a signing context from a keypair, defaulting the signer.
 	 *
 	 * @param SigningKeypair     $keypair The keypair whose secret key signs and whose key id is recorded.
@@ -100,8 +115,12 @@ final class SigningContext {
 	 * Return the secret key.
 	 *
 	 * @return string The 64-byte secret key.
+	 * @throws LogicException If the secret key has already been wiped from memory.
 	 */
 	public function secret_key(): string {
+		if ( null === $this->secret_key ) {
+			throw new LogicException( 'SigningContext: the secret key has been wiped from memory and is no longer available.' );
+		}
 		return $this->secret_key;
 	}
 

@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Archive\Crypto;
 
 use InvalidArgumentException;
+use LogicException;
 use SodiumException;
 
 /**
@@ -64,11 +65,11 @@ final class SigningKeypair {
 	private string $public_key;
 
 	/**
-	 * The 64-byte Ed25519 secret key.
+	 * The 64-byte Ed25519 secret key, or null once wiped.
 	 *
-	 * @var string
+	 * @var string|null
 	 */
-	private string $secret_key;
+	private ?string $secret_key;
 
 	/**
 	 * Construct a keypair from raw public and secret key bytes.
@@ -91,6 +92,20 @@ final class SigningKeypair {
 
 		$this->public_key = $public_key;
 		$this->secret_key = $secret_key;
+	}
+
+	/**
+	 * Wipe the secret key from memory when the keypair is destroyed.
+	 *
+	 * Defence-in-depth: the secret key this object holds is zeroed when the
+	 * keypair goes out of scope so it does not linger until garbage collection.
+	 * Best-effort — only when ext-sodium is available. The public key is not
+	 * secret and is left as is.
+	 */
+	public function __destruct() {
+		if ( null !== $this->secret_key && function_exists( 'sodium_memzero' ) ) {
+			sodium_memzero( $this->secret_key );
+		}
 	}
 
 	/**
@@ -164,8 +179,12 @@ final class SigningKeypair {
 	 * Return the secret key.
 	 *
 	 * @return string The 64-byte secret key.
+	 * @throws LogicException If the secret key has already been wiped from memory.
 	 */
 	public function secret_key(): string {
+		if ( null === $this->secret_key ) {
+			throw new LogicException( 'SigningKeypair: the secret key has been wiped from memory and is no longer available.' );
+		}
 		return $this->secret_key;
 	}
 

@@ -18,8 +18,9 @@ namespace Pontifex\Cli;
  *
  *  - the site URL is replaced with a generic placeholder, so the host is not
  *    identifiable;
- *  - absolute filesystem paths (the WordPress root and wp-content) are replaced
- *    with `{ABSPATH}` / `{WP_CONTENT_DIR}` placeholders, so directory layout and
+ *  - absolute filesystem paths (the WordPress root, wp-content, the operator's
+ *    home and temp directories, and /root) are replaced with placeholders such
+ *    as `{ABSPATH}` / `{WP_CONTENT_DIR}` / `{HOME}`, so directory layout and
  *    usernames in paths are not exposed;
  *  - any wp_options value whose name ends in `_key`, `_secret`, `_token`, or
  *    `_password` is masked, so API keys and the like never enter the bundle.
@@ -61,42 +62,21 @@ final class DiagnosticsRedactor {
 	private string $site_url;
 
 	/**
-	 * Absolute path prefixes to redact, as [absolute path => placeholder] pairs,
-	 * ordered longest-first so a nested path (wp-content) is replaced before the
-	 * root that contains it.
+	 * The redactor that replaces absolute path prefixes with placeholders.
 	 *
-	 * @var array<string, string>
+	 * @var PathRedactor
 	 */
-	private array $path_replacements;
+	private PathRedactor $path_redactor;
 
 	/**
 	 * Construct a redactor for one site's values.
 	 *
-	 * @param string $site_url        The site URL to redact (empty to skip).
-	 * @param string $abspath         The WordPress root path to redact (empty to skip).
-	 * @param string $wp_content_dir  The wp-content path to redact (empty to skip).
+	 * @param string       $site_url      The site URL to redact (empty to skip).
+	 * @param PathRedactor $path_redactor The redactor for absolute filesystem paths.
 	 */
-	public function __construct( string $site_url, string $abspath, string $wp_content_dir ) {
-		$this->site_url = $site_url;
-
-		$replacements = array();
-		if ( '' !== $wp_content_dir ) {
-			$replacements[ rtrim( $wp_content_dir, '/\\' ) ] = '{WP_CONTENT_DIR}';
-		}
-		if ( '' !== $abspath ) {
-			$replacements[ rtrim( $abspath, '/\\' ) ] = '{ABSPATH}';
-		}
-
-		// Apply the longest path first so a nested directory is not left half-redacted
-		// by an enclosing prefix.
-		uksort(
-			$replacements,
-			static function ( string $a, string $b ): int {
-				return strlen( $b ) <=> strlen( $a );
-			}
-		);
-
-		$this->path_replacements = $replacements;
+	public function __construct( string $site_url, PathRedactor $path_redactor ) {
+		$this->site_url      = $site_url;
+		$this->path_redactor = $path_redactor;
 	}
 
 	/**
@@ -110,11 +90,7 @@ final class DiagnosticsRedactor {
 			$text = str_replace( $this->site_url, self::URL_PLACEHOLDER, $text );
 		}
 
-		foreach ( $this->path_replacements as $absolute => $placeholder ) {
-			$text = str_replace( $absolute, $placeholder, $text );
-		}
-
-		return $text;
+		return $this->path_redactor->redact( $text );
 	}
 
 	/**

@@ -121,4 +121,26 @@ final class EncryptionContextTest extends TestCase {
 		$this->expectException( LogicException::class );
 		$context->consume();
 	}
+
+	/**
+	 * Destruction wipes the key, after which the key accessor refuses to return it.
+	 *
+	 * Calling __destruct() twice proves the wipe is idempotent (it also runs
+	 * implicitly when the object goes out of scope).
+	 *
+	 * @return void
+	 */
+	public function test_destruct_wipes_the_key(): void {
+		if ( ! function_exists( 'sodium_memzero' ) ) {
+			self::markTestSkipped( 'ext-sodium is required to wipe key material.' );
+		}
+
+		$context = new EncryptionContext( new OpensslAesGcmCipher(), self::valid_key(), self::valid_salt() );
+
+		$context->__destruct();
+		$context->__destruct();
+
+		$this->expectException( LogicException::class );
+		$context->key();
+	}
 }

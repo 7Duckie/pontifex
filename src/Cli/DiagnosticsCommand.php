@@ -131,7 +131,7 @@ final class DiagnosticsCommand {
 			$this->write_bundle( $output_path, $artifacts );
 		} catch ( Throwable $error ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders to the terminal; the message is our own plus the underlying error text.
-			WP_CLI::error( sprintf( 'Could not write the diagnostics bundle: %s', $error->getMessage() ) );
+			WP_CLI::error( sprintf( 'Could not write the diagnostics bundle: %s', PathRedactor::from_environment()->redact( $error->getMessage() ) ) );
 		}
 
 		WP_CLI::log( sprintf( 'Diagnostics bundle written: %s', $output_path ) );
@@ -148,7 +148,7 @@ final class DiagnosticsCommand {
 		if ( isset( $associative_args['output'] ) && '' !== $associative_args['output'] && true !== $associative_args['output'] ) {
 			$path = (string) $associative_args['output'];
 			if ( ! str_ends_with( $path, '.tar.gz' ) ) {
-				WP_CLI::error( sprintf( '--output must end in .tar.gz; got "%s".', $path ) );
+				WP_CLI::error( sprintf( '--output must end in .tar.gz; got "%s".', PathRedactor::from_environment()->redact( $path ) ) );
 			}
 			return $path;
 		}
@@ -164,11 +164,14 @@ final class DiagnosticsCommand {
 	 * @return DiagnosticsRedactor The configured redactor.
 	 */
 	private function build_redactor(): DiagnosticsRedactor {
-		return new DiagnosticsRedactor(
-			$this->wordpress_context->site_url(),
+		$paths = PathRedactor::from_paths(
 			$this->constant_string( 'ABSPATH', '' ),
-			$this->constant_string( 'WP_CONTENT_DIR', '' )
+			$this->constant_string( 'WP_CONTENT_DIR', '' ),
+			(string) getenv( 'HOME' ),
+			sys_get_temp_dir()
 		);
+
+		return new DiagnosticsRedactor( $this->wordpress_context->site_url(), $paths );
 	}
 
 	/**
