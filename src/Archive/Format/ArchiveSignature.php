@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Archive\Format;
 
 use InvalidArgumentException;
+use Pontifex\Archive\Integrity\Sha256;
 
 /**
  * Immutable value object representing the optional 100-byte signature block.
@@ -41,7 +42,7 @@ final class ArchiveSignature {
 	 *
 	 * @var int
 	 */
-	public const KEY_ID_SIZE = 32;
+	public const KEY_ID_SIZE = Sha256::DIGEST_SIZE;
 
 	/**
 	 * Size of the sig-length prefix in bytes (4 = one uint32).
@@ -62,7 +63,7 @@ final class ArchiveSignature {
 	 *
 	 * @var int
 	 */
-	public const SIZE = 100;
+	public const SIZE = self::KEY_ID_SIZE + self::SIG_LENGTH_PREFIX_SIZE + self::SIGNATURE_SIZE;
 
 	/**
 	 * The 32-byte key id (SHA-256 of the public key).

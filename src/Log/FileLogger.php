@@ -56,6 +56,17 @@ final class FileLogger extends AbstractLogger {
 	private const LOG_FILENAME = 'pontifex.log';
 
 	/**
+	 * Mode for a per-transfer log directory created beside a user-chosen archive.
+	 *
+	 * The protected central log uses 0700 via ProtectedDirectory; a sibling log
+	 * directory in the operator's own location is created world-traversable (0755)
+	 * rather than imposing owner-only access on their directory.
+	 *
+	 * @var int
+	 */
+	private const LOG_DIR_MODE = 0755;
+
+	/**
 	 * The eight PSR-3 levels ranked by severity, most severe first.
 	 *
 	 * A lower array index means more severe. The active floor and an
@@ -330,7 +341,7 @@ final class FileLogger extends AbstractLogger {
 		$this->silently(
 			function (): void {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating a plugin-owned log directory; WP_Filesystem is unavailable in CLI/test contexts.
-				mkdir( $this->log_dir, 0755, true );
+				mkdir( $this->log_dir, self::LOG_DIR_MODE, true );
 			}
 		);
 
