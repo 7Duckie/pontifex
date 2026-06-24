@@ -19,6 +19,36 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.2] — 2026-06-24 — Security hardening
+
+A hardening release from a full security/quality audit. No feature changes; the
+defaults are safer and a few attacker-controlled inputs are refused.
+
+### Security
+
+- **Plugin directories are protected from direct web access.** Logs, rollback
+  safety archives, and diagnostic bundles under `wp-content/pontifex/` now carry
+  an `.htaccess` (deny all) and an `index.php`, and the log directory is created
+  owner-only (`0700`). A `.wpmig` backup or log left under the web root is no
+  longer fetchable by URL on a typical Apache host. (nginx still needs a server
+  rule.)
+- **Restored file permissions are clamped.** A restored entry can no longer carry
+  setuid/setgid bits or be left world-writable.
+- **Archive symlinks that escape the site root are refused** by default; a hostile
+  archive can no longer plant a link such as `uploads/x -> /etc`. Use
+  `import --allow-unsafe-symlinks` to restore the old behaviour for a trusted
+  archive.
+- **Log lines are sanitised** of control characters (log-injection defence), and a
+  symlinked log path is refused rather than followed.
+- **Secret material is always scrubbed**, even on error paths, and an encryption
+  context is refused if reused for a second archive (a nonce-reuse guard).
+- **The secret signing key is written safely** — created exclusively, restricted
+  to `0600` before any bytes are written, and the mode is verified.
+- **Hardened diagnostics bundle** — drops `active_plugins`, uses an unpredictable
+  temporary filename.
+- Per-table export queries assert the WordPress table prefix; the archive reader
+  enforces decode and manifest read limits at its own layer.
+
 ## [0.4.1] — 2026-06-24 — Rollback-archive flag fix
 
 ### Fixed
@@ -402,7 +432,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/7Duckie/pontifex/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/7Duckie/pontifex/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/7Duckie/pontifex/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/7Duckie/pontifex/compare/v0.2.0...v0.3.0
