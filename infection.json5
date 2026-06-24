@@ -1,0 +1,22 @@
+{
+    // Pontifex mutation-testing configuration.
+    //
+    // Infection mutates src/ and checks whether the unit suite catches each
+    // change, surfacing tests that exercise code without truly asserting its
+    // behaviour (the "coverage theatre" the project guards against). It is
+    // ADVISORY ONLY: run it locally (see CLAUDE.md — typically on main after a
+    // release) to decide what to harden next. It is never a CI gate, so no
+    // minimum MSI is enforced here.
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": [
+            "src"
+        ]
+    },
+    "logs": {
+        "text": "infection.log"
+    },
+    "mutators": {
+        "@default": true
+    }
+}
