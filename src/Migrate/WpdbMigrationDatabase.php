@@ -95,7 +95,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 
 		$pattern = $this->wpdb->esc_like( $this->wpdb->prefix ) . '%';
 		$sql     = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; Plugin Check does not track the preparation across the assignment.
 		$rows = $this->wpdb->get_col( $sql );
 
 		if ( '' !== $this->wpdb->last_error ) {

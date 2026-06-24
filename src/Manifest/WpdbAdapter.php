@@ -212,7 +212,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( '' === $sql ) {
 			throw new RuntimeException( 'WpdbAdapter::execute_sql: sql must not be empty.' );
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql came from a Pontifex-produced archive; preparation/caching does not apply to schema-modifying restore statements.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the by-design replay of a Pontifex archive's database dump (the documented import trust boundary, Gap E); preparation/caching/escaping do not apply to schema-modifying restore statements.
 		$result = $this->wpdb->query( $sql );
 		if ( false === $result || '' !== $this->wpdb->last_error ) {
 			$last_error = '' !== $this->wpdb->last_error ? (string) $this->wpdb->last_error : 'query returned false';
