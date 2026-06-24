@@ -3,6 +3,9 @@ updates:
 
   - package-ecosystem: "composer"
     directory: "/"
+    # Dependency updates enter the promotion model at the bottom tier and
+    # flow up through the dev -> staging -> main gates (ADR 0007).
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -22,6 +25,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "monthly"
     labels:
