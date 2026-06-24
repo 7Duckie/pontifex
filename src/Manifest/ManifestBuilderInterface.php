@@ -23,8 +23,8 @@ use Pontifex\Archive\Writer\EntryPlan;
  * callers can substitute alternative implementations.
  *
  * The standard implementation is {@see ManifestBuilder}, which is
- * marked final and wires together FileScanner, DatabaseScanner, and
- * a WpdbAdapter at construction time. Tests substitute mock or fake
+ * marked final and wires together FileScanner and DatabaseScanner at
+ * construction time. Tests substitute mock or fake
  * implementations of this interface to exercise command-level
  * orchestration logic without standing up the full scanner stack.
  *

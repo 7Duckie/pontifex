@@ -12,7 +12,7 @@ namespace Pontifex\Cli;
 /**
  * A minimal contract for reporting progress through a long operation.
  *
- * ExportCommand creates one of these, tells it the total amount of
+ * Each long-running CLI command creates one of these, tells it the total amount of
  * work up front via start(), nudges it forward once per unit of work
  * via advance(), and closes it via finish(). The interface exists so
  * the command can be unit-tested with a silent NullProgressBar while

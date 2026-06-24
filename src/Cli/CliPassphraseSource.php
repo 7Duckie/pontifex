@@ -29,7 +29,7 @@ final class CliPassphraseSource implements PassphraseSource {
 	 * @throws RuntimeException If standard input cannot be read.
 	 */
 	public function from_stdin(): string {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents,WordPress.WP.AlternativeFunctions.file_system_operations_fgets -- Reading one line from the STDIN stream for --passphrase-stdin; WP_Filesystem has no STDIN abstraction.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fgets -- Reading one line from the STDIN stream for --passphrase-stdin; WP_Filesystem has no STDIN abstraction.
 		$line = fgets( STDIN );
 		if ( false === $line ) {
 			throw new RuntimeException( 'CliPassphraseSource: could not read a passphrase from standard input.' );

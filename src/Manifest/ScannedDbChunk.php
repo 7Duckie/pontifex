@@ -177,14 +177,8 @@ final class ScannedDbChunk {
 	public function open_sql_stream() {
 		$stream = ( $this->sql_provider )();
 		if ( ! is_resource( $stream ) ) {
-			throw new RuntimeException(
-				sprintf(
-					'ScannedDbChunk: sql_provider for table "%s" chunk %d did not return a stream resource.',
-					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->table_name reported verbatim in exception message for diagnostic context; not HTML output.
-					$this->table_name,
-					(int) $this->chunk_index
-				)
-			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->table_name reported verbatim in exception message for diagnostic context; not HTML output.
+			throw new RuntimeException( sprintf( 'ScannedDbChunk: sql_provider for table "%s" chunk %d did not return a stream resource.', $this->table_name, (int) $this->chunk_index ) );
 		}
 		return $stream;
 	}

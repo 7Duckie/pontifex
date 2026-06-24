@@ -86,6 +86,27 @@ final class EncryptionTest extends TestCase {
 	}
 
 	/**
+	 * A multibyte passphrase is measured by characters, not bytes.
+	 *
+	 * Nine two-byte characters is 18 bytes but only 9 characters — above the old
+	 * byte-count minimum yet below the character minimum, so it is refused.
+	 *
+	 * @return void
+	 */
+	public function test_collect_for_export_measures_multibyte_passphrase_by_characters(): void {
+		if ( ! function_exists( 'mb_strlen' ) ) {
+			self::markTestSkipped( 'ext-mbstring is required to measure characters.' );
+		}
+
+		$source = new FakePassphraseSource( array(), str_repeat( 'é', 9 ) );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'at least' );
+
+		Encryption::collect_for_export( $source, true );
+	}
+
+	/**
 	 * Two matching hidden prompts above the minimum return the passphrase.
 	 *
 	 * @return void

@@ -109,6 +109,13 @@ final class EntryHeader {
 	public const MAX_PAYLOAD_SIZE = 16384;
 
 	/**
+	 * Maximum nesting depth when decoding the canonical-JSON header (PHP's default).
+	 *
+	 * @var int
+	 */
+	private const JSON_MAX_DEPTH = 512;
+
+	/**
 	 * Maximum permitted POSIX mode value (12 bits, 0o7777 = 4095).
 	 *
 	 * @var int
@@ -839,7 +846,7 @@ final class EntryHeader {
 	 */
 	private static function decode_canonical_json( string $json ): self {
 		try {
-			$data = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+			$data = json_decode( $json, true, self::JSON_MAX_DEPTH, JSON_THROW_ON_ERROR );
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.

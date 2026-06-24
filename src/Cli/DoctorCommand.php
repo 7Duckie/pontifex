@@ -128,8 +128,8 @@ final class DoctorCommand {
 	 *
 	 * `__invoke` is a magic method: an instance with this method can
 	 * be called like a function. WP-CLI uses it to dispatch to a single-
-	 * command class. When we add `wp pontifex export`, it will be its
-	 * own class with its own `__invoke`.
+	 * command class. Each Pontifex command (export, import, verify,
+	 * rollback, diagnostics) is its own class with its own `__invoke`.
 	 *
 	 * @param array<int, string>         $positional_args Positional arguments passed on the CLI. Unused for `doctor`.
 	 * @param array<string, string|bool> $associative_args Associative `--key=value` and `--flag` arguments. Consumed by the formatter.
@@ -176,11 +176,11 @@ final class DoctorCommand {
 		$check_rows[] = $this->check_upload_max_filesize();
 		$check_rows[] = $this->check_open_basedir();
 
-		// PHP extensions Pontifex needs (or will need in Phase 1).
+		// PHP extensions Pontifex needs.
 		$check_rows[] = $this->check_extension_present( 'zlib', true, 'Required: gzip compression fallback.' );
 		$check_rows[] = $this->check_extension_present( 'zstd', false, 'Optional: zstd compression, preferred when present.' );
 		$check_rows[] = $this->check_extension_present( 'sodium', true, 'Required: archive encryption (AES-256-GCM via libsodium).' );
-		$check_rows[] = $this->check_extension_present( 'openssl', true, 'Required: signed download URLs (HMAC).' );
+		$check_rows[] = $this->check_extension_present( 'openssl', true, 'Required: archive encryption (AES-256-GCM via OpenSSL).' );
 		$check_rows[] = $this->check_extension_present( 'mbstring', true, 'Required: safe string handling on multibyte content.' );
 		$check_rows[] = $this->check_extension_present( 'pcre', true, 'Required: serialised-data parsing.' );
 		$check_rows[] = $this->check_extension_present( 'json', true, 'Required: manifest serialisation.' );
@@ -524,7 +524,7 @@ final class DoctorCommand {
 			'Action Scheduler',
 			$is_loaded_by_other_plugin ? 'loaded by another plugin' : 'not loaded yet',
 			self::STATUS_INFO,
-			'Pontifex does not yet bundle Action Scheduler. Phase 1 will.'
+			'Pontifex does not yet use Action Scheduler; planned for resumable exports in a later release.'
 		);
 	}
 

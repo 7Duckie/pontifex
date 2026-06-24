@@ -88,6 +88,13 @@ final class ArchiveManifest {
 	public const MAX_PAYLOAD_SIZE = 16777216;
 
 	/**
+	 * Maximum nesting depth when decoding the canonical-JSON payload (PHP's default).
+	 *
+	 * @var int
+	 */
+	private const JSON_MAX_DEPTH = 512;
+
+	/**
 	 * Flags used for encoding the canonical JSON payload.
 	 *
 	 * Fixed for v1 archives so writes are deterministic.
@@ -262,7 +269,7 @@ final class ArchiveManifest {
 	 */
 	private static function decode_canonical_json( string $json ): self {
 		try {
-			$data = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+			$data = json_decode( $json, true, self::JSON_MAX_DEPTH, JSON_THROW_ON_ERROR );
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.

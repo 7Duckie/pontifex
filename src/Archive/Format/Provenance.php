@@ -78,6 +78,13 @@ final class Provenance {
 	public const MAX_PAYLOAD_SIZE = 65536;
 
 	/**
+	 * Maximum nesting depth when decoding the canonical-JSON payload (PHP's default).
+	 *
+	 * @var int
+	 */
+	private const JSON_MAX_DEPTH = 512;
+
+	/**
 	 * Flags used for encoding the canonical JSON payload.
 	 *
 	 * Fixed for v1 archives so writes are deterministic — the same
@@ -401,7 +408,7 @@ final class Provenance {
 	 */
 	private static function decode_canonical_json( string $json ): self {
 		try {
-			$data = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+			$data = json_decode( $json, true, self::JSON_MAX_DEPTH, JSON_THROW_ON_ERROR );
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
@@ -450,8 +457,15 @@ final class Provenance {
 			}
 		}
 
-		$timestamp = DateTimeImmutable::createFromFormat( DateTimeInterface::ATOM, $data['timestamp'] );
-		if ( false === $timestamp ) {
+		$timestamp    = DateTimeImmutable::createFromFormat( DateTimeInterface::ATOM, $data['timestamp'] );
+		$parse_errors = DateTimeImmutable::getLastErrors();
+		// createFromFormat returns false on a hard failure, but for a coercible-but-malformed
+		// value (e.g. trailing data, out-of-range parts) it returns an object and records the
+		// problem in getLastErrors(); reject both so a wrong timestamp cannot slip through.
+		if (
+			false === $timestamp
+			|| ( false !== $parse_errors && ( $parse_errors['warning_count'] > 0 || $parse_errors['error_count'] > 0 ) )
+		) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- User-supplied value embedded in exception message for diagnostic context; this is an exception path, not HTML output to a browser.
 				sprintf( 'Provenance: timestamp "%s" is not a valid ISO 8601 string with timezone offset.', $data['timestamp'] )

@@ -65,7 +65,7 @@ final class RealEnvironment implements Environment {
 	 * @param string $path Absolute filesystem path.
 	 * @return float|false Bytes available, or false on failure.
 	 */
-	public function disk_free_space( string $path ) {
+	public function disk_free_space( string $path ): float|false {
 		return disk_free_space( $path );
 	}
 
@@ -110,7 +110,7 @@ final class RealEnvironment implements Environment {
 	 * @param string $constant_name e.g. "DISABLE_WP_CRON", "WP_CONTENT_DIR".
 	 * @return mixed
 	 */
-	public function constant_value( string $constant_name ) {
+	public function constant_value( string $constant_name ): mixed {
 		return defined( $constant_name ) ? constant( $constant_name ) : null;
 	}
 

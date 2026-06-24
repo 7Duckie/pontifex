@@ -58,15 +58,6 @@ final class HashingStream {
 	private Sha256 $hasher;
 
 	/**
-	 * Total bytes that have passed through the hash so far.
-	 *
-	 * Includes bytes contributed by both copy() and update() calls.
-	 *
-	 * @var int
-	 */
-	private int $bytes_processed = 0;
-
-	/**
 	 * Whether digest() has been called and the hasher consumed.
 	 *
 	 * @var bool
@@ -141,8 +132,7 @@ final class HashingStream {
 			}
 
 			$this->hasher->update( $chunk );
-			$this->bytes_processed += $chunk_length;
-			$copied_this_call      += $chunk_length;
+			$copied_this_call += $chunk_length;
 		}
 
 		return $copied_this_call;
@@ -169,18 +159,6 @@ final class HashingStream {
 			return;
 		}
 		$this->hasher->update( $bytes );
-		$this->bytes_processed += strlen( $bytes );
-	}
-
-	/**
-	 * Return the total bytes that have passed through the hash so far.
-	 *
-	 * Counts contributions from both copy() and update().
-	 *
-	 * @return int The cumulative byte count.
-	 */
-	public function bytes_processed(): int {
-		return $this->bytes_processed;
 	}
 
 	/**

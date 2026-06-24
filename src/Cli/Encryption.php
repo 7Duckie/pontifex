@@ -64,18 +64,39 @@ final class Encryption {
 		} else {
 			$passphrase = $source->prompt_hidden( 'Passphrase' );
 			$confirm    = $source->prompt_hidden( 'Confirm passphrase' );
-			if ( ! hash_equals( $passphrase, $confirm ) ) {
-				throw new RuntimeException( 'Encryption: the passphrases did not match.' );
+			try {
+				if ( ! hash_equals( $passphrase, $confirm ) ) {
+					throw new RuntimeException( 'Encryption: the passphrases did not match.' );
+				}
+			} finally {
+				// Scrub the confirmation copy whether or not it matched.
+				if ( function_exists( 'sodium_memzero' ) ) {
+					sodium_memzero( $confirm );
+				}
 			}
 		}
 
-		if ( strlen( $passphrase ) < self::MIN_PASSPHRASE_LENGTH ) {
+		if ( self::character_length( $passphrase ) < self::MIN_PASSPHRASE_LENGTH ) {
 			throw new RuntimeException(
 				sprintf( 'Encryption: the passphrase must be at least %d characters.', (int) self::MIN_PASSPHRASE_LENGTH )
 			);
 		}
 
 		return $passphrase;
+	}
+
+	/**
+	 * Count the characters in a passphrase, preferring multibyte-aware counting.
+	 *
+	 * The minimum length is specified in characters (`ARCHIVE-FORMAT.md` §8.4), so a
+	 * multibyte passphrase is measured by code points where ext-mbstring is
+	 * available, falling back to a byte count otherwise.
+	 *
+	 * @param string $value The passphrase to measure.
+	 * @return int The character count, or the byte count when ext-mbstring is absent.
+	 */
+	private static function character_length( string $value ): int {
+		return function_exists( 'mb_strlen' ) ? mb_strlen( $value, 'UTF-8' ) : strlen( $value );
 	}
 
 	/**
