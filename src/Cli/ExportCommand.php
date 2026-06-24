@@ -9,27 +9,18 @@ declare(strict_types=1);
 
 namespace Pontifex\Cli;
 
-use DateTimeImmutable;
 use RuntimeException;
 use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
-use Pontifex\Archive\Codec\CodecRegistry;
-use Pontifex\Archive\Format\ExporterInfo;
-use Pontifex\Archive\Format\Provenance;
-use Pontifex\Archive\Writer\ArchiveWriter;
-use Pontifex\Archive\Writer\EntryWriter;
-use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ExportRunner;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
-use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
-use Pontifex\Manifest\FileScanner;
-use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Manifest\ManifestBuilderInterface;
-use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
@@ -323,40 +314,32 @@ final class ExportCommand {
 
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
-		// 4. Build the Provenance block.
-		$provenance = $this->build_provenance( $encryption_disabled_reason );
+		// 4. Build the entry list (every file plus every database table to archive).
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules );
 
-		// 5. Wire up the manifest builder if the caller did not supply one.
-		$manifest_builder = $this->manifest_builder ?? $this->build_default_manifest_builder( $exclusion_rules );
-
-		// 6. Open the destination file.
-		$destination = $this->open_destination( $output_path );
+		// 5. Write the archive through the shared export engine.
+		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
 
 		try {
-			// 7. Build entry plans and write the archive.
-			$wordpress_root = $this->resolve_wordpress_root();
-			$entry_plans    = $manifest_builder->build( $wordpress_root );
-
-			$archive_writer = self::build_archive_writer();
+			$entry_plans = $manifest_builder->build( $this->resolve_wordpress_root() );
 
 			$this->progress->start( count( $entry_plans ), 'Writing archive' );
-			$bytes_written = $archive_writer->write_archive(
-				$provenance,
+			$result = $export_runner->export(
+				new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason ),
 				$entry_plans,
-				$destination,
 				function (): void {
 					$this->progress->advance();
-				},
-				$encryption,
-				$signing
+				}
 			);
 			$this->progress->finish();
+
+			$bytes_written = $result->bytes_written();
 
 			$this->logger->info(
 				'Export complete.',
 				array(
 					'output'  => $output_path,
-					'entries' => count( $entry_plans ),
+					'entries' => $result->entry_count(),
 					'bytes'   => $bytes_written,
 				)
 			);
@@ -369,8 +352,8 @@ final class ExportCommand {
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
-			// 8. Print the summary.
-			$this->print_summary( $output_path, count( $entry_plans ), $bytes_written );
+			// 6. Print the summary.
+			$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Export failed.',
@@ -382,9 +365,6 @@ final class ExportCommand {
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			throw $error;
-		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
-			fclose( $destination );
 		}
 	}
 
@@ -527,53 +507,6 @@ final class ExportCommand {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Build a Provenance block from current WordPress and PHP runtime facts.
-	 *
-	 * Reads wp_version, php_version, site_url, wpdb_charset, and
-	 * wpdb_collation from the injected abstractions. The exporter
-	 * name is the hardcoded literal "pontifex"; the version comes
-	 * from the PONTIFEX_VERSION constant defined in pontifex.php.
-	 *
-	 * @param string|null $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null when encrypting.
-	 * @return Provenance A fully-populated provenance value object.
-	 */
-	private function build_provenance( ?string $encryption_disabled_reason ): Provenance {
-		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
-			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
-			: '0.0.0-dev';
-
-		$exporter_info = new ExporterInfo( 'pontifex', $pontifex_version );
-
-		return new Provenance(
-			$this->wordpress_context->wp_version(),
-			$this->environment->php_version(),
-			$this->wordpress_context->site_url(),
-			$this->wordpress_context->wpdb_charset(),
-			$this->wordpress_context->wpdb_collation(),
-			$exporter_info,
-			new DateTimeImmutable(),
-			$encryption_disabled_reason
-		);
-	}
-
-	/**
-	 * Build a ManifestBuilder from the supplied exclusion rules.
-	 *
-	 * Used when no ManifestBuilder was passed to the constructor.
-	 * Wires up FileScanner + DatabaseScanner (with a WpdbAdapter
-	 * wrapping the real $wpdb) into a ManifestBuilder.
-	 *
-	 * @param ExclusionRules $exclusion_rules Rules to apply to both scanners.
-	 * @return ManifestBuilder A scanner-backed manifest builder.
-	 */
-	private function build_default_manifest_builder( ExclusionRules $exclusion_rules ): ManifestBuilder {
-		$file_scanner     = new FileScanner( $exclusion_rules );
-		$database_adapter = new WpdbAdapter( $this->wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $exclusion_rules );
-		return new ManifestBuilder( $file_scanner, $database_scanner );
-	}
-
-	/**
 	 * Build the default file logger when the caller supplies none.
 	 *
 	 * Reads WP_CONTENT_DIR and WP_DEBUG through the Environment seam so
@@ -637,22 +570,6 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Build the ArchiveWriter with its writer dependencies.
-	 *
-	 * The codec registry uses the v0.1.0 defaults (RawCodec + GzipCodec).
-	 * The EntryWriter and FooterWriter wrap the registry and the
-	 * footer-serialisation logic respectively.
-	 *
-	 * @return ArchiveWriter A ready-to-use archive writer.
-	 */
-	private static function build_archive_writer(): ArchiveWriter {
-		$codec_registry = CodecRegistry::with_defaults();
-		$entry_writer   = new EntryWriter( $codec_registry );
-		$footer_writer  = new FooterWriter();
-		return new ArchiveWriter( $entry_writer, $footer_writer );
-	}
-
-	/**
 	 * Resolve the WordPress installation root for the file scan.
 	 *
 	 * Reads the ABSPATH constant via the Environment abstraction so
@@ -666,30 +583,6 @@ final class ExportCommand {
 			throw new RuntimeException( 'ExportCommand: ABSPATH is not defined; is WordPress loaded?' );
 		}
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
-	}
-
-	/**
-	 * Open the destination file for writing.
-	 *
-	 * Opened read+write ("w+b"): writing is all an unsigned export needs, but a
-	 * signed export re-reads the just-written bytes to compute the signature
-	 * digest, so the handle must also be readable. The mode truncates on open
-	 * either way.
-	 *
-	 * Exits via WP_CLI::error if fopen fails.
-	 *
-	 * @param string $output_path Absolute path to the file to create.
-	 * @return resource A readable, writable binary stream resource.
-	 */
-	private function open_destination( string $output_path ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the destination archive file as a stream; @ traps an unopenable-file warning that we convert to a WP_CLI error below.
-		$destination = @fopen( $output_path, 'w+b' );
-		if ( false === $destination ) {
-			WP_CLI::error(
-				sprintf( 'Could not open destination for writing: %s', $output_path )
-			);
-		}
-		return $destination;
 	}
 
 	// -------------------------------------------------------------------------
