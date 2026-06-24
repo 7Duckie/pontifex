@@ -105,19 +105,66 @@ final class StatsCommand {
 	 * @return void
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
+		// Decide the format up front: WP_CLI\Formatter takes $associative_args by
+		// reference and unsets 'format' as it consumes it, so reading it afterwards
+		// would always look like the default table.
+		$machine_format = self::is_machine_format( $associative_args );
+
 		$export_stats = $this->read_stats( self::EXPORT_STATS_OPTION );
 		$import_stats = $this->read_stats( self::IMPORT_STATS_OPTION );
 
-		$rows           = $this->build_rows( $export_stats, $import_stats );
-		$default_fields = array( 'operation', 'attempted', 'succeeded', 'failed', 'size' );
+		$totals_formatter = new Formatter( $associative_args, array( 'operation', 'attempted', 'succeeded', 'failed', 'size' ) );
+		$totals_formatter->display_items( $this->build_rows( $export_stats, $import_stats ) );
 
-		$formatter = new Formatter( $associative_args, $default_fields );
-		$formatter->display_items( $rows );
+		// The rolling history is a human-readable addition; machine formats stay as
+		// the totals so json/csv/yaml output is a single clean structure.
+		if ( $machine_format ) {
+			return;
+		}
 
-		if ( self::no_activity( $export_stats, $import_stats ) && ! self::is_machine_format( $associative_args ) ) {
+		$history = TransferHistory::recent( $this->wordpress_context );
+		if ( array() !== $history ) {
+			WP_CLI::log( '' );
+			WP_CLI::log( 'Recent transfers (most recent first):' );
+			$recent_formatter = new Formatter( $associative_args, array( 'when', 'operation', 'outcome', 'size' ) );
+			$recent_formatter->display_items( $this->build_recent_rows( $history ) );
+		} elseif ( self::no_activity( $export_stats, $import_stats ) ) {
 			WP_CLI::log( '' );
 			WP_CLI::log( 'No transfers recorded yet. Run `wp pontifex export` or `wp pontifex import` to start the tally.' );
 		}
+	}
+
+	/**
+	 * Build the recent-transfers display rows from the rolling history, newest first.
+	 *
+	 * Pure and tolerant: a missing or corrupt entry field degrades to a placeholder
+	 * or zero rather than a type error.
+	 *
+	 * @param array<int, array<string, mixed>> $history The stored history, oldest first.
+	 * @return array<int, array<string, string>> One row per transfer, newest first.
+	 */
+	private function build_recent_rows( array $history ): array {
+		$rows = array();
+		foreach ( array_reverse( $history ) as $entry ) {
+			$rows[] = array(
+				'when'      => self::entry_string( $entry, 'at' ),
+				'operation' => self::entry_string( $entry, 'operation' ),
+				'outcome'   => self::entry_string( $entry, 'outcome' ),
+				'size'      => $this->wordpress_context->format_size( self::counter_int( $entry, 'bytes' ) ),
+			);
+		}
+		return $rows;
+	}
+
+	/**
+	 * Read one history-entry field as a string, defaulting to a placeholder.
+	 *
+	 * @param array<array-key, mixed> $entry The history entry.
+	 * @param string                  $key   The field name.
+	 * @return string The field as a string, or '(unknown)' when absent or non-string.
+	 */
+	private static function entry_string( array $entry, string $key ): string {
+		return isset( $entry[ $key ] ) && is_string( $entry[ $key ] ) ? $entry[ $key ] : '(unknown)';
 	}
 
 	/**

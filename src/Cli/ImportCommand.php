@@ -354,6 +354,7 @@ final class ImportCommand {
 						'bytes_imported' => $bytes_imported,
 					)
 				);
+				TransferHistory::record( $this->wordpress_context, 'import', 'succeeded', $bytes_imported, gmdate( 'c' ) );
 
 				$this->print_summary( $archive_path, $entry_total, $bytes_imported );
 			}
@@ -367,6 +368,7 @@ final class ImportCommand {
 			);
 			if ( ! $dry_run ) {
 				$this->bump_counters( array( 'failed' => 1 ) );
+				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
 			}
 			throw $error;
 		} finally {
