@@ -68,7 +68,14 @@ final class CompositeLogger extends AbstractLogger {
 	 */
 	public function log( $level, string|Stringable $message, array $context = array() ): void {
 		foreach ( $this->loggers as $logger ) {
-			$logger->log( $level, $message, $context );
+			try {
+				$logger->log( $level, $message, $context );
+			} catch ( \Throwable $e ) {
+				// Honour the tee guarantee: one sink throwing must not starve the
+				// others or break the transfer being logged. The bundled FileLogger
+				// is fail-open by contract; this guards an arbitrary injected sink.
+				unset( $e );
+			}
 		}
 	}
 }

@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Archive\Crypto;
 
+use SodiumException;
+
 /**
  * AES-256-GCM via ext-sodium's libsodium binding.
  *
@@ -44,7 +46,12 @@ final class SodiumAesGcmCipher implements Cipher {
 		$this->assert_available();
 		$this->assert_sizes( $nonce, $key );
 
-		return sodium_crypto_aead_aes256gcm_encrypt( $plaintext, $aad, $nonce, $key );
+		try {
+			return sodium_crypto_aead_aes256gcm_encrypt( $plaintext, $aad, $nonce, $key );
+		} catch ( SodiumException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
+			throw new CipherException( 'SodiumAesGcmCipher: AES-256-GCM encryption failed.', 0, $e );
+		}
 	}
 
 	/**
@@ -71,7 +78,12 @@ final class SodiumAesGcmCipher implements Cipher {
 			);
 		}
 
-		$plaintext = sodium_crypto_aead_aes256gcm_decrypt( $ciphertext_and_tag, $aad, $nonce, $key );
+		try {
+			$plaintext = sodium_crypto_aead_aes256gcm_decrypt( $ciphertext_and_tag, $aad, $nonce, $key );
+		} catch ( SodiumException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
+			throw new CipherException( 'SodiumAesGcmCipher: decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.', 0, $e );
+		}
 		if ( false === $plaintext ) {
 			throw new CipherException(
 				'SodiumAesGcmCipher: decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.'

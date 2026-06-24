@@ -77,4 +77,27 @@ final class CompositeLoggerTest extends TestCase {
 
 		( new CompositeLogger() )->info( 'nothing is listening' );
 	}
+
+	/**
+	 * A throwing child sink must not propagate or starve the other sinks.
+	 *
+	 * @return void
+	 */
+	public function test_a_throwing_child_does_not_break_the_tee(): void {
+		$received = null;
+
+		$throwing = Mockery::mock( LoggerInterface::class );
+		$throwing->shouldReceive( 'log' )->andThrow( new \RuntimeException( 'sink down' ) );
+
+		$good = Mockery::mock( LoggerInterface::class );
+		$good->shouldReceive( 'log' )->once()->andReturnUsing(
+			static function ( $level, $message ) use ( &$received ): void {
+				$received = (string) $message;
+			}
+		);
+
+		( new CompositeLogger( $throwing, $good ) )->info( 'still logged' );
+
+		$this->assertSame( 'still logged', $received, 'The healthy sink must still receive the line.' );
+	}
 }

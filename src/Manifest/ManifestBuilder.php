@@ -177,8 +177,8 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	 */
 	private static function open_source_for_scanned_entry( ScannedEntry $entry ) {
 		if ( EntryHeader::KIND_FILE === $entry->kind() ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Filesystem read for archive payload; WP_Filesystem cannot return a stream resource.
-			$stream = fopen( $entry->absolute_path(), 'rb' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Filesystem read for archive payload; WP_Filesystem cannot return a stream resource. @ traps an open-failure warning that becomes the explicit exception below.
+			$stream = @fopen( $entry->absolute_path(), 'rb' );
 			if ( false === $stream ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $entry->absolute_path() reported verbatim for diagnostic context; exception path, not HTML output.
