@@ -12,9 +12,9 @@ safety archive first), migrate a site to a new URL
 (`wp pontifex import --url=`) with serialised-data-safe search-replace,
 check an archive without restoring it (`wp pontifex verify`), and undo a
 mistaken import (`wp pontifex rollback`) — the round trip is proven
-end-to-end by an integration test against a real WordPress. Encryption
-(`--passphrase`) and the admin UI are still to come; see the roadmap. Do
-not rely on Pontifex for production data yet.
+end-to-end by an integration test against a real WordPress. The admin UI
+and the operational features (scheduling, transports, multisite) are still
+to come; see the roadmap. Do not rely on Pontifex for production data yet.
 
 ## What Pontifex will be
 
@@ -48,12 +48,14 @@ is the honest difference, updated at every release.
 | zstd compression (codec `0x0002`) | ✅ | ✅ — when `ext-zstd` is present, else gzip |
 | Encryption (`--encrypt`) | ✅ | ✅ — AES-256-GCM, Argon2id-derived key; `--encrypt` / `--passphrase-stdin` |
 | Ed25519 signatures | ✅ | ✅ — `wp pontifex keygen` + `export --sign`; `--public-key` verification on `verify` / `import` |
+| Activity readout (`wp pontifex stats`) | — | ✅ — export/import counters + recent-transfer history; `--format=json` |
+| Support bundle (`wp pontifex diagnostics`) | — | ✅ — sanitised tar.gz (redacted; never auto-uploads) |
+| Per-transfer log files | — | ✅ — beside the archive on export; in the log dir on import |
 
 **What Pontifex is _not_ yet:** a scheduled-backup system (no cron, no
 retention policies) or a point-and-click tool (the admin UI lands in
-v0.4.0). It also does not yet surface its activity (`wp pontifex stats` /
-`diagnostics` land in v0.4.0). If you need those today, pair Pontifex with
-tools that have them — and watch the table above as it fills in.
+v0.5.0). If you need those today, pair Pontifex with tools that have them —
+and watch the table above as it fills in.
 
 ## Requirements
 
@@ -163,10 +165,18 @@ truth — including why each deferred item waits — is
   - Optional Ed25519 detached signatures (Ed25519 over a streamed SHA-256
     prehash) — `wp pontifex keygen`, `export --sign --signing-key`, and
     `--public-key` verification on `verify` and `import`.
-- **v0.4.0 and beyond — Admin UI and operational maturity. Planned.**
-  Fuller observability (richer structured logging, full transfer metrics,
-  `wp pontifex stats`, `wp pontifex diagnostics`), moved here from v0.3.0;
-  an admin UI for non-CLI users; resumable exports (surviving PHP timeouts
+- **v0.4.0 — Stats, diagnostics and logging. ✅ Released.**
+  - `wp pontifex stats` — a local readout of the export/import counters,
+    with `--format=json` (also csv, yaml) for bug reports.
+  - Rolling transfer history — the most recent transfers (timestamp, kind,
+    outcome, size; never any content), shown by `stats`.
+  - `wp pontifex diagnostics` — a sanitised tar.gz support bundle (recent
+    logs, `doctor`/`stats` output, environment summary); redacted, never
+    auto-uploaded.
+  - Per-transfer log files — a self-contained log per transfer, beside the
+    archive on export and in the log directory on import.
+- **v0.5.0 and beyond — Admin UI and operational maturity. Planned.**
+  An admin UI for non-CLI users; resumable exports (surviving PHP timeouts
   and lost SSH sessions); scheduled exports; push/pull host-to-host
   transports; selective content (export-without-database, single-table,
   content-type filters); multisite support.
