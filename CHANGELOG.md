@@ -19,6 +19,30 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.4] — 2026-06-24 — Key-material wipe and path redaction
+
+The final hardening patch from the 2026-06-24 audit, completing two items
+deferred from v0.4.2 and v0.4.3. Both are defence-in-depth (low severity); there
+are no feature, archive-format, or CLI-flag changes.
+
+### Security
+
+- **Secret key material is wiped from memory when it is no longer needed.** The
+  encryption and signing context objects, and the signing keypair, now zero their
+  derived key or secret key with `sodium_memzero()` when destroyed, so a secret
+  no longer lingers in process memory until garbage collection. (The passphrase
+  and the CLI's working copies were already scrubbed in v0.4.2.)
+- **Absolute filesystem paths are kept out of the shareable diagnostics bundle.**
+  The bundle now replaces home directories, the system temp directory and `/root`
+  with placeholders — it already redacted the WordPress root and wp-content — so a
+  shared bundle no longer leaks the operator's username or directory layout.
+- **Absolute paths are kept out of user-facing CLI messages.** Operator-facing
+  error and log lines that name a path now show a placeholder (`{ABSPATH}`,
+  `{WP_CONTENT_DIR}`, `{HOME}`, `{TMP}`, `{ROOT}`) instead of the full path, so a
+  pasted terminal line or screenshot no longer exposes the layout. The on-disk
+  log keeps real paths (it is owner-only and not web-readable), so diagnosis is
+  unaffected.
+
 ## [0.4.3] — 2026-06-24 — Correctness fixes
 
 A correctness/quality patch from the same audit as v0.4.2.
@@ -458,6 +482,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.3...HEAD
+[0.4.4]: https://github.com/7Duckie/pontifex/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/7Duckie/pontifex/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/7Duckie/pontifex/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/7Duckie/pontifex/compare/v0.4.0...v0.4.1
