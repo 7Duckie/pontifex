@@ -431,6 +431,40 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
+	 * Scanning an unreadable directory must throw a clear RuntimeException.
+	 *
+	 * An unreadable sub-directory is the documented "fail loudly, never silently
+	 * skip" case. It is normally caught by the per-entry readability guard; the
+	 * `UnexpectedValueException`-to-`RuntimeException` translation added alongside
+	 * this test is the backstop for the residual case where the recursive iterator
+	 * fails to open a directory that passed the readability check (a race, or a
+	 * stat-readable-but-unopenable path). Either way the guarantee is the same: a
+	 * clear RuntimeException, not PHP's opaque message and not a silent skip.
+	 * Skipped as root, for whom chmod 0000 does not block reads.
+	 *
+	 * @return void
+	 */
+	public function test_unreadable_directory_throws_runtime_exception(): void {
+		if ( 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test unreadable directories when running as root (chmod is not enforced).' );
+		}
+
+		$this->write_file( 'locked/inside.txt', 'data' );
+		$locked = $this->fixture_root . '/locked';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; unreadability behaviour is the subject under test.
+		chmod( $locked, 0o000 );
+
+		try {
+			$this->expectException( RuntimeException::class );
+			self::unfiltered_scanner()->scan( $this->fixture_root );
+		} finally {
+			// Restore readability so teardown can clean up.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture cleanup.
+			chmod( $locked, 0o755 );
+		}
+	}
+
+	/**
 	 * Scanned file entries must carry a non-empty media_type.
 	 *
 	 * The exact value depends on the host's finfo magic database, so
