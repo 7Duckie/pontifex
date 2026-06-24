@@ -24,6 +24,10 @@ Thumbs.db
 /coverage/
 /build/
 
+# Infection (mutation testing) artefacts — generated locally, never committed
+/infection.log
+/.infection/
+
 # Pre-commit
 /.pre-commit-cache/
 
