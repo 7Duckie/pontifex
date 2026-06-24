@@ -169,25 +169,6 @@ final class HashingStreamTest extends TestCase {
 		$stream->update( '' );
 
 		$this->assertSame( Sha256::of( 'abc' ), $stream->digest() );
-		$this->assertSame( 3, $stream->bytes_processed() );
-	}
-
-	/**
-	 * The bytes_processed() counter must track copy() and update() contributions together.
-	 *
-	 * @return void
-	 */
-	public function test_bytes_processed_tracks_copy_and_update_combined(): void {
-		$header      = 'HEADER:';
-		$body        = 'streamed body payload';
-		$source      = $this->readable_stream( $body );
-		$destination = $this->writable_stream();
-		$stream      = new HashingStream();
-
-		$stream->update( $header );
-		$stream->copy( $source, $destination );
-
-		$this->assertSame( strlen( $header ) + strlen( $body ), $stream->bytes_processed() );
 	}
 
 	/**

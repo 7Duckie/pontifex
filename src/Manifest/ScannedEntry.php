@@ -263,31 +263,4 @@ final class ScannedEntry {
 	public function media_type(): ?string {
 		return $this->media_type;
 	}
-
-	/**
-	 * Whether this entry is a regular file.
-	 *
-	 * @return bool True if the kind is KIND_FILE.
-	 */
-	public function is_file(): bool {
-		return EntryHeader::KIND_FILE === $this->kind;
-	}
-
-	/**
-	 * Whether this entry is a directory.
-	 *
-	 * @return bool True if the kind is KIND_DIRECTORY.
-	 */
-	public function is_directory(): bool {
-		return EntryHeader::KIND_DIRECTORY === $this->kind;
-	}
-
-	/**
-	 * Whether this entry is a symbolic link.
-	 *
-	 * @return bool True if the kind is KIND_SYMLINK.
-	 */
-	public function is_symlink(): bool {
-		return EntryHeader::KIND_SYMLINK === $this->kind;
-	}
 }

@@ -242,7 +242,7 @@ final class ExclusionRules {
 		}
 
 		// Directory-tree: ends with "/**". Matches the directory and everything beneath it.
-		if ( self::ends_with( $pattern, '/**' ) ) {
+		if ( str_ends_with( $pattern, '/**' ) ) {
 			return self::tree_matches( $pattern, $relative_path );
 		}
 
@@ -342,19 +342,5 @@ final class ExclusionRules {
 	 */
 	private static function glob_matches( string $pattern, string $relative_path ): bool {
 		return fnmatch( $pattern, $relative_path, FNM_PATHNAME );
-	}
-
-	/**
-	 * Whether $haystack ends with $needle (PHP 8.1+ has str_ends_with, used here).
-	 *
-	 * Centralised helper so a future tweak (case-insensitive
-	 * comparison, normalisation, etc.) lands in one place.
-	 *
-	 * @param string $haystack The string to inspect.
-	 * @param string $needle   The suffix to look for.
-	 * @return bool True if $haystack ends with $needle.
-	 */
-	private static function ends_with( string $haystack, string $needle ): bool {
-		return str_ends_with( $haystack, $needle );
 	}
 }

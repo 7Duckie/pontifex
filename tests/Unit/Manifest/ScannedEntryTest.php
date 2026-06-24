@@ -268,43 +268,4 @@ final class ScannedEntryTest extends TestCase {
 
 		$this->assertNull( $dir->media_type() );
 	}
-
-	/**
-	 * The is_file predicate must reflect the kind correctly.
-	 *
-	 * @return void
-	 */
-	public function test_is_file_predicate(): void {
-		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
-		$dir  = new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0 );
-
-		$this->assertTrue( $file->is_file() );
-		$this->assertFalse( $dir->is_file() );
-	}
-
-	/**
-	 * The is_directory predicate must reflect the kind correctly.
-	 *
-	 * @return void
-	 */
-	public function test_is_directory_predicate(): void {
-		$file = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
-		$dir  = new ScannedEntry( EntryHeader::KIND_DIRECTORY, 'd', '/d', 0, 0755, 0 );
-
-		$this->assertTrue( $dir->is_directory() );
-		$this->assertFalse( $file->is_directory() );
-	}
-
-	/**
-	 * The is_symlink predicate must reflect the kind correctly.
-	 *
-	 * @return void
-	 */
-	public function test_is_symlink_predicate(): void {
-		$file    = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, 'text/plain' );
-		$symlink = new ScannedEntry( EntryHeader::KIND_SYMLINK, 'link', '/link', 0, 0777, 0, '/target' );
-
-		$this->assertTrue( $symlink->is_symlink() );
-		$this->assertFalse( $file->is_symlink() );
-	}
 }
