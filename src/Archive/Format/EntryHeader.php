@@ -563,6 +563,20 @@ final class EntryHeader {
 	}
 
 	/**
+	 * Return a best-effort original-size estimate for any entry kind.
+	 *
+	 * For a file entry this is size(); for a db_chunk it is byte_count() (db
+	 * chunks carry their size there, not in size()); for kinds with neither
+	 * (directories, symlinks) it is 0. Used by the safety-archive disk preflight,
+	 * which would otherwise count the whole database as zero.
+	 *
+	 * @return int The estimated original byte size.
+	 */
+	public function estimated_bytes(): int {
+		return $this->size ?? $this->byte_count ?? 0;
+	}
+
+	/**
 	 * Return the symlink target, or null for non-symlink entries.
 	 *
 	 * @return string|null The target path.
