@@ -19,6 +19,18 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.1] — 2026-06-24 — Rollback-archive flag fix
+
+### Fixed
+
+- **`wp pontifex import --no-rollback-archive` now actually skips the
+  pre-import safety archive.** The flag was silently ignored: WP-CLI parses a
+  `--no-<name>` argument as `<name> => false`, so `--no-rollback-archive`
+  arrived as `rollback-archive => false` rather than the `no-rollback-archive`
+  key the command read — and the safety archive was taken regardless. The
+  command now reads the form WP-CLI delivers. The documented flag is unchanged;
+  this only makes it work, and it fails safe either way.
+
 ## [0.4.0] — 2026-06-24 — Stats, diagnostics and logging
 
 The observability release. Pontifex can now show what it has done, package a
@@ -390,7 +402,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/7Duckie/pontifex/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/7Duckie/pontifex/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/7Duckie/pontifex/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/7Duckie/pontifex/compare/v0.1.0...v0.2.0
