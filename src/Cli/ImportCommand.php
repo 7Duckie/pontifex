@@ -260,10 +260,14 @@ final class ImportCommand {
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
 		// 1. Read and validate the archive path and flags.
-		$archive_path     = $this->require_archive_path( $positional_args );
-		$dry_run          = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
-		$skip_confirm     = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
-		$no_rollback      = isset( $associative_args['no-rollback-archive'] ) && false !== $associative_args['no-rollback-archive'];
+		$archive_path = $this->require_archive_path( $positional_args );
+		$dry_run      = isset( $associative_args['dry-run'] ) && false !== $associative_args['dry-run'];
+		$skip_confirm = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
+		// WP-CLI delivers the documented `--no-rollback-archive` flag as
+		// array( 'rollback-archive' => false ) via its --no-<name> convention, not
+		// as a 'no-rollback-archive' key — so read that form, or the flag is ignored.
+		$no_rollback      = array_key_exists( 'rollback-archive', $associative_args )
+			&& false === $associative_args['rollback-archive'];
 		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$public_key       = $this->resolve_public_key( $associative_args );
 		$target_url       = $this->require_target_url( $associative_args );

@@ -317,6 +317,10 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * --no-rollback-archive skips the safety archive but still restores.
 	 *
+	 * The flag is passed as WP-CLI delivers it: its --no-<name> convention turns
+	 * `--no-rollback-archive` into array( 'rollback-archive' => false ), not a
+	 * 'no-rollback-archive' key. The command must read that real form.
+	 *
 	 * @return void
 	 */
 	public function test_invoke_no_rollback_archive_flag_skips_the_safety_archive(): void {
@@ -341,8 +345,8 @@ final class InvokeBranchesTest extends TestCase {
 		$command(
 			array( $this->temp_archive_path ),
 			array(
-				'yes'                 => true,
-				'no-rollback-archive' => true,
+				'yes'              => true,
+				'rollback-archive' => false,
 			)
 		);
 
