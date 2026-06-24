@@ -18,6 +18,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Migrate\RewriteReport;
@@ -154,6 +155,16 @@ final class ImportCommand {
 	private LoggerInterface $logger;
 
 	/**
+	 * Whether the logger above was built by default (not injected).
+	 *
+	 * Only a defaulted logger writes to real files, so the per-transfer log is
+	 * teed onto it alone; a test that injects a spy logger never touches disk.
+	 *
+	 * @var bool
+	 */
+	private bool $logger_was_defaulted;
+
+	/**
 	 * The progress reporter that shows restore progress.
 	 *
 	 * Injected so tests can substitute a silent NullProgressBar. When
@@ -221,14 +232,15 @@ final class ImportCommand {
 		?UrlMigratorInterface $url_migrator = null,
 		?PassphraseSource $passphrase_source = null
 	) {
-		$this->environment       = $environment ?? new RealEnvironment();
-		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
-		$this->restore_runner    = $restore_runner;
-		$this->logger            = $logger ?? $this->build_default_logger();
-		$this->progress          = $progress ?? new WpCliProgressBar();
-		$this->safety_archiver   = $safety_archiver;
-		$this->url_migrator      = $url_migrator;
-		$this->passphrase_source = $passphrase_source ?? new CliPassphraseSource();
+		$this->environment          = $environment ?? new RealEnvironment();
+		$this->wordpress_context    = $wordpress_context ?? new RealWordPressContext();
+		$this->restore_runner       = $restore_runner;
+		$this->logger_was_defaulted = null === $logger;
+		$this->logger               = $logger ?? $this->build_default_logger();
+		$this->progress             = $progress ?? new WpCliProgressBar();
+		$this->safety_archiver      = $safety_archiver;
+		$this->url_migrator         = $url_migrator;
+		$this->passphrase_source    = $passphrase_source ?? new CliPassphraseSource();
 	}
 
 	/**
@@ -257,6 +269,17 @@ final class ImportCommand {
 		$target_url       = $this->require_target_url( $associative_args );
 
 		$this->validate_archive_path( $archive_path );
+
+		// 1a. For a real restore, tee a per-transfer log into the logs directory so
+		// this import leaves a self-contained record (the input archive may be
+		// read-only or elsewhere, so its file lives with the central log, not beside
+		// the archive). A dry-run restores nothing, so it gets no per-transfer file.
+		if ( ! $dry_run ) {
+			$this->attach_transfer_log(
+				fn (): string => $this->log_directory(),
+				'import-' . gmdate( 'Ymd-His' ) . '.log'
+			);
+		}
 
 		// 2. Announce the restore (and, with --url, the migration) scope, always.
 		$this->print_scope( $target_url );
@@ -559,14 +582,57 @@ final class ImportCommand {
 	 * @return LoggerInterface
 	 */
 	private function build_default_logger(): LoggerInterface {
+		return new FileLogger( $this->log_directory(), $this->debug_enabled() );
+	}
+
+	/**
+	 * Tee a per-transfer log file onto the central logger.
+	 *
+	 * Only the default logger writes to real files, so an injected spy logger
+	 * (the unit tests) is left untouched and no file is created. The directory is
+	 * resolved through a callback, so a run with an injected logger never reaches
+	 * the filesystem or the Environment seam. The per-transfer file uses the same
+	 * debug floor as the central log, so the two stay in step.
+	 *
+	 * @param callable(): string $directory Resolves the directory the per-transfer file lives in.
+	 * @param string             $filename  Name of the per-transfer file.
+	 * @return void
+	 */
+	private function attach_transfer_log( callable $directory, string $filename ): void {
+		if ( ! $this->logger_was_defaulted ) {
+			return;
+		}
+
+		$this->logger = new CompositeLogger(
+			$this->logger,
+			new FileLogger( $directory(), $this->debug_enabled(), $filename )
+		);
+	}
+
+	/**
+	 * Resolve the directory the central and per-transfer logs live in.
+	 *
+	 * Reads WP_CONTENT_DIR through the Environment seam, falling back to the
+	 * system temp directory when WordPress is not loaded (as in unit tests).
+	 *
+	 * @return string The absolute log directory path.
+	 */
+	private function log_directory(): string {
 		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
 			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
 			: sys_get_temp_dir();
 
-		$debug_enabled = $this->environment->is_constant_defined( 'WP_DEBUG' )
-			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
+		return $content_dir . '/pontifex/logs';
+	}
 
-		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled );
+	/**
+	 * Whether debug-level lines should be recorded (WP_DEBUG is on).
+	 *
+	 * @return bool True when WP_DEBUG is defined and truthy.
+	 */
+	private function debug_enabled(): bool {
+		return $this->environment->is_constant_defined( 'WP_DEBUG' )
+			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
 	}
 
 	/**
