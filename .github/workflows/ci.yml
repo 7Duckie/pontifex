@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging, dev]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, staging, dev]
 
 permissions:
   contents: read
@@ -75,6 +75,9 @@ jobs:
           restore-keys: |
             composer-${{ matrix.php_version }}-
 
+      - name: Validate composer.json (strict)
+        run: composer validate --strict
+
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
@@ -109,6 +112,15 @@ jobs:
     name: Integration suite (PHP ${{ matrix.php_version }})
     runs-on: ubuntu-latest
 
+    # Tiered gates (ADR 0007): the round-trip suite is heavy — it boots wp-env
+    # across the whole PHP matrix — so it runs only on the release-bound
+    # promotions: pull requests targeting staging or main, and pushes to those
+    # branches or a release tag. Feature pull requests into dev get the fast
+    # gates only, so day-to-day iteration stays quick.
+    if: >-
+      (github.event_name == 'pull_request' && (github.base_ref == 'staging' || github.base_ref == 'main')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+
     strategy:
       fail-fast: false
       matrix:
@@ -141,23 +153,91 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+
+      - name: Install pinned wp-env
+        run: npm ci
 
       # The integration suite needs a real WordPress and database. wp-env
-      # provides both (the same setup used locally), so CI reuses it rather
-      # than reconstructing a WordPress install and a MySQL service by hand.
+      # provides both (the same setup used locally). It is configured as a
+      # standalone tests environment in .wp-env.tests.json (the wp-env
+      # separate-config model, replacing the deprecated dual-environment
+      # default); .wp-env.tests.override.json pins the container PHP to the
+      # matrix entry, the override file wp-env reads for that config.
       - name: Pin the wp-env PHP version to the matrix entry
         run: |
-          echo '{ "phpVersion": "${{ matrix.php_version }}" }' > .wp-env.override.json
+          echo '{ "phpVersion": "${{ matrix.php_version }}" }' > .wp-env.tests.override.json
 
-      - name: Start wp-env (real WordPress + a throwaway test database)
-        run: npx --yes @wordpress/env start
+      - name: Start the wp-env tests environment
+        run: npx @wordpress/env start --config .wp-env.tests.json
 
       - name: Confirm the container honoured PHP ${{ matrix.php_version }}
         run: |
-          npx --yes @wordpress/env run tests-cli php -v
-          actual="$(npx --yes @wordpress/env run tests-cli php -v 2>/dev/null | grep -oE 'PHP [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')"
+          npx @wordpress/env run cli php -v --config .wp-env.tests.json
+          actual="$(npx @wordpress/env run cli php -v --config .wp-env.tests.json 2>/dev/null | grep -oE 'PHP [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')"
           echo "Detected container PHP: ${actual} (expected ${{ matrix.php_version }})"
           [ "${actual}" = "${{ matrix.php_version }}" ] || { echo "::error::wp-env did not honour PHP ${{ matrix.php_version }} (got ${actual})"; exit 1; }
 
       - name: Run the integration suite against real WordPress
-        run: npx --yes @wordpress/env run tests-cli --env-cwd=wp-content/plugins/pontifex composer test:integration
+        run: npx @wordpress/env run cli --env-cwd=wp-content/plugins/pontifex composer test:integration --config .wp-env.tests.json
+
+  plugin-check:
+    name: Plugin Check (built package)
+    runs-on: ubuntu-latest
+
+    # Plugin Check posts its summary as a pull-request comment, so this job
+    # needs pull-requests: write. Scoped to this job only — the others keep the
+    # minimal top-level permissions.
+    permissions:
+      contents: read
+      pull-requests: write
+
+    # Same tiered gate as the integration suite (ADR 0007). Plugin Check runs
+    # against the *built* package — the exact tree .distignore produces, with
+    # production-only dependencies — not the source checkout. That is what a
+    # user installs, and it is the only way to catch a broken .distignore
+    # before release (the lesson from v0.4.6, where a glob/anchored .distignore
+    # silently excluded nothing and would have shipped the whole dev tree).
+    if: >-
+      (github.event_name == 'pull_request' && (github.base_ref == 'staging' || github.base_ref == 'main')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
+          coverage: none
+          tools: composer:v2, wp-cli
+
+      - name: Install production Composer dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --no-progress
+
+      - name: Build the distributable package
+        run: |
+          set -euo pipefail
+          # WP-CLI's package installer rejects the modern GitHub token format
+          # (the ghs_/github_pat_ prefixes contain characters its validator
+          # disallows, so passing a token fails with "github oauth token ...
+          # contains invalid characters"). dist-archive is a public repository,
+          # so clear every token source and install it anonymously.
+          composer config --global --unset github-oauth.github.com 2>/dev/null || true
+          unset GITHUB_TOKEN GH_TOKEN 2>/dev/null || true
+          wp package install wp-cli/dist-archive-command:^2.0
+          wp dist-archive . "${RUNNER_TEMP}/pontifex.tar.gz" --format=targz
+          mkdir -p build
+          # Strip the single top-level plugin folder so build/ directly holds the
+          # shipped tree (its name varies by dist-archive version).
+          tar -xzf "${RUNNER_TEMP}/pontifex.tar.gz" -C build --strip-components=1
+          echo "Built tree (this is what would ship):"
+          ls -la build
+
+      - name: Run Plugin Check on the built package
+        uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ./build
+          slug: pontifex

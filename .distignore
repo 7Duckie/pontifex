@@ -20,6 +20,8 @@
 .pre-commit-config.yaml
 .wp-env.json
 .wp-env.override.json
+.wp-env.tests.json
+.wp-env.tests.override.json
 .distignore
 
 # Build and QA configuration (not needed at runtime)
@@ -29,6 +31,11 @@ phpunit.xml.dist
 phpunit-integration.xml.dist
 stubs
 composer.lock
+
+# Node tooling (wp-env only; the plugin itself ships no JavaScript build)
+node_modules
+package.json
+package-lock.json
 
 # Tests, build scripts, and documentation source
 tests

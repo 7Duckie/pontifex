@@ -1326,3 +1326,79 @@ flag for unattended runs?
   immutable and ships `with_max_total_bytes()` specifically so this
   flag can be added later as a purely additive change in the import
   command, with zero backfilling. Parked for v0.2.0.
+
+### Idea 014 — Canary / beta pre-releases to a tester cohort
+
+- **Status:** Parked
+- **Proposed:** 2026-06-24 by 7Duckie (during the branch-promotion-model
+  planning)
+- **Last reviewed:** 2026-06-24
+
+**The concept.** Before a version is released to everyone, cut a beta
+pre-release of it — a `vX.Y.Z-beta.N` tag — and put it in front of a small,
+self-selected group of testers first. They install the beta on real sites,
+exercise the round trip, and report back. Only once the beta has held up is the
+same code promoted to a general release. In the branch promotion model
+([ADR 0007](./adr/0007-branch-promotion-model.md)) the natural home for this is
+`staging`: the release candidate is assembled and proven there already, so the
+beta tag is cut from `staging`, and after the cohort confirms it, `staging`
+promotes to `main` for the general tag.
+
+**Motivation.** Pontifex runs inside other people's live sites on data we never
+see, and we cannot log in to fix a bad release. A real-world proving step
+between "all gates green in CI" and "everyone gets it" is the strongest
+remaining safety net — CI proves the round trip on synthetic sites, but a
+tester running it on their own unusual hosting, plugin mix, and data shapes
+catches the things synthetic fixtures never will. It also builds trust: a tool
+that betas its releases before pushing them reads as careful, which is the brand.
+
+**Feasibility.** The branch side is already in place once ADR 0007 lands —
+`staging` is the cut point and GitHub pre-release tags (`-beta.N`) are free. What
+is missing is the *distribution and feedback* side: a clear way for testers to
+obtain the beta (a pre-release asset on GitHub is the zero-infrastructure
+floor), a written "what to test / how to report" note, and a channel for their
+reports (a GitHub issue label, or a discussion). The harder, optional pieces are
+anything that automates delivery (an in-plugin "opt into betas" update channel),
+which is real work and reintroduces the network-call tension of Idea 001.
+
+**Benefit.** High for a data-loss-class tool: a real-world catch before a general
+release is worth far more than the effort of cutting a pre-release tag. The floor
+version (GitHub pre-release asset + a testing note + an issue label) is cheap;
+the value scales with how many testers actually run it.
+
+**Alternative implementations.** (a) **GitHub pre-release assets only** — cut the
+`-beta.N` tag, attach the built ZIP, point testers at it. Zero infrastructure;
+the right starting point. (b) **A `beta` distribution channel** the plugin can
+opt into for updates — best UX, but needs hosting and an opt-in update mechanism
+(overlaps Idea 001's phone-home tension); much later, if ever. (c) **No formal
+beta, rely on CI + the maintainer's own pre-release testing** — the status quo;
+fine until the install base is large enough that a bad release hurts real people.
+
+**Concerns and constraints.** Must stay opt-in and clearly labelled as beta so
+nobody installs a pre-release on a site that needs stability. Beta feedback has
+to go somewhere that is actually read. The automated-delivery variants conflict
+with the no-cloud-dependency / privacy ethos and should not be reached for before
+the manual floor is exhausted. Cutting betas adds a step to the release rhythm,
+so it is worth it only once there is a cohort who will actually run them.
+
+**When in the build.** Parked. The branch model is shaped now so this can be
+added later without restructuring, but the feature itself waits until there is a
+tester cohort to serve — realistically around the v1.0 era, alongside the
+WordPress.org submission (Idea 001) when adoption is real. Blocks nothing.
+
+**Dependencies.** The branch promotion model (ADR 0007 — provides the `staging`
+cut point). A built-package artifact to attach (the Plugin Check CI job already
+builds one). For the automated-channel variant: hosting and an opt-in update
+mechanism (out of scope until much later).
+
+**Open questions.** Where do testers report — a GitHub issue label, Discussions,
+or email? What is the minimum "what to test" checklist a tester should run? How
+many testers make a beta worthwhile before it is just ceremony? Should beta
+tags be built and attached automatically when `staging` is tagged, or by hand?
+
+**Decision log.**
+- 2026-06-24 — Captured during branch-promotion-model planning. 7Duckie wants
+  partial releases to a tester group before a general release. Recorded as the
+  future use of `staging`; the model (ADR 0007) is shaped to accommodate it, but
+  the feature is parked until there is a cohort to serve (≈ v1.0 era, with the
+  WP.org submission). GitHub pre-release assets are the intended cheap floor.

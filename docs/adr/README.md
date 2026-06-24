@@ -89,6 +89,16 @@ What follows from this choice — positive, negative, and neutral?
   WordPressContext as a separate abstraction from Environment.
 - [ADR 0002](./0002-composer-audit-strictness.md) —
   Composer audit strictness: report abandoned, fail on advisories.
+- [ADR 0003](./0003-strict-version-stamping.md) —
+  Strict version stamping: every tag matches the in-file version.
+- [ADR 0004](./0004-same-url-import-scope.md) —
+  v0.1.0 import restores to the same URL (URL rewriting deferred).
+- [ADR 0005](./0005-rollback-safety-archive-policy.md) —
+  Rollback: pre-import safety archive (location, retention, default-on).
+- [ADR 0006](./0006-cross-url-via-post-restore-search-replace.md) —
+  Cross-URL migration via a post-restore guarded search-replace.
+- [ADR 0007](./0007-branch-promotion-model.md) —
+  Branch promotion model: feature -> dev -> staging -> main, tiered gates.
 
 ## Further reading
 
