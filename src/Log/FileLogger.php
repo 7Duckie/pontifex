@@ -81,6 +81,16 @@ final class FileLogger extends AbstractLogger {
 	private string $log_dir;
 
 	/**
+	 * Base filename of the live log inside the directory.
+	 *
+	 * Defaults to {@see self::LOG_FILENAME} (the central site log); a
+	 * per-transfer logger passes its own name so its file sits apart.
+	 *
+	 * @var string
+	 */
+	private string $filename;
+
+	/**
 	 * Whether debug-level messages are written (true under WP_DEBUG).
 	 *
 	 * @var bool
@@ -106,10 +116,12 @@ final class FileLogger extends AbstractLogger {
 	 *
 	 * @param string $log_dir       Directory to write log files into. Created if absent.
 	 * @param bool   $debug_enabled Whether to record debug-level lines (pass WP_DEBUG).
+	 * @param string $filename      Optional. Base filename to write; defaults to the central log.
 	 */
-	public function __construct( string $log_dir, bool $debug_enabled ) {
+	public function __construct( string $log_dir, bool $debug_enabled, string $filename = self::LOG_FILENAME ) {
 		$this->log_dir       = rtrim( $log_dir, '/\\' );
 		$this->debug_enabled = $debug_enabled;
+		$this->filename      = $filename;
 	}
 
 	/**
@@ -233,7 +245,7 @@ final class FileLogger extends AbstractLogger {
 			return;
 		}
 
-		$path = $this->log_dir . '/' . self::LOG_FILENAME;
+		$path = $this->log_dir . '/' . $this->filename;
 		$this->maybe_rotate( $path );
 
 		$this->silently(

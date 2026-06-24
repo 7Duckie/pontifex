@@ -74,6 +74,22 @@ final class FileLoggerTest extends TestCase {
 	}
 
 	/**
+	 * A custom filename writes to that file, leaving the default name untouched.
+	 *
+	 * @return void
+	 */
+	public function test_custom_filename_writes_to_that_file(): void {
+		$logger = new FileLogger( $this->temp_dir, false, 'site.wpmig.log' );
+
+		$logger->info( 'Export started.' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading back a fixture log file the test wrote in the system temp path.
+		$body = (string) file_get_contents( $this->temp_dir . '/site.wpmig.log' );
+		$this->assertStringContainsString( 'Export started.', $body );
+		$this->assertFileDoesNotExist( $this->temp_dir . '/pontifex.log' );
+	}
+
+	/**
 	 * A non-empty context array is appended as compact JSON.
 	 *
 	 * @return void

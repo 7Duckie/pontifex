@@ -22,6 +22,7 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
@@ -161,6 +162,16 @@ final class ExportCommand {
 	private LoggerInterface $logger;
 
 	/**
+	 * Whether the logger above was built by default (not injected).
+	 *
+	 * Only a defaulted logger writes to real files, so the per-transfer log is
+	 * teed onto it alone; a test that injects a spy logger never touches disk.
+	 *
+	 * @var bool
+	 */
+	private bool $logger_was_defaulted;
+
+	/**
 	 * The progress reporter that shows archive-writing progress.
 	 *
 	 * Injected via the constructor so tests can substitute a silent
@@ -203,12 +214,13 @@ final class ExportCommand {
 		?ProgressReporter $progress = null,
 		?PassphraseSource $passphrase_source = null
 	) {
-		$this->environment       = $environment ?? new RealEnvironment();
-		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
-		$this->manifest_builder  = $manifest_builder;
-		$this->logger            = $logger ?? $this->build_default_logger();
-		$this->progress          = $progress ?? new WpCliProgressBar();
-		$this->passphrase_source = $passphrase_source ?? new CliPassphraseSource();
+		$this->environment          = $environment ?? new RealEnvironment();
+		$this->wordpress_context    = $wordpress_context ?? new RealWordPressContext();
+		$this->manifest_builder     = $manifest_builder;
+		$this->logger_was_defaulted = null === $logger;
+		$this->logger               = $logger ?? $this->build_default_logger();
+		$this->progress             = $progress ?? new WpCliProgressBar();
+		$this->passphrase_source    = $passphrase_source ?? new CliPassphraseSource();
 	}
 
 	/**
@@ -237,6 +249,13 @@ final class ExportCommand {
 		$signing_key_path  = isset( $associative_args['signing-key'] ) ? (string) $associative_args['signing-key'] : '';
 
 		$this->validate_output_path( $output_path );
+
+		// 1a. Tee a per-transfer log alongside the archive, so this export leaves a
+		// self-contained record next to its .wpmig (in addition to the central log).
+		$this->attach_transfer_log(
+			static fn (): string => dirname( $output_path ),
+			basename( $output_path ) . '.log'
+		);
 
 		// 2. Build the exclusion rules.
 		$user_patterns = '' !== $exclude_file_path
@@ -540,14 +559,57 @@ final class ExportCommand {
 	 * @return LoggerInterface A FileLogger writing under wp-content/pontifex/logs.
 	 */
 	private function build_default_logger(): LoggerInterface {
+		return new FileLogger( $this->log_directory(), $this->debug_enabled() );
+	}
+
+	/**
+	 * Tee a per-transfer log file onto the central logger.
+	 *
+	 * Only the default logger writes to real files, so an injected spy logger
+	 * (the unit tests) is left untouched and no file is created. The directory is
+	 * resolved through a callback, so a run with an injected logger never reaches
+	 * the filesystem or the Environment seam. The per-transfer file uses the same
+	 * debug floor as the central log, so the two stay in step.
+	 *
+	 * @param callable(): string $directory Resolves the directory the per-transfer file lives in.
+	 * @param string             $filename  Name of the per-transfer file.
+	 * @return void
+	 */
+	private function attach_transfer_log( callable $directory, string $filename ): void {
+		if ( ! $this->logger_was_defaulted ) {
+			return;
+		}
+
+		$this->logger = new CompositeLogger(
+			$this->logger,
+			new FileLogger( $directory(), $this->debug_enabled(), $filename )
+		);
+	}
+
+	/**
+	 * Resolve the directory the central and per-transfer logs live in.
+	 *
+	 * Reads WP_CONTENT_DIR through the Environment seam, falling back to the
+	 * system temp directory when WordPress is not loaded (as in unit tests).
+	 *
+	 * @return string The absolute log directory path.
+	 */
+	private function log_directory(): string {
 		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
 			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
 			: sys_get_temp_dir();
 
-		$debug_enabled = $this->environment->is_constant_defined( 'WP_DEBUG' )
-			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
+		return $content_dir . '/pontifex/logs';
+	}
 
-		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled );
+	/**
+	 * Whether debug-level lines should be recorded (WP_DEBUG is on).
+	 *
+	 * @return bool True when WP_DEBUG is defined and truthy.
+	 */
+	private function debug_enabled(): bool {
+		return $this->environment->is_constant_defined( 'WP_DEBUG' )
+			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
 	}
 
 	/**
