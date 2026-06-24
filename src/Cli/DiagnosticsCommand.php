@@ -164,11 +164,14 @@ final class DiagnosticsCommand {
 	 * @return DiagnosticsRedactor The configured redactor.
 	 */
 	private function build_redactor(): DiagnosticsRedactor {
-		return new DiagnosticsRedactor(
-			$this->wordpress_context->site_url(),
+		$paths = PathRedactor::from_paths(
 			$this->constant_string( 'ABSPATH', '' ),
-			$this->constant_string( 'WP_CONTENT_DIR', '' )
+			$this->constant_string( 'WP_CONTENT_DIR', '' ),
+			(string) getenv( 'HOME' ),
+			sys_get_temp_dir()
 		);
+
+		return new DiagnosticsRedactor( $this->wordpress_context->site_url(), $paths );
 	}
 
 	/**
