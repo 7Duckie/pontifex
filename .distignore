@@ -1,48 +1,49 @@
 # .distignore — paths excluded from the distributed plugin package.
 #
 # Used by `wp dist-archive` to build the ZIP that ships to WordPress.org.
-# The shipped package is the runtime only: pontifex.php, src/, vendor/,
-# languages/, readme.txt, LICENSE, CHANGELOG.md and composer.json.
-# Everything below is development, CI, testing, or internal documentation
-# that has no place inside a user's wp-content/plugins directory.
+# Patterns are matched gitignore-style WITHOUT a leading slash (a leading
+# slash is not honoured by dist-archive's matcher). The shipped package is
+# the runtime only: pontifex.php, src/, vendor/, languages/, readme.txt,
+# LICENSE, CHANGELOG.md and composer.json. Everything below is development,
+# CI, testing, or internal documentation with no place in a user's site.
 
 # Version control, CI, and editor / OS metadata
-/.git
-/.github
-/.gitattributes
-/.gitignore
-/.idea
-/.claude
-/.editorconfig
-/.DS_Store
-/.phpunit.cache
-/.pre-commit-config.yaml
-/.wp-env.json
-/.wp-env.override.json
-/.distignore
+.git
+.github
+.gitattributes
+.gitignore
+.idea
+.claude
+.editorconfig
+.DS_Store
+.phpunit.cache
+.pre-commit-config.yaml
+.wp-env.json
+.wp-env.override.json
+.distignore
 
 # Build and QA configuration (not needed at runtime)
-/phpcs.xml.dist
-/phpstan.neon.dist
-/phpunit.xml.dist
-/phpunit-integration.xml.dist
-/stubs
-/composer.lock
+phpcs.xml.dist
+phpstan.neon.dist
+phpunit.xml.dist
+phpunit-integration.xml.dist
+stubs
+composer.lock
 
 # Tests, build scripts, and documentation source
-/tests
-/scripts
-/docs
+tests
+scripts
+docs
 
 # GitHub-facing and internal working documents (the wp.org listing uses readme.txt)
-/README.md
-/CLAUDE.md
-/CLAUDE-CODE-KICKOFF-PROMPT.md
-/PONTIFEX-CONTINUITY.md
-/PONTIFEX-HANDOFF-2026-06-12.md
-/PONTIFEX-HANDOFF-2026-06-24.md
-/PONTIFEX-IDEA-BUILD-MVP-AUDIT.md
-/PONTIFEX-SECURITY-DEFENCE-MAPPING.md
-/PONTIFEX-SYSTEM-DESIGN-FRAMEWORK.md
-/AUDIT-FINDINGS.md
-/STATE.md
+README.md
+CLAUDE.md
+CLAUDE-CODE-KICKOFF-PROMPT.md
+PONTIFEX-CONTINUITY.md
+PONTIFEX-HANDOFF-2026-06-12.md
+PONTIFEX-HANDOFF-2026-06-24.md
+PONTIFEX-IDEA-BUILD-MVP-AUDIT.md
+PONTIFEX-SECURITY-DEFENCE-MAPPING.md
+PONTIFEX-SYSTEM-DESIGN-FRAMEWORK.md
+AUDIT-FINDINGS.md
+STATE.md
