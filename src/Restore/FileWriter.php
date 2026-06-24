@@ -157,11 +157,11 @@ final class FileWriter {
 		$this->ensure_parent_directory( $target_path );
 
 		if ( $header->is_file() ) {
-			$this->write_file( $target_path, $result->payload(), (int) $header->mode(), (int) $header->mtime() );
+			$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
 			return;
 		}
 		if ( $header->is_directory() ) {
-			$this->write_directory( $target_path, (int) $header->mode() );
+			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ) );
 			return;
 		}
 		if ( $header->is_symlink() ) {
@@ -286,6 +286,24 @@ final class FileWriter {
 				sprintf( 'FileWriter: could not create parent directory "%s".', $parent )
 			);
 		}
+	}
+
+	/**
+	 * Clamp a restored POSIX mode to a safe set of bits.
+	 *
+	 * The mode is taken verbatim from the archive, which on the import trust
+	 * boundary is attacker-controlled. Two classes of bit are stripped before it
+	 * is applied: the special bits (setuid, setgid, sticky — `07000`), so a
+	 * malicious archive cannot restore a setuid binary; and the world-write bit
+	 * (`0002`), so it cannot leave wp-config.php or any file writable by everyone.
+	 * Owner and group bits, and read/execute for others, are preserved, so a
+	 * normal same-site self-restore keeps its permissions intact.
+	 *
+	 * @param int $mode The mode recorded in the archive entry.
+	 * @return int The clamped mode.
+	 */
+	private static function clamp_mode( int $mode ): int {
+		return $mode & 0o0775;
 	}
 
 	/**

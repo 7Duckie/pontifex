@@ -430,6 +430,26 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A file entry's mode is clamped: setuid and world-write are stripped.
+	 *
+	 * An archive is attacker-controlled on the import trust boundary, so a mode
+	 * like 0o4666 (setuid + world-writable) must not be applied verbatim. The
+	 * special bits and the world-write bit are stripped; owner/group bits survive,
+	 * so 0o4666 becomes 0o0664.
+	 *
+	 * @return void
+	 */
+	public function test_file_entry_mode_is_clamped(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::file_result( 'danger.txt', 'data', 0o4666 ) );
+
+		$path = $this->fixture_root . '/danger.txt';
+		clearstatcache( true, $path );
+		$this->assertSame( 0o0664, fileperms( $path ) & 0o7777, 'setuid and world-write must be stripped' );
+	}
+
+	/**
 	 * Writing a file entry to a path that already exists replaces the file.
 	 *
 	 * @return void
@@ -464,6 +484,24 @@ final class FileWriterTest extends TestCase {
 		clearstatcache( true, $path );
 		$mode = fileperms( $path ) & 0o7777;
 		$this->assertSame( 0o700, $mode );
+	}
+
+	/**
+	 * A directory entry's mode is clamped: setgid and world-write are stripped.
+	 *
+	 * 0o2777 (setgid + world-writable) becomes 0o0775.
+	 *
+	 * @return void
+	 */
+	public function test_directory_entry_mode_is_clamped(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'shared', 0o2777 ) );
+
+		$path = $this->fixture_root . '/shared';
+		$this->assertDirectoryExists( $path );
+		clearstatcache( true, $path );
+		$this->assertSame( 0o0775, fileperms( $path ) & 0o7777, 'setgid and world-write must be stripped' );
 	}
 
 	/**
