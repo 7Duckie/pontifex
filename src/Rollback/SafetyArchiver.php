@@ -11,19 +11,11 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use RuntimeException;
-use Pontifex\Archive\Codec\CodecRegistry;
-use Pontifex\Archive\Format\ExporterInfo;
-use Pontifex\Archive\Format\Provenance;
-use Pontifex\Archive\Writer\ArchiveWriter;
-use Pontifex\Archive\Writer\EntryWriter;
-use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
-use Pontifex\Manifest\DatabaseScanner;
+use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ExportRunner;
 use Pontifex\Manifest\ExclusionRules;
-use Pontifex\Manifest\FileScanner;
-use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Manifest\ManifestBuilderInterface;
-use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\WordPress\WordPressContext;
 
 /**
@@ -129,32 +121,15 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	public function create( string $wordpress_root, ?callable $on_entry = null ): string {
 		$this->store->ensure_directory();
 
-		$manifest_builder = $this->manifest_builder ?? $this->build_default_manifest_builder();
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
 		$entry_plans      = $manifest_builder->build( $wordpress_root );
 
 		$this->preflight_disk_space( $entry_plans );
 
-		$path        = $this->store->next_archive_path( new DateTimeImmutable() );
-		$destination = $this->open_destination( $path );
+		$path = $this->store->next_archive_path( new DateTimeImmutable() );
 
-		try {
-			$total = count( $entry_plans );
-			$done  = 0;
-			self::build_archive_writer()->write_archive(
-				$this->build_provenance(),
-				$entry_plans,
-				$destination,
-				function () use ( &$done, $total, $on_entry ): void {
-					++$done;
-					if ( null !== $on_entry ) {
-						$on_entry( $done, $total );
-					}
-				}
-			);
-		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
-			fclose( $destination );
-		}
+		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
+		$export_runner->export( new ExportOptions( $path ), $entry_plans, $on_entry );
 
 		// The archive holds the whole database, so it must be owner-only. On a
 		// POSIX host a failed chmod means it could not be secured; rather than
@@ -214,71 +189,5 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 				)
 			);
 		}
-	}
-
-	/**
-	 * Open the safety-archive destination for writing.
-	 *
-	 * @param string $path Absolute path to create.
-	 * @return resource A writable binary stream resource.
-	 * @throws RuntimeException If the file cannot be opened for writing.
-	 */
-	private function open_destination( string $path ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the safety-archive destination as a stream; @ traps an unopenable-file warning converted to an exception below.
-		$destination = @fopen( $path, 'wb' );
-		if ( false === $destination ) {
-			throw new RuntimeException(
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'SafetyArchiver: could not open the safety archive for writing: %s', $path )
-			);
-		}
-		return $destination;
-	}
-
-	/**
-	 * Build a default ManifestBuilder over the v0.1.0 exclusions.
-	 *
-	 * Mirrors ExportCommand's default wiring: a FileScanner and a
-	 * DatabaseScanner (over the real $wpdb) under the curated default exclusion
-	 * rules, so caches and other backup directories are not captured.
-	 *
-	 * @return ManifestBuilder A scanner-backed manifest builder.
-	 */
-	private function build_default_manifest_builder(): ManifestBuilder {
-		$exclusion_rules  = ExclusionRules::default_v010();
-		$file_scanner     = new FileScanner( $exclusion_rules );
-		$database_adapter = new WpdbAdapter( $this->wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $exclusion_rules );
-		return new ManifestBuilder( $file_scanner, $database_scanner );
-	}
-
-	/**
-	 * Build a Provenance block from current WordPress and PHP runtime facts.
-	 *
-	 * @return Provenance A fully-populated provenance value object.
-	 */
-	private function build_provenance(): Provenance {
-		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
-			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
-			: '0.0.0-dev';
-
-		return new Provenance(
-			$this->wordpress_context->wp_version(),
-			$this->environment->php_version(),
-			$this->wordpress_context->site_url(),
-			$this->wordpress_context->wpdb_charset(),
-			$this->wordpress_context->wpdb_collation(),
-			new ExporterInfo( 'pontifex', $pontifex_version ),
-			new DateTimeImmutable()
-		);
-	}
-
-	/**
-	 * Build the ArchiveWriter with the v0.1.0 default codecs.
-	 *
-	 * @return ArchiveWriter A ready-to-use archive writer.
-	 */
-	private static function build_archive_writer(): ArchiveWriter {
-		return new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
 	}
 }
