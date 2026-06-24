@@ -14,7 +14,7 @@ namespace Pontifex\Cli;
  *
  * Mirrors Psr\Log\NullLogger: a safe, silent default that satisfies
  * the contract without producing any output. Unit tests inject this so
- * ExportCommand never reaches WP-CLI's make_progress_bar(), and any
+ * a command under test never reaches WP-CLI's make_progress_bar(), and any
  * future caller that wants a quiet export can use it too.
  */
 final class NullProgressBar implements ProgressReporter {
