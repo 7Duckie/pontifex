@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Archive\Crypto;
 
 use InvalidArgumentException;
+use LogicException;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Crypto\SignatureException;
 use Pontifex\Archive\Crypto\SigningKeypair;
@@ -144,5 +145,30 @@ final class SigningKeypairTest extends TestCase {
 		$this->expectException( SignatureException::class );
 
 		SigningKeypair::from_secret_key( str_repeat( 's', 10 ) );
+	}
+
+	/**
+	 * Destruction wipes the secret key, after which the accessor refuses to return it.
+	 *
+	 * Calling __destruct() twice proves the wipe is idempotent (it also runs
+	 * implicitly when the object goes out of scope).
+	 *
+	 * @return void
+	 */
+	public function test_destruct_wipes_the_secret_key(): void {
+		if ( ! function_exists( 'sodium_memzero' ) ) {
+			self::markTestSkipped( 'ext-sodium is required to wipe key material.' );
+		}
+
+		$keypair = new SigningKeypair(
+			str_repeat( 'p', SigningKeypair::PUBLIC_KEY_SIZE ),
+			str_repeat( 's', SigningKeypair::SECRET_KEY_SIZE )
+		);
+
+		$keypair->__destruct();
+		$keypair->__destruct();
+
+		$this->expectException( LogicException::class );
+		$keypair->secret_key();
 	}
 }

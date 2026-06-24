@@ -36,11 +36,11 @@ final class EncryptionContext {
 	private Cipher $cipher;
 
 	/**
-	 * The 32-byte AES-256 key derived from the passphrase.
+	 * The 32-byte AES-256 key derived from the passphrase, or null once wiped.
 	 *
-	 * @var string
+	 * @var string|null
 	 */
-	private string $key;
+	private ?string $key;
 
 	/**
 	 * The 16-byte per-archive salt, stored in the footer.
@@ -87,6 +87,21 @@ final class EncryptionContext {
 	}
 
 	/**
+	 * Wipe the derived key from memory when the context is destroyed.
+	 *
+	 * Defence-in-depth: the CLI scrubs the passphrase and the writer's working
+	 * copy already, but the key this object holds for its lifetime is zeroed
+	 * here too so it does not linger until garbage collection. Best-effort —
+	 * only when ext-sodium is available (the OpenSSL cipher path may run
+	 * without it).
+	 */
+	public function __destruct() {
+		if ( null !== $this->key && function_exists( 'sodium_memzero' ) ) {
+			sodium_memzero( $this->key );
+		}
+	}
+
+	/**
 	 * Return the cipher.
 	 *
 	 * @return Cipher The AES-256-GCM cipher.
@@ -99,8 +114,12 @@ final class EncryptionContext {
 	 * Return the derived key.
 	 *
 	 * @return string The 32-byte key.
+	 * @throws LogicException If the key has already been wiped from memory.
 	 */
 	public function key(): string {
+		if ( null === $this->key ) {
+			throw new LogicException( 'EncryptionContext: the key has been wiped from memory and is no longer available.' );
+		}
 		return $this->key;
 	}
 
