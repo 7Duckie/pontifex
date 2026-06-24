@@ -19,6 +19,28 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.6] — 2026-06-24 — WordPress.org readiness and i18n
+
+Distribution readiness for a WordPress.org submission, plus internationalisation
+of the CLI. Packaging, documentation, and presentation only — no change to the
+archive format, backup, or restore behaviour.
+
+### Added
+
+- **A WordPress.org `readme.txt`** — listing copy, header metadata, FAQ, and a
+  changelog summary.
+- **A `.distignore`** so the distributed package is the runtime only (the plugin
+  file, `src/`, `vendor/`, `languages/`, `readme.txt`, `LICENSE`, `CHANGELOG.md`
+  and `composer.json`); the shipped build is `composer install --no-dev`.
+- **Internationalised CLI output** — every user-facing command string is wrapped
+  for translation under the `pontifex` text domain, with `languages/pontifex.pot`.
+
+### Changed
+
+- The two by-design direct-database queries (the archive SQL replay and the
+  prepared `SHOW TABLES` listing) carry Plugin Check annotations so a
+  WordPress.org review passes cleanly.
+
 ## [0.4.5] — 2026-06-24 — Quality cleanup
 
 Quality "leftovers" from the 2026-06-24 audit (findings 053–057): dead-code
@@ -513,6 +535,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.3...HEAD
+[0.4.6]: https://github.com/7Duckie/pontifex/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/7Duckie/pontifex/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/7Duckie/pontifex/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/7Duckie/pontifex/compare/v0.4.2...v0.4.3
