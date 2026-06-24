@@ -162,4 +162,55 @@ final class StatsCommandTest extends TestCase {
 		$this->assertTrue( $this->invoke_private( $command, 'is_machine_format', array( 'format' => 'json' ) ) );
 		$this->assertTrue( $this->invoke_private( $command, 'is_machine_format', array( 'format' => 'csv' ) ) );
 	}
+
+	/**
+	 * The recent rows render newest first, with the byte total formatted.
+	 *
+	 * @return void
+	 */
+	public function test_build_recent_rows_renders_newest_first(): void {
+		$command = $this->build_command( $this->context_with_echoing_format_size() );
+
+		$history = array(
+			array(
+				'at'        => '2026-06-24T09:00:00+00:00',
+				'operation' => 'export',
+				'outcome'   => 'succeeded',
+				'bytes'     => 1000,
+			),
+			array(
+				'at'        => '2026-06-24T10:00:00+00:00',
+				'operation' => 'import',
+				'outcome'   => 'failed',
+				'bytes'     => 0,
+			),
+		);
+
+		$rows = $this->invoke_private( $command, 'build_recent_rows', $history );
+
+		// The list is oldest-first; the display reverses it to newest-first.
+		$this->assertSame( '2026-06-24T10:00:00+00:00', $rows[0]['when'] );
+		$this->assertSame( 'import', $rows[0]['operation'] );
+		$this->assertSame( 'failed', $rows[0]['outcome'] );
+		$this->assertSame( '0 bytes', $rows[0]['size'] );
+
+		$this->assertSame( 'export', $rows[1]['operation'] );
+		$this->assertSame( '1000 bytes', $rows[1]['size'] );
+	}
+
+	/**
+	 * A corrupt history entry degrades to placeholders rather than erroring.
+	 *
+	 * @return void
+	 */
+	public function test_build_recent_rows_tolerates_corrupt_entries(): void {
+		$command = $this->build_command( $this->context_with_echoing_format_size() );
+
+		$rows = $this->invoke_private( $command, 'build_recent_rows', array( array( 'bytes' => 'garbage' ) ) );
+
+		$this->assertSame( '(unknown)', $rows[0]['when'] );
+		$this->assertSame( '(unknown)', $rows[0]['operation'] );
+		$this->assertSame( '(unknown)', $rows[0]['outcome'] );
+		$this->assertSame( '0 bytes', $rows[0]['size'] );
+	}
 }

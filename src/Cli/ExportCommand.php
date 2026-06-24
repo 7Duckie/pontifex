@@ -340,6 +340,7 @@ final class ExportCommand {
 					'bytes_exported' => $bytes_written,
 				)
 			);
+			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
 			// 8. Print the summary.
 			$this->print_summary( $output_path, count( $entry_plans ), $bytes_written );
@@ -352,6 +353,7 @@ final class ExportCommand {
 				)
 			);
 			$this->bump_counters( array( 'failed' => 1 ) );
+			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
