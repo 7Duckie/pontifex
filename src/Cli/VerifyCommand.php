@@ -384,7 +384,7 @@ final class VerifyCommand {
 		$debug_enabled = $this->environment->is_constant_defined( 'WP_DEBUG' )
 			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
 
-		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled );
+		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled, protect_directory: true );
 	}
 
 	/**

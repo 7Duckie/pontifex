@@ -559,7 +559,7 @@ final class ExportCommand {
 	 * @return LoggerInterface A FileLogger writing under wp-content/pontifex/logs.
 	 */
 	private function build_default_logger(): LoggerInterface {
-		return new FileLogger( $this->log_directory(), $this->debug_enabled() );
+		return new FileLogger( $this->log_directory(), $this->debug_enabled(), protect_directory: true );
 	}
 
 	/**

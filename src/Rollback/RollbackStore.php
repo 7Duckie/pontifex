@@ -11,6 +11,7 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Pontifex\Filesystem\ProtectedDirectory;
 use RuntimeException;
 
 /**
@@ -93,14 +94,11 @@ final class RollbackStore implements RollbackStoreInterface {
 	 * @throws RuntimeException If the directory cannot be created.
 	 */
 	public function ensure_directory(): void {
-		if ( is_dir( $this->directory ) ) {
-			return;
-		}
-
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the plugin-owned, not-world-readable rollback directory; WP_Filesystem is unavailable in CLI/test contexts.
-		mkdir( $this->directory, self::DIRECTORY_MODE, true );
-
-		if ( ! is_dir( $this->directory ) ) {
+		// Create the not-world-readable directory and lock it against direct web
+		// access (a safety archive is a full site backup). ProtectedDirectory is
+		// best-effort, so the hard guarantee — the directory exists — is asserted
+		// here, where the caller expects an exception on failure.
+		if ( ! ProtectedDirectory::ensure( $this->directory, self::DIRECTORY_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
 				sprintf( 'RollbackStore: could not create the rollback directory: %s', $this->directory )

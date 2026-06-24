@@ -17,6 +17,7 @@ use Throwable;
 use WP_CLI;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Filesystem\ProtectedDirectory;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
@@ -374,6 +375,19 @@ final class DiagnosticsCommand {
 	 * @throws \RuntimeException If the directory cannot be created.
 	 */
 	private function ensure_dir( string $directory ): void {
+		// The plugin-owned default bundle directory (…/pontifex/diagnostics) is
+		// created not-world-readable and locked against direct web access, because
+		// the bundle can contain log excerpts. A user-supplied --output directory
+		// is left untouched so we never drop guard files into the operator's own
+		// location.
+		if ( str_contains( $directory, '/pontifex/' ) ) {
+			if ( ! ProtectedDirectory::ensure( $directory, 0700 ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the directory for diagnostics; surfaced on the CLI, not HTML output.
+				throw new \RuntimeException( sprintf( 'could not create the output directory: %s', $directory ) );
+			}
+			return;
+		}
+
 		if ( is_dir( $directory ) ) {
 			return;
 		}
