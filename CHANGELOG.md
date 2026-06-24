@@ -19,6 +19,31 @@ operational features (resumable and scheduled exports, transports, selective
 content, multisite) — begins after this tag. See
 [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.4.3] — 2026-06-24 — Correctness fixes
+
+A correctness/quality patch from the same audit as v0.4.2.
+
+### Fixed
+
+- **`wp pontifex export --no-defaults` now actually disables the curated default
+  exclusions.** It was silently ignored — WP-CLI parses `--no-defaults` as
+  `defaults => false`, but the command read a `no-defaults` key that is never set
+  (the same trap as the v0.4.1 `--no-rollback-archive` fix), so the defaults were
+  always applied. Verified against real WP-CLI.
+- **A failed restore statement is detected reliably.** The database restore now
+  treats a `false` return from the query as failure, not only a non-empty error
+  string, so a failed statement can no longer pass as success and silently drop
+  or skip a table (a real `$wpdb` returns `false` and, with errors suppressed,
+  leaves the error string empty).
+- **The safety-archive disk preflight now counts the database.** It summed file
+  sizes only, counting the database — usually the bulk of a backup — as zero; it
+  could pass and then run out of disk mid-write. It also fails closed (POSIX) if
+  the database-bearing archive cannot be locked to owner-only.
+- **An unreadable directory during export now fails with a clear, path-named
+  error** instead of an opaque internal exception, and is never silently skipped.
+- Smaller robustness fixes: the composite logger isolates a failing log sink; the
+  sodium AES-GCM cipher wraps `SodiumException` like its siblings.
+
 ## [0.4.2] — 2026-06-24 — Security hardening
 
 A hardening release from a full security/quality audit. No feature changes; the
@@ -432,7 +457,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/7Duckie/pontifex/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/7Duckie/pontifex/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/7Duckie/pontifex/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/7Duckie/pontifex/compare/v0.3.0...v0.4.0
