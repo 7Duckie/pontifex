@@ -146,6 +146,11 @@ final class ArchiveWriter {
 		if ( null !== $signing ) {
 			self::assert_signable_destination( $destination );
 		}
+		if ( null !== $encryption ) {
+			// One context per archive: refuse a reused context, whose deterministic
+			// index-prefixed nonces would collide across archives under the same key.
+			$encryption->consume();
+		}
 
 		$total = count( $entry_plans );
 

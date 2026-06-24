@@ -279,10 +279,14 @@ final class ExportCommand {
 			if ( ! $passphrase_stdin ) {
 				WP_CLI::warning( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.' );
 			}
-			$passphrase                 = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
-			$encryption                 = Encryption::context( $passphrase );
-			$encryption_disabled_reason = null;
-			sodium_memzero( $passphrase );
+			$passphrase = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
+			try {
+				$encryption                 = Encryption::context( $passphrase );
+				$encryption_disabled_reason = null;
+			} finally {
+				// Always scrub the passphrase, even if context derivation throws.
+				sodium_memzero( $passphrase );
+			}
 		}
 
 		// 3b. Load the signing key and build the signing context, if signing. The
@@ -295,8 +299,12 @@ final class ExportCommand {
 			}
 			try {
 				$secret_key = SigningKeys::load_secret_key( $signing_key_path );
-				$signing    = SigningKeys::signing_context( $secret_key );
-				sodium_memzero( $secret_key );
+				try {
+					$signing = SigningKeys::signing_context( $secret_key );
+				} finally {
+					// Always scrub the secret key, even if building the context throws.
+					sodium_memzero( $secret_key );
+				}
 			} catch ( \Exception $e ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 				WP_CLI::error( $e->getMessage() );
@@ -559,7 +567,7 @@ final class ExportCommand {
 	 * @return LoggerInterface A FileLogger writing under wp-content/pontifex/logs.
 	 */
 	private function build_default_logger(): LoggerInterface {
-		return new FileLogger( $this->log_directory(), $this->debug_enabled() );
+		return new FileLogger( $this->log_directory(), $this->debug_enabled(), protect_directory: true );
 	}
 
 	/**

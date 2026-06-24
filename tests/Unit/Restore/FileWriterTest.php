@@ -430,6 +430,26 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A file entry's mode is clamped: setuid and world-write are stripped.
+	 *
+	 * An archive is attacker-controlled on the import trust boundary, so a mode
+	 * like 0o4666 (setuid + world-writable) must not be applied verbatim. The
+	 * special bits and the world-write bit are stripped; owner/group bits survive,
+	 * so 0o4666 becomes 0o0664.
+	 *
+	 * @return void
+	 */
+	public function test_file_entry_mode_is_clamped(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::file_result( 'danger.txt', 'data', 0o4666 ) );
+
+		$path = $this->fixture_root . '/danger.txt';
+		clearstatcache( true, $path );
+		$this->assertSame( 0o0664, fileperms( $path ) & 0o7777, 'setuid and world-write must be stripped' );
+	}
+
+	/**
 	 * Writing a file entry to a path that already exists replaces the file.
 	 *
 	 * @return void
@@ -464,6 +484,24 @@ final class FileWriterTest extends TestCase {
 		clearstatcache( true, $path );
 		$mode = fileperms( $path ) & 0o7777;
 		$this->assertSame( 0o700, $mode );
+	}
+
+	/**
+	 * A directory entry's mode is clamped: setgid and world-write are stripped.
+	 *
+	 * 0o2777 (setgid + world-writable) becomes 0o0775.
+	 *
+	 * @return void
+	 */
+	public function test_directory_entry_mode_is_clamped(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'shared', 0o2777 ) );
+
+		$path = $this->fixture_root . '/shared';
+		$this->assertDirectoryExists( $path );
+		clearstatcache( true, $path );
+		$this->assertSame( 0o0775, fileperms( $path ) & 0o7777, 'setgid and world-write must be stripped' );
 	}
 
 	/**
@@ -518,16 +556,15 @@ final class FileWriterTest extends TestCase {
 	// -------------------------------------------------------------------
 
 	/**
-	 * Symlink entries are created with the target string taken verbatim.
+	 * With --allow-unsafe-symlinks, an absolute target is stored verbatim.
 	 *
-	 * Whether the target exists, is absolute, or escapes the
-	 * destination root is intentionally not the writer's concern —
-	 * the symlink target is stored as-is from the archive.
+	 * The override restores the old behaviour: the target is written as-is from
+	 * the archive, escaping or not.
 	 *
 	 * @return void
 	 */
-	public function test_symlink_entry_created_with_verbatim_target(): void {
-		$writer = new FileWriter( $this->fixture_root );
+	public function test_symlink_entry_created_with_verbatim_target_when_unsafe_allowed(): void {
+		$writer = new FileWriter( $this->fixture_root, true );
 		$target = '/some/absolute/path/that/may/not/exist';
 
 		$writer->write_entry( self::symlink_result( 'link', $target ) );
@@ -535,6 +572,62 @@ final class FileWriterTest extends TestCase {
 		$link = $this->fixture_root . '/link';
 		$this->assertTrue( is_link( $link ) );
 		$this->assertSame( $target, readlink( $link ) );
+	}
+
+	/**
+	 * A safe relative target (staying inside the root) is created by default.
+	 *
+	 * @return void
+	 */
+	public function test_safe_relative_symlink_created_by_default(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::symlink_result( 'a/link', '../b/target.txt' ) );
+
+		$link = $this->fixture_root . '/a/link';
+		$this->assertTrue( is_link( $link ) );
+		$this->assertSame( '../b/target.txt', readlink( $link ) );
+	}
+
+	/**
+	 * An absolute symlink target is refused by default.
+	 *
+	 * @return void
+	 */
+	public function test_absolute_symlink_target_refused_by_default(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'escapes the restore root' );
+
+		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
+	}
+
+	/**
+	 * A relative symlink target that escapes the root is refused by default.
+	 *
+	 * @return void
+	 */
+	public function test_escaping_relative_symlink_target_refused_by_default(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'escapes the restore root' );
+
+		$writer->write_entry( self::symlink_result( 'uploads/link', '../../../../etc/passwd' ) );
+	}
+
+	/**
+	 * The escaping target is allowed when --allow-unsafe-symlinks is set.
+	 *
+	 * @return void
+	 */
+	public function test_escaping_symlink_target_allowed_with_override(): void {
+		$writer = new FileWriter( $this->fixture_root, true );
+
+		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
+
+		$this->assertTrue( is_link( $this->fixture_root . '/link' ) );
 	}
 
 	/**
@@ -550,10 +643,10 @@ final class FileWriterTest extends TestCase {
 		$this->assertFileExists( $conflict );
 		$this->assertFalse( is_link( $conflict ), 'precondition: conflict should start as a regular file, not a link' );
 
-		$writer->write_entry( self::symlink_result( 'conflict', '/elsewhere' ) );
+		$writer->write_entry( self::symlink_result( 'conflict', 'elsewhere' ) );
 
 		$this->assertTrue( is_link( $conflict ) );
-		$this->assertSame( '/elsewhere', readlink( $conflict ) );
+		$this->assertSame( 'elsewhere', readlink( $conflict ) );
 	}
 
 	/**
@@ -568,10 +661,10 @@ final class FileWriterTest extends TestCase {
 		symlink( '/old/target', $link );
 		$this->assertSame( '/old/target', readlink( $link ), 'precondition: link should start pointing at /old/target' );
 
-		$writer->write_entry( self::symlink_result( 'link', '/new/target' ) );
+		$writer->write_entry( self::symlink_result( 'link', 'new-target' ) );
 
 		$this->assertTrue( is_link( $link ) );
-		$this->assertSame( '/new/target', readlink( $link ) );
+		$this->assertSame( 'new-target', readlink( $link ) );
 	}
 
 	// -------------------------------------------------------------------

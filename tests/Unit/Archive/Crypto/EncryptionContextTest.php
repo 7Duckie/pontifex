@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Archive\Crypto;
 
 use InvalidArgumentException;
+use LogicException;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Crypto\Cipher;
 use Pontifex\Archive\Crypto\EncryptionContext;
@@ -102,5 +103,22 @@ final class EncryptionContextTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		new EncryptionContext( new OpensslAesGcmCipher(), self::valid_key(), str_repeat( 's', 17 ) );
+	}
+
+	/**
+	 * A context may be consumed once; a second use is refused.
+	 *
+	 * This is the guard against reusing one context (one key) across two
+	 * archives, which would repeat the deterministic per-entry nonces.
+	 *
+	 * @return void
+	 */
+	public function test_consume_succeeds_once_then_refuses(): void {
+		$context = new EncryptionContext( new OpensslAesGcmCipher(), self::valid_key(), self::valid_salt() );
+
+		$context->consume();
+
+		$this->expectException( LogicException::class );
+		$context->consume();
 	}
 }

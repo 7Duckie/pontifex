@@ -78,6 +78,19 @@ use Pontifex\Archive\Writer\EntryWriter;
 final class EntryReader {
 
 	/**
+	 * Default ceiling on the decoded size of a single entry (2 GiB).
+	 *
+	 * Read-orchestrating callers (the restore/verify walk) pass a tighter,
+	 * archive-derived budget. This default is the backstop for any caller that
+	 * does not — a direct or third-party consumer of the documented format — so
+	 * a decompression bomb cannot inflate without bound at the reader layer.
+	 * Pass null explicitly only when no limit is genuinely wanted.
+	 *
+	 * @var int
+	 */
+	public const DEFAULT_MAX_DECODED_BYTES = 2147483648;
+
+	/**
 	 * Codec registry used to look up codecs by id.
 	 *
 	 * @var CodecRegistry
@@ -134,12 +147,12 @@ final class EntryReader {
 	 *
 	 * @param resource      $source            A seekable, readable stream containing the archive.
 	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record to read.
-	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce, or null for no limit.
+	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce. Defaults to DEFAULT_MAX_DECODED_BYTES; pass null for no limit.
 	 * @return EntryReadResult The parsed header and decoded payload.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
 	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, or the decoded payload exceeds $max_decoded_bytes.
 	 */
-	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = null ): EntryReadResult {
+	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
 		}

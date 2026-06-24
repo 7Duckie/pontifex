@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Log;
 
+use Pontifex\Filesystem\ProtectedDirectory;
 use Psr\Log\AbstractLogger;
 use Psr\Log\LogLevel;
 use Stringable;
@@ -112,16 +113,29 @@ final class FileLogger extends AbstractLogger {
 	private bool $rotation_checked = false;
 
 	/**
+	 * Whether to lock the directory against direct web access on creation.
+	 *
+	 * True for the central plugin-owned log directory under wp-content/pontifex;
+	 * false for a per-transfer log written beside a user-chosen archive, where we
+	 * must not drop guard files into the operator's own directory.
+	 *
+	 * @var bool
+	 */
+	private bool $protect_directory;
+
+	/**
 	 * Build a logger pointed at a directory.
 	 *
-	 * @param string $log_dir       Directory to write log files into. Created if absent.
-	 * @param bool   $debug_enabled Whether to record debug-level lines (pass WP_DEBUG).
-	 * @param string $filename      Optional. Base filename to write; defaults to the central log.
+	 * @param string $log_dir           Directory to write log files into. Created if absent.
+	 * @param bool   $debug_enabled     Whether to record debug-level lines (pass WP_DEBUG).
+	 * @param string $filename          Optional. Base filename to write; defaults to the central log.
+	 * @param bool   $protect_directory Optional. Lock the directory against web access (use for plugin-owned dirs).
 	 */
-	public function __construct( string $log_dir, bool $debug_enabled, string $filename = self::LOG_FILENAME ) {
-		$this->log_dir       = rtrim( $log_dir, '/\\' );
-		$this->debug_enabled = $debug_enabled;
-		$this->filename      = $filename;
+	public function __construct( string $log_dir, bool $debug_enabled, string $filename = self::LOG_FILENAME, bool $protect_directory = false ) {
+		$this->log_dir           = rtrim( $log_dir, '/\\' );
+		$this->debug_enabled     = $debug_enabled;
+		$this->filename          = $filename;
+		$this->protect_directory = $protect_directory;
 	}
 
 	/**
@@ -200,7 +214,26 @@ final class FileLogger extends AbstractLogger {
 			}
 		}
 
-		return $line . "\n";
+		// Neutralise control characters before adding the single real newline.
+		// An attacker-influenced value (an archive path, a provenance URL, a table
+		// name, a $wpdb error) could otherwise carry its own CR/LF to forge extra
+		// log lines, or terminal escapes that fire when an operator views the log.
+		// The JSON tail already escapes control characters, so only the message and
+		// exception text are affected.
+		return self::strip_control_characters( $line ) . "\n";
+	}
+
+	/**
+	 * Replace every C0 control character (and DEL) with a space.
+	 *
+	 * This collapses embedded newlines, carriage returns, and terminal escape
+	 * introducers to spaces, keeping each logged event on exactly one line.
+	 *
+	 * @param string $line The assembled line content (without the trailing newline).
+	 * @return string The line with control characters neutralised.
+	 */
+	private static function strip_control_characters( string $line ): string {
+		return (string) preg_replace( '/[\x00-\x1F\x7F]/', ' ', $line );
 	}
 
 	/**
@@ -246,6 +279,15 @@ final class FileLogger extends AbstractLogger {
 		}
 
 		$path = $this->log_dir . '/' . $this->filename;
+
+		// Refuse to follow a symlinked log path: if an attacker placed a symlink
+		// where the log file should be, appending through it would write to the
+		// link's target. Disable rather than follow it.
+		if ( is_link( $path ) ) {
+			$this->disabled = true;
+			return;
+		}
+
 		$this->maybe_rotate( $path );
 
 		$this->silently(
@@ -267,9 +309,20 @@ final class FileLogger extends AbstractLogger {
 	/**
 	 * Make sure the log directory exists, creating it if needed.
 	 *
+	 * For a plugin-owned directory ($protect_directory), delegate to
+	 * ProtectedDirectory so the directory is created not-world-readable and
+	 * carries the web-access guards; this also retrofits the guards onto a
+	 * directory created by an earlier (pre-0.4.2) version. A per-transfer log
+	 * beside a user-chosen archive uses a plain mkdir so no guard files are
+	 * dropped into the operator's own directory.
+	 *
 	 * @return bool True if the directory exists or was created.
 	 */
 	private function ensure_directory(): bool {
+		if ( $this->protect_directory ) {
+			return ProtectedDirectory::ensure( $this->log_dir, 0700 );
+		}
+
 		if ( is_dir( $this->log_dir ) ) {
 			return true;
 		}

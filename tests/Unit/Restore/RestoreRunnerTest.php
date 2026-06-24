@@ -146,14 +146,15 @@ final class RestoreRunnerTest extends TestCase {
 	/**
 	 * Build a RestoreRunner wired with a FileWriter rooted at the fixture and a fresh DatabaseWriter.
 	 *
-	 * @param FakeDbAdapter|null $db Optional adapter; if null, a fresh one is created.
+	 * @param FakeDbAdapter|null $db                    Optional adapter; if null, a fresh one is created.
+	 * @param bool               $allow_unsafe_symlinks Optional. Allow escaping symlink targets (default false).
 	 * @return RestoreRunner Ready to call restore() on.
 	 */
-	private function make_runner( ?FakeDbAdapter $db = null ): RestoreRunner {
+	private function make_runner( ?FakeDbAdapter $db = null, bool $allow_unsafe_symlinks = false ): RestoreRunner {
 		$db = $db ?? new FakeDbAdapter();
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
-			new FileWriter( $this->fixture_root ),
+			new FileWriter( $this->fixture_root, $allow_unsafe_symlinks ),
 			new DatabaseWriter( $db )
 		);
 	}
@@ -275,13 +276,13 @@ final class RestoreRunnerTest extends TestCase {
 	 */
 	public function test_restore_writes_symlink_entry(): void {
 		$runner = $this->make_runner();
-		$plans  = array( self::symlink_plan( 'wp-content/cache', '/tmp/wp-cache' ) );
+		$plans  = array( self::symlink_plan( 'wp-content/cache', '../uploads' ) );
 
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$link = $this->fixture_root . '/wp-content/cache';
 		$this->assertTrue( is_link( $link ) );
-		$this->assertSame( '/tmp/wp-cache', readlink( $link ) );
+		$this->assertSame( '../uploads', readlink( $link ) );
 	}
 
 	/**
@@ -708,7 +709,11 @@ final class RestoreRunnerTest extends TestCase {
 		file_put_contents( $outside, 'ORIGINAL' );
 
 		try {
-			$runner = $this->make_runner();
+			// Allow the hostile escaping symlink to be planted, so this test
+			// exercises the second-layer defence — a file write must replace the
+			// symlink in place rather than follow it — independently of the
+			// symlink-target refusal covered in FileWriterTest.
+			$runner = $this->make_runner( allow_unsafe_symlinks: true );
 			$plans  = array(
 				self::symlink_plan( 'victim', $outside ),
 				self::file_plan( 'victim', 'OVERWRITTEN' ),

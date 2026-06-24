@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Archive\Crypto;
 
 use InvalidArgumentException;
+use LogicException;
 
 /**
  * Immutable bundle of the three inputs an encrypted archive needs.
@@ -47,6 +48,18 @@ final class EncryptionContext {
 	 * @var string
 	 */
 	private string $salt;
+
+	/**
+	 * Whether this context has already been used to write an archive.
+	 *
+	 * A context must be used for exactly one archive. The per-entry nonce is the
+	 * entry index plus 8 random bytes, so reusing one context (same key) across
+	 * two archives would repeat the deterministic index-prefixed nonces — a
+	 * catastrophic GCM key+nonce reuse. {@see self::consume()} enforces this.
+	 *
+	 * @var bool
+	 */
+	private bool $consumed = false;
 
 	/**
 	 * Construct an encryption context.
@@ -98,5 +111,23 @@ final class EncryptionContext {
 	 */
 	public function salt(): string {
 		return $this->salt;
+	}
+
+	/**
+	 * Mark this context as used for one archive, refusing a second use.
+	 *
+	 * Called once by the writer before it begins an archive. A second call throws,
+	 * so the same key can never encrypt two archives with colliding nonces.
+	 *
+	 * @return void
+	 * @throws LogicException If the context has already been consumed.
+	 */
+	public function consume(): void {
+		if ( $this->consumed ) {
+			throw new LogicException(
+				'EncryptionContext: a context may be used for only one archive; derive a fresh context (with a fresh salt) per archive.'
+			);
+		}
+		$this->consumed = true;
 	}
 }

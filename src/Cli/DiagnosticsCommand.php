@@ -17,6 +17,7 @@ use Throwable;
 use WP_CLI;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Filesystem\ProtectedDirectory;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
@@ -83,7 +84,7 @@ final class DiagnosticsCommand {
 	 *
 	 * @var string[]
 	 */
-	private const SAFE_OPTIONS = array( 'template', 'stylesheet', 'blog_charset', 'timezone_string', 'WPLANG', 'active_plugins' );
+	private const SAFE_OPTIONS = array( 'template', 'stylesheet', 'blog_charset', 'timezone_string', 'WPLANG' );
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -312,7 +313,10 @@ final class DiagnosticsCommand {
 		$directory = dirname( $output_path );
 		$this->ensure_dir( $directory );
 
-		$temp_tar = $directory . '/.pontifex-diagnostics-' . uniqid( '', true ) . '.tar';
+		// Unpredictable temp name (not time-based uniqid), so an attacker cannot
+		// pre-create or symlink the path before PharData writes the bundle. The
+		// .tar suffix is required for PharData to recognise the format.
+		$temp_tar = $directory . '/.pontifex-diagnostics-' . bin2hex( random_bytes( 16 ) ) . '.tar';
 
 		$phar = new PharData( $temp_tar );
 		foreach ( $artifacts as $name => $content ) {
@@ -374,6 +378,19 @@ final class DiagnosticsCommand {
 	 * @throws \RuntimeException If the directory cannot be created.
 	 */
 	private function ensure_dir( string $directory ): void {
+		// The plugin-owned default bundle directory (…/pontifex/diagnostics) is
+		// created not-world-readable and locked against direct web access, because
+		// the bundle can contain log excerpts. A user-supplied --output directory
+		// is left untouched so we never drop guard files into the operator's own
+		// location.
+		if ( str_contains( $directory, '/pontifex/' ) ) {
+			if ( ! ProtectedDirectory::ensure( $directory, 0700 ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the directory for diagnostics; surfaced on the CLI, not HTML output.
+				throw new \RuntimeException( sprintf( 'could not create the output directory: %s', $directory ) );
+			}
+			return;
+		}
+
 		if ( is_dir( $directory ) ) {
 			return;
 		}

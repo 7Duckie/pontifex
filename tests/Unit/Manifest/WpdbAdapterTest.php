@@ -236,8 +236,26 @@ final class WpdbAdapterTest extends TestCase {
 			)
 		);
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 't', 0, 1 );
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 );
 
 		$this->assertStringContainsString( 'VALUES (42)', $sql );
+	}
+
+	/**
+	 * A per-table method refuses a table name outside the WordPress prefix.
+	 *
+	 * A scope guard: tables come from list_tables() (SHOW TABLES LIKE prefix%), so
+	 * a name outside the prefix indicates a caller passing an externally-influenced
+	 * name, which must not be dumped into an export.
+	 *
+	 * @return void
+	 */
+	public function test_per_table_method_refuses_table_outside_prefix(): void {
+		$wpdb = $this->mock_wpdb();
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'outside the WordPress prefix' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'mysql.user', 0, 1 );
 	}
 }

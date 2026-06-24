@@ -100,6 +100,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * @throws RuntimeException If the COUNT query fails.
 	 */
 	public function row_count( string $table_name ): int {
+		$this->assert_prefixed_table( $table_name );
 		$sql = $this->wpdb->prepare( 'SELECT COUNT(*) FROM %i', $table_name );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
 		$count = $this->wpdb->get_var( $sql );
@@ -125,6 +126,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * @throws RuntimeException If SHOW CREATE TABLE fails.
 	 */
 	public function dump_table_schema( string $table_name ): string {
+		$this->assert_prefixed_table( $table_name );
 		$sql = $this->wpdb->prepare( 'SHOW CREATE TABLE %i', $table_name );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
 		$row = $this->wpdb->get_row( $sql, ARRAY_N );
@@ -155,6 +157,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * @throws RuntimeException If the SELECT fails.
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
+		$this->assert_prefixed_table( $table_name );
 		$sql = $this->wpdb->prepare( 'SELECT * FROM %i LIMIT %d OFFSET %d', $table_name, $limit, $offset );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
@@ -235,6 +238,27 @@ final class WpdbAdapter implements DatabaseAdapter {
 		$as_string = (string) $value;
 		$escaped   = $this->wpdb->_real_escape( $as_string );
 		return "'" . $escaped . "'";
+	}
+
+	/**
+	 * Refuse to operate on a table outside the WordPress prefix.
+	 *
+	 * Per-table methods use $wpdb->prepare( '%i' ), so this is not an injection
+	 * defence; it is a scope guard. Tables are sourced from list_tables() (SHOW
+	 * TABLES LIKE prefix%), so a name outside the prefix indicates a future caller
+	 * passing an externally-influenced name, which must not be dumped into an
+	 * export. Skipped when the prefix is empty (an unconfigured $wpdb).
+	 *
+	 * @param string $table_name The table name to check.
+	 * @return void
+	 * @throws RuntimeException If the table is outside the WordPress prefix.
+	 */
+	private function assert_prefixed_table( string $table_name ): void {
+		$prefix = (string) $this->wpdb->prefix;
+		if ( '' !== $prefix && ! str_starts_with( $table_name, $prefix ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the table and prefix for diagnostics; surfaced on the CLI, not HTML output.
+			throw new RuntimeException( sprintf( 'WpdbAdapter: refusing to operate on table "%s" outside the WordPress prefix "%s".', $table_name, $prefix ) );
+		}
 	}
 
 	/**

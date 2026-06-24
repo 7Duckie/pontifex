@@ -90,17 +90,32 @@ final class FileWriter {
 	private string $destination_root;
 
 	/**
+	 * Whether to allow symlink entries whose target escapes the restore root.
+	 *
+	 * False by default: a symlink whose target resolves outside the destination
+	 * root (or is absolute) is refused, because a hostile archive can otherwise
+	 * plant a link such as `uploads/x -> /etc` that later code follows. The
+	 * operator can opt back into the old verbatim behaviour for a trusted archive.
+	 *
+	 * @var bool
+	 */
+	private bool $allow_unsafe_symlinks;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
 	 * exist. Once created, the absolute, real path is stored so
 	 * subsequent path-traversal checks can use string comparison.
 	 *
-	 * @param string $destination_root Absolute filesystem path of the restore root.
+	 * @param string $destination_root      Absolute filesystem path of the restore root.
+	 * @param bool   $allow_unsafe_symlinks  Optional. Allow symlink targets that escape the root (default false).
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root ) {
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false ) {
+		$this->allow_unsafe_symlinks = $allow_unsafe_symlinks;
+
 		if ( '' === $destination_root ) {
 			throw new InvalidArgumentException( 'FileWriter: destination_root must be non-empty.' );
 		}
@@ -157,11 +172,11 @@ final class FileWriter {
 		$this->ensure_parent_directory( $target_path );
 
 		if ( $header->is_file() ) {
-			$this->write_file( $target_path, $result->payload(), (int) $header->mode(), (int) $header->mtime() );
+			$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
 			return;
 		}
 		if ( $header->is_directory() ) {
-			$this->write_directory( $target_path, (int) $header->mode() );
+			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ) );
 			return;
 		}
 		if ( $header->is_symlink() ) {
@@ -289,6 +304,24 @@ final class FileWriter {
 	}
 
 	/**
+	 * Clamp a restored POSIX mode to a safe set of bits.
+	 *
+	 * The mode is taken verbatim from the archive, which on the import trust
+	 * boundary is attacker-controlled. Two classes of bit are stripped before it
+	 * is applied: the special bits (setuid, setgid, sticky — `07000`), so a
+	 * malicious archive cannot restore a setuid binary; and the world-write bit
+	 * (`0002`), so it cannot leave wp-config.php or any file writable by everyone.
+	 * Owner and group bits, and read/execute for others, are preserved, so a
+	 * normal same-site self-restore keeps its permissions intact.
+	 *
+	 * @param int $mode The mode recorded in the archive entry.
+	 * @return int The clamped mode.
+	 */
+	private static function clamp_mode( int $mode ): int {
+		return $mode & 0o0775;
+	}
+
+	/**
 	 * Write file contents and set mode and mtime.
 	 *
 	 * @param string $target_path Absolute path of the file to write.
@@ -356,15 +389,23 @@ final class FileWriter {
 	/**
 	 * Create a symlink at $target_path pointing at $link_target.
 	 *
-	 * Overwrites an existing symlink, file, or directory at the
-	 * link path. The link target is taken verbatim from the
-	 * archive; FileWriter does not validate or normalise it.
+	 * Overwrites an existing symlink, file, or directory at the link path. Unless
+	 * unsafe symlinks are explicitly allowed, a target that resolves outside the
+	 * restore root (or is absolute) is refused — a hostile archive could otherwise
+	 * plant an escaping link that later code follows.
 	 *
 	 * @param string $target_path Absolute path where the link should be created.
 	 * @param string $link_target The string the link should point at.
-	 * @throws RuntimeException If the link cannot be created.
+	 * @throws RuntimeException If the target escapes the root (and is not allowed), or the link cannot be created.
 	 */
 	private function write_symlink( string $target_path, string $link_target ): void {
+		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: refusing symlink "%s" whose target "%s" escapes the restore root. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
+			);
+		}
+
 		// Remove anything pre-existing at the link path so symlink() will succeed.
 		if ( is_link( $target_path ) || file_exists( $target_path ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time cleanup of conflicting filesystem entry; WP_Filesystem cannot remove symlinks reliably.
@@ -377,6 +418,59 @@ final class FileWriter {
 				sprintf( 'FileWriter: could not create symlink "%s" -> "%s".', $target_path, $link_target )
 			);
 		}
+	}
+
+	/**
+	 * Whether a symlink's target would resolve outside the restore root.
+	 *
+	 * An absolute target is always treated as escaping (it is not constrained to
+	 * the root). A relative target is resolved against the link's own directory
+	 * and its `.`/`..` segments collapsed textually (the target need not exist
+	 * yet, so realpath cannot be used); the result must be the root itself or a
+	 * path beneath it.
+	 *
+	 * @param string $link_path   Absolute path where the link will be created (inside the root).
+	 * @param string $link_target The target string recorded in the archive.
+	 * @return bool True if the target escapes the restore root.
+	 */
+	private function symlink_target_escapes_root( string $link_path, string $link_target ): bool {
+		if ( self::is_absolute_path( $link_target ) ) {
+			return true;
+		}
+
+		$resolved = self::normalise_path( dirname( $link_path ) . '/' . $link_target );
+
+		return $resolved !== $this->destination_root
+			&& ! str_starts_with( $resolved, $this->destination_root . '/' );
+	}
+
+	/**
+	 * Collapse `.` and `..` segments in a path textually (no filesystem access).
+	 *
+	 * Backslashes are normalised to forward slashes first, so a Windows-shaped
+	 * target is handled on a POSIX host. A leading slash is preserved. A `..`
+	 * that would rise above the first segment is simply dropped.
+	 *
+	 * @param string $path The path to normalise.
+	 * @return string The normalised path.
+	 */
+	private static function normalise_path( string $path ): string {
+		$is_absolute = '' !== $path && '/' === $path[0];
+		$segments    = explode( '/', str_replace( '\\', '/', $path ) );
+		$stack       = array();
+
+		foreach ( $segments as $segment ) {
+			if ( '' === $segment || '.' === $segment ) {
+				continue;
+			}
+			if ( '..' === $segment ) {
+				array_pop( $stack );
+				continue;
+			}
+			$stack[] = $segment;
+		}
+
+		return ( $is_absolute ? '/' : '' ) . implode( '/', $stack );
 	}
 
 	/**
