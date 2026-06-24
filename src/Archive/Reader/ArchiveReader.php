@@ -437,6 +437,20 @@ final class ArchiveReader {
 			);
 		}
 
+		// Cap the declared length before allocating: the manifest block is a
+		// length-prefix plus a payload (itself capped at MAX_PAYLOAD_SIZE) plus a
+		// 32-byte hash. Without this, an archive padded to its file size could
+		// force a single multi-gigabyte fread. The +1024 covers prefix and hash.
+		if ( $length > ArchiveManifest::MAX_PAYLOAD_SIZE + 1024 ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: declared manifest length %d exceeds the maximum %d; refusing to allocate.',
+					(int) $length,
+					(int) ArchiveManifest::MAX_PAYLOAD_SIZE
+				)
+			);
+		}
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, $offset ) ) {
 			throw new RuntimeException( 'ArchiveReader: could not seek to manifest offset.' );
