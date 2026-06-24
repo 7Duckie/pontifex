@@ -12,7 +12,11 @@
   "config": {
     "allow-plugins": {
       "composer/installers": true,
-      "dealerdirect/phpcodesniffer-composer-installer": true
+      "dealerdirect/phpcodesniffer-composer-installer": true,
+      "infection/extension-installer": true
+    },
+    "platform": {
+      "php": "8.2.0"
     },
     "sort-packages": true
   },
@@ -36,6 +40,7 @@
   "require-dev": {
     "brain/monkey": "^2.7",
     "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+    "infection/infection": "^0.32.6",
     "mockery/mockery": "^1.6",
     "php-stubs/wp-cli-stubs": "^2.10",
     "phpstan/phpstan": "^1.11",
@@ -61,6 +66,7 @@
       "pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg",
       "@php -r \"echo 'Done. Run composer check before committing.' . PHP_EOL;\""
     ],
+    "infection": "@php -d memory_limit=-1 vendor/bin/infection --threads=max",
     "lint": "phpcs --standard=phpcs.xml.dist",
     "lint:fix": "phpcbf --standard=phpcs.xml.dist",
     "test": "phpunit",

@@ -37,6 +37,10 @@ node_modules
 package.json
 package-lock.json
 
+# Mutation testing (local, advisory; never shipped)
+infection.json5
+infection.log
+
 # Tests, build scripts, and documentation source
 tests
 scripts
