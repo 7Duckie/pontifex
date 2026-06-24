@@ -274,7 +274,7 @@ final class FileScanner {
 					sprintf( 'FileScanner: could not lstat symlink "%s".', $absolute_path )
 				);
 			}
-			$mode  = (int) ( $lstat['mode'] & 0o7777 );
+			$mode  = (int) ( $lstat['mode'] & 07777 );
 			$mtime = (int) $lstat['mtime'];
 			return new ScannedEntry( $kind, $relative_path, $absolute_path, 0, $mode, $mtime, $target, null );
 		}
@@ -288,7 +288,7 @@ final class FileScanner {
 		}
 
 		$size  = EntryHeader::KIND_FILE === $kind ? (int) $info->getSize() : 0;
-		$mode  = (int) ( $info->getPerms() & 0o7777 );
+		$mode  = (int) ( $info->getPerms() & 07777 );
 		$mtime = (int) $info->getMTime();
 
 		// Files carry a media_type sniffed at scan time; directories do not.
