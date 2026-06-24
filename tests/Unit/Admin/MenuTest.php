@@ -11,6 +11,8 @@ namespace Pontifex\Tests\Unit\Admin;
 
 use Brain\Monkey\Functions;
 use Mockery;
+use Pontifex\Admin\BackupPage;
+use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
 use Pontifex\Rollback\RollbackStoreInterface;
@@ -39,7 +41,11 @@ final class MenuTest extends TestCase {
 			Mockery::mock( RollbackStoreInterface::class ),
 			'0.5.0'
 		);
-		return new Menu( $overview );
+		$backup   = new BackupPage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() )
+		);
+		return new Menu( $overview, $backup );
 	}
 
 	/**
@@ -115,5 +121,45 @@ final class MenuTest extends TestCase {
 		$menu->enqueue_assets( 'edit.php' );
 
 		$this->assertFalse( $enqueued );
+	}
+
+	/**
+	 * Loads and localises the Backup script on the Backup screen only.
+	 *
+	 * @return void
+	 */
+	public function test_enqueue_assets_loads_the_script_on_the_backup_screen(): void {
+		$calls = 0;
+		Functions\when( 'add_menu_page' )->justReturn( 'toplevel_page_pontifex' );
+		Functions\when( 'add_submenu_page' )->alias(
+			static function () use ( &$calls ): string {
+				++$calls;
+				return 1 === $calls ? 'pontifex_page_overview' : 'pontifex_page_pontifex-backup';
+			}
+		);
+		Functions\when( 'wp_enqueue_style' )->justReturn( null );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
+
+		$script_handle = '';
+		Functions\when( 'wp_enqueue_script' )->alias(
+			static function ( string $handle ) use ( &$script_handle ): void {
+				$script_handle = $handle;
+			}
+		);
+		$localized = false;
+		Functions\when( 'wp_localize_script' )->alias(
+			static function () use ( &$localized ): bool {
+				$localized = true;
+				return true;
+			}
+		);
+
+		$menu = $this->menu();
+		$menu->register_pages();
+		$menu->enqueue_assets( 'pontifex_page_pontifex-backup' );
+
+		$this->assertSame( 'pontifex-backup', $script_handle, 'The Backup script should be enqueued on the Backup screen.' );
+		$this->assertTrue( $localized, 'The Backup script should be localised with its configuration.' );
 	}
 }

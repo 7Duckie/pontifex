@@ -1,0 +1,88 @@
+<?php
+/**
+ * Unit tests for the admin bootstrap's hook wiring.
+ *
+ * @package Pontifex\Tests\Unit\Admin
+ */
+
+declare(strict_types=1);
+
+namespace Pontifex\Tests\Unit\Admin;
+
+use Brain\Monkey\Functions;
+use Mockery;
+use Pontifex\Admin\AdminBootstrap;
+use Pontifex\Admin\BackupController;
+use Pontifex\Admin\BackupPage;
+use Pontifex\Admin\BackupStore;
+use Pontifex\Admin\Menu;
+use Pontifex\Admin\OverviewPage;
+use Pontifex\Environment\Environment;
+use Pontifex\Rollback\RollbackStoreInterface;
+use Pontifex\Tests\TestCase;
+use Pontifex\WordPress\WordPressContext;
+
+/**
+ * Covers that register() attaches every hook the admin layer needs.
+ *
+ * The bootstrap is built with real Menu and BackupController instances over
+ * mocked interface dependencies (both are final, so they are not doubled); the
+ * collaborators are only used as callback targets, never invoked, so the test
+ * asserts the set of action hooks that were registered.
+ */
+final class AdminBootstrapTest extends TestCase {
+
+	/**
+	 * Attaches the menu, the assets, and the four Backup admin-ajax actions.
+	 *
+	 * @return void
+	 */
+	public function test_register_hooks_menu_assets_and_backup_actions(): void {
+		$hooks = array();
+		Functions\when( 'add_action' )->alias(
+			static function ( string $hook ) use ( &$hooks ): void {
+				$hooks[] = $hook;
+			}
+		);
+
+		( new AdminBootstrap( $this->menu(), $this->controller() ) )->register();
+
+		$this->assertContains( 'admin_menu', $hooks );
+		$this->assertContains( 'admin_enqueue_scripts', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_create_backup', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_backup_progress', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_download_backup', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_delete_backup', $hooks );
+	}
+
+	/**
+	 * A real Menu over mocked page dependencies.
+	 *
+	 * @return Menu
+	 */
+	private function menu(): Menu {
+		$overview = new OverviewPage(
+			Mockery::mock( WordPressContext::class ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			'0.5.0'
+		);
+		$backup   = new BackupPage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() )
+		);
+		return new Menu( $overview, $backup );
+	}
+
+	/**
+	 * A real BackupController over mocked dependencies.
+	 *
+	 * @return BackupController
+	 */
+	private function controller(): BackupController {
+		return new BackupController(
+			Mockery::mock( Environment::class ),
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() )
+		);
+	}
+}

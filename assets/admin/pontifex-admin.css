@@ -138,6 +138,77 @@
 	border-top: 1px solid var(--pontifex-rule);
 }
 
+/* Backup --------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-lead {
+	max-width: 60ch;
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-button {
+	display: inline-block;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	border: 0;
+	background: var(--pontifex-accent);
+	color: var(--pontifex-paper);
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-button:hover,
+.pontifex-admin .pontifex-button:focus {
+	background: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.pontifex-admin .pontifex-progress {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.pontifex-admin .pontifex-notice {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-actions {
+	white-space: nowrap;
+}
+
+.pontifex-admin .pontifex-link {
+	color: var(--pontifex-accent);
+}
+
+.pontifex-admin .pontifex-delete-backup {
+	margin-left: calc(var(--pontifex-step) * 2);
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pontifex-muted);
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-delete-backup:hover,
+.pontifex-admin .pontifex-delete-backup:focus {
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-delete-backup:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 /* Narrow screens ------------------------------------------------------------ */
 
 @media screen and (max-width: 600px) {
