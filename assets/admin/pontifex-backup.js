@@ -118,12 +118,43 @@
 	}
 
 	/**
+	 * Enable or disable every delete button, so none can be pressed mid-backup.
+	 *
+	 * @param {boolean} enabled Whether the delete buttons should be clickable.
+	 */
+	function setDeleteEnabled( enabled ) {
+		Array.prototype.forEach.call(
+			document.querySelectorAll( '.pontifex-delete-backup' ),
+			function ( btn ) {
+				btn.disabled = ! enabled;
+			}
+		);
+	}
+
+	/**
+	 * Reset the create UI after a failed or refused backup.
+	 *
+	 * @param {HTMLButtonElement} button  The create button.
+	 * @param {string}            message The message to show.
+	 */
+	function resetAfterFailure( button, message ) {
+		button.disabled = false;
+		setDeleteEnabled( true );
+		showBar( false );
+		setIndeterminate( false );
+		setText( 'pontifex-backup-progress', '' );
+		setText( 'pontifex-backup-timing', '' );
+		setText( 'pontifex-backup-result', message );
+	}
+
+	/**
 	 * Run a backup: poll for progress while the create request completes.
 	 *
 	 * @param {HTMLButtonElement} button The create button.
 	 */
 	function startCreate( button ) {
 		button.disabled = true;
+		setDeleteEnabled( false );
 		setText( 'pontifex-backup-result', '' );
 		setText( 'pontifex-backup-progress', cfg.strings.starting );
 		setText( 'pontifex-backup-timing', '' );
@@ -132,16 +163,18 @@
 
 		var startedAt = Date.now();
 		var copyStartedAt = 0;
+		var seenCopying = false;
+		var lastDone = 0;
 
 		var poll = window.setInterval( function () {
 			request( 'pontifex_backup_progress' ).then( function ( res ) {
-				if ( ! res || ! res.success || ! res.data ) {
+				if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
 					return;
 				}
 				var data = res.data;
 				var elapsed = ( Date.now() - startedAt ) / 1000;
 
-				if ( 'scanning' === data.phase ) {
+				if ( 'copying' !== data.phase && ! seenCopying ) {
 					// Scanning phase: total unknown, so a sliding bar plus the climbing count.
 					setIndeterminate( true );
 					if ( data.done > 0 ) {
@@ -151,20 +184,24 @@
 					return;
 				}
 
-				// Copying phase: determinate bar, with elapsed and an estimate of time left.
+				// Copying phase: determinate bar that never runs backwards, with elapsed
+				// and an estimate of time left. Once seen, we never revert to scanning.
+				seenCopying = true;
 				if ( 0 === copyStartedAt ) {
 					copyStartedAt = Date.now();
 				}
+				var done = Math.max( data.done, lastDone );
+				lastDone = done;
 				setIndeterminate( false );
-				setBar( data.done, data.total );
+				setBar( done, data.total );
 				setText(
 					'pontifex-backup-progress',
-					cfg.strings.progress.replace( '%1$s', data.done ).replace( '%2$s', data.total )
+					cfg.strings.progress.replace( '%1$s', done ).replace( '%2$s', data.total )
 				);
 
 				var copyElapsed = ( Date.now() - copyStartedAt ) / 1000;
-				if ( data.done > 0 && copyElapsed > 0 ) {
-					var remaining = copyElapsed * ( data.total - data.done ) / data.done;
+				if ( done > 0 && done < data.total && copyElapsed > 0 ) {
+					var remaining = copyElapsed * ( data.total - done ) / done;
 					setText(
 						'pontifex-backup-timing',
 						cfg.strings.timing
@@ -185,23 +222,10 @@
 				window.location.reload();
 				return;
 			}
-			button.disabled = false;
-			showBar( false );
-			setIndeterminate( false );
-			setText( 'pontifex-backup-progress', '' );
-			setText( 'pontifex-backup-timing', '' );
-			setText(
-				'pontifex-backup-result',
-				( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed
-			);
+			resetAfterFailure( button, ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed );
 		} ).catch( function () {
 			window.clearInterval( poll );
-			button.disabled = false;
-			showBar( false );
-			setIndeterminate( false );
-			setText( 'pontifex-backup-progress', '' );
-			setText( 'pontifex-backup-timing', '' );
-			setText( 'pontifex-backup-result', cfg.strings.failed );
+			resetAfterFailure( button, cfg.strings.failed );
 		} );
 	}
 

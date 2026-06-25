@@ -63,6 +63,17 @@ final class BackupController {
 	private const PROGRESS_TRANSIENT = 'pontifex_backup_progress';
 
 	/**
+	 * The transient key marking that a backup is currently running.
+	 *
+	 * A single-runner lock: create() refuses a second backup while this is set, so
+	 * two concurrent exports can never fight over the progress transient. Carries a
+	 * TTL so a crash that skips the shutdown handler still self-heals.
+	 *
+	 * @var string
+	 */
+	private const LOCK_TRANSIENT = 'pontifex_backup_lock';
+
+	/**
 	 * How long the progress transient lives, in seconds (15 minutes).
 	 *
 	 * A literal rather than MINUTE_IN_SECONDS so the class is testable without
@@ -85,6 +96,13 @@ final class BackupController {
 	 * @var string
 	 */
 	private const PHASE_COPYING = 'copying';
+
+	/**
+	 * Progress phase reported when no backup is running (no progress transient set).
+	 *
+	 * @var string
+	 */
+	private const PHASE_IDLE = 'idle';
 
 	/**
 	 * Minimum interval, in seconds, between progress transient writes.
@@ -177,6 +195,16 @@ final class BackupController {
 	private ?string $active_backup_path = null;
 
 	/**
+	 * Whether this request holds the single-runner backup lock.
+	 *
+	 * Set when create() acquires the lock and cleared when it releases it, so the
+	 * shutdown handler knows whether a fatal left the lock (and a partial) behind.
+	 *
+	 * @var bool
+	 */
+	private bool $lock_held = false;
+
+	/**
 	 * Construct the controller around its collaborators.
 	 *
 	 * @param Environment                   $environment       Constant and PHP-version reads.
@@ -216,6 +244,12 @@ final class BackupController {
 			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
 		}
 
+		// Single-runner lock: refuse a second backup while one is already running, so
+		// two concurrent exports can never fight over the shared progress transient.
+		if ( ! $this->acquire_lock() ) {
+			wp_send_json_error( array( 'message' => __( 'A backup is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
+		}
+
 		$this->extend_time_limit();
 		$this->store->ensure_directory();
 		$this->bump_counters( array( 'attempted' => 1 ) );
@@ -247,6 +281,7 @@ final class BackupController {
 			$this->secure_file( $path );
 			$this->clear_progress();
 			$this->active_backup_path = null;
+			$this->release_lock();
 
 			$this->bump_counters(
 				array(
@@ -268,6 +303,7 @@ final class BackupController {
 			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
+			$this->release_lock();
 			$this->clear_progress();
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
@@ -283,13 +319,14 @@ final class BackupController {
 	 * try/catch in create() never runs and PHP dies after the destination file was
 	 * opened, leaving a half-written archive. On shutdown, when a backup was still
 	 * in progress and the request ended on a fatal, this logs the real reason and
-	 * removes the partial file. A clean run, or one that failed with a catchable
-	 * exception, has already cleared the active path, so this does nothing.
+	 * removes the partial file and releases the lock. A clean run, or one that
+	 * failed with a catchable exception, has already released the lock, so this
+	 * does nothing.
 	 *
 	 * @return void
 	 */
 	public function handle_shutdown(): void {
-		if ( null === $this->active_backup_path ) {
+		if ( ! $this->lock_held ) {
 			return;
 		}
 
@@ -299,11 +336,12 @@ final class BackupController {
 		}
 
 		$this->logger->error(
-			'Admin backup ended on a fatal error; removing the partial archive.',
+			'Admin backup ended on a fatal error; cleaning up the partial archive.',
 			array( 'error' => $last_error['message'] )
 		);
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
+		$this->release_lock();
 	}
 
 	/**
@@ -340,7 +378,7 @@ final class BackupController {
 		$progress = get_transient( self::PROGRESS_TRANSIENT );
 		$progress = is_array( $progress ) ? $progress : array();
 
-		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_COPYING;
+		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
 
 		wp_send_json_success(
 			array(
@@ -570,6 +608,30 @@ final class BackupController {
 	 */
 	private function clear_progress(): void {
 		delete_transient( self::PROGRESS_TRANSIENT );
+	}
+
+	/**
+	 * Acquire the single-runner backup lock, or report that it is already held.
+	 *
+	 * @return bool True if the lock was acquired; false if a backup is already running.
+	 */
+	private function acquire_lock(): bool {
+		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
+			return false;
+		}
+		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
+		$this->lock_held = true;
+		return true;
+	}
+
+	/**
+	 * Release the single-runner backup lock held by this request.
+	 *
+	 * @return void
+	 */
+	private function release_lock(): void {
+		delete_transient( self::LOCK_TRANSIENT );
+		$this->lock_held = false;
 	}
 
 	// -------------------------------------------------------------------------

@@ -168,6 +168,38 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A second backup is refused while one is already running.
+	 *
+	 * The single-runner lock stops two concurrent exports fighting over the shared
+	 * progress transient (the cause of the oscillating bar). The refused request
+	 * returns 409 and writes nothing.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_when_a_backup_is_already_running(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_backup_lock' === $key ? time() : false;
+			}
+		);
+
+		try {
+			$this->controller()->create();
+			$this->fail( 'create() should refuse while a backup is already running.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'A refused backup must write nothing.' );
+	}
+
+	/**
 	 * Refuses a download without the managing capability.
 	 *
 	 * @return void
