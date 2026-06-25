@@ -157,8 +157,13 @@
 	cursor: pointer;
 }
 
-.pontifex-admin .pontifex-button:hover,
-.pontifex-admin .pontifex-button:focus {
+/* The hidden attribute must beat the button's own display rule, so the idle Cancel button and the running Create button are actually hidden. */
+.pontifex-admin .pontifex-button[hidden] {
+	display: none;
+}
+
+.pontifex-admin .pontifex-button:hover:not(:disabled),
+.pontifex-admin .pontifex-button:focus:not(:disabled) {
 	background: var(--pontifex-ink);
 }
 
@@ -246,8 +251,8 @@
 	cursor: pointer;
 }
 
-.pontifex-admin .pontifex-delete-backup:hover,
-.pontifex-admin .pontifex-delete-backup:focus {
+.pontifex-admin .pontifex-delete-backup:hover:not(:disabled),
+.pontifex-admin .pontifex-delete-backup:focus:not(:disabled) {
 	color: var(--pontifex-ink);
 }
 
