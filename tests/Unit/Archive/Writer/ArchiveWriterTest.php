@@ -363,6 +363,45 @@ final class ArchiveWriterTest extends TestCase {
 	}
 
 	/**
+	 * Forwards the byte-progress callback across every entry's payload.
+	 *
+	 * The callback the export's progress bar rides on must see each entry's raw
+	 * source bytes as the entries stream, so the reported total equals the sum of
+	 * the entries' payload sizes — progress that advances within an entry, not
+	 * only between entries.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_reports_source_bytes_across_entries(): void {
+		$payloads = array( str_repeat( 'a', 100 ), str_repeat( 'b', 250 ), str_repeat( 'c', 70 ) );
+		$plans    = array();
+		foreach ( $payloads as $index => $payload ) {
+			$plans[] = new EntryPlan(
+				EntryHeader::for_file( 'file' . $index . '.txt', strlen( $payload ), 0644, 0, 'application/octet-stream', 0 ),
+				0,
+				self::zero_nonce(),
+				self::memory_stream_with( $payload )
+			);
+		}
+		$expected = strlen( $payloads[0] ) + strlen( $payloads[1] ) + strlen( $payloads[2] );
+
+		$reported = 0;
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			$plans,
+			self::memory_stream(),
+			null,
+			null,
+			null,
+			function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( $expected, $reported, 'The byte callback must see every source byte across all entries.' );
+	}
+
+	/**
 	 * Each entry's source stream is closed after the entry has been written.
 	 *
 	 * This bounds the export's memory: only one source is open at a time, no

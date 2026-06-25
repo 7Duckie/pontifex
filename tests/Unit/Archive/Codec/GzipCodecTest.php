@@ -326,4 +326,52 @@ final class GzipCodecTest extends TestCase {
 		$this->assertSame( strlen( $payload ), $written );
 		$this->assertSame( $payload, $this->drain( $output ) );
 	}
+
+	/**
+	 * Encoding must report each chunk's source bytes to the progress callback.
+	 *
+	 * The reported deltas must sum to the original input size and arrive more
+	 * than once for a multi-chunk payload, so a caller can advance a byte-based
+	 * progress bar within a single large entry rather than only at its boundary.
+	 *
+	 * @return void
+	 */
+	public function test_encode_reports_source_bytes_to_the_callback(): void {
+		$payload  = str_repeat( 'progress reporting payload; ', 4000 );
+		$codec    = new GzipCodec();
+		$reported = 0;
+		$calls    = 0;
+
+		$codec->encode(
+			$this->readable_stream( $payload ),
+			$this->writable_stream(),
+			function ( int $bytes ) use ( &$reported, &$calls ): void {
+				$reported += $bytes;
+				++$calls;
+			}
+		);
+
+		$this->assertSame( strlen( $payload ), $reported, 'Reported bytes must sum to the input size.' );
+		$this->assertGreaterThan( 1, $calls, 'A multi-chunk payload must report more than once.' );
+	}
+
+	/**
+	 * Encoding an empty input must not invoke the progress callback.
+	 *
+	 * @return void
+	 */
+	public function test_encode_empty_input_reports_nothing(): void {
+		$codec = new GzipCodec();
+		$calls = 0;
+
+		$codec->encode(
+			$this->readable_stream( '' ),
+			$this->writable_stream(),
+			function () use ( &$calls ): void {
+				++$calls;
+			}
+		);
+
+		$this->assertSame( 0, $calls, 'Empty input reads nothing, so the callback must not fire.' );
+	}
 }

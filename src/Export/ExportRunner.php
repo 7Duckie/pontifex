@@ -118,10 +118,11 @@ final class ExportRunner {
 	 * @param ExportOptions                                     $options     Where to write, plus optional encryption, signing, and the unencrypted-archive reason.
 	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
 	 * @return ExportResult The bytes written and the entry count.
 	 * @throws RuntimeException If the destination cannot be opened, or the archive cannot be written.
 	 */
-	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null ): ExportResult {
+	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		// Capture the entry count up front from Countable — both a plain array and a
 		// ManifestStream satisfy it in O(1); the write consumes the entries by
@@ -138,7 +139,8 @@ final class ExportRunner {
 				$destination,
 				$on_entry,
 				$options->encryption(),
-				$options->signing()
+				$options->signing(),
+				$on_bytes
 			);
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.

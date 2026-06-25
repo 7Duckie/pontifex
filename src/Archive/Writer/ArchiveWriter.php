@@ -127,13 +127,14 @@ final class ArchiveWriter {
 	 * @param callable|null          $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
 	 * @param EncryptionContext|null $encryption       Encryption inputs (cipher, key, salt); when supplied the header's encrypted flag is set, every entry is encrypted with a per-entry nonce, and the salt is written into the footer; null produces an unencrypted archive.
 	 * @param SigningContext|null    $signing          Signing inputs (signer, secret key, key id); when supplied the header's signed flag is set and a 100-byte Ed25519 signature block over the SHA-256 of every byte through the footer is appended. Requires a seekable, readable destination. null produces an unsigned archive.
+	 * @param callable|null          $on_bytes_read    Optional byte-progress callback forwarded to each entry's codec, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry as well as between entries.
 	 * @return int Total bytes written to the destination during this call.
 	 * @throws InvalidArgumentException If $destination is not a stream resource, any element
 	 *                                  of $entry_plans is not an EntryPlan, or signing was requested
 	 *                                  but the destination is not seekable and readable.
 	 * @throws RuntimeException         If any block fails to serialise, any write fails, a nonce cannot be generated, or signing fails.
 	 */
-	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null ): int {
+	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null ): int {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
@@ -231,7 +232,8 @@ final class ArchiveWriter {
 					$source,
 					$destination,
 					$cipher,
-					$key
+					$key,
+					$on_bytes_read
 				);
 			} finally {
 				if ( is_resource( $source ) ) {
