@@ -489,6 +489,30 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * The verify() byte callback fires as each entry's record streams through.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reports_bytes_read(): void {
+		$runner   = $this->make_runner();
+		$plans    = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana banana banana' ),
+		);
+		$reported = 0;
+
+		$runner->verify(
+			self::build_archive_stream( $plans ),
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'verify forwards byte progress from each entry read.' );
+	}
+
+	/**
 	 * Build a RestoreRunner with explicit defensive limits.
 	 *
 	 * @param ArchiveLimits      $limits The limits to enforce.

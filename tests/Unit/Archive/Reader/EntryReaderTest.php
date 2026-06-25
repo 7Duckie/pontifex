@@ -213,6 +213,44 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
+	 * Passes a sound entry and reports every record byte to the callback.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_passes_a_sound_entry_and_reports_bytes(): void {
+		$contents = str_repeat( 'verify me ', 200 );
+		$fixture  = self::write_file_entry_to_fixture( 'note.txt', $contents, RawCodec::ID );
+		$reported = 0;
+
+		self::make_reader()->verify_entry(
+			$fixture[0],
+			$fixture[1],
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( $fixture[1]->length(), $reported, 'verify_entry reports every byte of the record.' );
+	}
+
+	/**
+	 * Rejects an entry whose bytes no longer match its recorded hash.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_a_tampered_entry(): void {
+		$fixture = self::write_file_entry_to_fixture( 'note.txt', 'integrity matters', RawCodec::ID );
+		$bytes   = self::read_all( $fixture[0] );
+		// Flip a byte inside the hashed region (the header), leaving the recorded manifest hash intact.
+		$flipped = "\x00" === $bytes[20] ? "\xFF" : "\x00";
+		$corrupt = substr_replace( $bytes, $flipped, 20, 1 );
+		$stream  = self::memory_stream( $corrupt );
+
+		$this->expectException( RuntimeException::class );
+		self::make_reader()->verify_entry( $stream, $fixture[1] );
+	}
+
+	/**
 	 * The read_entry method must reject a non-resource source.
 	 *
 	 * @return void

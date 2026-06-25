@@ -17,6 +17,8 @@ use Pontifex\Admin\BackupPage;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
+use Pontifex\Admin\VerifyController;
+use Pontifex\Admin\VerifyPage;
 use Pontifex\Environment\Environment;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
@@ -46,14 +48,17 @@ final class AdminBootstrapTest extends TestCase {
 			}
 		);
 
-		( new AdminBootstrap( $this->menu(), $this->controller() ) )->register();
+		( new AdminBootstrap( $this->menu(), $this->controller(), $this->verify_controller() ) )->register();
 
 		$this->assertContains( 'admin_menu', $hooks );
 		$this->assertContains( 'admin_enqueue_scripts', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_create_backup', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_backup_progress', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_cancel_backup', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_download_backup', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_delete_backup', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_verify', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_verify_progress', $hooks );
 	}
 
 	/**
@@ -71,7 +76,11 @@ final class AdminBootstrapTest extends TestCase {
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() )
 		);
-		return new Menu( $overview, $backup );
+		$verify   = new VerifyPage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() )
+		);
+		return new Menu( $overview, $backup, $verify );
 	}
 
 	/**
@@ -81,6 +90,20 @@ final class AdminBootstrapTest extends TestCase {
 	 */
 	private function controller(): BackupController {
 		return new BackupController(
+			Mockery::mock( Environment::class ),
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() ),
+			new NullLogger()
+		);
+	}
+
+	/**
+	 * A real VerifyController over mocked dependencies.
+	 *
+	 * @return VerifyController
+	 */
+	private function verify_controller(): VerifyController {
+		return new VerifyController(
 			Mockery::mock( Environment::class ),
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() ),

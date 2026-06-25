@@ -12,10 +12,11 @@ namespace Pontifex\Admin;
 /**
  * Registers the top-level "Pontifex" admin menu and enqueues its stylesheet.
  *
- * Version 0.5.0 ships one screen — the Overview — under a top-level menu; later slices
- * add Backup, Verify and Restore as sibling subpages. The menu and every page
- * require the `manage_options` capability (the WordPress "manage this site"
- * gate): the admin UI is deny-by-default, unlike the shell-trust CLI.
+ * Version 0.5.0 builds the admin UI screen by screen: the Overview, Backup and
+ * Verify screens sit under a top-level menu, with the Restore slice still to come
+ * as a sibling subpage. The menu and every page require the `manage_options`
+ * capability (the WordPress "manage this site" gate): the admin UI is
+ * deny-by-default, unlike the shell-trust CLI.
  *
  * The stylesheet is enqueued only on Pontifex screens, identified by the hook
  * suffixes WordPress returns from add_menu_page(), so the plugin adds nothing to
@@ -52,6 +53,13 @@ final class Menu {
 	private BackupPage $backup;
 
 	/**
+	 * The Verify page controller.
+	 *
+	 * @var VerifyPage
+	 */
+	private VerifyPage $verify;
+
+	/**
 	 * The hook suffixes WordPress assigned to the Pontifex screens.
 	 *
 	 * Collected as the pages register so {@see self::enqueue_assets()} can tell a
@@ -62,21 +70,30 @@ final class Menu {
 	private array $page_hooks = array();
 
 	/**
-	 * The hook suffix of the Backup screen — the one screen that also loads a script.
+	 * The hook suffix of the Backup screen — one of the two screens that load a script.
 	 *
 	 * @var string
 	 */
 	private string $backup_hook = '';
 
 	/**
+	 * The hook suffix of the Verify screen — the other screen that loads a script.
+	 *
+	 * @var string
+	 */
+	private string $verify_hook = '';
+
+	/**
 	 * Construct the menu around its page controllers.
 	 *
 	 * @param OverviewPage $overview The Overview page controller.
 	 * @param BackupPage   $backup   The Backup page controller.
+	 * @param VerifyPage   $verify   The Verify page controller.
 	 */
-	public function __construct( OverviewPage $overview, BackupPage $backup ) {
+	public function __construct( OverviewPage $overview, BackupPage $backup, VerifyPage $verify ) {
 		$this->overview = $overview;
 		$this->backup   = $backup;
+		$this->verify   = $verify;
 	}
 
 	/**
@@ -117,6 +134,15 @@ final class Menu {
 			array( $this->backup, 'render' )
 		);
 
+		$verify_hook = add_submenu_page(
+			self::SLUG,
+			__( 'Pontifex — Verify', 'pontifex' ),
+			__( 'Verify', 'pontifex' ),
+			self::CAPABILITY,
+			self::SLUG . '-verify',
+			array( $this->verify, 'render' )
+		);
+
 		if ( is_string( $overview_hook ) && '' !== $overview_hook ) {
 			$this->page_hooks[] = $overview_hook;
 		}
@@ -124,6 +150,11 @@ final class Menu {
 		if ( is_string( $backup_hook ) && '' !== $backup_hook ) {
 			$this->page_hooks[] = $backup_hook;
 			$this->backup_hook  = $backup_hook;
+		}
+
+		if ( is_string( $verify_hook ) && '' !== $verify_hook ) {
+			$this->page_hooks[] = $verify_hook;
+			$this->verify_hook  = $verify_hook;
 		}
 	}
 
@@ -154,6 +185,10 @@ final class Menu {
 
 		if ( '' !== $this->backup_hook && $hook_suffix === $this->backup_hook ) {
 			$this->enqueue_backup_script( $base, $version );
+		}
+
+		if ( '' !== $this->verify_hook && $hook_suffix === $this->verify_hook ) {
+			$this->enqueue_verify_script( $base, $version );
 		}
 	}
 
@@ -192,9 +227,9 @@ final class Menu {
 					/* translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes */
 					'progress'      => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'       => __( '%s elapsed', 'pontifex' ),
+					'elapsed'       => __( 'Time elapsed - %s', 'pontifex' ),
 					/* translators: 1: elapsed time, 2: estimated time remaining */
-					'timing'        => __( '%1$s elapsed with about %2$s left', 'pontifex' ),
+					'timing'        => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
 					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
 					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
 					'cancel'        => __( 'Cancel backup', 'pontifex' ),
@@ -203,6 +238,44 @@ final class Menu {
 					'confirmCancel' => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
 					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+				),
+			)
+		);
+	}
+
+	/**
+	 * Enqueue and configure the Verify screen's script.
+	 *
+	 * Drives the per-backup Verify actions over admin-ajax. Localised with the
+	 * ajax URL, a `pontifex_verify` nonce, and the translated strings it shows; the
+	 * server re-checks the capability and nonce on every action.
+	 *
+	 * @param string       $base    The plugin's base URL.
+	 * @param string|false $version The asset version, or false when undefined.
+	 * @return void
+	 */
+	private function enqueue_verify_script( string $base, string|false $version ): void {
+		wp_enqueue_script(
+			'pontifex-verify',
+			$base . 'assets/admin/pontifex-verify.js',
+			array(),
+			$version,
+			true
+		);
+
+		wp_localize_script(
+			'pontifex-verify',
+			'pontifexVerify',
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( VerifyController::NONCE_ACTION ),
+				'strings' => array(
+					'starting' => __( 'Verifying…', 'pontifex' ),
+					/* translators: 1: bytes read so far, 2: archive size, both as human-readable sizes */
+					'progress' => __( '%1$s of %2$s', 'pontifex' ),
+					/* translators: %s: elapsed time, e.g. 0:48 */
+					'elapsed'  => __( 'Time elapsed - %s', 'pontifex' ),
+					'failed'   => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 				),
 			)
 		);
