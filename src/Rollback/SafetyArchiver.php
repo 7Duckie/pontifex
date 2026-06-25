@@ -116,10 +116,11 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 *
 	 * @param string        $wordpress_root Absolute path of the WordPress installation to archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void` with each chunk's raw source byte count.
 	 * @return string The absolute path of the safety archive written.
 	 * @throws RuntimeException If the preflight refuses, or the archive cannot be written.
 	 */
-	public function create( string $wordpress_root, ?callable $on_entry = null ): string {
+	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null ): string {
 		$this->store->ensure_directory();
 
 		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
@@ -130,7 +131,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		$path = $this->store->next_archive_path( new DateTimeImmutable() );
 
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
-		$export_runner->export( new ExportOptions( $path ), $entry_plans, $on_entry );
+		$export_runner->export( new ExportOptions( $path ), $entry_plans, $on_entry, $on_bytes );
 
 		// The archive holds the whole database, so it must be owner-only. On a
 		// POSIX host a failed chmod means it could not be secured; rather than

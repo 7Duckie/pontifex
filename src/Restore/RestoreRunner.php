@@ -132,16 +132,18 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
 	 */
-	public function restore( $archive_source, ?callable $on_entry_restored = null ): void {
+	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		$this->walk(
 			$archive_source,
 			$on_entry_restored,
 			function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
 				$this->dispatch( $manifest_entry, $result );
-			}
+			},
+			$on_bytes
 		);
 	}
 
@@ -205,9 +207,10 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param resource      $archive_source A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable      $handle         Receives each decoded entry as `( ManifestEntry $entry, EntryReadResult $result ): void`.
+	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws RuntimeException If the archive is malformed, hash verification fails, a defensive limit is exceeded, or $handle fails.
 	 */
-	private function walk( $archive_source, ?callable $on_entry, callable $handle ): void {
+	private function walk( $archive_source, ?callable $on_entry, callable $handle, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source );
 		$manifest = $reader->manifest();
 
@@ -232,7 +235,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			$remaining   = $total_budget - $decoded_so_far;
 			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
 
-			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit );
+			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit, $on_bytes );
 
 			$decoded_so_far += strlen( $result->payload() );
 			if ( $decoded_so_far > $total_budget ) {

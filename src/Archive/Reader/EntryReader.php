@@ -91,14 +91,15 @@ final class EntryReader {
 	public const DEFAULT_MAX_DECODED_BYTES = 2147483648;
 
 	/**
-	 * Chunk size, in bytes, for the streaming verify read (1 MiB).
+	 * Chunk size, in bytes, for the streaming entry reads (1 MiB).
 	 *
-	 * Bounds memory and sets how often {@see self::verify_entry()} reports byte
-	 * progress; a larger value only reduces the number of read calls.
+	 * Bounds memory and sets how often {@see self::verify_entry()} and
+	 * {@see self::read_record_bytes()} report byte progress; a larger value only
+	 * reduces the number of read calls.
 	 *
 	 * @var int
 	 */
-	private const VERIFY_CHUNK_SIZE = 1048576;
+	private const READ_CHUNK_SIZE = 1048576;
 
 	/**
 	 * Codec registry used to look up codecs by id.
@@ -158,11 +159,12 @@ final class EntryReader {
 	 * @param resource      $source            A seekable, readable stream containing the archive.
 	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record to read.
 	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce. Defaults to DEFAULT_MAX_DECODED_BYTES; pass null for no limit.
+	 * @param callable|null $on_bytes          Optional byte-progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record is read, so a caller can report progress within a large entry.
 	 * @return EntryReadResult The parsed header and decoded payload.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
 	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, or the decoded payload exceeds $max_decoded_bytes.
 	 */
-	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES ): EntryReadResult {
+	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES, ?callable $on_bytes = null ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
 		}
@@ -172,7 +174,7 @@ final class EntryReader {
 			throw new InvalidArgumentException( 'EntryReader: $source stream must be seekable.' );
 		}
 
-		$record_bytes = $this->read_record_bytes( $source, $manifest_entry );
+		$record_bytes = $this->read_record_bytes( $source, $manifest_entry, $on_bytes );
 		$record_len   = strlen( $record_bytes );
 
 		// Minimum record size: 4-byte header_length + at least 1 byte of header + 2-byte codec_id + 12-byte nonce + 32-byte hash.
@@ -312,7 +314,7 @@ final class EntryReader {
 		$context   = hash_init( 'sha256' );
 		$remaining = $length - Sha256::DIGEST_SIZE;
 		while ( $remaining > 0 ) {
-			$want = (int) min( self::VERIFY_CHUNK_SIZE, $remaining );
+			$want = (int) min( self::READ_CHUNK_SIZE, $remaining );
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 			$chunk = fread( $source, $want );
 			if ( false === $chunk || '' === $chunk ) {
@@ -395,12 +397,18 @@ final class EntryReader {
 	/**
 	 * Read the on-disk entry record bytes for the given manifest entry.
 	 *
+	 * Reads the record in {@see self::READ_CHUNK_SIZE} chunks, reporting each
+	 * chunk's byte count through the optional callback so a large entry can drive a
+	 * byte-progress bar. The whole record is still accumulated in memory for the
+	 * decode that follows; true decoded-streaming is a separate, later change.
+	 *
 	 * @param resource      $source         The source stream.
 	 * @param ManifestEntry $manifest_entry The entry pointing at the record.
+	 * @param callable|null $on_bytes       Optional byte-progress callback, called as `( int $bytes ): void` per chunk read.
 	 * @return string The raw on-disk record bytes.
 	 * @throws RuntimeException If the seek fails or fewer bytes are returned than expected.
 	 */
-	private function read_record_bytes( $source, ManifestEntry $manifest_entry ): string {
+	private function read_record_bytes( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
 			throw new RuntimeException(
@@ -408,14 +416,29 @@ final class EntryReader {
 			);
 		}
 
-		$length = $manifest_entry->length();
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
-		$bytes = fread( $source, $length );
-		if ( false === $bytes || strlen( $bytes ) !== $length ) {
-			throw new RuntimeException(
-				sprintf( 'EntryReader: could not read %d entry bytes at offset %d; stream may be truncated.', (int) $length, (int) $manifest_entry->offset() )
-			);
+		// Read the record in chunks, accumulating the whole record (the decode still
+		// needs it in memory — true decoded-streaming is a later change) while
+		// reporting each chunk's byte count, so a large entry advances a byte-progress
+		// bar instead of freezing the restore walk.
+		$length    = $manifest_entry->length();
+		$bytes     = '';
+		$remaining = $length;
+		while ( $remaining > 0 ) {
+			$want = (int) min( self::READ_CHUNK_SIZE, $remaining );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+			$chunk = fread( $source, $want );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new RuntimeException(
+					sprintf( 'EntryReader: could not read %d entry bytes at offset %d; stream may be truncated.', (int) $length, (int) $manifest_entry->offset() )
+				);
+			}
+			$bytes     .= $chunk;
+			$remaining -= strlen( $chunk );
+			if ( null !== $on_bytes ) {
+				$on_bytes( strlen( $chunk ) );
+			}
 		}
+
 		return $bytes;
 	}
 

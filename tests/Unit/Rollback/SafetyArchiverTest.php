@@ -128,6 +128,39 @@ final class SafetyArchiverTest extends TestCase {
 		$this->assertSame( array(), $store->archives(), 'No archive may be written when the preflight refuses.' );
 	}
 
+	/**
+	 * Forwards byte progress from the export to the caller's callback.
+	 *
+	 * @return void
+	 */
+	public function test_create_forwards_byte_progress(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			$this->file_plan( 'wp-content/note.txt', "café ☕\n" ),
+		);
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$reported = 0;
+		$archiver->create(
+			'/var/www/html',
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'create() forwards byte progress from the export pipeline.' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborator builders.
 	// -------------------------------------------------------------------------

@@ -251,6 +251,28 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
+	 * Reads a sound entry and reports every record byte to the callback.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_reports_bytes(): void {
+		$contents = str_repeat( 'restore me ', 200 );
+		$fixture  = self::write_file_entry_to_fixture( 'note.txt', $contents, RawCodec::ID );
+		$reported = 0;
+
+		self::make_reader()->read_entry(
+			$fixture[0],
+			$fixture[1],
+			EntryReader::DEFAULT_MAX_DECODED_BYTES,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( $fixture[1]->length(), $reported, 'read_entry reports every byte of the record.' );
+	}
+
+	/**
 	 * The read_entry method must reject a non-resource source.
 	 *
 	 * @return void
