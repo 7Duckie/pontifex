@@ -170,7 +170,7 @@ final class SafetyArchiverTest extends TestCase {
 	 */
 	private function manifest_builder_returning( array $plans ) {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
-		$builder->shouldReceive( 'build' )->once()->andReturn( $plans );
+		$builder->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( $plans ) );
 		return $builder;
 	}
 

@@ -363,6 +363,33 @@ final class ArchiveWriterTest extends TestCase {
 	}
 
 	/**
+	 * Each entry's source stream is closed after the entry has been written.
+	 *
+	 * This bounds the export's memory: only one source is open at a time, no
+	 * matter how many entries the archive holds. The plan opens a fresh stream
+	 * from its factory, which the writer must close once the entry is on disk.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_closes_each_entry_source(): void {
+		$opened = null;
+		$plan   = new EntryPlan(
+			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			static function () use ( &$opened ) {
+				$opened = self::memory_stream_with( 'data' );
+				return $opened;
+			}
+		);
+
+		self::make_writer()->write_archive( self::sample_provenance(), array( $plan ), self::memory_stream() );
+
+		$this->assertNotNull( $opened, 'The writer should have opened the deferred source.' );
+		$this->assertFalse( is_resource( $opened ), 'The writer must close each entry source after writing it.' );
+	}
+
+	/**
 	 * The first entry must start at the offset just past the provenance block.
 	 *
 	 * @return void

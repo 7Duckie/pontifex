@@ -21,6 +21,7 @@ use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Manifest\ManifestBuilder;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 
 /**
@@ -119,14 +120,16 @@ final class ManifestBuilderTest extends TestCase {
 	}
 
 	/**
-	 * Building against an empty WordPress root and empty database must return an empty array.
+	 * Building against an empty WordPress root and empty database must return an empty stream.
 	 *
 	 * @return void
 	 */
-	public function test_build_empty_inputs_returns_empty_array(): void {
-		$plans = self::default_builder()->build( $this->fixture_root );
+	public function test_build_empty_inputs_returns_empty_stream(): void {
+		$stream = self::default_builder()->build( $this->fixture_root );
 
-		$this->assertSame( array(), $plans );
+		$this->assertInstanceOf( ManifestStream::class, $stream );
+		$this->assertCount( 0, $stream );
+		$this->assertSame( array(), iterator_to_array( $stream ) );
 	}
 
 	/**
@@ -141,7 +144,7 @@ final class ManifestBuilderTest extends TestCase {
 		$db = new FakeDbAdapter();
 		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
 
-		$plans = self::default_builder( $db )->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder( $db )->build( $this->fixture_root ) );
 
 		$this->assertNotEmpty( $plans );
 		foreach ( $plans as $plan ) {
@@ -158,7 +161,7 @@ final class ManifestBuilderTest extends TestCase {
 		$this->write_file( 'wp-config.php' );
 		$expected_nonce = str_repeat( "\0", EntryWriter::NONCE_SIZE );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 
 		$this->assertNotEmpty( $plans );
 		foreach ( $plans as $plan ) {
@@ -178,7 +181,7 @@ final class ManifestBuilderTest extends TestCase {
 		$db = new FakeDbAdapter();
 		$db->add_table( 'wp_options', 5, "CREATE TABLE `wp_options` (id INT);\n" );
 
-		$plans = self::default_builder( $db )->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder( $db )->build( $this->fixture_root ) );
 
 		// Find the last file plan's index and the first db_chunk's index.
 		$last_file_index = null;
@@ -205,7 +208,7 @@ final class ManifestBuilderTest extends TestCase {
 	public function test_file_plan_has_file_header(): void {
 		$this->write_file( 'wp-config.php', 'data' );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 
 		$this->assertCount( 1, $plans );
 		$header = $plans[0]->header();
@@ -221,7 +224,7 @@ final class ManifestBuilderTest extends TestCase {
 	public function test_directory_plan_has_directory_header(): void {
 		$this->write_file( 'wp-content/themes/twentytwentyfour/style.css' );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 		$kinds = array_map( static fn( EntryPlan $p ): string => (string) $p->header()->kind(), $plans );
 
 		$this->assertContains( EntryHeader::KIND_DIRECTORY, $kinds );
@@ -236,7 +239,7 @@ final class ManifestBuilderTest extends TestCase {
 		$db = new FakeDbAdapter();
 		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
 
-		$plans = self::default_builder( $db )->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder( $db )->build( $this->fixture_root ) );
 
 		$this->assertCount( 1, $plans );
 		$header = $plans[0]->header();
@@ -254,7 +257,7 @@ final class ManifestBuilderTest extends TestCase {
 		$db = new FakeDbAdapter();
 		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
 
-		$plans = self::default_builder( $db )->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder( $db )->build( $this->fixture_root ) );
 
 		foreach ( $plans as $plan ) {
 			$this->assertIsResource( $plan->source() );
@@ -269,7 +272,7 @@ final class ManifestBuilderTest extends TestCase {
 	public function test_file_plan_source_yields_file_contents(): void {
 		$this->write_file( 'note.txt', 'pontifex was here' );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 
 		$this->assertCount( 1, $plans );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Reading a test stream resource.
@@ -285,7 +288,7 @@ final class ManifestBuilderTest extends TestCase {
 	public function test_directory_plan_source_is_empty(): void {
 		$this->write_file( 'wp-content/themes/x/style.css' );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 
 		foreach ( $plans as $plan ) {
 			if ( EntryHeader::KIND_DIRECTORY === $plan->header()->kind() ) {
@@ -309,7 +312,7 @@ final class ManifestBuilderTest extends TestCase {
 		$database_scanner = new DatabaseScanner( new FakeDbAdapter(), ExclusionRules::none() );
 		$builder          = new ManifestBuilder( $file_scanner, $database_scanner );
 
-		$plans = $builder->build( $this->fixture_root );
+		$plans = iterator_to_array( $builder->build( $this->fixture_root ) );
 		$paths = array();
 		foreach ( $plans as $plan ) {
 			if ( EntryHeader::KIND_FILE === $plan->header()->kind() ) {
@@ -329,7 +332,7 @@ final class ManifestBuilderTest extends TestCase {
 	public function test_media_type_propagates_through_to_entry_header(): void {
 		$this->write_file( 'note.txt', 'plain text content' );
 
-		$plans = self::default_builder()->build( $this->fixture_root );
+		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
 
 		$file_plans = array();
 		foreach ( $plans as $plan ) {
