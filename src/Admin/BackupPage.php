@@ -127,8 +127,10 @@ final class BackupPage {
 			esc_html__( 'A backup packs every file and the whole database into one .wpmig archive, written to a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download.', 'pontifex' )
 		);
 		printf(
-			'<p><button type="button" class="pontifex-button" id="pontifex-create-backup">%s</button></p>',
-			esc_html__( 'Create backup', 'pontifex' )
+			'<p><button type="button" class="pontifex-button" id="pontifex-create-backup">%s</button>'
+			. '<button type="button" class="pontifex-button" id="pontifex-cancel-backup" hidden>%s</button></p>',
+			esc_html__( 'Create backup', 'pontifex' ),
+			esc_html__( 'Cancel backup', 'pontifex' )
 		);
 		echo '<div class="pontifex-progress-track" id="pontifex-backup-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-backup-bar"></span></div>';
 		echo '<p class="pontifex-progress" id="pontifex-backup-progress" aria-live="polite"></p>';

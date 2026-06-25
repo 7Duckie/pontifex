@@ -152,13 +152,35 @@
 	}
 
 	/**
-	 * Reset the create UI after a failed or refused backup.
+	 * Swap the Create and Cancel buttons for the running or idle state.
 	 *
-	 * @param {HTMLButtonElement} button  The create button.
-	 * @param {string}            message The message to show.
+	 * While a backup runs, Cancel takes Create's place (the one filled element on
+	 * the page); when idle, Create is shown and Cancel hidden and reset.
+	 *
+	 * @param {boolean} running Whether a backup is running.
 	 */
-	function resetAfterFailure( button, message ) {
-		button.disabled = false;
+	function swapRunning( running ) {
+		var create = document.getElementById( 'pontifex-create-backup' );
+		var cancel = document.getElementById( 'pontifex-cancel-backup' );
+		if ( create ) {
+			create.hidden = running;
+		}
+		if ( cancel ) {
+			cancel.hidden = ! running;
+			cancel.disabled = false;
+			cancel.textContent = cfg.strings.cancel;
+		}
+	}
+
+	/**
+	 * Return the create UI to its idle state, showing a message.
+	 *
+	 * Used after a failed, refused, or cancelled backup.
+	 *
+	 * @param {string} message The notice to show.
+	 */
+	function resetIdle( message ) {
+		swapRunning( false );
 		setDeleteEnabled( true );
 		showBar( false );
 		setIndeterminate( false );
@@ -169,11 +191,9 @@
 
 	/**
 	 * Run a backup: poll for progress while the create request completes.
-	 *
-	 * @param {HTMLButtonElement} button The create button.
 	 */
-	function startCreate( button ) {
-		button.disabled = true;
+	function startCreate() {
+		swapRunning( true );
 		setDeleteEnabled( false );
 		setText( 'pontifex-backup-result', '' );
 		setText( 'pontifex-backup-progress', cfg.strings.starting );
@@ -244,16 +264,20 @@
 
 		request( 'pontifex_create_backup' ).then( function ( res ) {
 			window.clearInterval( poll );
+			if ( res && res.success && res.data && res.data.cancelled ) {
+				resetIdle( cfg.strings.cancelled );
+				return;
+			}
 			if ( res && res.success ) {
 				setIndeterminate( false );
 				setBar( 1, 1 );
 				window.location.reload();
 				return;
 			}
-			resetAfterFailure( button, ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed );
+			resetIdle( ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed );
 		} ).catch( function () {
 			window.clearInterval( poll );
-			resetAfterFailure( button, cfg.strings.failed );
+			resetIdle( cfg.strings.failed );
 		} );
 	}
 
@@ -281,14 +305,35 @@
 	}
 
 	/**
-	 * Wire the create button and any delete buttons present on the page.
+	 * Bind the Cancel button to request a stop of the running backup.
+	 *
+	 * The pending create request resolves with a cancelled response once the
+	 * export has stopped; that is what resets the UI, so this only signals the
+	 * request and reflects the "cancelling" state.
+	 *
+	 * @param {HTMLButtonElement} button The cancel button.
+	 */
+	function bindCancel( button ) {
+		button.addEventListener( 'click', function () {
+			button.disabled = true;
+			button.textContent = cfg.strings.cancelling;
+			request( 'pontifex_cancel_backup' ).catch( function () {} );
+		} );
+	}
+
+	/**
+	 * Wire the create, cancel, and delete buttons present on the page.
 	 */
 	function init() {
 		var create = document.getElementById( 'pontifex-create-backup' );
 		if ( create ) {
 			create.addEventListener( 'click', function () {
-				startCreate( create );
+				startCreate();
 			} );
+		}
+		var cancel = document.getElementById( 'pontifex-cancel-backup' );
+		if ( cancel ) {
+			bindCancel( cancel );
 		}
 		Array.prototype.forEach.call(
 			document.querySelectorAll( '.pontifex-delete-backup' ),

@@ -195,6 +195,9 @@ final class Menu {
 					'elapsed'       => __( '%s elapsed', 'pontifex' ),
 					/* translators: 1: elapsed time, 2: estimated time remaining */
 					'timing'        => __( '%1$s elapsed with about %2$s left', 'pontifex' ),
+					'cancel'        => __( 'Cancel backup', 'pontifex' ),
+					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
+					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
 					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
 				),

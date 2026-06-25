@@ -252,6 +252,9 @@ final class BackupController {
 
 		$this->extend_time_limit();
 		$this->store->ensure_directory();
+		// Drop any stale cancel sentinel a crashed run may have left, so this backup
+		// is not cancelled before it starts.
+		$this->store->clear_cancel();
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
 		// A fatal error — out of memory, an exceeded time limit — cannot be caught,
@@ -282,6 +285,7 @@ final class BackupController {
 			$this->clear_progress();
 			$this->active_backup_path = null;
 			$this->release_lock();
+			$this->store->clear_cancel();
 
 			$this->bump_counters(
 				array(
@@ -299,12 +303,23 @@ final class BackupController {
 					'size'     => $this->wordpress_context->format_size( $result->bytes_written() ),
 				)
 			);
+		} catch ( BackupCancelled $cancelled ) {
+			// Cancellation is not a failure: remove the partial archive, release the
+			// lock, and report it as cancelled. The attempted counter stays bumped,
+			// but neither succeeded nor failed is recorded and nothing is logged.
+			$this->delete_partial_backup();
+			$this->active_backup_path = null;
+			$this->release_lock();
+			$this->clear_progress();
+			$this->store->clear_cancel();
+			wp_send_json_success( array( 'cancelled' => true ) );
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
 			$this->release_lock();
 			$this->clear_progress();
+			$this->store->clear_cancel();
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
@@ -342,6 +357,7 @@ final class BackupController {
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
 		$this->release_lock();
+		$this->store->clear_cancel();
 	}
 
 	/**
@@ -442,6 +458,27 @@ final class BackupController {
 		}
 	}
 
+	/**
+	 * Ask the running backup to stop.
+	 *
+	 * The `wp_ajax_pontifex_cancel_backup` handler. Refuses without capability and
+	 * nonce, then writes the cancel sentinel the running export polls for; the
+	 * export unwinds cooperatively at its next progress checkpoint and reports the
+	 * backup as cancelled. Returns immediately — the operator's create request is
+	 * what resolves once the export has stopped.
+	 *
+	 * @return void
+	 */
+	public function cancel(): void {
+		if ( ! $this->is_authorised() ) {
+			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
+		}
+
+		$this->store->ensure_directory();
+		$this->store->request_cancel();
+		wp_send_json_success();
+	}
+
 	// -------------------------------------------------------------------------
 	// Authorisation.
 	// -------------------------------------------------------------------------
@@ -533,6 +570,7 @@ final class BackupController {
 			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
 				$this->set_copy_progress( $bytes_done, $total_bytes );
 				$last = $now;
+				$this->throw_if_cancelled();
 			}
 		};
 	}
@@ -554,8 +592,25 @@ final class BackupController {
 			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
 				$this->set_scan_progress( $scanned );
 				$last = $now;
+				$this->throw_if_cancelled();
 			}
 		};
+	}
+
+	/**
+	 * Throw {@see BackupCancelled} when the operator has requested a cancel.
+	 *
+	 * Called from the scan and copy progress callbacks at their throttle point, so
+	 * a cancel is observed within {@see self::PROGRESS_THROTTLE_SECONDS} — including
+	 * partway through a single large file, where a per-entry check could not fire.
+	 *
+	 * @return void
+	 * @throws BackupCancelled When a cancel has been requested for this backup.
+	 */
+	private function throw_if_cancelled(): void {
+		if ( $this->store->is_cancel_requested() ) {
+			throw new BackupCancelled();
+		}
 	}
 
 	/**

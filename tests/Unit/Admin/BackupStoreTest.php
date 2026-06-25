@@ -158,6 +158,27 @@ final class BackupStoreTest extends TestCase {
 	}
 
 	/**
+	 * The cancel sentinel round-trips: requested, observed, then cleared.
+	 *
+	 * The export polls is_cancel_requested() within one long request, so the read
+	 * clears the stat cache; this exercises the write, the read, and the removal.
+	 *
+	 * @return void
+	 */
+	public function test_cancel_sentinel_round_trips(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		$this->assertFalse( $store->is_cancel_requested(), 'No cancel is requested initially.' );
+
+		$store->request_cancel();
+		$this->assertTrue( $store->is_cancel_requested(), 'A requested cancel must be observed.' );
+
+		$store->clear_cancel();
+		$this->assertFalse( $store->is_cancel_requested(), 'A cleared cancel must no longer be observed.' );
+	}
+
+	/**
 	 * Create an empty file with the given name inside the store directory.
 	 *
 	 * @param BackupStore $store    The store whose directory to seed.

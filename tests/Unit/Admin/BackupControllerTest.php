@@ -254,6 +254,131 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * Refuses a cancel request without the managing capability.
+	 *
+	 * @return void
+	 */
+	public function test_cancel_refuses_without_capability(): void {
+		Functions\when( 'current_user_can' )->justReturn( false );
+		$this->stub_json();
+
+		try {
+			$this->controller()->cancel();
+			$this->fail( 'cancel() should refuse without the capability.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 403, $this->json['status'] );
+	}
+
+	/**
+	 * A cancel request writes the sentinel the running export polls for.
+	 *
+	 * @return void
+	 */
+	public function test_cancel_requests_a_stop_and_reports_success(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$this->controller()->cancel();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue(
+			( new BackupStore( $this->base ) )->is_cancel_requested(),
+			'cancel() must write the sentinel the export polls for.'
+		);
+	}
+
+	/**
+	 * A cancel during the scan stops the backup and writes nothing.
+	 *
+	 * @return void
+	 */
+	public function test_create_honours_a_cancel_during_the_scan(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->andReturnUsing(
+			static function ( string $root, ?callable $on_scan ) use ( $store ) {
+				$store->request_cancel();
+				if ( null !== $on_scan ) {
+					$on_scan( 1 );
+				}
+				return ManifestStream::from_plans( array() );
+			}
+		);
+
+		$this->controller( $builder )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertArrayHasKey( 'cancelled', $this->json['data'], 'A cancelled backup must report cancelled.' );
+		$this->assertTrue( $this->json['data']['cancelled'] );
+		$this->assertSame( array(), $store->backups(), 'A cancel during the scan writes no backup.' );
+		$this->assertFalse( $store->is_cancel_requested(), 'The sentinel must be cleared after a cancel.' );
+	}
+
+	/**
+	 * A cancel during the copy stops the backup and removes the partial archive.
+	 *
+	 * @return void
+	 */
+	public function test_create_honours_a_cancel_during_the_copy(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		$plans = array(
+			$this->cancelling_plan( 'a.txt', $store ),
+			$this->file_plan( 'b.txt', "second entry\n" ),
+		);
+
+		$this->controller( $this->manifest_builder_returning( $plans ) )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertArrayHasKey( 'cancelled', $this->json['data'], 'A cancelled backup must report cancelled.' );
+		$this->assertTrue( $this->json['data']['cancelled'] );
+		$this->assertSame( array(), $store->backups(), 'A cancel during the copy must remove the partial archive.' );
+		$this->assertFalse( $store->is_cancel_requested(), 'The sentinel must be cleared after a cancel.' );
+	}
+
+	/**
+	 * A stale cancel sentinel is cleared at the start, so a fresh backup completes.
+	 *
+	 * @return void
+	 */
+	public function test_create_clears_a_stale_cancel_sentinel_and_completes(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$store->request_cancel();
+
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n" ),
+			$this->file_plan( 'note.txt', "note\n" ),
+		);
+
+		$this->controller( $this->manifest_builder_returning( $plans ) )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertArrayNotHasKey( 'cancelled', $this->json['data'], 'A stale sentinel must not cancel a fresh backup.' );
+		$this->assertCount( 1, $store->backups(), 'The completed backup must be written.' );
+		$this->assertFalse( $store->is_cancel_requested(), 'The stale sentinel must be cleared.' );
+	}
+
+	/**
 	 * Refuses a download without the managing capability.
 	 *
 	 * @return void
@@ -512,6 +637,37 @@ final class BackupControllerTest extends TestCase {
 			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
 			static function () {
 				throw new RuntimeException( 'simulated source failure' );
+			}
+		);
+	}
+
+	/**
+	 * Build a file EntryPlan whose source requests a cancel as it begins to stream.
+	 *
+	 * The deferred source writes the cancel sentinel just before returning the
+	 * stream, so the copy progress callback observes the cancel partway through
+	 * writing this entry — the situation the mid-copy cleanup must handle.
+	 *
+	 * @param string      $path  Relative path inside the archive.
+	 * @param BackupStore $store The store whose cancel sentinel the source writes.
+	 * @return EntryPlan
+	 */
+	private function cancelling_plan( string $path, BackupStore $store ): EntryPlan {
+		$contents = "first entry payload\n";
+		$header   = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan(
+			$header,
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			static function () use ( $contents, $store ) {
+				$store->request_cancel();
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory in-process buffer for the test source.
+				$stream = fopen( 'php://memory', 'r+b' );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+				fwrite( $stream, $contents );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+				rewind( $stream );
+				return $stream;
 			}
 		);
 	}

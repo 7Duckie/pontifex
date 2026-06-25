@@ -86,6 +86,19 @@ final class BackupStore {
 	private const DIRECTORY_MODE = 0700;
 
 	/**
+	 * Sentinel filename whose presence asks a running backup to stop.
+	 *
+	 * A dot-file, so it never matches the backup glob or the strict retrieval
+	 * pattern; it lives in this owner-only, web-protected directory. The cancel
+	 * request creates it and the running export polls for it — the one signal that
+	 * crosses the two requests reliably (a transient cannot be re-read mid-request
+	 * without a persistent object cache).
+	 *
+	 * @var string
+	 */
+	private const CANCEL_SENTINEL = '.pontifex-cancel';
+
+	/**
 	 * Absolute path of the backups directory.
 	 *
 	 * @var string
@@ -208,5 +221,51 @@ final class BackupStore {
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Removing a plugin-owned backup the operator chose to delete; WP_Filesystem is unavailable in CLI/test contexts.
 		return unlink( $path );
+	}
+
+	/**
+	 * Ask the running backup to stop by creating the cancel sentinel.
+	 *
+	 * Called by the cancel endpoint, which runs in a separate request from the
+	 * export. The export polls {@see self::is_cancel_requested()} and unwinds when
+	 * it sees the file. The caller ensures the directory exists first.
+	 *
+	 * @return void
+	 */
+	public function request_cancel(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Writing a plugin-owned cancel sentinel in the protected backups directory; WP_Filesystem is unavailable in CLI/test contexts.
+		file_put_contents( $this->directory . '/' . self::CANCEL_SENTINEL, '' );
+	}
+
+	/**
+	 * Whether a cancel has been requested for the running backup.
+	 *
+	 * The export calls this repeatedly within one long request, so PHP's stat
+	 * cache would otherwise hide a sentinel another request has just created; the
+	 * cache is cleared for the path before each check.
+	 *
+	 * @return bool True if the cancel sentinel is present.
+	 */
+	public function is_cancel_requested(): bool {
+		$path = $this->directory . '/' . self::CANCEL_SENTINEL;
+		clearstatcache( true, $path );
+		return is_file( $path );
+	}
+
+	/**
+	 * Remove the cancel sentinel, if present.
+	 *
+	 * Best-effort: a stale sentinel is cleared at the start of a backup and the
+	 * sentinel is removed on every exit path, so a failure to unlink must not
+	 * abort the backup lifecycle.
+	 *
+	 * @return void
+	 */
+	public function clear_cancel(): void {
+		$path = $this->directory . '/' . self::CANCEL_SENTINEL;
+		if ( is_file( $path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the plugin-owned cancel sentinel; its failure must not abort the backup lifecycle.
+			@unlink( $path );
+		}
 	}
 }

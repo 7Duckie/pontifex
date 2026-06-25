@@ -101,7 +101,7 @@ final class AdminBootstrap {
 	 * Attach the admin hooks.
 	 *
 	 * Registers the menu on `admin_menu`, the page assets on
-	 * `admin_enqueue_scripts`, and the Backup screen's four admin-ajax actions.
+	 * `admin_enqueue_scripts`, and the Backup screen's five admin-ajax actions.
 	 * The menu and asset callbacks are inert on non-Pontifex screens, and each
 	 * ajax action re-checks the capability and nonce, so calling this
 	 * unconditionally from an `is_admin()` block is safe.
@@ -114,6 +114,7 @@ final class AdminBootstrap {
 
 		add_action( 'wp_ajax_pontifex_create_backup', array( $this->backup_controller, 'create' ) );
 		add_action( 'wp_ajax_pontifex_backup_progress', array( $this->backup_controller, 'progress' ) );
+		add_action( 'wp_ajax_pontifex_cancel_backup', array( $this->backup_controller, 'cancel' ) );
 		add_action( 'wp_ajax_pontifex_download_backup', array( $this->backup_controller, 'download' ) );
 		add_action( 'wp_ajax_pontifex_delete_backup', array( $this->backup_controller, 'delete' ) );
 	}
