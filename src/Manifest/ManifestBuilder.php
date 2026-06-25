@@ -100,17 +100,18 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	 * stream, or database-chunk SQL only when that entry is written — which
 	 * ArchiveWriter opens as it writes the entry and closes immediately after.
 	 *
-	 * @param string $wordpress_root Absolute filesystem path of the WP installation.
+	 * @param string        $wordpress_root   Absolute filesystem path of the WP installation.
+	 * @param callable|null $on_scan_progress Optional callback invoked with the running file-scan entry count, so a caller can report scan progress before the write begins; receives one int argument.
 	 * @return ManifestStream All entries that should be archived, in deterministic order (files, then database chunks).
 	 * @throws InvalidArgumentException If $wordpress_root is empty or not a directory.
 	 * @throws RuntimeException         If the filesystem or database scan fails.
 	 */
-	public function build( string $wordpress_root ): ManifestStream {
+	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream {
 		// Scan filesystem then database. Both scanners already return their output
 		// sorted; we preserve that order (files first, then database chunks). The
 		// scan results are lightweight value objects — paths, sizes, deferred
 		// sources — never file contents, so holding the two lists costs little.
-		$file_items = $this->file_scanner->scan( $wordpress_root );
+		$file_items = $this->file_scanner->scan( $wordpress_root, $on_scan_progress );
 		$db_items   = $this->database_scanner->scan();
 
 		// Sum the estimated original sizes once, for the safety-archive disk

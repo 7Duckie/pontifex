@@ -73,6 +73,32 @@ final class BackupController {
 	private const PROGRESS_TTL = 900;
 
 	/**
+	 * Progress phase: walking the filesystem to enumerate entries; the count climbs while the total is still unknown.
+	 *
+	 * @var string
+	 */
+	private const PHASE_SCANNING = 'scanning';
+
+	/**
+	 * Progress phase: writing the enumerated entries into the archive; determinate.
+	 *
+	 * @var string
+	 */
+	private const PHASE_COPYING = 'copying';
+
+	/**
+	 * Minimum interval, in seconds, between progress transient writes.
+	 *
+	 * Progress is refreshed at most this often rather than once per entry, which
+	 * keeps option writes bounded while still moving the bar a few times a second —
+	 * so it creeps continuously even through a slow patch (e.g. large early files)
+	 * instead of appearing to stall.
+	 *
+	 * @var float
+	 */
+	private const PROGRESS_THROTTLE_SECONDS = 0.3;
+
+	/**
 	 * The wp_options key holding the export counters (mirrors ExportCommand).
 	 *
 	 * @var string
@@ -205,16 +231,18 @@ final class BackupController {
 		);
 
 		try {
+			$this->set_progress( 0, 0, self::PHASE_SCANNING );
+
 			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
-			$entry_plans = $builder->build( $this->resolve_wordpress_root() );
+			$entry_plans = $builder->build( $this->resolve_wordpress_root(), $this->scan_progress_callback() );
 			$total       = count( $entry_plans );
 
-			$this->set_progress( 0, $total );
+			$this->set_progress( 0, $total, self::PHASE_COPYING );
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
 			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
-			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, $this->progress_callback( $total ) );
+			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, $this->progress_callback() );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -312,8 +340,11 @@ final class BackupController {
 		$progress = get_transient( self::PROGRESS_TRANSIENT );
 		$progress = is_array( $progress ) ? $progress : array();
 
+		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_COPYING;
+
 		wp_send_json_success(
 			array(
+				'phase' => $phase,
 				'done'  => $this->counter_int( $progress, 'done' ),
 				'total' => $this->counter_int( $progress, 'total' ),
 			)
@@ -442,20 +473,45 @@ final class BackupController {
 	}
 
 	/**
-	 * Build the per-entry progress callback that writes the throttled transient.
+	 * Build the per-entry copy progress callback that writes the throttled transient.
 	 *
 	 * Writing on every entry would mean tens of thousands of option writes on a
-	 * large site, so the transient is refreshed at most a hundred times across the
-	 * run, plus once on the final entry.
+	 * large site, so the transient is refreshed at most once every
+	 * {@see self::PROGRESS_THROTTLE_SECONDS}, plus once on the final entry.
+	 * Throttling by time rather than by entry count keeps the bar creeping a few
+	 * times a second even through a slow patch of large early files, instead of
+	 * sitting still until a whole percent has been written.
 	 *
-	 * @param int $total The total entry count, used to size the throttle step.
 	 * @return callable(int, int): void The callback to hand to {@see ExportRunner::export()}.
 	 */
-	private function progress_callback( int $total ): callable {
-		$step = max( 1, intdiv( $total, 100 ) );
-		return function ( int $done, int $count ) use ( $step ): void {
-			if ( $done === $count || 0 === $done % $step ) {
-				$this->set_progress( $done, $count );
+	private function progress_callback(): callable {
+		$last = 0.0;
+		return function ( int $done, int $count ) use ( &$last ): void {
+			$now = microtime( true );
+			if ( $done === $count || ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
+				$this->set_progress( $done, $count, self::PHASE_COPYING );
+				$last = $now;
+			}
+		};
+	}
+
+	/**
+	 * Build the scan-phase progress callback that writes the throttled transient.
+	 *
+	 * The total is unknown while the filesystem is being walked, so this reports a
+	 * climbing count with total left at zero; the browser renders it as the
+	 * indeterminate "scanning" phase. Throttled by time (at most once every
+	 * {@see self::PROGRESS_THROTTLE_SECONDS}) to keep option writes bounded.
+	 *
+	 * @return callable(int): void The callback to hand to {@see \Pontifex\Manifest\ManifestBuilderInterface::build()}.
+	 */
+	private function scan_progress_callback(): callable {
+		$last = 0.0;
+		return function ( int $scanned ) use ( &$last ): void {
+			$now = microtime( true );
+			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
+				$this->set_progress( $scanned, 0, self::PHASE_SCANNING );
+				$last = $now;
 			}
 		};
 	}
@@ -490,14 +546,16 @@ final class BackupController {
 	/**
 	 * Write the running progress to the transient.
 	 *
-	 * @param int $done  Entries written so far.
-	 * @param int $total Total entries to write.
+	 * @param int    $done  Entries processed so far in the current phase.
+	 * @param int    $total Total entries for the phase, or 0 when not yet known (scanning).
+	 * @param string $phase The current phase: self::PHASE_SCANNING or self::PHASE_COPYING.
 	 * @return void
 	 */
-	private function set_progress( int $done, int $total ): void {
+	private function set_progress( int $done, int $total, string $phase ): void {
 		set_transient(
 			self::PROGRESS_TRANSIENT,
 			array(
+				'phase' => $phase,
 				'done'  => $done,
 				'total' => $total,
 			),

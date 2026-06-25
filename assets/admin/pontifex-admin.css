@@ -54,7 +54,7 @@
 /* Sections ------------------------------------------------------------------ */
 
 .pontifex-admin .pontifex-section {
-	margin-bottom: calc(var(--pontifex-step) * 5);
+	margin-bottom: calc(var(--pontifex-step) * 3);
 }
 
 .pontifex-admin .pontifex-section-title {
@@ -170,12 +170,13 @@
 .pontifex-admin .pontifex-progress {
 	min-height: 1.5em;
 	margin: var(--pontifex-step) 0 0;
-	color: var(--pontifex-muted);
+	color: var(--pontifex-ink);
+	font-weight: 600;
 	font-variant-numeric: tabular-nums;
 }
 
 .pontifex-admin .pontifex-progress-track {
-	height: 2px;
+	height: 3px;
 	margin: calc(var(--pontifex-step) * 2) 0 0;
 	background: var(--pontifex-rule);
 	overflow: hidden;
@@ -187,6 +188,30 @@
 	height: 100%;
 	background: var(--pontifex-accent);
 	transition: width 0.3s ease;
+}
+
+/* Scanning phase: the total is unknown, so a segment slides across instead of filling. */
+.pontifex-admin .pontifex-progress-track.is-indeterminate .pontifex-progress-fill {
+	width: 40%;
+	animation: pontifex-scan 2s ease-in-out infinite;
+}
+
+@keyframes pontifex-scan {
+	from {
+		transform: translateX(-110%);
+	}
+
+	to {
+		transform: translateX(275%);
+	}
+}
+
+.pontifex-admin .pontifex-timing {
+	min-height: 1.2em;
+	margin: calc(var(--pontifex-step) / 2) 0 0;
+	color: var(--pontifex-muted);
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
 }
 
 .pontifex-admin .pontifex-notice {

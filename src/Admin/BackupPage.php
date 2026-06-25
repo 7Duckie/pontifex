@@ -132,6 +132,7 @@ final class BackupPage {
 		);
 		echo '<div class="pontifex-progress-track" id="pontifex-backup-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-backup-bar"></span></div>';
 		echo '<p class="pontifex-progress" id="pontifex-backup-progress" aria-live="polite"></p>';
+		echo '<p class="pontifex-timing" id="pontifex-backup-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-backup-result" aria-live="polite"></p>';
 		echo '</section>';
 	}
@@ -193,13 +194,18 @@ final class BackupPage {
 	 * Format a backup's creation time from its filename.
 	 *
 	 * @param string $filename The backup basename.
-	 * @return string A readable UTC datetime, or '(unknown)' if the name does not match.
+	 * @return string A readable creation time in the site's timezone, or '(unknown)' if the name does not match.
 	 */
 	private function backup_when( string $filename ): string {
 		if ( 1 === preg_match( '/pontifex-backup-(\d{8}T\d{6}Z)\./', $filename, $matches ) ) {
 			$parsed = DateTimeImmutable::createFromFormat( self::STAMP_FORMAT, $matches[1], new DateTimeZone( 'UTC' ) );
 			if ( false !== $parsed ) {
-				return $parsed->format( 'Y-m-d H:i' ) . ' UTC';
+				// Render in the site's configured timezone (Settings -> General), not UTC,
+				// so operators see local time; the format reads "08.45 on 25,06,2026".
+				$formatted = wp_date( 'H.i \o\n d,m,Y', $parsed->getTimestamp() );
+				if ( false !== $formatted ) {
+					return $formatted;
+				}
 			}
 		}
 		return '(unknown)';

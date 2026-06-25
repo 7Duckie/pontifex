@@ -50,10 +50,11 @@ interface ManifestBuilderInterface {
 	 * legitimate outcome that produces a valid empty archive containing only the
 	 * header, provenance, manifest, and footer blocks.
 	 *
-	 * @param string $wordpress_root Absolute filesystem path of the WordPress installation.
+	 * @param string        $wordpress_root   Absolute filesystem path of the WordPress installation.
+	 * @param callable|null $on_scan_progress Optional callback invoked with the running file-scan entry count, so a caller can report scan progress; receives one int argument.
 	 * @return ManifestStream All entries that should be archived, in implementation-defined order.
 	 * @throws InvalidArgumentException If $wordpress_root is empty or not a directory.
 	 * @throws RuntimeException         If the build cannot complete (e.g. a scanner fails).
 	 */
-	public function build( string $wordpress_root ): ManifestStream;
+	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream;
 }

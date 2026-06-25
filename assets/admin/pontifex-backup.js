@@ -86,6 +86,38 @@
 	}
 
 	/**
+	 * Toggle the indeterminate (scanning) animation on the bar.
+	 *
+	 * @param {boolean} on Whether the scanning animation should run.
+	 */
+	function setIndeterminate( on ) {
+		var track = document.getElementById( 'pontifex-backup-track' );
+		if ( track ) {
+			track.classList.toggle( 'is-indeterminate', on );
+		}
+	}
+
+	/**
+	 * Format a duration in seconds as M:SS, or H:MM:SS past an hour.
+	 *
+	 * @param {number} seconds Elapsed or remaining seconds.
+	 * @return {string} The formatted duration.
+	 */
+	function fmtDuration( seconds ) {
+		var s = Math.max( 0, Math.round( seconds ) );
+		var h = Math.floor( s / 3600 );
+		var m = Math.floor( ( s % 3600 ) / 60 );
+		var sec = s % 60;
+		var pad = function ( n ) {
+			return n < 10 ? '0' + n : String( n );
+		};
+		if ( h > 0 ) {
+			return h + ':' + pad( m ) + ':' + pad( sec );
+		}
+		return m + ':' + pad( sec );
+	}
+
+	/**
 	 * Run a backup: poll for progress while the create request completes.
 	 *
 	 * @param {HTMLButtonElement} button The create button.
@@ -94,33 +126,70 @@
 		button.disabled = true;
 		setText( 'pontifex-backup-result', '' );
 		setText( 'pontifex-backup-progress', cfg.strings.starting );
+		setText( 'pontifex-backup-timing', '' );
 		showBar( true );
-		setBar( 0, 1 );
+		setIndeterminate( true );
+
+		var startedAt = Date.now();
+		var copyStartedAt = 0;
 
 		var poll = window.setInterval( function () {
 			request( 'pontifex_backup_progress' ).then( function ( res ) {
-				if ( res && res.success && res.data && res.data.total > 0 ) {
+				if ( ! res || ! res.success || ! res.data ) {
+					return;
+				}
+				var data = res.data;
+				var elapsed = ( Date.now() - startedAt ) / 1000;
+
+				if ( 'scanning' === data.phase ) {
+					// Scanning phase: total unknown, so a sliding bar plus the climbing count.
+					setIndeterminate( true );
+					if ( data.done > 0 ) {
+						setText( 'pontifex-backup-progress', cfg.strings.scanning.replace( '%s', data.done ) );
+					}
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( elapsed ) ) );
+					return;
+				}
+
+				// Copying phase: determinate bar, with elapsed and an estimate of time left.
+				if ( 0 === copyStartedAt ) {
+					copyStartedAt = Date.now();
+				}
+				setIndeterminate( false );
+				setBar( data.done, data.total );
+				setText(
+					'pontifex-backup-progress',
+					cfg.strings.progress.replace( '%1$s', data.done ).replace( '%2$s', data.total )
+				);
+
+				var copyElapsed = ( Date.now() - copyStartedAt ) / 1000;
+				if ( data.done > 0 && copyElapsed > 0 ) {
+					var remaining = copyElapsed * ( data.total - data.done ) / data.done;
 					setText(
-						'pontifex-backup-progress',
-						cfg.strings.progress
-							.replace( '%1$s', res.data.done )
-							.replace( '%2$s', res.data.total )
+						'pontifex-backup-timing',
+						cfg.strings.timing
+							.replace( '%1$s', fmtDuration( elapsed ) )
+							.replace( '%2$s', fmtDuration( remaining ) )
 					);
-					setBar( res.data.done, res.data.total );
+				} else {
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( elapsed ) ) );
 				}
 			} ).catch( function () {} );
-		}, 1500 );
+		}, 1000 );
 
 		request( 'pontifex_create_backup' ).then( function ( res ) {
 			window.clearInterval( poll );
 			if ( res && res.success ) {
+				setIndeterminate( false );
 				setBar( 1, 1 );
 				window.location.reload();
 				return;
 			}
 			button.disabled = false;
 			showBar( false );
+			setIndeterminate( false );
 			setText( 'pontifex-backup-progress', '' );
+			setText( 'pontifex-backup-timing', '' );
 			setText(
 				'pontifex-backup-result',
 				( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed
@@ -129,7 +198,9 @@
 			window.clearInterval( poll );
 			button.disabled = false;
 			showBar( false );
+			setIndeterminate( false );
 			setText( 'pontifex-backup-progress', '' );
+			setText( 'pontifex-backup-timing', '' );
 			setText( 'pontifex-backup-result', cfg.strings.failed );
 		} );
 	}

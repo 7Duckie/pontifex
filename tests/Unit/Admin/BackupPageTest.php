@@ -42,6 +42,11 @@ final class BackupPageTest extends TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		$this->base = sys_get_temp_dir() . '/pontifex-backup-page-' . uniqid( '', true );
+		Functions\when( 'wp_date' )->alias(
+			static function ( string $format, ?int $timestamp = null ): string {
+				return gmdate( $format, $timestamp ?? 0 );
+			}
+		);
 	}
 
 	/**
@@ -122,10 +127,10 @@ final class BackupPageTest extends TestCase {
 
 		$this->assertCount( 2, $rows );
 		$this->assertSame( 'pontifex-backup-20260301T093000Z.wpmig', $rows[0]['filename'] );
-		$this->assertSame( '2026-03-01 09:30 UTC', $rows[0]['when'] );
+		$this->assertSame( '09.30 on 01,03,2026', $rows[0]['when'] );
 		$this->assertSame( '11 B', $rows[0]['size'], 'Size should be the file length, formatted.' );
 		$this->assertSame( 'pontifex-backup-20260101T120000Z.wpmig', $rows[1]['filename'] );
-		$this->assertSame( '2026-01-01 12:00 UTC', $rows[1]['when'] );
+		$this->assertSame( '12.00 on 01,01,2026', $rows[1]['when'] );
 	}
 
 	/**

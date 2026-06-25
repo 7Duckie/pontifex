@@ -187,8 +187,14 @@ final class Menu {
 				'nonce'   => wp_create_nonce( BackupController::NONCE_ACTION ),
 				'strings' => array(
 					'starting'      => __( 'Starting backup…', 'pontifex' ),
+					/* translators: %s: number of files found so far */
+					'scanning'      => __( 'Scanning files… %s', 'pontifex' ),
 					/* translators: 1: entries written so far, 2: total entries */
 					'progress'      => __( '%1$s of %2$s files', 'pontifex' ),
+					/* translators: %s: elapsed time, e.g. 0:48 */
+					'elapsed'       => __( '%s elapsed', 'pontifex' ),
+					/* translators: 1: elapsed time, 2: estimated time remaining */
+					'timing'        => __( '%1$s elapsed with about %2$s left', 'pontifex' ),
 					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
 				),
