@@ -443,6 +443,30 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * The restore() byte callback fires as each entry's record streams through.
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_bytes_read(): void {
+		$runner   = $this->make_runner();
+		$plans    = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana banana banana' ),
+		);
+		$reported = 0;
+
+		$runner->restore(
+			self::build_archive_stream( $plans ),
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'restore forwards byte progress from each entry read.' );
+	}
+
+	/**
 	 * The verify() walk reads and checks every entry but writes nothing.
 	 *
 	 * A mixed archive (a file and a db_chunk) is verified; afterwards the

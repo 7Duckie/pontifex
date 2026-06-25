@@ -47,10 +47,11 @@ interface RestoreRunnerInterface {
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes          Optional byte-progress callback called as `( int $bytes ): void` with each chunk's byte count as an entry is read, so a caller can report progress within a large entry.
 	 * @throws InvalidArgumentException If $archive_source is not a valid, seekable stream resource.
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any writer fails.
 	 */
-	public function restore( $archive_source, ?callable $on_entry_restored = null ): void;
+	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void;
 
 	/**
 	 * Read and hash-verify every entry from the archive stream, writing nothing.

@@ -33,8 +33,9 @@ interface SafetyArchiverInterface {
 	 *
 	 * @param string        $wordpress_root Absolute path of the WordPress installation to archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void`.
 	 * @return string The absolute path of the safety archive written.
 	 * @throws RuntimeException If the preflight refuses, or the archive cannot be written.
 	 */
-	public function create( string $wordpress_root, ?callable $on_entry = null ): string;
+	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null ): string;
 }
