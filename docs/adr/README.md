@@ -99,6 +99,8 @@ What follows from this choice — positive, negative, and neutral?
   Cross-URL migration via a post-restore guarded search-replace.
 - [ADR 0007](./0007-branch-promotion-model.md) —
   Branch promotion model: feature -> dev -> staging -> main, tiered gates.
+- [ADR 0008](./0008-content-only-backup-scope.md) —
+  Backups are content-only by default (wp-content + database); whole-site opt-in.
 
 ## Further reading
 
