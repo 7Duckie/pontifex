@@ -45,6 +45,13 @@ final class Menu {
 	private OverviewPage $overview;
 
 	/**
+	 * The Backup page controller.
+	 *
+	 * @var BackupPage
+	 */
+	private BackupPage $backup;
+
+	/**
 	 * The hook suffixes WordPress assigned to the Pontifex screens.
 	 *
 	 * Collected as the pages register so {@see self::enqueue_assets()} can tell a
@@ -55,12 +62,21 @@ final class Menu {
 	private array $page_hooks = array();
 
 	/**
+	 * The hook suffix of the Backup screen — the one screen that also loads a script.
+	 *
+	 * @var string
+	 */
+	private string $backup_hook = '';
+
+	/**
 	 * Construct the menu around its page controllers.
 	 *
 	 * @param OverviewPage $overview The Overview page controller.
+	 * @param BackupPage   $backup   The Backup page controller.
 	 */
-	public function __construct( OverviewPage $overview ) {
+	public function __construct( OverviewPage $overview, BackupPage $backup ) {
 		$this->overview = $overview;
+		$this->backup   = $backup;
 	}
 
 	/**
@@ -92,8 +108,22 @@ final class Menu {
 			array( $this->overview, 'render' )
 		);
 
+		$backup_hook = add_submenu_page(
+			self::SLUG,
+			__( 'Pontifex — Backup', 'pontifex' ),
+			__( 'Backup', 'pontifex' ),
+			self::CAPABILITY,
+			self::SLUG . '-backup',
+			array( $this->backup, 'render' )
+		);
+
 		if ( is_string( $overview_hook ) && '' !== $overview_hook ) {
 			$this->page_hooks[] = $overview_hook;
+		}
+
+		if ( is_string( $backup_hook ) && '' !== $backup_hook ) {
+			$this->page_hooks[] = $backup_hook;
+			$this->backup_hook  = $backup_hook;
 		}
 	}
 
@@ -120,6 +150,61 @@ final class Menu {
 			$base . 'assets/admin/pontifex-admin.css',
 			array(),
 			$version
+		);
+
+		if ( '' !== $this->backup_hook && $hook_suffix === $this->backup_hook ) {
+			$this->enqueue_backup_script( $base, $version );
+		}
+	}
+
+	/**
+	 * Enqueue and configure the Backup screen's script.
+	 *
+	 * The script drives the create, progress, download, and delete actions over
+	 * admin-ajax. It is localised with the ajax URL, a `pontifex_backup` nonce, and
+	 * the translated strings it shows; the server re-checks the capability and the
+	 * nonce on every action, so the localised nonce only spares the operator a
+	 * stale-page failure, it is not the security boundary.
+	 *
+	 * @param string       $base    The plugin's base URL.
+	 * @param string|false $version The asset version, or false when undefined.
+	 * @return void
+	 */
+	private function enqueue_backup_script( string $base, string|false $version ): void {
+		wp_enqueue_script(
+			'pontifex-backup',
+			$base . 'assets/admin/pontifex-backup.js',
+			array(),
+			$version,
+			true
+		);
+
+		wp_localize_script(
+			'pontifex-backup',
+			'pontifexBackup',
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( BackupController::NONCE_ACTION ),
+				'strings' => array(
+					'starting'      => __( 'Starting backup…', 'pontifex' ),
+					/* translators: %s: number of files found so far */
+					'scanning'      => __( 'Scanning files… %s', 'pontifex' ),
+					/* translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes */
+					'progress'      => __( '%1$s of %2$s', 'pontifex' ),
+					/* translators: %s: elapsed time, e.g. 0:48 */
+					'elapsed'       => __( '%s elapsed', 'pontifex' ),
+					/* translators: 1: elapsed time, 2: estimated time remaining */
+					'timing'        => __( '%1$s elapsed with about %2$s left', 'pontifex' ),
+					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
+					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
+					'cancel'        => __( 'Cancel backup', 'pontifex' ),
+					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
+					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
+					'confirmCancel' => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
+					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+				),
+			)
 		);
 	}
 }

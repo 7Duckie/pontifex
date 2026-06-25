@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Admin;
 
+use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\FileLogger;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\WordPress\RealWordPressContext;
 
@@ -24,7 +26,8 @@ use Pontifex\WordPress\RealWordPressContext;
  *
  * {@see self::create()} is the composition root that builds the default object
  * graph from the real WordPress environment; {@see self::register()} attaches
- * the WordPress hooks. Tests construct the class with a {@see Menu} double.
+ * the WordPress hooks, including the Backup screen's admin-ajax actions. Tests
+ * construct the class with {@see Menu} and {@see BackupController} doubles.
  */
 final class AdminBootstrap {
 
@@ -36,12 +39,21 @@ final class AdminBootstrap {
 	private Menu $menu;
 
 	/**
-	 * Construct the bootstrap around a menu registrar.
+	 * The controller behind the Backup screen's admin-ajax actions.
 	 *
-	 * @param Menu $menu The menu registrar to hook into WordPress.
+	 * @var BackupController
 	 */
-	public function __construct( Menu $menu ) {
-		$this->menu = $menu;
+	private BackupController $backup_controller;
+
+	/**
+	 * Construct the bootstrap around the menu registrar and the backup controller.
+	 *
+	 * @param Menu             $menu              The menu registrar to hook into WordPress.
+	 * @param BackupController $backup_controller The controller serving the Backup screen's actions.
+	 */
+	public function __construct( Menu $menu, BackupController $backup_controller ) {
+		$this->menu              = $menu;
+		$this->backup_controller = $backup_controller;
 	}
 
 	/**
@@ -49,33 +61,61 @@ final class AdminBootstrap {
 	 *
 	 * The composition root: it reads the content directory and plugin version
 	 * from the constants pontifex.php defines, and wires the real WordPress
-	 * context and rollback store into the Overview page. Kept separate from the
-	 * constructor so tests inject doubles instead of touching global state.
+	 * context, environment, and stores into the Overview and Backup pages and the
+	 * backup controller. Kept separate from the constructor so tests inject
+	 * doubles instead of touching global state.
 	 *
 	 * @return self A bootstrap wired to the real WordPress environment.
 	 */
 	public static function create(): self {
 		$context        = new RealWordPressContext();
+		$environment    = new RealEnvironment();
 		$content_dir    = defined( 'WP_CONTENT_DIR' ) ? (string) constant( 'WP_CONTENT_DIR' ) : '';
 		$plugin_version = defined( 'PONTIFEX_VERSION' ) ? (string) constant( 'PONTIFEX_VERSION' ) : '';
+
 		$rollback_store = new RollbackStore( $content_dir );
+		$backup_store   = new BackupStore( $content_dir );
 
 		$overview = new OverviewPage( $context, $rollback_store, $plugin_version );
+		$backup   = new BackupPage( $context, $backup_store );
 
-		return new self( new Menu( $overview ) );
+		$logger            = new FileLogger( $content_dir . '/pontifex/logs', self::debug_enabled(), protect_directory: true );
+		$backup_controller = new BackupController( $environment, $context, $backup_store, $logger );
+
+		return new self( new Menu( $overview, $backup ), $backup_controller );
+	}
+
+	/**
+	 * Whether WordPress debug logging is on, read from the WP_DEBUG constant.
+	 *
+	 * Mirrors the verbosity floor the WP-CLI commands use, so the admin Backup's
+	 * log lines follow the same debug setting as the rest of Pontifex.
+	 *
+	 * @return bool True when WP_DEBUG is defined and truthy.
+	 */
+	private static function debug_enabled(): bool {
+		return defined( 'WP_DEBUG' ) && (bool) constant( 'WP_DEBUG' );
 	}
 
 	/**
 	 * Attach the admin hooks.
 	 *
-	 * Registers the menu on `admin_menu` and the page assets on
-	 * `admin_enqueue_scripts`. Both callbacks are inert on non-Pontifex screens,
-	 * so calling this unconditionally from an `is_admin()` block is safe.
+	 * Registers the menu on `admin_menu`, the page assets on
+	 * `admin_enqueue_scripts`, and the Backup screen's five admin-ajax actions.
+	 * The menu and asset callbacks are inert on non-Pontifex screens, and each
+	 * ajax action re-checks the capability and nonce, so calling this
+	 * unconditionally from an `is_admin()` block is safe.
 	 *
 	 * @return void
 	 */
 	public function register(): void {
 		add_action( 'admin_menu', array( $this->menu, 'register_pages' ) );
 		add_action( 'admin_enqueue_scripts', array( $this->menu, 'enqueue_assets' ) );
+
+		add_action( 'wp_ajax_pontifex_create_backup', array( $this->backup_controller, 'create' ) );
+		add_action( 'wp_ajax_pontifex_backup_progress', array( $this->backup_controller, 'progress' ) );
+		add_action( 'wp_ajax_pontifex_cancel_backup', array( $this->backup_controller, 'cancel' ) );
+		add_action( 'wp_ajax_pontifex_download_backup', array( $this->backup_controller, 'download' ) );
+		add_action( 'wp_ajax_pontifex_delete_backup', array( $this->backup_controller, 'delete' ) );
 	}
 }

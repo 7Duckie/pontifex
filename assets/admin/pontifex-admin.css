@@ -54,7 +54,7 @@
 /* Sections ------------------------------------------------------------------ */
 
 .pontifex-admin .pontifex-section {
-	margin-bottom: calc(var(--pontifex-step) * 5);
+	margin-bottom: calc(var(--pontifex-step) * 4);
 }
 
 .pontifex-admin .pontifex-section-title {
@@ -136,6 +136,129 @@
 	padding: calc(var(--pontifex-step) * 2) 0;
 	color: var(--pontifex-muted);
 	border-top: 1px solid var(--pontifex-rule);
+}
+
+/* Backup --------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-lead {
+	max-width: 60ch;
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-button {
+	display: inline-block;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	border: 0;
+	background: var(--pontifex-accent);
+	color: var(--pontifex-paper);
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+/* The hidden attribute must beat the button's own display rule, so the idle Cancel button and the running Create button are actually hidden. */
+.pontifex-admin .pontifex-button[hidden] {
+	display: none;
+}
+
+.pontifex-admin .pontifex-button:hover:not(:disabled),
+.pontifex-admin .pontifex-button:focus:not(:disabled) {
+	background: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.pontifex-admin .pontifex-progress {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-ink);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+/* Collapse the status lines when empty, so the idle gap to "Your backups" matches the header gap. */
+.pontifex-admin .pontifex-progress:empty,
+.pontifex-admin .pontifex-timing:empty,
+.pontifex-admin .pontifex-notice:empty {
+	display: none;
+}
+
+.pontifex-admin .pontifex-progress-track {
+	height: 3px;
+	margin: calc(var(--pontifex-step) * 2) 0 0;
+	background: var(--pontifex-rule);
+	overflow: hidden;
+}
+
+.pontifex-admin .pontifex-progress-fill {
+	display: block;
+	width: 0;
+	height: 100%;
+	background: var(--pontifex-accent);
+	transition: width 0.3s ease;
+}
+
+/* Scanning phase: the total is unknown, so a segment slides across instead of filling. */
+.pontifex-admin .pontifex-progress-track.is-indeterminate .pontifex-progress-fill {
+	width: 40%;
+	animation: pontifex-scan 2s ease-in-out infinite;
+}
+
+@keyframes pontifex-scan {
+	from {
+		transform: translateX(-110%);
+	}
+
+	to {
+		transform: translateX(275%);
+	}
+}
+
+.pontifex-admin .pontifex-timing {
+	min-height: 1.2em;
+	margin: calc(var(--pontifex-step) / 2) 0 0;
+	color: var(--pontifex-muted);
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
+}
+
+.pontifex-admin .pontifex-notice {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-actions {
+	white-space: nowrap;
+}
+
+.pontifex-admin .pontifex-link {
+	color: var(--pontifex-accent);
+}
+
+.pontifex-admin .pontifex-delete-backup {
+	margin-left: calc(var(--pontifex-step) * 2);
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pontifex-muted);
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-delete-backup:hover:not(:disabled),
+.pontifex-admin .pontifex-delete-backup:focus:not(:disabled) {
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-delete-backup:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 
 /* Narrow screens ------------------------------------------------------------ */

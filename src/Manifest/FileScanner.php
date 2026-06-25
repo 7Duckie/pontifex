@@ -93,12 +93,13 @@ final class FileScanner {
 	 * encountered path is unreadable, a symlink target cannot be
 	 * resolved, or a filesystem item is none of file/directory/symlink.
 	 *
-	 * @param string $root Absolute filesystem path of the directory to scan.
+	 * @param string        $root        Absolute filesystem path of the directory to scan.
+	 * @param callable|null $on_progress Optional callback invoked with the running entry count as the walk proceeds, so a caller can report scan progress; receives one int argument.
 	 * @return ScannedEntry[] All entries found, in stable lexicographic order by relative_path.
 	 * @throws InvalidArgumentException If $root is empty or is not an existing directory.
 	 * @throws RuntimeException If a directory cannot be read during the scan, or an entry is unreadable or unclassifiable.
 	 */
-	public function scan( string $root ): array {
+	public function scan( string $root, ?callable $on_progress = null ): array {
 		if ( '' === $root ) {
 			throw new InvalidArgumentException( 'FileScanner: scan root must be non-empty.' );
 		}
@@ -158,6 +159,10 @@ final class FileScanner {
 				}
 
 				$entries[] = self::build_scanned_entry( $kind, $relative_path, $absolute_path, $info );
+
+				if ( null !== $on_progress ) {
+					$on_progress( count( $entries ) );
+				}
 			}
 		} catch ( UnexpectedValueException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message (carrying the unreadable path from the iterator) for diagnostics; surfaced on the CLI, not HTML output.

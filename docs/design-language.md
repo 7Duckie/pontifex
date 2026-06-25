@@ -62,7 +62,8 @@ Numbers use `font-variant-numeric: tabular-nums` so figures and tables align.
 
 An **8px rhythm** (`--pontifex-step: 8px`). Margins and padding are multiples of
 it (8 / 16 / 24 / 32 / 40), so vertical rhythm stays consistent. Content sits in a
-single left-aligned column capped at `960px`.
+single left-aligned column capped at `960px`, with a 16px left inset so the column
+does not sit flush against the wp-admin chrome.
 
 ## Components (v0.5.0)
 
@@ -76,6 +77,18 @@ single left-aligned column capped at `960px`.
   headers; no zebra striping or cell borders.
 - **Empty state** — a single muted sentence under a hairline rule, written to
   explain what will fill the space, not to alarm.
+- **Button** — a solid accent rectangle with white 600-weight text, sharp corners,
+  no border; it darkens to ink on hover/focus and fades when disabled. The one
+  filled element on a page, used for the primary action (e.g. "Create backup").
+- **Progress / notice** — a quiet muted line (tabular figures) that reports the
+  running count of a long operation, and an ink line for its final result; neither
+  is boxed or colour-coded, per "restraint over alarm". A secondary text action
+  (e.g. a backup's "Delete") is an underlined muted link, never a coloured button.
+- **Progress bar** — a determinate two-pixel hairline track in the rule colour that
+  fills with the accent as a long operation advances, carrying the running-count
+  line as its label. Hidden until the operation starts, it reaches full before the
+  page reloads. A thin line, never a heavy bar or a spinner, and never colour-coded
+  by state — restraint over alarm.
 
 ## Conventions
 
