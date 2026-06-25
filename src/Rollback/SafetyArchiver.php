@@ -16,6 +16,7 @@ use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\WordPress\WordPressContext;
 
 /**
@@ -155,23 +156,21 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	/**
 	 * Refuse early when free disk space obviously will not fit the archive.
 	 *
-	 * Best-effort: the estimate is the sum of the plans' original sizes —
-	 * including the database, whose size lives in each db_chunk's byte_count()
-	 * rather than size(), so estimated_bytes() is used to avoid counting the
-	 * database (often the bulk of a backup) as zero. It is a conservative proxy,
-	 * since the archive compresses them. A free-space reading that cannot be taken
-	 * (false, e.g. under open_basedir) is treated as "proceed" — the write itself
-	 * is the hard backstop, since it runs before any destructive restore.
+	 * Best-effort: the estimate is the stream's precomputed estimated_bytes() —
+	 * the sum of the entries' original sizes, including the database (whose size
+	 * lives in each db_chunk's byte_count(), not size()), so the database is not
+	 * counted as zero. It is a conservative proxy, since the archive compresses
+	 * them. Reading the total from the stream avoids walking — and so rebuilding —
+	 * every plan. A free-space reading that cannot be taken (false, e.g. under
+	 * open_basedir) is treated as "proceed" — the write itself is the hard
+	 * backstop, since it runs before any destructive restore.
 	 *
-	 * @param array<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans The plans about to be written.
+	 * @param ManifestStream $entry_plans The stream of entries about to be written.
 	 * @return void
 	 * @throws RuntimeException If the free space is known and smaller than the estimate.
 	 */
-	private function preflight_disk_space( array $entry_plans ): void {
-		$estimate = 0;
-		foreach ( $entry_plans as $plan ) {
-			$estimate += $plan->header()->estimated_bytes();
-		}
+	private function preflight_disk_space( ManifestStream $entry_plans ): void {
+		$estimate = $entry_plans->estimated_bytes();
 
 		$free = $this->environment->disk_free_space( $this->store->directory() );
 		if ( false === $free ) {

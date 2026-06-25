@@ -106,6 +106,7 @@ final class ExportRunner {
 		return new ManifestBuilder( $file_scanner, $database_scanner );
 	}
 
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
 	/**
 	 * Write a Pontifex archive of the supplied entries to the destination.
 	 *
@@ -114,13 +115,19 @@ final class ExportRunner {
 	 * writes the header, provenance, every entry, the manifest, and the footer via
 	 * {@see ArchiveWriter}. The destination is always closed, success or failure.
 	 *
-	 * @param ExportOptions                                  $options     Where to write, plus optional encryption, signing, and the unencrypted-archive reason.
-	 * @param array<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order. May be empty.
-	 * @param callable|null                                  $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param ExportOptions                                     $options     Where to write, plus optional encryption, signing, and the unencrypted-archive reason.
+	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
+	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @return ExportResult The bytes written and the entry count.
 	 * @throws RuntimeException If the destination cannot be opened, or the archive cannot be written.
 	 */
-	public function export( ExportOptions $options, array $entry_plans, ?callable $on_entry = null ): ExportResult {
+	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null ): ExportResult {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
+		// Capture the entry count up front from Countable — both a plain array and a
+		// ManifestStream satisfy it in O(1); the write consumes the entries by
+		// iterating them.
+		$entry_count = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
+
 		$provenance  = $this->build_provenance( $options->encryption_disabled_reason() );
 		$destination = $this->open_destination( $options->output_path() );
 
@@ -138,7 +145,7 @@ final class ExportRunner {
 			fclose( $destination );
 		}
 
-		return new ExportResult( $bytes_written, count( $entry_plans ) );
+		return new ExportResult( $bytes_written, $entry_count );
 	}
 
 	/**

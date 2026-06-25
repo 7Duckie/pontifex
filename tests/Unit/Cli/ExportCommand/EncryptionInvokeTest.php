@@ -257,7 +257,7 @@ final class EncryptionInvokeTest extends TestCase {
 	 */
 	private function build_manifest_builder_mock_returning_empty() {
 		$mock = Mockery::mock( ManifestBuilderInterface::class );
-		$mock->shouldReceive( 'build' )->once()->andReturn( array() );
+		$mock->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
 		return $mock;
 	}
 }
