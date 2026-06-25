@@ -19,6 +19,7 @@
 
 	max-width: 960px;
 	margin-top: calc(var(--pontifex-step) * 3);
+	padding-left: calc(var(--pontifex-step) * 2);
 	color: var(--pontifex-ink);
 	font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
 	font-size: 14px;
