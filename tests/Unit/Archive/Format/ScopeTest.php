@@ -63,6 +63,45 @@ final class ScopeTest extends TestCase {
 	}
 
 	/**
+	 * The content_only() factory must fix the content-only facts.
+	 *
+	 * Records content-only true, a "wp-content" content root, core and wp-config.php
+	 * excluded, the database included, and the supplied exclusion patterns.
+	 *
+	 * @return void
+	 */
+	public function test_content_only_factory_fixes_the_content_only_facts(): void {
+		$scope = Scope::content_only( array( 'wp-content/cache/**' ) );
+
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+		$this->assertFalse( $scope->includes_core() );
+		$this->assertFalse( $scope->includes_wp_config() );
+		$this->assertTrue( $scope->includes_database() );
+		$this->assertSame( array( 'wp-content/cache/**' ), $scope->excluded_paths() );
+	}
+
+	/**
+	 * The whole_site() factory must fix the whole-site facts.
+	 *
+	 * Records content-only false, an empty content root (entries rooted at the site
+	 * root), core and wp-config.php included, the database included, and the supplied
+	 * exclusion patterns.
+	 *
+	 * @return void
+	 */
+	public function test_whole_site_factory_fixes_the_whole_site_facts(): void {
+		$scope = Scope::whole_site( array( 'wp-content/cache/**' ) );
+
+		$this->assertFalse( $scope->is_content_only() );
+		$this->assertSame( '', $scope->content_root() );
+		$this->assertTrue( $scope->includes_core() );
+		$this->assertTrue( $scope->includes_wp_config() );
+		$this->assertTrue( $scope->includes_database() );
+		$this->assertSame( array( 'wp-content/cache/**' ), $scope->excluded_paths() );
+	}
+
+	/**
 	 * Encoding via to_array() must emit the six fields in a fixed order for deterministic JSON.
 	 *
 	 * @return void

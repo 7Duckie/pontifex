@@ -12,6 +12,7 @@ namespace Pontifex\Export;
 use InvalidArgumentException;
 use Pontifex\Archive\Crypto\EncryptionContext;
 use Pontifex\Archive\Crypto\SigningContext;
+use Pontifex\Archive\Format\Scope;
 
 /**
  * Immutable value object carrying the per-export inputs for {@see ExportRunner::export()}.
@@ -64,19 +65,33 @@ final class ExportOptions {
 	private ?string $encryption_disabled_reason;
 
 	/**
+	 * What the archive backs up (content-only vs whole-site), or null to record none.
+	 *
+	 * Non-null for a scope-aware export (the CLI export and the admin Backup screen),
+	 * which records the scope and the source table prefix in provenance (format
+	 * v1.1); null when a caller records no scope (the safety archiver), leaving the
+	 * provenance byte-identical to a pre-v1.1 archive.
+	 *
+	 * @var Scope|null
+	 */
+	private ?Scope $scope;
+
+	/**
 	 * Construct an ExportOptions.
 	 *
 	 * @param string                 $output_path                Absolute path the archive is written to; must be non-empty.
 	 * @param EncryptionContext|null $encryption                 Encryption inputs, or null for an unencrypted archive.
 	 * @param SigningContext|null    $signing                    Signing inputs, or null for an unsigned archive.
 	 * @param string|null            $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null.
+	 * @param Scope|null             $scope                      What the archive backs up, or null to record no scope.
 	 * @throws InvalidArgumentException If $output_path is the empty string.
 	 */
 	public function __construct(
 		string $output_path,
 		?EncryptionContext $encryption = null,
 		?SigningContext $signing = null,
-		?string $encryption_disabled_reason = null
+		?string $encryption_disabled_reason = null,
+		?Scope $scope = null
 	) {
 		if ( '' === $output_path ) {
 			throw new InvalidArgumentException( 'ExportOptions: output_path must not be empty.' );
@@ -86,6 +101,7 @@ final class ExportOptions {
 		$this->encryption                 = $encryption;
 		$this->signing                    = $signing;
 		$this->encryption_disabled_reason = $encryption_disabled_reason;
+		$this->scope                      = $scope;
 	}
 
 	/**
@@ -122,5 +138,14 @@ final class ExportOptions {
 	 */
 	public function encryption_disabled_reason(): ?string {
 		return $this->encryption_disabled_reason;
+	}
+
+	/**
+	 * Return what the archive backs up, or null when no scope is recorded.
+	 *
+	 * @return Scope|null The scope, or null.
+	 */
+	public function scope(): ?Scope {
+		return $this->scope;
 	}
 }

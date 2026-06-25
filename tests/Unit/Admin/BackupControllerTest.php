@@ -14,6 +14,7 @@ use Mockery;
 use Pontifex\Admin\BackupController;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
@@ -119,6 +120,48 @@ final class BackupControllerTest extends TestCase {
 		$this->assertCount( 1, $backups, 'Exactly one backup file should have been written.' );
 		$this->assertStringStartsWith( 'pontifex-backup-', basename( $backups[0] ) );
 		$this->assertSame( 0600, fileperms( $backups[0] ) & 0777, 'A backup must be owner read/write only.' );
+	}
+
+	/**
+	 * An admin backup records a content-only scope and the source table prefix.
+	 *
+	 * The admin Backup screen is always content-only (ADR 0008): a whole-site clone
+	 * stays a CLI-only operation. The written archive's provenance must reflect that,
+	 * and carry the source table prefix the destination restore needs.
+	 *
+	 * @return void
+	 */
+	public function test_create_writes_a_content_only_scope(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$plans = array(
+			$this->file_plan( 'wp-content/note.txt', "content\n" ),
+		);
+
+		$this->controller( $this->manifest_builder_returning( $plans ) )->create();
+
+		$backups = ( new BackupStore( $this->base ) )->backups();
+		$this->assertCount( 1, $backups, 'Exactly one backup file should have been written.' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the just-written backup's provenance back in a unit test.
+		$source = fopen( $backups[0], 'rb' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open the written backup.' );
+		}
+		try {
+			$provenance = ( new ArchiveReader( $source ) )->provenance();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened above.
+			fclose( $source );
+		}
+
+		$scope = $provenance->scope();
+		$this->assertNotNull( $scope, 'An admin backup should record a scope.' );
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+		$this->assertSame( 'wp_', $provenance->table_prefix(), 'The source table prefix should be recorded.' );
 	}
 
 	/**
@@ -562,6 +605,8 @@ final class BackupControllerTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
 		$environment->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/tmp/wp/' );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/tmp/wp/wp-content' );
 		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_VERSION' )->andReturn( false );
 		$environment->shouldReceive( 'php_version' )->andReturn( '8.2.0' );
 		return $environment;
@@ -578,6 +623,7 @@ final class BackupControllerTest extends TestCase {
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
 		$context->shouldReceive( 'format_size' )->andReturnUsing(
 			static function ( int $bytes ): string {
 				return $bytes . ' B';

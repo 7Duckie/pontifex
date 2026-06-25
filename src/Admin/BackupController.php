@@ -12,6 +12,7 @@ namespace Pontifex\Admin;
 use DateTimeImmutable;
 use RuntimeException;
 use Throwable;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
@@ -270,8 +271,12 @@ final class BackupController {
 		try {
 			$this->set_scan_progress( 0 );
 
-			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
-			$entry_plans = $builder->build( $this->resolve_wordpress_root(), $this->scan_progress_callback() );
+			// The admin backup is always content-only: it scans wp-content and records
+			// each file under a "wp-content" path prefix, with a content-only scope in
+			// provenance (ADR 0008). A whole-site clone stays a CLI-only operation.
+			$exclusions  = ExclusionRules::default_v010();
+			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, 'wp-content' );
+			$entry_plans = $builder->build( $this->resolve_content_root(), $this->scan_progress_callback() );
 			$total_bytes = $entry_plans->estimated_bytes();
 
 			$this->set_copy_progress( 0, $total_bytes );
@@ -279,7 +284,8 @@ final class BackupController {
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
 			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
-			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, null, $this->byte_progress_callback( $total_bytes ) );
+			$options                  = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
+			$result                   = $runner->export( $options, $entry_plans, null, $this->byte_progress_callback( $total_bytes ) );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -537,16 +543,25 @@ final class BackupController {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Resolve the WordPress installation root for the file scan.
+	 * Resolve the wp-content root for the content-only file scan.
 	 *
-	 * @return string The absolute path of the WordPress root.
-	 * @throws RuntimeException If ABSPATH is not defined (should never happen in an admin request).
+	 * Reads WP_CONTENT_DIR through the Environment abstraction — the directory
+	 * WordPress actually serves wp-content from, which a site may have relocated —
+	 * and falls back to ABSPATH/wp-content (WordPress's own default for the constant)
+	 * when it is not defined, so the resolver still works outside a full WordPress
+	 * request, as in unit tests.
+	 *
+	 * @return string The absolute path of the wp-content directory.
+	 * @throws RuntimeException If WP_CONTENT_DIR is undefined and ABSPATH is too (should never happen in an admin request).
 	 */
-	private function resolve_wordpress_root(): string {
-		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
-			throw new RuntimeException( 'BackupController: ABSPATH is not defined; is WordPress loaded?' );
+	private function resolve_content_root(): string {
+		if ( $this->environment->is_constant_defined( 'WP_CONTENT_DIR' ) ) {
+			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
 		}
-		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
+			throw new RuntimeException( 'BackupController: neither WP_CONTENT_DIR nor ABSPATH is defined; is WordPress loaded?' );
+		}
+		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' ) . '/wp-content';
 	}
 
 	/**

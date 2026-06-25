@@ -365,6 +365,56 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
+	 * A non-empty path prefix must be prepended to every emitted relative path.
+	 *
+	 * Models the content-only scan, where the walk is rooted at WP_CONTENT_DIR but
+	 * the recorded paths must stay WordPress-root-relative, so a "wp-content" prefix
+	 * re-roots them. Every emitted path — files and the intermediate directories
+	 * alike — carries the prefix.
+	 *
+	 * @return void
+	 */
+	public function test_path_prefix_is_prepended_to_relative_paths(): void {
+		$this->write_file( 'plugins/akismet/akismet.php' );
+		$this->write_file( 'uploads/2026/05/image.jpg' );
+
+		$entries = ( new FileScanner( ExclusionRules::none(), 'wp-content' ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		$this->assertContains( 'wp-content/plugins', $paths );
+		$this->assertContains( 'wp-content/plugins/akismet/akismet.php', $paths );
+		$this->assertContains( 'wp-content/uploads/2026/05/image.jpg', $paths );
+		foreach ( $paths as $path ) {
+			$this->assertStringStartsWith( 'wp-content/', $path, 'Every scanned path should carry the configured prefix.' );
+		}
+	}
+
+	/**
+	 * The recursion guard must still fire when scanning a content root under a prefix.
+	 *
+	 * This is the content-only trap. The walk is rooted at WP_CONTENT_DIR, so a
+	 * stale Pontifex export sits at "pontifex/..." relative to the root, while the
+	 * guard is keyed on the WordPress-root-relative "wp-content/pontifex". Only
+	 * because the "wp-content" prefix is prepended *before* the guard runs does the
+	 * stale export stay excluded; a regression that prefixed after the guard (or not
+	 * at all) would recursively re-include the previous archive.
+	 *
+	 * @return void
+	 */
+	public function test_path_prefix_keeps_pontifex_working_dir_excluded(): void {
+		$this->make_dir( 'pontifex' );
+		$this->write_file( 'pontifex/exports/old.wpmig', 'previous-archive' );
+		$this->write_file( 'uploads/keep.txt', 'site-content' );
+
+		$entries = ( new FileScanner( ExclusionRules::none(), 'wp-content' ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		$this->assertContains( 'wp-content/uploads/keep.txt', $paths );
+		$this->assertNotContains( 'wp-content/pontifex', $paths );
+		$this->assertNotContains( 'wp-content/pontifex/exports/old.wpmig', $paths );
+	}
+
+	/**
 	 * Scanning an empty string root must throw InvalidArgumentException.
 	 *
 	 * @return void
