@@ -99,6 +99,8 @@ final class BackupPageTest extends TestCase {
 
 		$this->assertStringContainsString( 'Pontifex — Backup', $output );
 		$this->assertStringContainsString( 'id="pontifex-create-backup"', $output );
+		$this->assertStringContainsString( 'id="pontifex-backup-track"', $output );
+		$this->assertStringContainsString( 'role="progressbar"', $output );
 		$this->assertStringContainsString( 'pontifex-backup-20260101T000000Z.wpmig', $output );
 		$this->assertStringContainsString( 'Download', $output );
 		$this->assertStringContainsString( 'pontifex-delete-backup', $output );

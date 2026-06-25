@@ -84,6 +84,11 @@ does not sit flush against the wp-admin chrome.
   running count of a long operation, and an ink line for its final result; neither
   is boxed or colour-coded, per "restraint over alarm". A secondary text action
   (e.g. a backup's "Delete") is an underlined muted link, never a coloured button.
+- **Progress bar** — a determinate two-pixel hairline track in the rule colour that
+  fills with the accent as a long operation advances, carrying the running-count
+  line as its label. Hidden until the operation starts, it reaches full before the
+  page reloads. A thin line, never a heavy bar or a spinner, and never colour-coded
+  by state — restraint over alarm.
 
 ## Conventions
 

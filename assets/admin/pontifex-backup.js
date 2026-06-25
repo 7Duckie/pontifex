@@ -56,6 +56,36 @@
 	}
 
 	/**
+	 * Show or hide the determinate progress bar.
+	 *
+	 * @param {boolean} visible Whether the bar should be shown.
+	 */
+	function showBar( visible ) {
+		var track = document.getElementById( 'pontifex-backup-track' );
+		if ( track ) {
+			track.hidden = ! visible;
+		}
+	}
+
+	/**
+	 * Fill the progress bar to the fraction of entries written so far.
+	 *
+	 * @param {number} done  Entries written so far.
+	 * @param {number} total Total entries to write.
+	 */
+	function setBar( done, total ) {
+		var pct = total > 0 ? Math.round( ( done / total ) * 100 ) : 0;
+		var fill = document.getElementById( 'pontifex-backup-bar' );
+		var track = document.getElementById( 'pontifex-backup-track' );
+		if ( fill ) {
+			fill.style.width = pct + '%';
+		}
+		if ( track ) {
+			track.setAttribute( 'aria-valuenow', String( pct ) );
+		}
+	}
+
+	/**
 	 * Run a backup: poll for progress while the create request completes.
 	 *
 	 * @param {HTMLButtonElement} button The create button.
@@ -64,6 +94,8 @@
 		button.disabled = true;
 		setText( 'pontifex-backup-result', '' );
 		setText( 'pontifex-backup-progress', cfg.strings.starting );
+		showBar( true );
+		setBar( 0, 1 );
 
 		var poll = window.setInterval( function () {
 			request( 'pontifex_backup_progress' ).then( function ( res ) {
@@ -74,6 +106,7 @@
 							.replace( '%1$s', res.data.done )
 							.replace( '%2$s', res.data.total )
 					);
+					setBar( res.data.done, res.data.total );
 				}
 			} ).catch( function () {} );
 		}, 1500 );
@@ -81,10 +114,12 @@
 		request( 'pontifex_create_backup' ).then( function ( res ) {
 			window.clearInterval( poll );
 			if ( res && res.success ) {
+				setBar( 1, 1 );
 				window.location.reload();
 				return;
 			}
 			button.disabled = false;
+			showBar( false );
 			setText( 'pontifex-backup-progress', '' );
 			setText(
 				'pontifex-backup-result',
@@ -93,6 +128,7 @@
 		} ).catch( function () {
 			window.clearInterval( poll );
 			button.disabled = false;
+			showBar( false );
 			setText( 'pontifex-backup-progress', '' );
 			setText( 'pontifex-backup-result', cfg.strings.failed );
 		} );

@@ -130,6 +130,7 @@ final class BackupPage {
 			'<p><button type="button" class="pontifex-button" id="pontifex-create-backup">%s</button></p>',
 			esc_html__( 'Create backup', 'pontifex' )
 		);
+		echo '<div class="pontifex-progress-track" id="pontifex-backup-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-backup-bar"></span></div>';
 		echo '<p class="pontifex-progress" id="pontifex-backup-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-backup-result" aria-live="polite"></p>';
 		echo '</section>';
