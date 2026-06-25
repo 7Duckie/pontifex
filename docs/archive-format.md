@@ -1,7 +1,7 @@
 # Pontifex Archive Format Specification
 
 **File extension:** `.wpmig`
-**Version:** 1.0 (DRAFT)
+**Version:** 1.1 (DRAFT) — adds the optional `scope` and `table_prefix` provenance fields; v1.0 readers accept v1.1 archives unchanged.
 **Status:** Draft — finalised when Pontifex 0.1.0 ships. Until that point, this specification may change with each minor version release.
 **Licence:** This specification is published under CC BY 4.0. Implementations of the format are not restricted; the spec text itself may be redistributed with attribution.
 
@@ -82,7 +82,7 @@ The archive begins with sixteen bytes:
 |-------:|-------:|----------------|----------------------------------------------------|
 |   0    |   8    | Magic          | `0x57 0x50 0x4D 0x49 0x47 0x00 0x00 0x01`          |
 |   8    |   2    | Format major   | uint16 big-endian — `0x0001` for v1                |
-|  10    |   2    | Format minor   | uint16 big-endian — `0x0000` for v1.0              |
+|  10    |   2    | Format minor   | uint16 big-endian — `0x0001` for v1.1 (`0x0000` = v1.0) |
 |  12    |   4    | Flags          | uint32 big-endian bitfield (see below)             |
 
 The magic spells `WPMIG\0\0\x01` in ASCII. The trailing `\x01` is deliberately non-printable: it prevents the file from being mistaken for a UTF-8 text file by tools that probe the first eight bytes.
@@ -113,54 +113,48 @@ Immediately after the header sits the provenance block: a JSON object describing
 - **hash:** SHA-256 of the JSON payload as stored (i.e., after any encryption applied); 32 bytes.
 - **payload:** the JSON object itself, UTF-8 encoded.
 
-The schema of the JSON object (v1):
+The schema of the JSON object:
 
 ```json
 {
-  "format_version": 1,
+  "wp_version": "6.8.0",
+  "php_version": "8.2.18",
+  "url": "https://example.com",
+  "db_charset": "utf8mb4",
+  "db_collation": "utf8mb4_unicode_520_ci",
   "exporter": {
     "name": "pontifex",
-    "version": "0.1.0",
-    "implementation": "php"
+    "version": "0.5.0"
   },
-  "exported_at": "2026-05-21T14:23:01Z",
-  "source": {
-    "url": "https://example.com",
-    "wp_version": "6.8.0",
-    "php_version": "8.2.18",
-    "db_engine": "mysql",
-    "db_version": "8.0.36",
-    "db_charset": "utf8mb4",
-    "db_collation": "utf8mb4_unicode_520_ci",
-    "table_prefix": "wp_",
-    "multisite": false
-  },
+  "timestamp": "2026-05-21T14:23:01+00:00",
+  "table_prefix": "wp_",
   "scope": {
-    "includes_database": true,
-    "includes_uploads": true,
-    "includes_themes": true,
-    "includes_plugins": true,
-    "includes_mu_plugins": true,
+    "content_only": true,
+    "content_root": "wp-content",
+    "includes_core": false,
     "includes_wp_config": false,
-    "excluded_paths": ["wp-content/cache", "wp-content/debug.log"]
+    "includes_database": true,
+    "excluded_paths": ["wp-content/pontifex/**", "wp-content/cache/**"]
   },
-  "plugins_active": [
-    { "slug": "woocommerce", "version": "8.5.0" }
-  ],
-  "themes_active": [
-    { "slug": "twentytwentyfour", "version": "1.2" }
-  ],
-  "encryption_disabled_reason": null,
-  "note": "Optional human-readable note set by the operator at export time."
+  "encryption_disabled_reason": null
 }
 ```
 
 Field rules:
 
-- All timestamps are ISO 8601 with explicit UTC offset.
-- Unknown fields encountered by a reader must be preserved verbatim if the archive is re-emitted (e.g., by a converter); a v1 reader must not strip future-version fields.
-- The `db_charset` and `db_collation` fields are critical for correct database import. Importers must use these values when the destination database supports them. (Mismatched collation is the documented root cause of UTF-8 corruption and emoji loss in existing migration tools — see [§15](#15-design-rationale-and-prior-art).)
-- When the archive is unencrypted, `encryption_disabled_reason` must be a non-empty string explaining why; this is recorded in the audit trail.
+- **Required in every archive:** `wp_version`, `php_version`, `url`, `db_charset`, `db_collation`, `exporter` (with `name` and `version`), and `timestamp`. These are the locked v1 fields (§13.2.3).
+- All timestamps are ISO 8601 with an explicit UTC offset.
+- The `db_charset` and `db_collation` fields are critical for correct database import. Importers must use these values when the destination database supports them. (Mismatched collation is a documented root cause of UTF-8 corruption and emoji loss in migration — see [§15](#15-design-rationale-and-prior-art).)
+- `encryption_disabled_reason` is present and a non-empty string only when the archive is unencrypted (§8.5); it is absent or null otherwise, and when present it is recorded in the audit trail.
+- `table_prefix` (optional, added in v1.1) records the source site's database table prefix, so a content-only restore can rewrite the source-prefixed table names to the destination's own prefix.
+- `scope` (optional, added in v1.1) records what the archive backed up. **Its absence means a legacy whole-site archive** (one written before this field existed). Its fields:
+  - `content_only` (boolean) — true for a content-only archive (the `wp-content` tree plus the whole database), false for a whole-site archive that also carries WordPress core and `wp-config.php`.
+  - `content_root` (string) — the directory the file entries are relative to, given relative to the WordPress root: `wp-content` for a content-only archive, the empty string for a whole-site archive.
+  - `includes_core` (boolean) — whether WordPress core (`wp-admin`, `wp-includes`, the root core PHP files) is in the archive.
+  - `includes_wp_config` (boolean) — whether `wp-config.php` is in the archive.
+  - `includes_database` (boolean) — whether the database is in the archive.
+  - `excluded_paths` (string array) — the exclusion patterns that were applied.
+- Unknown fields encountered by a reader must be preserved verbatim if the archive is re-emitted (e.g., by a converter); a reader must not strip future-version fields.
 
 The provenance block is deliberately the first thing after the header so that a reader can inspect it without having to decrypt or process anything else. Operators about to import an archive can be shown its provenance and prompted to confirm it before any destructive operation begins.
 
@@ -516,6 +510,8 @@ The format is deliberately extensible. Future minor versions may introduce, with
 - New manifest fields, with the same constraint.
 - New entry `kind` values for cases v1 did not anticipate.
 - New optional flag bits in the reserved range, subject to the rule in §13.2.4 that readers unable to parse them must reject the archive.
+
+**v1.1 — the first minor revision** added the optional `scope` block and `table_prefix` provenance fields (§5), recording what an archive backed up. A v1.0 reader accepts a v1.1 archive and ignores these additions, per the rules above.
 
 The asymmetry is deliberate: adding things is cheap because readers ignoring an unknown extension is safe; redefining things is expensive because readers acting on misinterpreted bytes is dangerous.
 

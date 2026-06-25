@@ -178,7 +178,7 @@ final class ArchiveWriter {
 		if ( null !== $signing ) {
 			$flags |= Header::FLAG_SIGNED;
 		}
-		$header = new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_0, $flags );
+		$header = new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_1, $flags );
 
 		$header_bytes  = $header->to_bytes();
 		$bytes_written = 0;
