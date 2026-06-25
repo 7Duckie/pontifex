@@ -113,6 +113,7 @@ final class BackupControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertSame( 2, $this->json['data']['entries'] );
 		$this->assertGreaterThan( 0, $this->json['data']['bytes'] );
+		$this->assertArrayHasKey( 'source_bytes', $this->json['data'], 'The success response carries the source byte total for the result message.' );
 
 		$backups = ( new BackupStore( $this->base ) )->backups();
 		$this->assertCount( 1, $backups, 'Exactly one backup file should have been written.' );

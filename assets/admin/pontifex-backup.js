@@ -56,6 +56,31 @@
 	}
 
 	/**
+	 * Stash a one-time notice to show after the page reloads.
+	 *
+	 * @param {string} message The notice to show on the next load.
+	 */
+	function storeNotice( message ) {
+		try {
+			window.sessionStorage.setItem( 'pontifexBackupNotice', message );
+		} catch ( e ) {}
+	}
+
+	/**
+	 * Show and clear a notice stashed before a reload, if any.
+	 */
+	function showStoredNotice() {
+		var message = null;
+		try {
+			message = window.sessionStorage.getItem( 'pontifexBackupNotice' );
+			window.sessionStorage.removeItem( 'pontifexBackupNotice' );
+		} catch ( e ) {}
+		if ( message ) {
+			setText( 'pontifex-backup-result', message );
+		}
+	}
+
+	/**
 	 * Show or hide the determinate progress bar.
 	 *
 	 * @param {boolean} visible Whether the bar should be shown.
@@ -271,6 +296,13 @@
 			if ( res && res.success ) {
 				setIndeterminate( false );
 				setBar( 1, 1 );
+				if ( res.data && res.data.bytes && res.data.source_bytes ) {
+					storeNotice(
+						cfg.strings.created
+							.replace( '%1$s', formatBytes( res.data.bytes ) )
+							.replace( '%2$s', formatBytes( res.data.source_bytes ) )
+					);
+				}
 				window.location.reload();
 				return;
 			}
@@ -315,6 +347,9 @@
 	 */
 	function bindCancel( button ) {
 		button.addEventListener( 'click', function () {
+			if ( ! window.confirm( cfg.strings.confirmCancel ) ) {
+				return;
+			}
 			button.disabled = true;
 			button.textContent = cfg.strings.cancelling;
 			request( 'pontifex_cancel_backup' ).catch( function () {} );
@@ -325,6 +360,7 @@
 	 * Wire the create, cancel, and delete buttons present on the page.
 	 */
 	function init() {
+		showStoredNotice();
 		var create = document.getElementById( 'pontifex-create-backup' );
 		if ( create ) {
 			create.addEventListener( 'click', function () {

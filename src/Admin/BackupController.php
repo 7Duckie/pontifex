@@ -297,10 +297,11 @@ final class BackupController {
 
 			wp_send_json_success(
 				array(
-					'filename' => basename( $path ),
-					'entries'  => $result->entry_count(),
-					'bytes'    => $result->bytes_written(),
-					'size'     => $this->wordpress_context->format_size( $result->bytes_written() ),
+					'filename'     => basename( $path ),
+					'entries'      => $result->entry_count(),
+					'bytes'        => $result->bytes_written(),
+					'size'         => $this->wordpress_context->format_size( $result->bytes_written() ),
+					'source_bytes' => $total_bytes,
 				)
 			);
 		} catch ( BackupCancelled $cancelled ) {

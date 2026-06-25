@@ -195,9 +195,12 @@ final class Menu {
 					'elapsed'       => __( '%s elapsed', 'pontifex' ),
 					/* translators: 1: elapsed time, 2: estimated time remaining */
 					'timing'        => __( '%1$s elapsed with about %2$s left', 'pontifex' ),
+					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
+					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
 					'cancel'        => __( 'Cancel backup', 'pontifex' ),
 					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
 					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
+					'confirmCancel' => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
 					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
 				),
