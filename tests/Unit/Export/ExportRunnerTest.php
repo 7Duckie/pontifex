@@ -11,6 +11,8 @@ namespace Pontifex\Tests\Unit\Export;
 
 use Mockery;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -151,6 +153,54 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * An export carrying a scope records the scope and the source table prefix.
+	 *
+	 * The scope-aware path (the CLI export and the admin Backup screen): when the
+	 * options carry a Scope, export() must record both v1.1 provenance fields — the
+	 * scope object and the table prefix read from the WordPress context.
+	 *
+	 * @return void
+	 */
+	public function test_export_with_scope_records_scope_and_table_prefix(): void {
+		$context = $this->wordpress_context_mock();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+
+		$runner = new ExportRunner( $this->environment_mock(), $context );
+
+		$scope = Scope::content_only( array( 'wp-content/cache/**' ) );
+		$runner->export( new ExportOptions( $this->temp_output_path, null, null, null, $scope ), array(), null );
+
+		$provenance = $this->provenance( $this->temp_output_path );
+		$this->assertSame( 'wp_', $provenance->table_prefix(), 'The source table prefix should be recorded.' );
+		$recorded = $provenance->scope();
+		$this->assertNotNull( $recorded, 'A scope-aware export should record a scope.' );
+		$this->assertTrue( $recorded->is_content_only() );
+		$this->assertSame( 'wp-content', $recorded->content_root() );
+		$this->assertSame( array( 'wp-content/cache/**' ), $recorded->excluded_paths() );
+	}
+
+	/**
+	 * An export with no scope records neither the scope nor the table prefix.
+	 *
+	 * The legacy path (the safety archiver): the two v1.1 fields travel together, so
+	 * a no-scope export leaves both null and the provenance byte-identical to a
+	 * pre-v1.1 archive. The context mock deliberately does NOT stub wpdb_prefix(), so
+	 * this would also fail loudly (an unexpected Mockery call) if export() read the
+	 * prefix when no scope was supplied.
+	 *
+	 * @return void
+	 */
+	public function test_export_without_scope_records_neither_scope_nor_table_prefix(): void {
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$runner->export( new ExportOptions( $this->temp_output_path ), array(), null );
+
+		$provenance = $this->provenance( $this->temp_output_path );
+		$this->assertNull( $provenance->scope(), 'A no-scope export should record no scope.' );
+		$this->assertNull( $provenance->table_prefix(), 'A no-scope export should record no table prefix.' );
+	}
+
+	/**
 	 * An empty entry list still produces a valid, readable archive.
 	 *
 	 * @return void
@@ -244,6 +294,27 @@ final class ExportRunnerTest extends TestCase {
 		try {
 			$reader = new ArchiveReader( $source );
 			return $reader->manifest()->entry_count();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
+			fclose( $source );
+		}
+	}
+
+	/**
+	 * Open a written archive and return its parsed provenance block.
+	 *
+	 * @param string $path Absolute path to the archive.
+	 * @return Provenance
+	 */
+	private function provenance( string $path ): Provenance {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the just-written archive to read its provenance back.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open the written archive.' );
+		}
+		try {
+			$reader = new ArchiveReader( $source );
+			return $reader->provenance();
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
 			fclose( $source );

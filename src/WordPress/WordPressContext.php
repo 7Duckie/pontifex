@@ -111,6 +111,17 @@ interface WordPressContext {
 	public function wpdb_collation(): string;
 
 	/**
+	 * The table-name prefix the WordPress database is configured to use.
+	 *
+	 * Equivalent to $wpdb->prefix. Recorded in Provenance (format v1.1) so a
+	 * content-only restore can rewrite the source-prefixed table names to the
+	 * destination's own prefix.
+	 *
+	 * @return string e.g. "wp_".
+	 */
+	public function wpdb_prefix(): string;
+
+	/**
 	 * The version string reported by the database server.
 	 *
 	 * Equivalent to $wpdb->get_var('SELECT VERSION()'). Used by

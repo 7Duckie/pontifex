@@ -97,10 +97,11 @@ final class ExportRunner {
 	 *
 	 * @param WordPressContext $wordpress_context Supplies the $wpdb instance for the database scan.
 	 * @param ExclusionRules   $rules             Rules applied to both the file and database scans.
+	 * @param string           $path_prefix       Prefix prepended to every scanned file path, so a scan rooted below the WordPress root still records WordPress-root-relative paths. Pass '' for a whole-site scan rooted at the WordPress root, or 'wp-content' for a content-only scan rooted at WP_CONTENT_DIR.
 	 * @return ManifestBuilder A scanner-backed manifest builder.
 	 */
-	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules ): ManifestBuilder {
-		$file_scanner     = new FileScanner( $rules );
+	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
+		$file_scanner     = new FileScanner( $rules, $path_prefix );
 		$database_adapter = new WpdbAdapter( $wordpress_context->wpdb_instance() );
 		$database_scanner = new DatabaseScanner( $database_adapter, $rules );
 		return new ManifestBuilder( $file_scanner, $database_scanner );
@@ -129,7 +130,7 @@ final class ExportRunner {
 		// iterating them.
 		$entry_count = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
 
-		$provenance  = $this->build_provenance( $options->encryption_disabled_reason() );
+		$provenance  = $this->build_provenance( $options );
 		$destination = $this->open_destination( $options->output_path() );
 
 		try {
@@ -153,13 +154,21 @@ final class ExportRunner {
 	/**
 	 * Build a Provenance block from current WordPress and PHP runtime facts.
 	 *
-	 * @param string|null $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null when encrypting.
+	 * When the options carry a scope (a scope-aware export), the scope and the
+	 * source database table prefix are recorded too (format v1.1). When they do not
+	 * (the safety archiver), both are left null, so the provenance bytes stay
+	 * identical to a pre-v1.1 archive — the two v1.1 fields travel together.
+	 *
+	 * @param ExportOptions $options The per-export options, supplying the unencrypted-archive reason and the optional scope.
 	 * @return Provenance A fully-populated provenance value object.
 	 */
-	private function build_provenance( ?string $encryption_disabled_reason ): Provenance {
+	private function build_provenance( ExportOptions $options ): Provenance {
 		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
 			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
 			: self::FALLBACK_VERSION;
+
+		$scope        = $options->scope();
+		$table_prefix = null !== $scope ? $this->wordpress_context->wpdb_prefix() : null;
 
 		return new Provenance(
 			$this->wordpress_context->wp_version(),
@@ -169,7 +178,9 @@ final class ExportRunner {
 			$this->wordpress_context->wpdb_collation(),
 			new ExporterInfo( 'pontifex', $pontifex_version ),
 			new DateTimeImmutable(),
-			$encryption_disabled_reason
+			$options->encryption_disabled_reason(),
+			$table_prefix,
+			$scope
 		);
 	}
 

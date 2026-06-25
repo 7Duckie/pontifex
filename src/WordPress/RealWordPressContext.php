@@ -90,6 +90,15 @@ final class RealWordPressContext implements WordPressContext {
 	}
 
 	/**
+	 * Return the table-name prefix the WordPress database is configured to use.
+	 *
+	 * @return string e.g. "wp_".
+	 */
+	public function wpdb_prefix(): string {
+		return (string) $this->wpdb_instance()->prefix;
+	}
+
+	/**
 	 * Return the version string reported by the database server.
 	 *
 	 * Returns an empty string if the SELECT VERSION() query returns

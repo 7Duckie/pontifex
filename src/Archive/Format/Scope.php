@@ -128,6 +128,40 @@ final class Scope {
 	}
 
 	/**
+	 * Build the scope for a content-only archive (the everyday default).
+	 *
+	 * A content-only archive carries the `wp-content` tree plus the whole database
+	 * and deliberately omits WordPress core and `wp-config.php` (ADR 0008). This
+	 * factory fixes those facts in one place so no caller can record an
+	 * inconsistent content-only scope; the caller supplies only the exclusion
+	 * patterns that were actually applied.
+	 *
+	 * @param string[] $excluded_paths The exclusion patterns applied to the export.
+	 * @return self A content-only scope.
+	 * @throws InvalidArgumentException If any element of $excluded_paths is not a string.
+	 */
+	public static function content_only( array $excluded_paths ): self {
+		return new self( true, 'wp-content', false, false, true, $excluded_paths );
+	}
+
+	/**
+	 * Build the scope for a whole-site archive (the explicit clone-onto-bare opt-in).
+	 *
+	 * A whole-site archive carries everything under the WordPress root — WordPress
+	 * core and `wp-config.php` included — plus the whole database, so its entries
+	 * are rooted at the site root itself rather than under `wp-content` (ADR 0008).
+	 * This factory fixes those facts in one place; the caller supplies only the
+	 * exclusion patterns that were actually applied.
+	 *
+	 * @param string[] $excluded_paths The exclusion patterns applied to the export.
+	 * @return self A whole-site scope.
+	 * @throws InvalidArgumentException If any element of $excluded_paths is not a string.
+	 */
+	public static function whole_site( array $excluded_paths ): self {
+		return new self( false, '', true, true, true, $excluded_paths );
+	}
+
+	/**
 	 * Whether this is a content-only archive.
 	 *
 	 * @return bool True for content-only, false for whole-site.

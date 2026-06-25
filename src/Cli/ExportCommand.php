@@ -13,6 +13,7 @@ use RuntimeException;
 use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Export\ExportOptions;
@@ -27,17 +28,27 @@ use Pontifex\WordPress\WordPressContext;
 /**
  * `wp pontifex export` — produce a Pontifex archive of the current WordPress site.
  *
- * Writes a single .wpmig archive file containing every file under the
- * WordPress root (minus exclusions) and every WordPress-prefixed
- * database table (chunked into ~4 MiB pieces). The archive is the
- * complete on-disk artefact needed to restore the site to its
- * current state on a different host.
+ * Writes a single .wpmig archive file. By default the archive is
+ * content-only: every file under wp-content (minus exclusions) plus
+ * every WordPress-prefixed database table (chunked into ~4 MiB
+ * pieces) — the everyday working-WordPress-to-working-WordPress
+ * backup. Pass --whole-site to capture the entire WordPress root
+ * instead, including core and wp-config.php, for cloning onto a bare
+ * destination. Either way the archive is the on-disk artefact needed
+ * to restore the site on a different host.
  *
  * ## OPTIONS
  *
  * --output=<path>
  * : Absolute filesystem path where the archive should be written.
  *   The parent directory must exist and be writable.
+ *
+ * [--whole-site]
+ * : Capture the entire WordPress root — WordPress core and
+ *   wp-config.php included — rather than only wp-content. Use this
+ *   when cloning onto a fresh, empty destination; the default
+ *   content-only archive is the right choice for an existing
+ *   WordPress install.
  *
  * [--exclude-file=<path>]
  * : Path to a file containing additional exclusion patterns, one per
@@ -47,9 +58,9 @@ use Pontifex\WordPress\WordPressContext;
  *   or exact string.
  *
  * [--no-defaults]
- * : Skip the curated default exclusion list (Pontifex's working dir,
- *   wp-content/cache, other backup plugins' directories). Use only
- *   patterns from `--exclude-file`, if any.
+ * : Skip the curated default exclusion list (Pontifex's working dir
+ *   and wp-content/cache). Use only patterns from `--exclude-file`,
+ *   if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
@@ -76,6 +87,7 @@ use Pontifex\WordPress\WordPressContext;
  *
  *     wp pontifex export --output=/tmp/site.wpmig
  *     wp pontifex export --output=/tmp/site.wpmig --yes
+ *     wp pontifex export --output=/tmp/site.wpmig --whole-site --yes
  *     wp pontifex export --output=/tmp/site.wpmig --exclude-file=/tmp/extras.txt
  *     wp pontifex export --output=/tmp/site.wpmig --no-defaults --exclude-file=/tmp/only.txt
  *     wp pontifex export --output=/tmp/site.wpmig --encrypt
@@ -233,6 +245,7 @@ final class ExportCommand {
 		$output_path       = $this->require_output_path( $associative_args );
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
 		$use_defaults      = self::should_use_defaults( $associative_args );
+		$whole_site        = isset( $associative_args['whole-site'] ) && false !== $associative_args['whole-site'];
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
@@ -257,6 +270,7 @@ final class ExportCommand {
 
 		// 3. Confirm with the user (unless --yes).
 		if ( ! $skip_confirmation ) {
+			$this->print_scope_summary( $whole_site );
 			$this->print_exclusion_summary( $exclusion_rules );
 			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
 		}
@@ -314,18 +328,29 @@ final class ExportCommand {
 
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
-		// 4. Build the entry list (every file plus every database table to archive).
-		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules );
+		// 4. Resolve the export scope. Content-only (the default) scans wp-content and
+		// records each file under a "wp-content" path prefix, so the recorded paths
+		// stay WordPress-root-relative; --whole-site scans the whole WordPress root
+		// with no prefix. The scope facts are recorded in provenance so a destination
+		// can tell what the archive holds before unpacking it (ADR 0008).
+		$scan_root   = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
+		$path_prefix = $whole_site ? '' : 'wp-content';
+		$scope       = $whole_site
+			? Scope::whole_site( $exclusion_rules->patterns() )
+			: Scope::content_only( $exclusion_rules->patterns() );
 
-		// 5. Write the archive through the shared export engine.
+		// 5. Build the entry list (every file plus every database table to archive).
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix );
+
+		// 6. Write the archive through the shared export engine.
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
 
 		try {
-			$entry_plans = $manifest_builder->build( $this->resolve_wordpress_root() );
+			$entry_plans = $manifest_builder->build( $scan_root );
 
 			$this->progress->start( count( $entry_plans ), 'Writing archive' );
 			$result = $export_runner->export(
-				new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason ),
+				new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason, $scope ),
 				$entry_plans,
 				function (): void {
 					$this->progress->advance();
@@ -352,7 +377,7 @@ final class ExportCommand {
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
-			// 6. Print the summary.
+			// 7. Print the summary.
 			$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -585,6 +610,25 @@ final class ExportCommand {
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
 	}
 
+	/**
+	 * Resolve the wp-content root for a content-only file scan.
+	 *
+	 * Reads WP_CONTENT_DIR through the Environment abstraction — the directory
+	 * WordPress actually serves wp-content from, which a site may have relocated —
+	 * and falls back to ABSPATH/wp-content (WordPress's own default for the constant)
+	 * when it is not defined, so the resolver still works outside a full WordPress
+	 * request, as in unit tests.
+	 *
+	 * @return string The absolute path of the wp-content directory.
+	 * @throws RuntimeException If WP_CONTENT_DIR is undefined and ABSPATH is too (should never happen inside a WordPress request).
+	 */
+	private function resolve_content_root(): string {
+		if ( $this->environment->is_constant_defined( 'WP_CONTENT_DIR' ) ) {
+			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
+		}
+		return $this->resolve_wordpress_root() . '/wp-content';
+	}
+
 	// -------------------------------------------------------------------------
 	// Counters.
 	// -------------------------------------------------------------------------
@@ -650,6 +694,24 @@ final class ExportCommand {
 	// -------------------------------------------------------------------------
 	// Output formatting.
 	// -------------------------------------------------------------------------
+
+	/**
+	 * Print which scope the export will use, so the user sees it before confirming.
+	 *
+	 * The default changed to content-only in v0.5.x (ADR 0008), so this line is
+	 * also the cue that points a user wanting the old full-site behaviour at
+	 * --whole-site.
+	 *
+	 * @param bool $whole_site True for a whole-site export, false for content-only.
+	 * @return void
+	 */
+	private function print_scope_summary( bool $whole_site ): void {
+		if ( $whole_site ) {
+			WP_CLI::log( __( 'Scope: whole-site (the entire WordPress root, including core and wp-config.php).', 'pontifex' ) );
+			return;
+		}
+		WP_CLI::log( __( 'Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone.', 'pontifex' ) );
+	}
 
 	/**
 	 * Print the active exclusion patterns so the user can review them before confirming.

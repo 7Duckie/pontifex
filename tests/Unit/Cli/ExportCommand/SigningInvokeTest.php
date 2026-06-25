@@ -213,6 +213,8 @@ final class SigningInvokeTest extends TestCase {
 		$mock->shouldReceive( 'constant_value' )->with( 'PONTIFEX_VERSION' )->andReturn( '0.0.0-test' );
 		$mock->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
 		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/tmp/wp/' );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/tmp/wp/wp-content' );
 		$mock->shouldReceive( 'php_version' )->andReturn( '8.2.10' );
 		return $mock;
 	}
@@ -228,6 +230,7 @@ final class SigningInvokeTest extends TestCase {
 		$mock->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$mock->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$mock->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$mock->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
