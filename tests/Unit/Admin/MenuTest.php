@@ -15,6 +15,7 @@ use Pontifex\Admin\BackupPage;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
+use Pontifex\Admin\VerifyPage;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
@@ -45,7 +46,11 @@ final class MenuTest extends TestCase {
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() )
 		);
-		return new Menu( $overview, $backup );
+		$verify   = new VerifyPage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() )
+		);
+		return new Menu( $overview, $backup, $verify );
 	}
 
 	/**
@@ -134,7 +139,10 @@ final class MenuTest extends TestCase {
 		Functions\when( 'add_submenu_page' )->alias(
 			static function () use ( &$calls ): string {
 				++$calls;
-				return 1 === $calls ? 'pontifex_page_overview' : 'pontifex_page_pontifex-backup';
+				if ( 1 === $calls ) {
+					return 'pontifex_page_overview';
+				}
+				return 2 === $calls ? 'pontifex_page_pontifex-backup' : 'pontifex_page_pontifex-verify';
 			}
 		);
 		Functions\when( 'wp_enqueue_style' )->justReturn( null );
@@ -161,5 +169,48 @@ final class MenuTest extends TestCase {
 
 		$this->assertSame( 'pontifex-backup', $script_handle, 'The Backup script should be enqueued on the Backup screen.' );
 		$this->assertTrue( $localized, 'The Backup script should be localised with its configuration.' );
+	}
+
+	/**
+	 * Loads and localises the Verify script on the Verify screen only.
+	 *
+	 * @return void
+	 */
+	public function test_enqueue_assets_loads_the_script_on_the_verify_screen(): void {
+		$calls = 0;
+		Functions\when( 'add_menu_page' )->justReturn( 'toplevel_page_pontifex' );
+		Functions\when( 'add_submenu_page' )->alias(
+			static function () use ( &$calls ): string {
+				++$calls;
+				if ( 1 === $calls ) {
+					return 'pontifex_page_overview';
+				}
+				return 2 === $calls ? 'pontifex_page_pontifex-backup' : 'pontifex_page_pontifex-verify';
+			}
+		);
+		Functions\when( 'wp_enqueue_style' )->justReturn( null );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
+
+		$script_handle = '';
+		Functions\when( 'wp_enqueue_script' )->alias(
+			static function ( string $handle ) use ( &$script_handle ): void {
+				$script_handle = $handle;
+			}
+		);
+		$localized = false;
+		Functions\when( 'wp_localize_script' )->alias(
+			static function () use ( &$localized ): bool {
+				$localized = true;
+				return true;
+			}
+		);
+
+		$menu = $this->menu();
+		$menu->register_pages();
+		$menu->enqueue_assets( 'pontifex_page_pontifex-verify' );
+
+		$this->assertSame( 'pontifex-verify', $script_handle, 'The Verify script should be enqueued on the Verify screen.' );
+		$this->assertTrue( $localized, 'The Verify script should be localised with its configuration.' );
 	}
 }

@@ -240,8 +240,8 @@
 	color: var(--pontifex-accent);
 }
 
-.pontifex-admin .pontifex-delete-backup {
-	margin-left: calc(var(--pontifex-step) * 2);
+.pontifex-admin .pontifex-delete-backup,
+.pontifex-admin .pontifex-verify-backup {
 	padding: 0;
 	border: 0;
 	background: none;
@@ -251,12 +251,20 @@
 	cursor: pointer;
 }
 
+/* Delete sits after the Download link, so it needs separating; Verify is the only action in its row. */
+.pontifex-admin .pontifex-delete-backup {
+	margin-left: calc(var(--pontifex-step) * 2);
+}
+
 .pontifex-admin .pontifex-delete-backup:hover:not(:disabled),
-.pontifex-admin .pontifex-delete-backup:focus:not(:disabled) {
+.pontifex-admin .pontifex-delete-backup:focus:not(:disabled),
+.pontifex-admin .pontifex-verify-backup:hover:not(:disabled),
+.pontifex-admin .pontifex-verify-backup:focus:not(:disabled) {
 	color: var(--pontifex-ink);
 }
 
-.pontifex-admin .pontifex-delete-backup:disabled {
+.pontifex-admin .pontifex-delete-backup:disabled,
+.pontifex-admin .pontifex-verify-backup:disabled {
 	opacity: 0.5;
 	cursor: default;
 }

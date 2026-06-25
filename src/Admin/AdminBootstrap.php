@@ -27,7 +27,7 @@ use Pontifex\WordPress\RealWordPressContext;
  * {@see self::create()} is the composition root that builds the default object
  * graph from the real WordPress environment; {@see self::register()} attaches
  * the WordPress hooks, including the Backup screen's admin-ajax actions. Tests
- * construct the class with {@see Menu} and {@see BackupController} doubles.
+ * construct the class with {@see Menu} and controller doubles.
  */
 final class AdminBootstrap {
 
@@ -46,14 +46,23 @@ final class AdminBootstrap {
 	private BackupController $backup_controller;
 
 	/**
-	 * Construct the bootstrap around the menu registrar and the backup controller.
+	 * The controller behind the Verify screen's admin-ajax actions.
+	 *
+	 * @var VerifyController
+	 */
+	private VerifyController $verify_controller;
+
+	/**
+	 * Construct the bootstrap around the menu registrar and the controllers.
 	 *
 	 * @param Menu             $menu              The menu registrar to hook into WordPress.
 	 * @param BackupController $backup_controller The controller serving the Backup screen's actions.
+	 * @param VerifyController $verify_controller The controller serving the Verify screen's actions.
 	 */
-	public function __construct( Menu $menu, BackupController $backup_controller ) {
+	public function __construct( Menu $menu, BackupController $backup_controller, VerifyController $verify_controller ) {
 		$this->menu              = $menu;
 		$this->backup_controller = $backup_controller;
+		$this->verify_controller = $verify_controller;
 	}
 
 	/**
@@ -78,11 +87,13 @@ final class AdminBootstrap {
 
 		$overview = new OverviewPage( $context, $rollback_store, $plugin_version );
 		$backup   = new BackupPage( $context, $backup_store );
+		$verify   = new VerifyPage( $context, $backup_store );
 
 		$logger            = new FileLogger( $content_dir . '/pontifex/logs', self::debug_enabled(), protect_directory: true );
 		$backup_controller = new BackupController( $environment, $context, $backup_store, $logger );
+		$verify_controller = new VerifyController( $environment, $context, $backup_store, $logger );
 
-		return new self( new Menu( $overview, $backup ), $backup_controller );
+		return new self( new Menu( $overview, $backup, $verify ), $backup_controller, $verify_controller );
 	}
 
 	/**
@@ -101,9 +112,9 @@ final class AdminBootstrap {
 	 * Attach the admin hooks.
 	 *
 	 * Registers the menu on `admin_menu`, the page assets on
-	 * `admin_enqueue_scripts`, and the Backup screen's five admin-ajax actions.
-	 * The menu and asset callbacks are inert on non-Pontifex screens, and each
-	 * ajax action re-checks the capability and nonce, so calling this
+	 * `admin_enqueue_scripts`, and the Backup and Verify screens' admin-ajax
+	 * actions. The menu and asset callbacks are inert on non-Pontifex screens, and
+	 * each ajax action re-checks the capability and nonce, so calling this
 	 * unconditionally from an `is_admin()` block is safe.
 	 *
 	 * @return void
@@ -117,5 +128,8 @@ final class AdminBootstrap {
 		add_action( 'wp_ajax_pontifex_cancel_backup', array( $this->backup_controller, 'cancel' ) );
 		add_action( 'wp_ajax_pontifex_download_backup', array( $this->backup_controller, 'download' ) );
 		add_action( 'wp_ajax_pontifex_delete_backup', array( $this->backup_controller, 'delete' ) );
+
+		add_action( 'wp_ajax_pontifex_verify', array( $this->verify_controller, 'verify' ) );
+		add_action( 'wp_ajax_pontifex_verify_progress', array( $this->verify_controller, 'progress' ) );
 	}
 }
