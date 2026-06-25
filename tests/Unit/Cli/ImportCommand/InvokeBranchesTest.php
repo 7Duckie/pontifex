@@ -17,6 +17,7 @@ use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Crypto\SigningKeypair;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
@@ -77,23 +78,48 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * Write a minimal, valid, unsigned archive to the given path.
+	 * Write a minimal, valid, unsigned, content-only archive to the given path.
+	 *
+	 * Content-only so the default (content-only) import accepts it; the import scope
+	 * gate is covered separately by the whole-site and legacy refusal tests.
 	 *
 	 * @param string $path Destination path.
 	 * @return void
 	 */
 	private static function write_unsigned_archive( string $path ): void {
-		self::write_archive_to( $path, null );
+		self::write_archive_to( $path, null, Scope::content_only( array() ), 'wp_' );
 	}
 
 	/**
-	 * Write a minimal, valid archive to the given path, optionally signed.
+	 * Write a minimal, valid, unsigned, whole-site archive to the given path.
 	 *
-	 * @param string              $path    Destination path.
-	 * @param SigningContext|null $signing Signing context, or null for an unsigned archive.
+	 * @param string $path Destination path.
 	 * @return void
 	 */
-	private static function write_archive_to( string $path, ?SigningContext $signing ): void {
+	private static function write_whole_site_archive( string $path ): void {
+		self::write_archive_to( $path, null, Scope::whole_site( array() ), 'wp_' );
+	}
+
+	/**
+	 * Write a minimal, valid, unsigned, legacy (no-scope) archive to the given path.
+	 *
+	 * @param string $path Destination path.
+	 * @return void
+	 */
+	private static function write_legacy_archive( string $path ): void {
+		self::write_archive_to( $path, null, null, null );
+	}
+
+	/**
+	 * Write a minimal, valid archive to the given path, optionally signed and scoped.
+	 *
+	 * @param string              $path         Destination path.
+	 * @param SigningContext|null $signing      Signing context, or null for an unsigned archive.
+	 * @param Scope|null          $scope        The scope to record, or null for a legacy (no-scope) archive.
+	 * @param string|null         $table_prefix The table prefix to record, or null for none.
+	 * @return void
+	 */
+	private static function write_archive_to( string $path, ?SigningContext $signing, ?Scope $scope = null, ?string $table_prefix = null ): void {
 		$provenance = new Provenance(
 			'6.6.1',
 			'8.2.10',
@@ -101,7 +127,10 @@ final class InvokeBranchesTest extends TestCase {
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
 			new ExporterInfo( 'pontifex', '0.3.0' ),
-			new DateTimeImmutable( '2026-06-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+			new DateTimeImmutable( '2026-06-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			$table_prefix,
+			$scope
 		);
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp source file for the command to read; WP_Filesystem is not bootstrapped in unit tests.
@@ -552,6 +581,115 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * A default (content-only) import refuses a whole-site archive before any restore.
+	 *
+	 * The scope gate runs before the safety archive and the restore: a whole-site
+	 * archive (which carries WordPress core and wp-config.php) is refused unless
+	 * --whole-site is given, so a default restore never overwrites a live site's core.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_refuses_a_whole_site_archive_by_default(): void {
+		self::write_whole_site_archive( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing a whole-site archive' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'refusing a whole-site archive' );
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * A default (content-only) import refuses a legacy (no-scope) archive before any restore.
+	 *
+	 * A legacy archive predates the content-only format and is treated as
+	 * whole-site, so it is refused on the default path just like an explicit
+	 * whole-site archive.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_refuses_a_legacy_archive_by_default(): void {
+		self::write_legacy_archive( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing a legacy archive' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'refusing a legacy archive' );
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * Passing --whole-site allows restoring a whole-site archive.
+	 *
+	 * The opt-in path: with --whole-site the scope gate permits a whole-site
+	 * archive, so the safety archive is taken and the restore proceeds.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_with_whole_site_flag_restores_a_whole_site_archive(): void {
+		self::write_whole_site_archive( $this->temp_archive_path );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'whole-site' => true,
+				'yes'        => true,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path );
+	}
+
+	/**
 	 * Build an Environment mock that answers the ABSPATH lookup.
 	 *
 	 * The take_safety_archive step resolves the WordPress root through ABSPATH to
@@ -564,6 +702,8 @@ final class InvokeBranchesTest extends TestCase {
 		$mock = Mockery::mock( Environment::class );
 		$mock->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
 		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/var/www/html' );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/var/www/html/wp-content' );
 		return $mock;
 	}
 
