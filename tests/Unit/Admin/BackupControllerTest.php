@@ -121,6 +121,60 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * The copy phase reports byte progress against the entries' total size.
+	 *
+	 * Captures the progress transient the running export writes and asserts a
+	 * copying-phase entry carries the total source bytes as its denominator and a
+	 * non-zero bytes-copied count — the byte callback the determinate bar rides on.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_byte_progress_in_the_copy_phase(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$writes = array();
+		Functions\when( 'set_transient' )->alias(
+			static function ( string $key, $value ) use ( &$writes ): bool {
+				if ( 'pontifex_backup_progress' === $key ) {
+					$writes[] = $value;
+				}
+				return true;
+			}
+		);
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$alpha          = "alpha alpha alpha\n";
+		$beta           = "beta\n";
+		$expected_total = strlen( $alpha ) + strlen( $beta );
+		$plans          = array(
+			$this->file_plan( 'a.txt', $alpha ),
+			$this->file_plan( 'b.txt', $beta ),
+		);
+
+		$this->controller( $this->manifest_builder_returning( $plans ) )->create();
+
+		$copy = array_values(
+			array_filter(
+				$writes,
+				static function ( $write ): bool {
+					return is_array( $write ) && isset( $write['phase'] ) && 'copying' === $write['phase'];
+				}
+			)
+		);
+
+		$this->assertNotEmpty( $copy, 'The copy phase must write byte progress.' );
+		$this->assertSame( $expected_total, (int) $copy[0]['bytes_total'], 'bytes_total must equal the entries\' source size.' );
+
+		$max_done = 0;
+		foreach ( $copy as $write ) {
+			$max_done = max( $max_done, (int) $write['bytes_done'] );
+		}
+		$this->assertGreaterThan( 0, $max_done, 'The byte callback must report bytes copied during the export.' );
+	}
+
+	/**
 	 * A failed backup is logged and leaves no partial archive behind.
 	 *
 	 * @return void

@@ -118,6 +118,26 @@
 	}
 
 	/**
+	 * Format a byte count as a human-readable size (e.g. 236 MB).
+	 *
+	 * @param {number} bytes A non-negative byte count.
+	 * @return {string} The formatted size.
+	 */
+	function formatBytes( bytes ) {
+		var n = Math.max( 0, bytes );
+		if ( n < 1024 ) {
+			return n + ' B';
+		}
+		var units = [ 'KB', 'MB', 'GB', 'TB' ];
+		var u = -1;
+		do {
+			n /= 1024;
+			u++;
+		} while ( n >= 1024 && u < units.length - 1 );
+		return ( n < 10 ? n.toFixed( 1 ) : Math.round( n ) ) + ' ' + units[ u ];
+	}
+
+	/**
 	 * Enable or disable every delete button, so none can be pressed mid-backup.
 	 *
 	 * @param {boolean} enabled Whether the delete buttons should be clickable.
@@ -163,7 +183,7 @@
 
 		var startedAt = Date.now();
 		var seenCopying = false;
-		var lastDone = 0;
+		var lastBytes = 0;
 		var samples = [];
 
 		var poll = window.setInterval( function () {
@@ -184,30 +204,32 @@
 					return;
 				}
 
-				// Copying phase: determinate bar that never runs backwards, with elapsed
-				// and an estimate of time left. Once seen, we never revert to scanning.
+				// Copying phase: determinate bar driven by bytes, so it advances through a
+				// single large file and not only at file boundaries; it never runs backwards,
+				// with elapsed and an estimate of time left. Once seen, never revert to scanning.
 				seenCopying = true;
-				var done = Math.max( data.done, lastDone );
-				lastDone = done;
+				var bytesDone = Math.max( data.bytes_done, lastBytes );
+				lastBytes = bytesDone;
+				var bytesTotal = data.bytes_total;
 				setIndeterminate( false );
-				setBar( done, data.total );
+				setBar( bytesDone, bytesTotal );
 				setText(
 					'pontifex-backup-progress',
-					cfg.strings.progress.replace( '%1$s', done ).replace( '%2$s', data.total )
+					cfg.strings.progress.replace( '%1$s', formatBytes( bytesDone ) ).replace( '%2$s', formatBytes( bytesTotal ) )
 				);
 
-				// Estimate time left from a recent-rate window (last ~5s), not the average
-				// since the start: the first files are large, so a since-start rate reads in
-				// hours early then collapses to seconds. And withhold the estimate until
-				// enough has copied (10%) that it is steady, showing only elapsed until then.
-				samples.push( { t: Date.now(), done: done } );
+				// Estimate time left from a recent-rate window (last ~5s) over bytes, not the
+				// average since the start: with large early files a since-start rate reads in
+				// hours then collapses. Withhold the estimate until enough has copied (10%)
+				// that the rate is steady, showing only elapsed until then.
+				samples.push( { t: Date.now(), bytes: bytesDone } );
 				while ( samples.length > 1 && ( samples[ samples.length - 1 ].t - samples[ 0 ].t ) > 5000 ) {
 					samples.shift();
 				}
 				var span = ( samples[ samples.length - 1 ].t - samples[ 0 ].t ) / 1000;
-				var rate = span > 0 ? ( samples[ samples.length - 1 ].done - samples[ 0 ].done ) / span : 0;
-				if ( rate > 0 && done >= data.total * 0.1 && done < data.total ) {
-					var remaining = ( data.total - done ) / rate;
+				var rate = span > 0 ? ( samples[ samples.length - 1 ].bytes - samples[ 0 ].bytes ) / span : 0;
+				if ( rate > 0 && bytesTotal > 0 && bytesDone >= bytesTotal * 0.1 && bytesDone < bytesTotal ) {
+					var remaining = ( bytesTotal - bytesDone ) / rate;
 					setText(
 						'pontifex-backup-timing',
 						cfg.strings.timing

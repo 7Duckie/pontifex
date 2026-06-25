@@ -265,18 +265,18 @@ final class BackupController {
 		);
 
 		try {
-			$this->set_progress( 0, 0, self::PHASE_SCANNING );
+			$this->set_scan_progress( 0 );
 
 			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
 			$entry_plans = $builder->build( $this->resolve_wordpress_root(), $this->scan_progress_callback() );
-			$total       = count( $entry_plans );
+			$total_bytes = $entry_plans->estimated_bytes();
 
-			$this->set_progress( 0, $total, self::PHASE_COPYING );
+			$this->set_copy_progress( 0, $total_bytes );
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
 			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
-			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, $this->progress_callback() );
+			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, null, $this->byte_progress_callback( $total_bytes ) );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -362,11 +362,11 @@ final class BackupController {
 	}
 
 	/**
-	 * Report the in-progress export's running count.
+	 * Report the in-progress export's running progress.
 	 *
 	 * The `wp_ajax_pontifex_backup_progress` handler, polled by the page while a
-	 * backup runs. Returns the done/total counts the running export writes, or
-	 * zeroes when none is recorded.
+	 * backup runs. Returns the scanning file count and the copying byte counts the
+	 * running export writes, or zeroes when none is recorded.
 	 *
 	 * @return void
 	 */
@@ -382,9 +382,10 @@ final class BackupController {
 
 		wp_send_json_success(
 			array(
-				'phase' => $phase,
-				'done'  => $this->counter_int( $progress, 'done' ),
-				'total' => $this->counter_int( $progress, 'total' ),
+				'phase'       => $phase,
+				'done'        => $this->counter_int( $progress, 'done' ),
+				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
+				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
 			)
 		);
 	}
@@ -511,23 +512,26 @@ final class BackupController {
 	}
 
 	/**
-	 * Build the per-entry copy progress callback that writes the throttled transient.
+	 * Build the copy-phase byte-progress callback that writes the throttled transient.
 	 *
-	 * Writing on every entry would mean tens of thousands of option writes on a
-	 * large site, so the transient is refreshed at most once every
-	 * {@see self::PROGRESS_THROTTLE_SECONDS}, plus once on the final entry.
-	 * Throttling by time rather than by entry count keeps the bar creeping a few
-	 * times a second even through a slow patch of large early files, instead of
-	 * sitting still until a whole percent has been written.
+	 * Handed to {@see ExportRunner::export()} as its byte callback: the export feeds
+	 * it each chunk's raw source byte count, which it accumulates and reports
+	 * against the total. Reporting bytes rather than entries keeps the bar advancing
+	 * smoothly through a single large file instead of freezing at its boundary. The
+	 * transient is refreshed at most once every {@see self::PROGRESS_THROTTLE_SECONDS}
+	 * to keep option writes bounded.
 	 *
-	 * @return callable(int, int): void The callback to hand to {@see ExportRunner::export()}.
+	 * @param int $total_bytes The estimated total source bytes — the progress denominator.
+	 * @return callable(int): void The byte callback to hand to {@see ExportRunner::export()}.
 	 */
-	private function progress_callback(): callable {
-		$last = 0.0;
-		return function ( int $done, int $count ) use ( &$last ): void {
-			$now = microtime( true );
-			if ( $done === $count || ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
-				$this->set_progress( $done, $count, self::PHASE_COPYING );
+	private function byte_progress_callback( int $total_bytes ): callable {
+		$last       = 0.0;
+		$bytes_done = 0;
+		return function ( int $bytes ) use ( &$last, &$bytes_done, $total_bytes ): void {
+			$bytes_done += $bytes;
+			$now         = microtime( true );
+			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
+				$this->set_copy_progress( $bytes_done, $total_bytes );
 				$last = $now;
 			}
 		};
@@ -548,7 +552,7 @@ final class BackupController {
 		return function ( int $scanned ) use ( &$last ): void {
 			$now = microtime( true );
 			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
-				$this->set_progress( $scanned, 0, self::PHASE_SCANNING );
+				$this->set_scan_progress( $scanned );
 				$last = $now;
 			}
 		};
@@ -582,20 +586,43 @@ final class BackupController {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Write the running progress to the transient.
+	 * Write the scanning-phase progress to the transient.
 	 *
-	 * @param int    $done  Entries processed so far in the current phase.
-	 * @param int    $total Total entries for the phase, or 0 when not yet known (scanning).
-	 * @param string $phase The current phase: self::PHASE_SCANNING or self::PHASE_COPYING.
+	 * The total is unknown while the filesystem is walked, so only the climbing
+	 * file count is reported; the browser renders it as the indeterminate phase.
+	 *
+	 * @param int $scanned Files enumerated so far.
 	 * @return void
 	 */
-	private function set_progress( int $done, int $total, string $phase ): void {
+	private function set_scan_progress( int $scanned ): void {
 		set_transient(
 			self::PROGRESS_TRANSIENT,
 			array(
-				'phase' => $phase,
-				'done'  => $done,
-				'total' => $total,
+				'phase' => self::PHASE_SCANNING,
+				'done'  => $scanned,
+			),
+			self::PROGRESS_TTL
+		);
+	}
+
+	/**
+	 * Write the copying-phase byte progress to the transient.
+	 *
+	 * Reports the bytes processed against the estimated total so the browser can
+	 * fill a determinate bar that advances within a large entry, not only between
+	 * entries.
+	 *
+	 * @param int $bytes_done  Source bytes processed so far.
+	 * @param int $bytes_total Estimated total source bytes.
+	 * @return void
+	 */
+	private function set_copy_progress( int $bytes_done, int $bytes_total ): void {
+		set_transient(
+			self::PROGRESS_TRANSIENT,
+			array(
+				'phase'       => self::PHASE_COPYING,
+				'bytes_done'  => $bytes_done,
+				'bytes_total' => $bytes_total,
 			),
 			self::PROGRESS_TTL
 		);
