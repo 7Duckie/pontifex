@@ -31,9 +31,9 @@ use Pontifex\Archive\Integrity\Sha256;
  *
  * Detailed per-entry metadata (size_uncompressed, size_compressed,
  * mode, modified_at, media_type) lives in entry headers on disk, NOT
- * here. The manifest is a lightweight navigation index, following the
- * pattern used by ZIP central directories, OCI image manifests, and
- * git pack indexes.
+ * here. The manifest is a lightweight navigation index — a directory of
+ * entries kept separate from the data they point to, the pattern common
+ * to container and archive formats.
  *
  * Instances are constructed via the four static factories, one per
  * entry kind (for_file, for_db_chunk, for_directory, for_symlink).

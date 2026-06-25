@@ -335,8 +335,8 @@ archives are **unencrypted**.
 - **Import trust boundary documented** in
   [`.github/SECURITY.md`](.github/SECURITY.md): importing a `.wpmig`
   grants its author full write access to the target, so only trusted
-  archives should be imported. A peer-CVE security review (Wordfence /
-  WPScan / Patchstack) informed the hardening above.
+  archives should be imported. A review against published WordPress
+  vulnerability data informed the hardening above.
 
 ## [0.0.6] — pre-alpha (tests strengthened; v0.1.0 scope settled)
 
