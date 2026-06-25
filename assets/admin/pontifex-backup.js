@@ -162,9 +162,9 @@
 		setIndeterminate( true );
 
 		var startedAt = Date.now();
-		var copyStartedAt = 0;
 		var seenCopying = false;
 		var lastDone = 0;
+		var samples = [];
 
 		var poll = window.setInterval( function () {
 			request( 'pontifex_backup_progress' ).then( function ( res ) {
@@ -187,9 +187,6 @@
 				// Copying phase: determinate bar that never runs backwards, with elapsed
 				// and an estimate of time left. Once seen, we never revert to scanning.
 				seenCopying = true;
-				if ( 0 === copyStartedAt ) {
-					copyStartedAt = Date.now();
-				}
 				var done = Math.max( data.done, lastDone );
 				lastDone = done;
 				setIndeterminate( false );
@@ -199,9 +196,18 @@
 					cfg.strings.progress.replace( '%1$s', done ).replace( '%2$s', data.total )
 				);
 
-				var copyElapsed = ( Date.now() - copyStartedAt ) / 1000;
-				if ( done > 0 && done < data.total && copyElapsed > 0 ) {
-					var remaining = copyElapsed * ( data.total - done ) / done;
+				// Estimate time left from a recent-rate window (last ~5s), not the average
+				// since the start: the first files are large, so a since-start rate reads in
+				// hours early then collapses to seconds. And withhold the estimate until
+				// enough has copied (10%) that it is steady, showing only elapsed until then.
+				samples.push( { t: Date.now(), done: done } );
+				while ( samples.length > 1 && ( samples[ samples.length - 1 ].t - samples[ 0 ].t ) > 5000 ) {
+					samples.shift();
+				}
+				var span = ( samples[ samples.length - 1 ].t - samples[ 0 ].t ) / 1000;
+				var rate = span > 0 ? ( samples[ samples.length - 1 ].done - samples[ 0 ].done ) / span : 0;
+				if ( rate > 0 && done >= data.total * 0.1 && done < data.total ) {
+					var remaining = ( data.total - done ) / rate;
 					setText(
 						'pontifex-backup-timing',
 						cfg.strings.timing
