@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Admin;
 
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\FileLogger;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\WordPress\RealWordPressContext;
 
@@ -78,9 +79,22 @@ final class AdminBootstrap {
 		$overview = new OverviewPage( $context, $rollback_store, $plugin_version );
 		$backup   = new BackupPage( $context, $backup_store );
 
-		$backup_controller = new BackupController( $environment, $context, $backup_store );
+		$logger            = new FileLogger( $content_dir . '/pontifex/logs', self::debug_enabled(), protect_directory: true );
+		$backup_controller = new BackupController( $environment, $context, $backup_store, $logger );
 
 		return new self( new Menu( $overview, $backup ), $backup_controller );
+	}
+
+	/**
+	 * Whether WordPress debug logging is on, read from the WP_DEBUG constant.
+	 *
+	 * Mirrors the verbosity floor the WP-CLI commands use, so the admin Backup's
+	 * log lines follow the same debug setting as the rest of Pontifex.
+	 *
+	 * @return bool True when WP_DEBUG is defined and truthy.
+	 */
+	private static function debug_enabled(): bool {
+		return defined( 'WP_DEBUG' ) && (bool) constant( 'WP_DEBUG' );
 	}
 
 	/**

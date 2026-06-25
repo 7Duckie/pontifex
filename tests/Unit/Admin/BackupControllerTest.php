@@ -21,6 +21,8 @@ use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use RuntimeException;
 
 /**
@@ -116,6 +118,53 @@ final class BackupControllerTest extends TestCase {
 		$this->assertCount( 1, $backups, 'Exactly one backup file should have been written.' );
 		$this->assertStringStartsWith( 'pontifex-backup-', basename( $backups[0] ) );
 		$this->assertSame( 0600, fileperms( $backups[0] ) & 0777, 'A backup must be owner read/write only.' );
+	}
+
+	/**
+	 * A failed backup is logged and leaves no partial archive behind.
+	 *
+	 * @return void
+	 */
+	public function test_create_logs_and_removes_partial_backup_on_failure(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'error' )->once();
+
+		$builder = $this->manifest_builder_returning( array( $this->throwing_plan( 'index.php' ) ) );
+
+		try {
+			$this->controller( $builder, $logger )->create();
+			$this->fail( 'create() should have halted via wp_send_json_error.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame(
+			array(),
+			( new BackupStore( $this->base ) )->backups(),
+			'A failed backup must leave no partial archive in the store.'
+		);
+	}
+
+	/**
+	 * The shutdown handler does nothing when no backup is in progress.
+	 *
+	 * Guards against it deleting a file or logging on an ordinary request's
+	 * shutdown; it acts only when a fatal interrupted a running backup.
+	 *
+	 * @return void
+	 */
+	public function test_handle_shutdown_ignores_requests_with_no_active_backup(): void {
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldNotReceive( 'error' );
+
+		$this->controller( null, $logger )->handle_shutdown();
+
+		$this->addToAssertionCount( 1 );
 	}
 
 	/**
@@ -218,13 +267,15 @@ final class BackupControllerTest extends TestCase {
 	 * Build a controller around mocked collaborators and a real store on the temp dir.
 	 *
 	 * @param ManifestBuilderInterface|null $builder Optional injected manifest builder.
+	 * @param LoggerInterface|null          $logger  Optional injected logger; a NullLogger by default.
 	 * @return BackupController
 	 */
-	private function controller( ?ManifestBuilderInterface $builder = null ): BackupController {
+	private function controller( ?ManifestBuilderInterface $builder = null, ?LoggerInterface $logger = null ): BackupController {
 		return new BackupController(
 			$this->environment_mock(),
 			$this->wordpress_context_mock(),
 			new BackupStore( $this->base ),
+			$logger ?? new NullLogger(),
 			$builder
 		);
 	}
@@ -355,6 +406,28 @@ final class BackupControllerTest extends TestCase {
 	private function file_plan( string $path, string $contents ): EntryPlan {
 		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
 		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build a file EntryPlan whose source stream cannot be opened.
+	 *
+	 * The deferred source factory throws when the writer pulls it, so the export
+	 * fails partway — after the destination file has been created — which is the
+	 * situation the partial-file cleanup must handle.
+	 *
+	 * @param string $path Relative path inside the archive.
+	 * @return EntryPlan
+	 */
+	private function throwing_plan( string $path ): EntryPlan {
+		$header = EntryHeader::for_file( $path, 4, 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan(
+			$header,
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			static function () {
+				throw new RuntimeException( 'simulated source failure' );
+			}
+		);
 	}
 
 	/**

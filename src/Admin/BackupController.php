@@ -19,6 +19,7 @@ use Pontifex\Export\ExportRunner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\WordPress\WordPressContext;
+use Psr\Log\LoggerInterface;
 
 /**
  * Handles the four admin-ajax actions that drive the Backup screen.
@@ -89,6 +90,17 @@ final class BackupController {
 	private const FILE_MODE = 0600;
 
 	/**
+	 * PHP error types that are fatal and uncatchable, so they bypass the try/catch.
+	 *
+	 * A run that ends on one of these (out of memory, an exceeded time limit) never
+	 * reaches the catch in {@see self::create()}; {@see self::handle_shutdown()}
+	 * cleans up after it instead.
+	 *
+	 * @var int[]
+	 */
+	private const FATAL_ERROR_TYPES = array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR );
+
+	/**
 	 * The Environment abstraction (constants and PHP version).
 	 *
 	 * @var Environment
@@ -110,6 +122,14 @@ final class BackupController {
 	private BackupStore $store;
 
 	/**
+	 * PSR-3 logger; a failed backup's real cause is recorded here so the
+	 * "check the Pontifex log" message it shows the operator is honest.
+	 *
+	 * @var LoggerInterface
+	 */
+	private LoggerInterface $logger;
+
+	/**
 	 * The manifest builder used to enumerate entries.
 	 *
 	 * Optional: when null, create() wires the default scanner-backed builder over
@@ -121,22 +141,35 @@ final class BackupController {
 	private ?ManifestBuilderInterface $manifest_builder;
 
 	/**
+	 * Absolute path of the backup currently being written, or null when idle.
+	 *
+	 * Set once the destination path is known and cleared when the run ends, so the
+	 * shutdown handler knows whether a fatal left a partial archive to remove.
+	 *
+	 * @var string|null
+	 */
+	private ?string $active_backup_path = null;
+
+	/**
 	 * Construct the controller around its collaborators.
 	 *
 	 * @param Environment                   $environment       Constant and PHP-version reads.
 	 * @param WordPressContext              $wordpress_context Provenance facts, counters, and size formatting.
 	 * @param BackupStore                   $store             The backups directory.
+	 * @param LoggerInterface               $logger            Records a failed backup's real cause.
 	 * @param ManifestBuilderInterface|null $manifest_builder  Optional. When null, a default scanner-backed builder is used.
 	 */
 	public function __construct(
 		Environment $environment,
 		WordPressContext $wordpress_context,
 		BackupStore $store,
+		LoggerInterface $logger,
 		?ManifestBuilderInterface $manifest_builder = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
+		$this->logger            = $logger;
 		$this->manifest_builder  = $manifest_builder;
 	}
 
@@ -161,6 +194,16 @@ final class BackupController {
 		$this->store->ensure_directory();
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
+		// A fatal error — out of memory, an exceeded time limit — cannot be caught,
+		// so the catch below never runs for it: PHP would die mid-write and leave a
+		// partial archive in the store, unlogged. Register a shutdown handler that
+		// removes the partial file and records the real reason if that happens.
+		register_shutdown_function(
+			function (): void {
+				$this->handle_shutdown();
+			}
+		);
+
 		try {
 			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
 			$entry_plans = $builder->build( $this->resolve_wordpress_root() );
@@ -168,12 +211,14 @@ final class BackupController {
 
 			$this->set_progress( 0, $total );
 
-			$path   = $this->store->next_backup_path( new DateTimeImmutable() );
-			$runner = new ExportRunner( $this->environment, $this->wordpress_context );
-			$result = $runner->export( new ExportOptions( $path ), $entry_plans, $this->progress_callback( $total ) );
+			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
+			$this->active_backup_path = $path;
+			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
+			$result                   = $runner->export( new ExportOptions( $path ), $entry_plans, $this->progress_callback( $total ) );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
+			$this->active_backup_path = null;
 
 			$this->bump_counters(
 				array(
@@ -192,11 +237,62 @@ final class BackupController {
 				)
 			);
 		} catch ( Throwable $error ) {
+			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
+			$this->delete_partial_backup();
+			$this->active_backup_path = null;
 			$this->clear_progress();
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
 		}
+	}
+
+	/**
+	 * Remove a partial archive and record the cause when a fatal error ended a run.
+	 *
+	 * Registered with register_shutdown_function() at the start of {@see create()}.
+	 * A fatal — out of memory, an exceeded time limit — cannot be caught, so the
+	 * try/catch in create() never runs and PHP dies after the destination file was
+	 * opened, leaving a half-written archive. On shutdown, when a backup was still
+	 * in progress and the request ended on a fatal, this logs the real reason and
+	 * removes the partial file. A clean run, or one that failed with a catchable
+	 * exception, has already cleared the active path, so this does nothing.
+	 *
+	 * @return void
+	 */
+	public function handle_shutdown(): void {
+		if ( null === $this->active_backup_path ) {
+			return;
+		}
+
+		$last_error = error_get_last();
+		if ( ! is_array( $last_error ) || ! in_array( $last_error['type'], self::FATAL_ERROR_TYPES, true ) ) {
+			return;
+		}
+
+		$this->logger->error(
+			'Admin backup ended on a fatal error; removing the partial archive.',
+			array( 'error' => $last_error['message'] )
+		);
+		$this->delete_partial_backup();
+		$this->active_backup_path = null;
+	}
+
+	/**
+	 * Delete the in-progress backup file if one was left on disk.
+	 *
+	 * Best-effort: a failure to remove the partial archive must not mask the error
+	 * that caused the backup to fail, so a missing file or an unlink failure is
+	 * ignored.
+	 *
+	 * @return void
+	 */
+	private function delete_partial_backup(): void {
+		if ( null === $this->active_backup_path ) {
+			return;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a partial archive after a failed backup; a failure (including a missing file) must not mask the original error.
+		@unlink( $this->active_backup_path );
 	}
 
 	/**

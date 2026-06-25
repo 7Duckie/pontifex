@@ -21,6 +21,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
+use Psr\Log\NullLogger;
 
 /**
  * Covers that register() attaches every hook the admin layer needs.
@@ -82,7 +83,8 @@ final class AdminBootstrapTest extends TestCase {
 		return new BackupController(
 			Mockery::mock( Environment::class ),
 			Mockery::mock( WordPressContext::class ),
-			new BackupStore( sys_get_temp_dir() )
+			new BackupStore( sys_get_temp_dir() ),
+			new NullLogger()
 		);
 	}
 }
