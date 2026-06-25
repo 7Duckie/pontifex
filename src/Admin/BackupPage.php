@@ -203,8 +203,8 @@ final class BackupPage {
 			$parsed = DateTimeImmutable::createFromFormat( self::STAMP_FORMAT, $matches[1], new DateTimeZone( 'UTC' ) );
 			if ( false !== $parsed ) {
 				// Render in the site's configured timezone (Settings -> General), not UTC,
-				// so operators see local time; the format reads "08.45 on 25,06,2026".
-				$formatted = wp_date( 'H.i \o\n d-m-Y', $parsed->getTimestamp() );
+				// so operators see local time; the format reads "08:45 on 25-06-2026".
+				$formatted = wp_date( 'H:i \o\n d-m-Y', $parsed->getTimestamp() );
 				if ( false !== $formatted ) {
 					return $formatted;
 				}
