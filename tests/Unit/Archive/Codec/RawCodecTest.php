@@ -245,4 +245,55 @@ final class RawCodecTest extends TestCase {
 		$this->assertSame( strlen( $payload ), $written );
 		$this->assertSame( $payload, $this->drain( $output ) );
 	}
+
+	/**
+	 * Encoding must report each chunk's source bytes to the progress callback.
+	 *
+	 * The reported deltas must sum to the original input size and arrive more
+	 * than once for a multi-chunk payload, so a caller can advance a byte-based
+	 * progress bar while a stored (uncompressed) entry streams.
+	 *
+	 * @return void
+	 */
+	public function test_encode_reports_source_bytes_to_the_callback(): void {
+		$payload  = str_repeat( 'raw progress payload; ', 4000 );
+		$codec    = new RawCodec();
+		$output   = $this->writable_stream();
+		$reported = 0;
+		$calls    = 0;
+
+		$written = $codec->encode(
+			$this->readable_stream( $payload ),
+			$output,
+			function ( int $bytes ) use ( &$reported, &$calls ): void {
+				$reported += $bytes;
+				++$calls;
+			}
+		);
+
+		$this->assertSame( strlen( $payload ), $reported, 'Reported bytes must sum to the input size.' );
+		$this->assertGreaterThan( 1, $calls, 'A multi-chunk payload must report more than once.' );
+		$this->assertSame( $payload, $this->drain( $output ), 'The reporting copy must still pass bytes through unchanged.' );
+		$this->assertSame( strlen( $payload ), $written, 'The reporting copy must return the byte count written.' );
+	}
+
+	/**
+	 * Encoding an empty input must not invoke the progress callback.
+	 *
+	 * @return void
+	 */
+	public function test_encode_empty_input_reports_nothing(): void {
+		$codec = new RawCodec();
+		$calls = 0;
+
+		$codec->encode(
+			$this->readable_stream( '' ),
+			$this->writable_stream(),
+			function () use ( &$calls ): void {
+				++$calls;
+			}
+		);
+
+		$this->assertSame( 0, $calls, 'Empty input reads nothing, so the callback must not fire.' );
+	}
 }

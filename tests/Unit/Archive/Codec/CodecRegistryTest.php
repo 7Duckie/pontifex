@@ -74,11 +74,12 @@ final class CodecRegistryTest extends TestCase {
 			/**
 			 * No-op encode for stub purposes.
 			 *
-			 * @param resource $input  A readable stream resource.
-			 * @param resource $output A writable stream resource.
+			 * @param resource      $input   A readable stream resource.
+			 * @param resource      $output  A writable stream resource.
+			 * @param callable|null $on_read Ignored by this stub.
 			 * @return int Always zero.
 			 */
-			public function encode( $input, $output ): int {
+			public function encode( $input, $output, ?callable $on_read = null ): int {
 				return 0;
 			}
 

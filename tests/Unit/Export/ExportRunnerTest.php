@@ -118,6 +118,39 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * The export() method forwards the byte-progress callback so it sees every source byte.
+	 *
+	 * Mirrors the per-entry progress test but for the byte callback the Backup
+	 * screen uses to drive a bar that advances within a large entry: the reported
+	 * deltas must sum to the total source bytes across all entries.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_bytes_read(): void {
+		$contents = array( "alpha\n", "beta beta\n", "gamma gamma gamma\n" );
+		$plans    = array(
+			$this->file_plan( 'a.txt', $contents[0] ),
+			$this->file_plan( 'b.txt', $contents[1] ),
+			$this->file_plan( 'c.txt', $contents[2] ),
+		);
+		$expected = strlen( $contents[0] ) + strlen( $contents[1] ) + strlen( $contents[2] );
+
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$reported = 0;
+		$runner->export(
+			new ExportOptions( $this->temp_output_path ),
+			$plans,
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( $expected, $reported, 'The byte callback should see every source byte across all entries.' );
+	}
+
+	/**
 	 * An empty entry list still produces a valid, readable archive.
 	 *
 	 * @return void

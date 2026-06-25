@@ -116,26 +116,27 @@ final class EntryWriter {
 	 * data (AAD), and the stored payload is the ciphertext with the 16-byte GCM
 	 * tag appended.
 	 *
-	 * @param EntryHeader $header      Entry metadata. The size_compressed field is
-	 *                                 overwritten by the writer once the codec has run —
-	 *                                 it records the compression output, NOT the
-	 *                                 post-encryption stored size — so callers may pass a
-	 *                                 draft header with any value (typically 0).
-	 * @param int         $codec_id    Codec id for the payload. Low byte = compression
-	 *                                 codec (must be registered); high byte = encryption.
-	 * @param string      $nonce       Per-entry nonce; must be exactly NONCE_SIZE bytes.
-	 *                                 Spec §8.3 for the construction rules; for unencrypted
-	 *                                 entries it is present but unused and should be
-	 *                                 zero-filled.
-	 * @param resource    $source      Readable stream resource. Read from the current seek
-	 *                                 position until EOF. The caller controls positioning.
-	 * @param resource    $destination Writable stream resource. Bytes are appended at the
-	 *                                 destination's current seek position and it is
-	 *                                 advanced by total_entry_length bytes.
-	 * @param Cipher|null $cipher      Cipher to encrypt with; required when the codec id's
-	 *                                 encryption byte is set, unused otherwise.
-	 * @param string|null $key         Encryption key; required when the codec id's
-	 *                                 encryption byte is set, unused otherwise.
+	 * @param EntryHeader   $header      Entry metadata. The size_compressed field is
+	 *                                   overwritten by the writer once the codec has run —
+	 *                                   it records the compression output, NOT the
+	 *                                   post-encryption stored size — so callers may pass a
+	 *                                   draft header with any value (typically 0).
+	 * @param int           $codec_id    Codec id for the payload. Low byte = compression
+	 *                                   codec (must be registered); high byte = encryption.
+	 * @param string        $nonce       Per-entry nonce; must be exactly NONCE_SIZE bytes.
+	 *                                   Spec §8.3 for the construction rules; for unencrypted
+	 *                                   entries it is present but unused and should be
+	 *                                   zero-filled.
+	 * @param resource      $source      Readable stream resource. Read from the current seek
+	 *                                   position until EOF. The caller controls positioning.
+	 * @param resource      $destination Writable stream resource. Bytes are appended at the
+	 *                                   destination's current seek position and it is
+	 *                                   advanced by total_entry_length bytes.
+	 * @param Cipher|null   $cipher      Cipher to encrypt with; required when the codec id's
+	 *                                   encryption byte is set, unused otherwise.
+	 * @param string|null   $key         Encryption key; required when the codec id's
+	 *                                   encryption byte is set, unused otherwise.
+	 * @param callable|null $on_bytes_read Optional byte-progress callback forwarded to the codec, called as `( int $bytes ): void` with each chunk's raw source byte count as the payload streams.
 	 * @return EntryWriteResult Stored payload length, total entry record length, and the
 	 *                          SHA-256 hash that was written to disk.
 	 * @throws InvalidArgumentException If the encryption family is unknown, the compression
@@ -151,7 +152,8 @@ final class EntryWriter {
 		$source,
 		$destination,
 		?Cipher $cipher = null,
-		?string $key = null
+		?string $key = null,
+		?callable $on_bytes_read = null
 	): EntryWriteResult {
 		$compression_codec_id = CodecId::compression( $codec_id );
 		$encryption_family    = CodecId::encryption_family( $codec_id );
@@ -201,7 +203,7 @@ final class EntryWriter {
 			// compressed byte count, which becomes size_compressed in the header — the
 			// compression output, NOT the post-encryption stored size (the 16-byte GCM
 			// tag is encryption framing, counted only in the stored payload and lengths).
-			$compressed_length = $codec->encode( $source, $temp );
+			$compressed_length = $codec->encode( $source, $temp, $on_bytes_read );
 
 			// Build the corrected header now that the compressed byte count is known.
 			// Finalising it here also lets it serve as the AES-GCM additional

@@ -45,12 +45,20 @@ interface Codec {
 	 * Writes to the current position of $output. The caller is
 	 * responsible for stream positioning before and after the call.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $on_read is supplied it is called after each chunk is read from
+	 * $input, with the number of raw input bytes that chunk held, as
+	 * `( int $bytes ): void`. This lets a caller report byte-level progress as a
+	 * large entry streams rather than only at entry boundaries; the reported
+	 * bytes are the original, pre-encoding input, so they sum to the input size.
+	 * The callback must not touch the streams. Null disables progress reporting.
+	 *
+	 * @param resource      $input   A readable stream resource.
+	 * @param resource      $output  A writable stream resource.
+	 * @param callable|null $on_read Optional progress callback, called as `( int $bytes ): void` with each chunk's raw input byte count.
 	 * @return int The number of bytes written to $output.
 	 * @throws CodecException On read failure, write failure, or codec-internal error.
 	 */
-	public function encode( $input, $output ): int;
+	public function encode( $input, $output, ?callable $on_read = null ): int;
 
 	/**
 	 * Read encoded bytes from the input stream and write decoded bytes to the output stream.

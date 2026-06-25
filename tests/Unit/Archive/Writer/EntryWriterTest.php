@@ -128,6 +128,38 @@ final class EntryWriterTest extends TestCase {
 	}
 
 	/**
+	 * Forwards the byte-progress callback to the codec as the payload streams.
+	 *
+	 * The callback must receive the entry's raw source bytes as the payload is
+	 * encoded — the hook a caller uses to report progress within a single entry —
+	 * so the reported total equals the source size.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_reports_source_bytes_to_the_callback(): void {
+		$source_contents = str_repeat( 'entry payload chunk; ', 1000 );
+		$source          = self::memory_stream( $source_contents );
+		$destination     = self::memory_stream();
+
+		$header   = EntryHeader::for_file( 'big.txt', strlen( $source_contents ), 0644, 1690000000, 'application/octet-stream', 0 );
+		$reported = 0;
+		self::make_writer()->write_entry(
+			$header,
+			0,
+			self::zero_nonce(),
+			$source,
+			$destination,
+			null,
+			null,
+			function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( strlen( $source_contents ), $reported, 'The callback must see every source byte of the entry.' );
+	}
+
+	/**
 	 * NONCE_SIZE must equal 12 bytes (spec §6).
 	 *
 	 * @return void
