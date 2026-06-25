@@ -54,7 +54,7 @@
 /* Sections ------------------------------------------------------------------ */
 
 .pontifex-admin .pontifex-section {
-	margin-bottom: calc(var(--pontifex-step) * 3);
+	margin-bottom: calc(var(--pontifex-step) * 4);
 }
 
 .pontifex-admin .pontifex-section-title {
@@ -173,6 +173,13 @@
 	color: var(--pontifex-ink);
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
+}
+
+/* Collapse the status lines when empty, so the idle gap to "Your backups" matches the header gap. */
+.pontifex-admin .pontifex-progress:empty,
+.pontifex-admin .pontifex-timing:empty,
+.pontifex-admin .pontifex-notice:empty {
+	display: none;
 }
 
 .pontifex-admin .pontifex-progress-track {
