@@ -12,6 +12,7 @@ namespace Pontifex\Tests\Unit\Rollback;
 use Mockery;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -97,6 +98,65 @@ final class SafetyArchiverTest extends TestCase {
 
 		// The archive is well-formed: it reads back with the two entries.
 		$this->assertSame( 2, $this->entry_count( $path ), 'The written archive should contain both entries.' );
+	}
+
+	/**
+	 * A content-only safety archive records a content-only scope and the table prefix.
+	 *
+	 * The pre-import safety archive follows the restore's scope (ADR 0008): a
+	 * content-only restore takes a content-only safety archive, so its provenance
+	 * carries a content-only scope and the source table prefix the destination needs.
+	 *
+	 * @return void
+	 */
+	public function test_create_content_only_records_a_content_only_scope(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			1,
+			true
+		);
+
+		$path = $archiver->create( '/var/www/html/wp-content' );
+
+		$provenance = $this->read_provenance( $path );
+		$scope      = $provenance->scope();
+		$this->assertNotNull( $scope, 'A content-only safety archive should record a scope.' );
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+		$this->assertSame( 'wp_', $provenance->table_prefix() );
+	}
+
+	/**
+	 * A whole-site safety archive records a whole-site scope.
+	 *
+	 * The default mode: a --whole-site restore takes a whole-site safety archive,
+	 * whose provenance records a whole-site scope rooted at the site root.
+	 *
+	 * @return void
+	 */
+	public function test_create_whole_site_records_a_whole_site_scope(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( 'wp-config.php', "<?php\n" ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$path = $archiver->create( '/var/www/html' );
+
+		$scope = $this->read_provenance( $path )->scope();
+		$this->assertNotNull( $scope, 'A whole-site safety archive should record a scope.' );
+		$this->assertFalse( $scope->is_content_only() );
+		$this->assertSame( '', $scope->content_root() );
 	}
 
 	/**
@@ -192,6 +252,7 @@ final class SafetyArchiverTest extends TestCase {
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
 		return $context;
 	}
 
@@ -257,6 +318,26 @@ final class SafetyArchiverTest extends TestCase {
 		try {
 			$reader = new ArchiveReader( $source );
 			return $reader->manifest()->entry_count();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
+			fclose( $source );
+		}
+	}
+
+	/**
+	 * Open a written archive and return its parsed provenance block.
+	 *
+	 * @param string $path Absolute path to the archive.
+	 * @return Provenance
+	 */
+	private function read_provenance( string $path ): Provenance {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the just-written archive to read its provenance back.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open the written archive.' );
+		}
+		try {
+			return ( new ArchiveReader( $source ) )->provenance();
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
 			fclose( $source );

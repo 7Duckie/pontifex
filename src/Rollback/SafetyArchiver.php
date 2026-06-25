@@ -11,6 +11,7 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use RuntimeException;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
@@ -89,6 +90,20 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	private int $retention;
 
 	/**
+	 * Whether to take a content-only safety archive rather than a whole-site one.
+	 *
+	 * False (the default) scans the whole WordPress root and records a whole-site
+	 * scope, matching a whole-site restore. True scans wp-content under a
+	 * "wp-content" path prefix and records a content-only scope, matching a
+	 * content-only restore — so the safety archive captures exactly what the restore
+	 * is about to overwrite, and rolls back through the same restore engine (ADR
+	 * 0008). The caller passes the matching scan root to {@see self::create()}.
+	 *
+	 * @var bool
+	 */
+	private bool $content_only;
+
+	/**
 	 * Construct a SafetyArchiver.
 	 *
 	 * @param Environment                   $environment       PHP-runtime and filesystem reads.
@@ -96,19 +111,22 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param RollbackStoreInterface        $store             The rollback directory the archive is written into.
 	 * @param ManifestBuilderInterface|null $manifest_builder  Optional. When null, a default scanner-backed builder is used.
 	 * @param int                           $retention         How many newest archives to keep (ADR 0005 default: 1).
+	 * @param bool                          $content_only      Optional. Take a content-only safety archive (scan root passed to create() must be WP_CONTENT_DIR); default false takes a whole-site one.
 	 */
 	public function __construct(
 		Environment $environment,
 		WordPressContext $wordpress_context,
 		RollbackStoreInterface $store,
 		?ManifestBuilderInterface $manifest_builder = null,
-		int $retention = 1
+		int $retention = 1,
+		bool $content_only = false
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
 		$this->manifest_builder  = $manifest_builder;
 		$this->retention         = $retention;
+		$this->content_only      = $content_only;
 	}
 
 	/**
@@ -123,15 +141,25 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null ): string {
 		$this->store->ensure_directory();
 
-		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, ExclusionRules::default_v010() );
+		// The safety archive follows the restore's scope (ADR 0008): a content-only
+		// restore takes a content-only safety archive (wp-content under a "wp-content"
+		// prefix), so it captures exactly what is about to be overwritten and rolls
+		// back through the same restore engine. The caller passes the matching scan
+		// root ($wordpress_root is WP_CONTENT_DIR for content-only, ABSPATH for whole-site).
+		$exclusions       = ExclusionRules::default_v010();
+		$path_prefix      = $this->content_only ? 'wp-content' : '';
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, $path_prefix );
 		$entry_plans      = $manifest_builder->build( $wordpress_root );
 
 		$this->preflight_disk_space( $entry_plans );
 
 		$path = $this->store->next_archive_path( new DateTimeImmutable() );
 
+		$scope         = $this->content_only
+			? Scope::content_only( $exclusions->patterns() )
+			: Scope::whole_site( $exclusions->patterns() );
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
-		$export_runner->export( new ExportOptions( $path ), $entry_plans, $on_entry, $on_bytes );
+		$export_runner->export( new ExportOptions( $path, null, null, null, $scope ), $entry_plans, $on_entry, $on_bytes );
 
 		// The archive holds the whole database, so it must be owner-only. On a
 		// POSIX host a failed chmod means it could not be secured; rather than

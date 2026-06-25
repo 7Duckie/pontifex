@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
@@ -39,9 +40,13 @@ use Pontifex\WordPress\WordPressContext;
  *
  * Reads a single .wpmig archive and replays every entry: files back onto
  * the WordPress root, database chunks back into the database. By default the
- * restore is to the **same site URL**; passing --url=<new-url> additionally
- * runs a serialised-safe cross-URL migration over the restored database
- * (ADR 0006), with the pre-import safety archive as its undo.
+ * restore is **content-only** — it writes the wp-content tree and the whole
+ * database, and refuses an archive that would overwrite WordPress core or
+ * wp-config.php; pass --whole-site to restore an entire-site archive onto a
+ * fresh destination (ADR 0008). By default the restore is also to the
+ * **same site URL**; passing --url=<new-url> additionally runs a
+ * serialised-safe cross-URL migration over the restored database (ADR 0006),
+ * with the pre-import safety archive as its undo.
  *
  * This is the dangerous half of Pontifex: it overwrites the live site.
  * It therefore confirms before acting (unless --yes), and offers
@@ -61,6 +66,13 @@ use Pontifex\WordPress\WordPressContext;
  * : Migrate the site to a new URL after restoring. Runs a serialised-safe
  *   search-replace over the restored database, rewriting the archive's source
  *   URL to <new-url>. Omit for a same-URL restore.
+ *
+ * [--whole-site]
+ * : Restore an entire-site archive — WordPress core and wp-config.php included —
+ *   not only wp-content. Required to restore a whole-site or legacy archive,
+ *   which the default content-only restore refuses so it never overwrites a live
+ *   site's core or wp-config.php. Use only when restoring onto a fresh, empty
+ *   destination.
  *
  * [--dry-run]
  * : Read and verify the entire archive without writing anything to the
@@ -93,6 +105,7 @@ use Pontifex\WordPress\WordPressContext;
  * ## EXAMPLES
  *
  *     wp pontifex import /tmp/site.wpmig
+ *     wp pontifex import /tmp/site.wpmig --whole-site --yes
  *     wp pontifex import /tmp/site.wpmig --url=https://new-site.example
  *     wp pontifex import /tmp/site.wpmig --dry-run
  *     wp pontifex import /tmp/site.wpmig --yes
@@ -276,6 +289,7 @@ final class ImportCommand {
 			&& false === $associative_args['rollback-archive'];
 		$passphrase_stdin = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$allow_unsafe     = isset( $associative_args['allow-unsafe-symlinks'] ) && false !== $associative_args['allow-unsafe-symlinks'];
+		$whole_site       = isset( $associative_args['whole-site'] ) && false !== $associative_args['whole-site'];
 		$public_key       = $this->resolve_public_key( $associative_args );
 		$target_url       = $this->require_target_url( $associative_args );
 
@@ -295,18 +309,25 @@ final class ImportCommand {
 		// 2. Announce the restore (and, with --url, the migration) scope, always.
 		$this->print_scope( $target_url );
 
-		// 3. Confirm with the user (unless --yes, or --dry-run which changes nothing).
-		if ( ! $dry_run && ! $skip_confirm ) {
-			WP_CLI::confirm( sprintf( /* translators: %s: the archive path */ __( 'Restore %s over the current site?', 'pontifex' ), $archive_path ), $associative_args );
-		}
-
-		// 4. Open the source archive for reading.
+		// 3. Open the source archive for reading. Opened (and validated) before the
+		// confirmation prompt so a forged signature or a scope mismatch refuses up
+		// front, rather than after the operator has agreed to a destructive restore.
 		$source = $this->open_source( $archive_path );
 
-		// 4b. Signature gate: verify before anything is written, so a forged or
+		// 3b. Signature gate: verify before anything is written, so a forged or
 		// tampered archive never reaches the restore. A signed archive with no key
 		// supplied is allowed but warned; an unsigned archive with a key is noted.
 		$this->verify_signature_gate( $source, $public_key );
+
+		// 3c. Scope gate: a default (content-only) restore refuses a whole-site or
+		// legacy archive before any write, so it never overwrites a live site's core
+		// or wp-config.php; --whole-site allows it (ADR 0008).
+		$this->assert_scope_permits_restore( $source, $whole_site );
+
+		// 4. Confirm with the user (unless --yes, or --dry-run which changes nothing).
+		if ( ! $dry_run && ! $skip_confirm ) {
+			WP_CLI::confirm( sprintf( /* translators: %s: the archive path */ __( 'Restore %s over the current site?', 'pontifex' ), $archive_path ), $associative_args );
+		}
 
 		// 5. Wire up the URL migrator when --url was given. The restore engine is wired
 		// inside the try below, where opening the archive (to detect encryption and
@@ -327,7 +348,10 @@ final class ImportCommand {
 		try {
 			// Wire the restore engine. For an encrypted archive this reads the salt and
 			// collects the passphrase, so it sits inside the try where a failure is logged.
-			$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin, $allow_unsafe );
+			// A default (content-only) restore restricts the file writer to the
+			// wp-content tree as a write-boundary backstop behind the scope gate above.
+			$required_prefix = $whole_site ? null : 'wp-content';
+			$restore_runner  = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin, $allow_unsafe, $required_prefix );
 
 			// With --url, read the source URL from the archive's provenance and
 			// announce the migration before anything is written. Reading the
@@ -360,7 +384,7 @@ final class ImportCommand {
 				$this->bump_counters( array( 'attempted' => 1 ) );
 
 				if ( ! $no_rollback ) {
-					$this->take_safety_archive();
+					$this->take_safety_archive( $whole_site );
 				}
 
 				$restore_runner->restore( $source, $on_entry );
@@ -502,14 +526,17 @@ final class ImportCommand {
 	 * whether it is encrypted; if so, collects the passphrase and builds a keyed
 	 * EntryReader (the key derived from the footer salt), otherwise a plain one.
 	 * Then wires a FileWriter rooted at the WordPress installation (ABSPATH) and
-	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb.
+	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb. On a
+	 * content-only restore the FileWriter is additionally restricted to the
+	 * wp-content tree.
 	 *
-	 * @param resource $source                The open archive stream, read for its header and footer.
-	 * @param bool     $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
-	 * @param bool     $allow_unsafe_symlinks True to allow symlink targets that escape the restore root.
+	 * @param resource    $source                The open archive stream, read for its header and footer.
+	 * @param bool        $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
+	 * @param bool        $allow_unsafe_symlinks True to allow symlink targets that escape the restore root.
+	 * @param string|null $required_prefix       Prefix every restored file path must sit under ("wp-content" for a content-only restore), or null to allow any path (a whole-site restore).
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner( $source, bool $passphrase_stdin, bool $allow_unsafe_symlinks ): RestoreRunner {
+	private function build_default_restore_runner( $source, bool $passphrase_stdin, bool $allow_unsafe_symlinks, ?string $required_prefix = null ): RestoreRunner {
 		$archive_reader = new ArchiveReader( $source );
 		$passphrase     = $archive_reader->header()->is_encrypted()
 			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
@@ -528,7 +555,7 @@ final class ImportCommand {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
-		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks );
+		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
 	}
@@ -549,16 +576,19 @@ final class ImportCommand {
 	/**
 	 * Take a pre-import safety archive of the current site.
 	 *
-	 * Writes a full safety archive before the restore overwrites anything, so a
-	 * mistaken import can be undone with `wp pontifex rollback`. It runs before
-	 * the destructive restore: if it fails (the free-disk preflight refuses, or
-	 * the write fails), the exception propagates and the import aborts before
-	 * touching the site.
+	 * Writes a safety archive before the restore overwrites anything, so a mistaken
+	 * import can be undone with `wp pontifex rollback`. It runs before the
+	 * destructive restore: if it fails (the free-disk preflight refuses, or the
+	 * write fails), the exception propagates and the import aborts before touching
+	 * the site. The safety archive follows the restore's scope — content-only for a
+	 * default restore (capturing only the wp-content tree being overwritten),
+	 * whole-site for a --whole-site restore (ADR 0008).
 	 *
+	 * @param bool $whole_site True for a whole-site restore; false for a content-only restore.
 	 * @return void
 	 */
-	private function take_safety_archive(): void {
-		$safety_archiver = $this->safety_archiver ?? $this->build_default_safety_archiver();
+	private function take_safety_archive( bool $whole_site ): void {
+		$safety_archiver = $this->safety_archiver ?? $this->build_default_safety_archiver( ! $whole_site );
 
 		$on_entry = function ( int $done, int $total ): void {
 			if ( 1 === $done ) {
@@ -567,7 +597,8 @@ final class ImportCommand {
 			$this->progress->advance();
 		};
 
-		$path = $safety_archiver->create( $this->resolve_wordpress_root(), $on_entry );
+		$safety_root = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
+		$path        = $safety_archiver->create( $safety_root, $on_entry );
 		$this->progress->finish();
 
 		$this->logger->info( 'Safety archive written.', array( 'safety_archive' => $path ) );
@@ -575,16 +606,22 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Build a SafetyArchiver rooted at WP_CONTENT_DIR.
+	 * Build a SafetyArchiver whose rollback store lives under WP_CONTENT_DIR.
 	 *
+	 * The content directory is the location the safety archive is *stored* in
+	 * (wp-content/pontifex/rollback), independent of what it captures; the
+	 * $content_only flag controls whether the archive captures only the wp-content
+	 * tree or the whole site.
+	 *
+	 * @param bool $content_only True to take a content-only safety archive; false for a whole-site one.
 	 * @return SafetyArchiver
 	 */
-	private function build_default_safety_archiver(): SafetyArchiver {
+	private function build_default_safety_archiver( bool $content_only ): SafetyArchiver {
 		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
 			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
 			: sys_get_temp_dir();
 
-		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ) );
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ), null, 1, $content_only );
 	}
 
 	/**
@@ -666,6 +703,59 @@ final class ImportCommand {
 			throw new RuntimeException( 'ImportCommand: ABSPATH is not defined; is WordPress loaded?' );
 		}
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+	}
+
+	/**
+	 * Resolve the wp-content root for a content-only safety archive.
+	 *
+	 * Reads WP_CONTENT_DIR through the Environment abstraction, falling back to
+	 * ABSPATH/wp-content (WordPress's own default for the constant) when it is not
+	 * defined, so the resolver still works outside a full WordPress request, as in
+	 * unit tests. This is the root the content-only safety archive scans — the
+	 * current site's wp-content, which the restore is about to overwrite.
+	 *
+	 * @return string The absolute path of the wp-content directory.
+	 * @throws RuntimeException If WP_CONTENT_DIR is undefined and ABSPATH is too (should never happen inside a WordPress request).
+	 */
+	private function resolve_content_root(): string {
+		if ( $this->environment->is_constant_defined( 'WP_CONTENT_DIR' ) ) {
+			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
+		}
+		return $this->resolve_wordpress_root() . '/wp-content';
+	}
+
+	/**
+	 * Refuse a default restore of a whole-site or legacy archive, before any write.
+	 *
+	 * Reads the archive's recorded scope from its provenance and, unless --whole-site
+	 * was given, refuses an archive that is not content-only: a whole-site archive
+	 * (its scope records core/wp-config.php) or a legacy archive (it records no scope
+	 * at all, so it predates the content-only format and is treated as whole-site).
+	 * This fails closed, so a default content-only restore never overwrites a live
+	 * site's WordPress core or wp-config.php. The same gate applies to a --dry-run,
+	 * so the dry-run honestly previews what a real restore would do. The stream is
+	 * rewound for the restore/verify walk that follows.
+	 *
+	 * @param resource $source     The open archive stream.
+	 * @param bool     $whole_site True when --whole-site was given; then any archive is allowed.
+	 * @return void
+	 */
+	private function assert_scope_permits_restore( $source, bool $whole_site ): void {
+		$scope = ( new ArchiveReader( $source ) )->provenance()->scope();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource so the restore walk re-reads it; not a WP_Filesystem operation.
+		rewind( $source );
+
+		if ( $whole_site ) {
+			return;
+		}
+
+		if ( $scope instanceof Scope && $scope->is_content_only() ) {
+			return;
+		}
+
+		WP_CLI::error(
+			__( 'This archive includes WordPress core and wp-config.php (it is a whole-site or legacy archive). A default restore is content-only and will not overwrite them. Re-run with --whole-site to restore the entire site — only onto a fresh, empty destination.', 'pontifex' )
+		);
 	}
 
 	/**

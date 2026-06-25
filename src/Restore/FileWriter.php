@@ -102,19 +102,36 @@ final class FileWriter {
 	private bool $allow_unsafe_symlinks;
 
 	/**
+	 * Path prefix every restored entry must sit under, or null to allow any path.
+	 *
+	 * Null for an unrestricted (whole-site) restore. Set to "wp-content" for a
+	 * content-only restore, where {@see self::write_entry()} refuses any
+	 * file/directory/symlink whose path is not the prefix itself or beneath it — so
+	 * even a mislabelled content-only archive can never write WordPress core or
+	 * wp-config.php. This is the write-boundary backstop behind the import command's
+	 * up-front scope preflight (ADR 0008). Database chunks are unaffected: they go
+	 * through DatabaseWriter, and the whole database is restored in both modes.
+	 *
+	 * @var string|null
+	 */
+	private ?string $required_prefix;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
 	 * exist. Once created, the absolute, real path is stored so
 	 * subsequent path-traversal checks can use string comparison.
 	 *
-	 * @param string $destination_root      Absolute filesystem path of the restore root.
-	 * @param bool   $allow_unsafe_symlinks  Optional. Allow symlink targets that escape the root (default false).
+	 * @param string      $destination_root      Absolute filesystem path of the restore root.
+	 * @param bool        $allow_unsafe_symlinks  Optional. Allow symlink targets that escape the root (default false).
+	 * @param string|null $required_prefix        Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false ) {
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null ) {
 		$this->allow_unsafe_symlinks = $allow_unsafe_symlinks;
+		$this->required_prefix       = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
 
 		if ( '' === $destination_root ) {
 			throw new InvalidArgumentException( 'FileWriter: destination_root must be non-empty.' );
@@ -167,7 +184,8 @@ final class FileWriter {
 		}
 
 		$relative_path = (string) $header->path();
-		$target_path   = $this->resolve_safe_path( $relative_path );
+		$this->assert_within_required_prefix( $relative_path );
+		$target_path = $this->resolve_safe_path( $relative_path );
 		$this->assert_no_symlinked_ancestor( $relative_path );
 		$this->ensure_parent_directory( $target_path );
 
@@ -187,6 +205,37 @@ final class FileWriter {
 		throw new RuntimeException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
 			sprintf( 'FileWriter: unsupported entry kind "%s".', $header->kind() )
+		);
+	}
+
+	/**
+	 * Refuse an entry whose path sits outside the required prefix, on a restricted restore.
+	 *
+	 * A no-op when no prefix is required (a whole-site restore). On a content-only
+	 * restore (prefix "wp-content") the entry path must be the prefix itself or sit
+	 * beneath it; anything else — a WordPress core file, wp-config.php, a root file —
+	 * is refused. This is the write-boundary backstop behind the import command's
+	 * up-front scope preflight: the preflight rejects a whole-site or legacy archive
+	 * before any write, and this guard ensures even a mislabelled content-only
+	 * archive cannot slip a core path through.
+	 *
+	 * @param string $relative_path The entry path, relative to the restore root.
+	 * @throws InvalidArgumentException If the path is outside the required prefix.
+	 */
+	private function assert_within_required_prefix( string $relative_path ): void {
+		if ( null === $this->required_prefix ) {
+			return;
+		}
+		if ( $relative_path === $this->required_prefix ) {
+			return;
+		}
+		$prefix = $this->required_prefix . '/';
+		if ( 0 === strncmp( $relative_path, $prefix, strlen( $prefix ) ) ) {
+			return;
+		}
+		throw new InvalidArgumentException(
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path and the prefix are reported verbatim for diagnostic context; exception path, not HTML output.
+			sprintf( 'FileWriter: entry path "%s" is outside the permitted "%s" tree and is refused by this content-only restore.', $relative_path, $this->required_prefix )
 		);
 	}
 
