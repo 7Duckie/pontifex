@@ -131,7 +131,7 @@ final class ArchiveWriterTest extends TestCase {
 		$header = Header::from_bytes( substr( $bytes, 0, Header::SIZE ) );
 
 		$this->assertSame( Header::FORMAT_MAJOR_V1, $header->major() );
-		$this->assertSame( Header::FORMAT_MINOR_V1_0, $header->minor() );
+		$this->assertSame( Header::FORMAT_MINOR_V1_1, $header->minor() );
 		$this->assertSame( 0, $header->flags() );
 	}
 

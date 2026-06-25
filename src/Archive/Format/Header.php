@@ -68,6 +68,17 @@ final class Header {
 	public const FORMAT_MINOR_V1_0 = 0;
 
 	/**
+	 * Format minor version for v1.1 archives — the current version Pontifex writes.
+	 *
+	 * Version 1.1 adds the optional `scope` and `table_prefix` provenance fields
+	 * (ADR 0008). The change is backward-compatible: a v1.0 reader accepts a v1.1 archive and
+	 * ignores the additions it does not understand (`ARCHIVE-FORMAT.md` §13.1).
+	 *
+	 * @var int
+	 */
+	public const FORMAT_MINOR_V1_1 = 1;
+
+	/**
 	 * Flag bit indicating the archive is encrypted (bit 0).
 	 *
 	 * @var int
@@ -163,16 +174,16 @@ final class Header {
 	}
 
 	/**
-	 * Build the standard header for the current Pontifex format version (v1.0, no flags).
+	 * Build the standard header for the current Pontifex format version (v1.1, no flags).
 	 *
 	 * Most writers should call this rather than the full constructor.
 	 * The full constructor exists for tests and for code that parses
 	 * arbitrary header bytes.
 	 *
-	 * @return self A Header with major=1, minor=0, flags=0.
+	 * @return self A Header with major=1, minor=1, flags=0.
 	 */
 	public static function current_version(): self {
-		return new self( self::FORMAT_MAJOR_V1, self::FORMAT_MINOR_V1_0, 0 );
+		return new self( self::FORMAT_MAJOR_V1, self::FORMAT_MINOR_V1_1, 0 );
 	}
 
 	/**

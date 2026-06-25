@@ -16,6 +16,7 @@ use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Integrity\Sha256;
 
 /**
@@ -59,6 +60,55 @@ final class ProvenanceTest extends TestCase {
 	 */
 	private function expected_canonical_json(): string {
 		return '{"wp_version":"6.5.0","php_version":"8.2.10","url":"https://example.com","db_charset":"utf8mb4","db_collation":"utf8mb4_unicode_520_ci","exporter":{"name":"pontifex","version":"0.1.0"},"timestamp":"2026-05-21T22:21:02+00:00"}';
+	}
+
+	/**
+	 * The optional v1.1 scope and table prefix must encode in a fixed order and round-trip.
+	 *
+	 * @return void
+	 */
+	public function test_round_trip_preserves_scope_and_table_prefix(): void {
+		$scope      = new Scope( true, 'wp-content', false, false, true, array( 'wp-content/pontifex/**', 'wp-content/cache/**' ) );
+		$provenance = new Provenance(
+			'6.5.0',
+			'8.2.10',
+			'https://example.com',
+			'utf8mb4',
+			'utf8mb4_unicode_520_ci',
+			new ExporterInfo( 'pontifex', '0.5.0' ),
+			new DateTimeImmutable( '2026-05-21T22:21:02+00:00' ),
+			null,
+			'wp_',
+			$scope
+		);
+
+		$payload = substr( $provenance->to_bytes(), Provenance::HEADER_SIZE );
+		$this->assertSame(
+			'{"wp_version":"6.5.0","php_version":"8.2.10","url":"https://example.com","db_charset":"utf8mb4","db_collation":"utf8mb4_unicode_520_ci","exporter":{"name":"pontifex","version":"0.5.0"},"timestamp":"2026-05-21T22:21:02+00:00","table_prefix":"wp_","scope":{"content_only":true,"content_root":"wp-content","includes_core":false,"includes_wp_config":false,"includes_database":true,"excluded_paths":["wp-content/pontifex/**","wp-content/cache/**"]}}',
+			$payload
+		);
+
+		$restored = Provenance::from_bytes( $provenance->to_bytes() );
+		$this->assertSame( 'wp_', $restored->table_prefix() );
+		$this->assertNotNull( $restored->scope() );
+		$this->assertTrue( $restored->scope()->is_content_only() );
+		$this->assertSame( 'wp-content', $restored->scope()->content_root() );
+		$this->assertFalse( $restored->scope()->includes_core() );
+		$this->assertFalse( $restored->scope()->includes_wp_config() );
+		$this->assertTrue( $restored->scope()->includes_database() );
+		$this->assertSame( array( 'wp-content/pontifex/**', 'wp-content/cache/**' ), $restored->scope()->excluded_paths() );
+	}
+
+	/**
+	 * An archive with no scope or table prefix (the v1.0 shape) decodes them as null.
+	 *
+	 * @return void
+	 */
+	public function test_scope_and_table_prefix_absent_decode_as_null(): void {
+		$restored = Provenance::from_bytes( $this->valid_provenance()->to_bytes() );
+
+		$this->assertNull( $restored->table_prefix() );
+		$this->assertNull( $restored->scope() );
 	}
 
 	/**
