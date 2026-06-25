@@ -91,6 +91,16 @@ final class EntryReader {
 	public const DEFAULT_MAX_DECODED_BYTES = 2147483648;
 
 	/**
+	 * Chunk size, in bytes, for the streaming verify read (1 MiB).
+	 *
+	 * Bounds memory and sets how often {@see self::verify_entry()} reports byte
+	 * progress; a larger value only reduces the number of read calls.
+	 *
+	 * @var int
+	 */
+	private const VERIFY_CHUNK_SIZE = 1048576;
+
+	/**
 	 * Codec registry used to look up codecs by id.
 	 *
 	 * @var CodecRegistry
@@ -256,6 +266,86 @@ final class EntryReader {
 		}
 
 		return new EntryReadResult( $header, $decoded_payload );
+	}
+
+	/**
+	 * Read and hash-verify one entry from the source, without decoding it.
+	 *
+	 * The integrity twin of {@see self::read_entry()} for the verify path. It
+	 * streams the entry record from the source in chunks, hashing as it reads, and
+	 * checks the computed SHA-256 against both the record's trailing hash and the
+	 * manifest's recorded entry_hash — the same integrity guarantee read_entry
+	 * gives. It never buffers the whole entry, decrypts, or decompresses, because
+	 * a verification only needs to know the stored bytes are intact: the hash is
+	 * computed over the as-stored bytes, so it holds whether the payload is
+	 * compressed or encrypted. This keeps memory flat regardless of entry size and
+	 * reports progress mid-entry through the optional callback, so a single large
+	 * entry no longer blocks the walk.
+	 *
+	 * @param resource      $source         A seekable, readable stream containing the archive.
+	 * @param ManifestEntry $manifest_entry The manifest entry pointing at the on-disk record.
+	 * @param callable|null $on_bytes       Optional progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record streams.
+	 * @return void
+	 * @throws InvalidArgumentException If $source is not a valid stream resource.
+	 * @throws RuntimeException         If the record is truncated, or its hash does not match the bytes on disk or the manifest.
+	 */
+	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null ): void {
+		if ( ! is_resource( $source ) ) {
+			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
+		}
+
+		$length = $manifest_entry->length();
+		if ( $length < Sha256::DIGEST_SIZE ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $length )
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+			);
+		}
+
+		// Hash everything up to the trailing 32-byte stored hash, streamed in chunks.
+		$context   = hash_init( 'sha256' );
+		$remaining = $length - Sha256::DIGEST_SIZE;
+		while ( $remaining > 0 ) {
+			$want = (int) min( self::VERIFY_CHUNK_SIZE, $remaining );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+			$chunk = fread( $source, $want );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new RuntimeException(
+					sprintf( 'EntryReader: could not read entry bytes at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+				);
+			}
+			hash_update( $context, $chunk );
+			$remaining -= strlen( $chunk );
+			if ( null !== $on_bytes ) {
+				$on_bytes( strlen( $chunk ) );
+			}
+		}
+		$computed_hash = hash_final( $context, true );
+
+		// Read the trailing stored hash.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$stored_hash = fread( $source, Sha256::DIGEST_SIZE );
+		if ( false === $stored_hash || strlen( $stored_hash ) !== Sha256::DIGEST_SIZE ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: could not read the entry hash at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+			);
+		}
+		if ( null !== $on_bytes ) {
+			$on_bytes( Sha256::DIGEST_SIZE );
+		}
+
+		if ( ! hash_equals( $stored_hash, $computed_hash ) ) {
+			throw new RuntimeException( 'EntryReader: entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
+		}
+		if ( ! hash_equals( $manifest_entry->entry_hash(), $computed_hash ) ) {
+			throw new RuntimeException( 'EntryReader: on-disk entry hash does not match the manifest entry_hash.' );
+		}
 	}
 
 	/**

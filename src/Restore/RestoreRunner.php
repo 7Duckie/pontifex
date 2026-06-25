@@ -146,27 +146,45 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	}
 
 	/**
-	 * Read and verify every entry from the archive stream, writing nothing.
+	 * Read and hash-verify every entry from the archive stream, writing nothing.
 	 *
-	 * Runs the identical read-and-verify walk as {@see self::restore()} —
-	 * opening the archive, reading the manifest, decoding and
-	 * hash-verifying each entry — but never routes an entry to a writer,
-	 * so the destination filesystem and database are left untouched. The
-	 * engine behind a dry-run import.
+	 * Opens the archive, reads the manifest, and streams each entry through
+	 * {@see EntryReader::verify_entry()} — hashing the stored bytes and checking
+	 * them against the manifest, without decoding or buffering whole entries.
+	 * Nothing is written to the destination, so this is the engine behind both the
+	 * Verify screen and a dry-run import. Unlike {@see self::restore()} it does not
+	 * decode payloads: a verification only needs the stored bytes to be intact, and
+	 * skipping the decode keeps memory flat and lets a large entry report progress.
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
-	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed or hash verification fails.
+	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
+	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
-	public function verify( $archive_source, ?callable $on_entry_verified = null ): void {
-		$this->walk(
-			$archive_source,
-			$on_entry_verified,
-			static function (): void {
-				// Read and verify only: nothing is written to the destination.
+	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
+		$reader   = new ArchiveReader( $archive_source );
+		$manifest = $reader->manifest();
+		$entries  = $manifest->entries();
+		$total    = count( $entries );
+
+		if ( $total > $this->limits->max_entry_count() ) {
+			throw new RuntimeException(
+				sprintf(
+					'RestoreRunner: archive declares %d entries, exceeding the maximum of %d.',
+					(int) $total,
+					(int) $this->limits->max_entry_count()
+				)
+			);
+		}
+
+		$done = 0;
+		foreach ( $entries as $manifest_entry ) {
+			$this->entry_reader->verify_entry( $archive_source, $manifest_entry, $on_bytes );
+			++$done;
+			if ( null !== $on_entry_verified ) {
+				$on_entry_verified( $done, $total );
 			}
-		);
+		}
 	}
 
 	/**
