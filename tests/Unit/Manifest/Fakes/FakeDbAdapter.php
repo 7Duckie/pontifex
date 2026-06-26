@@ -76,12 +76,18 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
-	 * Return a single canned INSERT line per row in the requested range.
+	 * Return one batched multi-row INSERT for the requested range.
+	 *
+	 * Mirrors {@see \Pontifex\Manifest\WpdbAdapter::dump_table_rows()}, which
+	 * packs every row of a chunk into a single INSERT INTO ... VALUES (...),
+	 * (...), ...; statement — NOT one INSERT per row. Tests rely on this
+	 * fidelity so the scanner's predicted statement_count is checked against
+	 * the shape the real emitter produces.
 	 *
 	 * @param string $table_name Registered table name.
 	 * @param int    $offset     Starting row offset.
 	 * @param int    $limit      Maximum number of rows.
-	 * @return string SQL bytes.
+	 * @return string SQL bytes (empty when the range yields no rows).
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
 		$row_count = $this->row_count( $table_name );
@@ -89,11 +95,11 @@ final class FakeDbAdapter implements DatabaseAdapter {
 		if ( $offset >= $end ) {
 			return '';
 		}
-		$sql = '';
+		$tuples = array();
 		for ( $i = $offset; $i < $end; ++$i ) {
-			$sql .= "INSERT INTO `{$table_name}` VALUES ({$i});\n";
+			$tuples[] = "({$i})";
 		}
-		return $sql;
+		return "INSERT INTO `{$table_name}` VALUES " . implode( ', ', $tuples ) . ";\n";
 	}
 
 	/**

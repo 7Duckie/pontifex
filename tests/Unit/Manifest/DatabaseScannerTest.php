@@ -161,6 +161,64 @@ final class DatabaseScannerTest extends TestCase {
 	}
 
 	/**
+	 * A first chunk's predicted statement_count must equal the statements the writer parses.
+	 *
+	 * The rows of a chunk are emitted as a single batched INSERT, so a first chunk is
+	 * DROP + CREATE + one INSERT = 3 statements no matter how many rows it carries.
+	 * Predicting one INSERT per row over-counts, and DatabaseWriter then refuses to
+	 * replay the chunk on restore — the regression this guards against.
+	 *
+	 * @return void
+	 */
+	public function test_first_chunk_statement_count_matches_emitted_sql(): void {
+		$schema = "DROP TABLE IF EXISTS `wp_x`;\nCREATE TABLE `wp_x` (id INT);\n";
+		$db     = new FakeDbAdapter();
+		$db->add_table( 'wp_x', 5, $schema );
+
+		$chunks = self::unfiltered_scanner( $db )->scan();
+		$sql    = self::stream_contents( $chunks[0]->open_sql_stream() );
+
+		$this->assertSame( 3, $chunks[0]->statement_count(), 'A 5-row first chunk emits DROP + CREATE + one batched INSERT.' );
+		$this->assertSame( self::parsed_statement_count( $sql ), $chunks[0]->statement_count(), 'Predicted count must equal what the writer parses.' );
+	}
+
+	/**
+	 * An empty table's single chunk predicts exactly its two schema statements.
+	 *
+	 * @return void
+	 */
+	public function test_empty_table_statement_count_matches_emitted_sql(): void {
+		$schema = "DROP TABLE IF EXISTS `empty_table`;\nCREATE TABLE `empty_table` (id INT);\n";
+		$db     = new FakeDbAdapter();
+		$db->add_table( 'empty_table', 0, $schema );
+
+		$chunks = self::unfiltered_scanner( $db )->scan();
+		$sql    = self::stream_contents( $chunks[0]->open_sql_stream() );
+
+		$this->assertSame( 2, $chunks[0]->statement_count(), 'An empty table emits only DROP + CREATE.' );
+		$this->assertSame( self::parsed_statement_count( $sql ), $chunks[0]->statement_count(), 'Predicted count must equal what the writer parses.' );
+	}
+
+	/**
+	 * A later (non-first) chunk carries only its batched INSERT, so its predicted count is 1.
+	 *
+	 * @return void
+	 */
+	public function test_later_chunk_statement_count_matches_emitted_sql(): void {
+		$schema = "DROP TABLE IF EXISTS `big`;\nCREATE TABLE `big` (id INT);\n";
+		$db     = new FakeDbAdapter();
+		$db->add_table( 'big', 50, $schema );
+
+		// 5 rows per chunk → 10 chunks; chunk index 1 carries rows only.
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 5 * 1024 );
+		$chunks  = $scanner->scan();
+		$sql     = self::stream_contents( $chunks[1]->open_sql_stream() );
+
+		$this->assertSame( 1, $chunks[1]->statement_count(), 'A later chunk emits a single batched INSERT.' );
+		$this->assertSame( self::parsed_statement_count( $sql ), $chunks[1]->statement_count(), 'Predicted count must equal what the writer parses.' );
+	}
+
+	/**
 	 * Excluded tables must be skipped entirely.
 	 *
 	 * @return void
@@ -225,6 +283,27 @@ final class DatabaseScannerTest extends TestCase {
 	 */
 	public function test_default_chunk_size_constant(): void {
 		$this->assertSame( 4 * 1024 * 1024, DatabaseScanner::DEFAULT_CHUNK_SIZE_BYTES );
+	}
+
+	/**
+	 * Count statements in realised SQL exactly as DatabaseWriter splits them.
+	 *
+	 * Splits on ";\n", trims each piece, and discards empty pieces — the same
+	 * contract DatabaseWriter::write_entry() applies before comparing against the
+	 * recorded statement_count. Keeping the two in lockstep is the whole point of
+	 * these assertions.
+	 *
+	 * @param string $sql The realised chunk SQL.
+	 * @return int The number of statements the writer would replay.
+	 */
+	private static function parsed_statement_count( string $sql ): int {
+		$count = 0;
+		foreach ( explode( ";\n", $sql ) as $piece ) {
+			if ( '' !== trim( $piece ) ) {
+				++$count;
+			}
+		}
+		return $count;
 	}
 
 	/**
