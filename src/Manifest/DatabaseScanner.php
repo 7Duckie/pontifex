@@ -203,9 +203,13 @@ final class DatabaseScanner {
 		};
 
 		// Predict statement_count and byte_count cheaply for metadata.
-		// Schema contributes 2 statements (DROP + CREATE). Each row contributes 1 INSERT.
+		// The first chunk's schema emits 2 statements (DROP + CREATE); the rows are
+		// emitted as a single batched multi-row INSERT, so any chunk carrying rows
+		// contributes exactly 1 INSERT — not one per row. This count must match the
+		// statements the emitter actually writes, because DatabaseWriter refuses to
+		// replay a chunk whose parsed statement count disagrees with this header value.
 		// Byte count is the rows-per-chunk estimate plus an allowance for the schema if applicable.
-		$statement_count = $limit + ( $is_first ? 2 : 0 );
+		$statement_count = ( $is_first ? 2 : 0 ) + ( $limit > 0 ? 1 : 0 );
 		$byte_count      = ( $limit * self::AVG_BYTES_PER_STATEMENT_ESTIMATE ) + ( $is_first ? 2048 : 0 );
 
 		return new ScannedDbChunk( $table_name, $chunk_index, $statement_count, $byte_count, $sql_provider );
