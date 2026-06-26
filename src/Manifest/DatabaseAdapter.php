@@ -99,4 +99,27 @@ interface DatabaseAdapter {
 	 * @throws RuntimeException If the statement fails to execute.
 	 */
 	public function execute_sql( string $sql ): void;
+
+	/**
+	 * Rewrite the WordPress table prefix embedded in key columns, after a restore.
+	 *
+	 * Used during a cross-prefix restore by {@see \Pontifex\Restore\DatabaseWriter}
+	 * once every db_chunk has been replayed (table identifiers are already rewritten
+	 * to the destination prefix at replay time). The prefix is also embedded in two
+	 * plain key columns, which a table rename does not touch:
+	 *
+	 *  - `{prefix}options.option_name = '{prefix}user_roles'`, and
+	 *  - every `{prefix}usermeta.meta_key` that begins with the prefix
+	 *    (`{prefix}capabilities`, `{prefix}user_level`, `{prefix}user-settings`, …).
+	 *
+	 * The rewrite is column-aware (it updates only the key column, never a value), so
+	 * it is bounded and never touches serialised data. Implementations must escape
+	 * both prefixes — the source prefix comes from the archive and is untrusted.
+	 *
+	 * @param string $source_prefix The prefix recorded in the archive (the rows' current prefix).
+	 * @param string $dest_prefix   The destination site's prefix (the rows' target prefix).
+	 * @return void
+	 * @throws RuntimeException If a rewrite statement fails to execute.
+	 */
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void;
 }

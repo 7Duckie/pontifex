@@ -152,4 +152,31 @@ final class FakeDbAdapter implements DatabaseAdapter {
 		}
 		$this->executed_statements[] = $sql;
 	}
+
+	/**
+	 * Prefix-key rewrite calls, in order, as [source_prefix, dest_prefix] pairs.
+	 *
+	 * @var array<int, array{0: string, 1: string}>
+	 */
+	private array $rewrite_calls = array();
+
+	/**
+	 * Record a prefix-key rewrite call so a test can assert it happened.
+	 *
+	 * @param string $source_prefix The prefix recorded in the archive.
+	 * @param string $dest_prefix   The destination site's prefix.
+	 * @return void
+	 */
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void {
+		$this->rewrite_calls[] = array( $source_prefix, $dest_prefix );
+	}
+
+	/**
+	 * Return the recorded prefix-key rewrite calls, in order.
+	 *
+	 * @return array<int, array{0: string, 1: string}> Each entry is [source_prefix, dest_prefix].
+	 */
+	public function rewrite_calls(): array {
+		return $this->rewrite_calls;
+	}
 }

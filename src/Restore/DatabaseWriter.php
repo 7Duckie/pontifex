@@ -88,12 +88,37 @@ final class DatabaseWriter {
 	private DatabaseAdapter $adapter;
 
 	/**
+	 * The table prefix recorded in the archive, or '' when none is to be rewritten.
+	 *
+	 * @var string
+	 */
+	private string $source_prefix;
+
+	/**
+	 * The destination site's table prefix, or '' when no rewrite is to be done.
+	 *
+	 * @var string
+	 */
+	private string $dest_prefix;
+
+	/**
 	 * Construct a DatabaseWriter that executes statements via $adapter.
 	 *
-	 * @param DatabaseAdapter $adapter The destination database adapter.
+	 * When the source and destination prefixes are both non-empty and differ, the
+	 * writer rewrites each chunk's table identifier to the destination prefix as it
+	 * replays it, and {@see self::finalise_prefix_rewrite()} rewrites the prefix
+	 * embedded in the options/usermeta key columns once the replay is complete (ADR
+	 * 0008). When they are equal or either is empty, both are no-ops and the SQL is
+	 * replayed verbatim.
+	 *
+	 * @param DatabaseAdapter $adapter       The destination database adapter.
+	 * @param string          $source_prefix Optional. The prefix recorded in the archive; default '' (no rewrite).
+	 * @param string          $dest_prefix   Optional. The destination site's prefix; default '' (no rewrite).
 	 */
-	public function __construct( DatabaseAdapter $adapter ) {
-		$this->adapter = $adapter;
+	public function __construct( DatabaseAdapter $adapter, string $source_prefix = '', string $dest_prefix = '' ) {
+		$this->adapter       = $adapter;
+		$this->source_prefix = $source_prefix;
+		$this->dest_prefix   = $dest_prefix;
 	}
 
 	/**
@@ -117,7 +142,8 @@ final class DatabaseWriter {
 			);
 		}
 
-		$statements     = self::split_statements( $result->payload() );
+		$payload        = $this->rewrite_table_identifier( (string) $header->table_name(), $result->payload() );
+		$statements     = self::split_statements( $payload );
 		$declared_count = (int) $header->statement_count();
 		$parsed_count   = count( $statements );
 
@@ -131,6 +157,77 @@ final class DatabaseWriter {
 		foreach ( $statements as $statement ) {
 			$this->adapter->execute_sql( $statement );
 		}
+	}
+
+	/**
+	 * Rewrite the prefix embedded in key columns, once every chunk has been replayed.
+	 *
+	 * The companion to the per-chunk table-identifier rewrite: renaming the tables
+	 * does not touch the prefix that also lives in `{prefix}options.option_name` and
+	 * the `{prefix}usermeta.meta_key` rows, so this finalises the cross-prefix restore
+	 * by rewriting those key columns through the adapter. A no-op unless a prefix
+	 * rewrite is active. Call it after the restore walk has written every db_chunk
+	 * (the options and usermeta tables must already exist with the destination prefix).
+	 *
+	 * @return void
+	 * @throws RuntimeException If a rewrite statement fails to execute.
+	 */
+	public function finalise_prefix_rewrite(): void {
+		if ( ! $this->prefix_rewrite_active() ) {
+			return;
+		}
+		$this->adapter->rewrite_prefix_keys( $this->source_prefix, $this->dest_prefix );
+	}
+
+	/**
+	 * Rewrite a chunk's source-prefixed table identifier to the destination prefix.
+	 *
+	 * A no-op unless a prefix rewrite is active and the chunk's table actually carries
+	 * the source prefix. Otherwise the chunk's one table name — always backtick-quoted
+	 * in the DROP/CREATE/INSERT the export emits, where row values are single-quoted —
+	 * is swapped for its destination-prefixed form. Matching the full backtick-quoted
+	 * identifier keeps the rewrite from touching a single-quoted value or a
+	 * prefix-substring sibling table.
+	 *
+	 * @param string $source_table The chunk's table name, from the entry header.
+	 * @param string $payload      The chunk's decoded SQL bytes.
+	 * @return string The payload with the table identifier rewritten, or unchanged.
+	 */
+	private function rewrite_table_identifier( string $source_table, string $payload ): string {
+		if ( ! $this->prefix_rewrite_active() || '' === $source_table ) {
+			return $payload;
+		}
+		if ( ! str_starts_with( $source_table, $this->source_prefix ) ) {
+			return $payload;
+		}
+		$dest_table = $this->dest_prefix . substr( $source_table, strlen( $this->source_prefix ) );
+		$from       = '`' . self::escape_identifier( $source_table ) . '`';
+		$to         = '`' . self::escape_identifier( $dest_table ) . '`';
+		return str_replace( $from, $to, $payload );
+	}
+
+	/**
+	 * Whether a table-prefix rewrite should be performed.
+	 *
+	 * @return bool True when both prefixes are non-empty and differ.
+	 */
+	private function prefix_rewrite_active(): bool {
+		return '' !== $this->source_prefix
+			&& '' !== $this->dest_prefix
+			&& $this->source_prefix !== $this->dest_prefix;
+	}
+
+	/**
+	 * Escape an SQL identifier by doubling backticks.
+	 *
+	 * Mirrors the escaping {@see \Pontifex\Manifest\WpdbAdapter} applies when emitting
+	 * the identifier, so the rewrite's search string matches the bytes in the payload.
+	 *
+	 * @param string $identifier Raw identifier.
+	 * @return string The identifier with embedded backticks doubled.
+	 */
+	private static function escape_identifier( string $identifier ): string {
+		return str_replace( '`', '``', $identifier );
 	}
 
 	/**

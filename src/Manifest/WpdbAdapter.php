@@ -224,6 +224,75 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Rewrite the WordPress table prefix embedded in the options and usermeta key columns.
+	 *
+	 * Runs after a cross-prefix restore has replayed every table (already renamed to
+	 * the destination prefix). Two plain key columns still carry the source prefix and
+	 * are rewritten column-aware here: the single `{prefix}user_roles` option, and
+	 * every usermeta `meta_key` beginning with the source prefix. Both statements go
+	 * through `$wpdb->prepare()` — `%i` for the table identifier, `%s`/`%d` for values,
+	 * with `esc_like()` on the LIKE pattern — because the source prefix comes from the
+	 * archive and is untrusted. A no-op when the prefixes are equal.
+	 *
+	 * @param string $source_prefix The prefix recorded in the archive.
+	 * @param string $dest_prefix   The destination site's prefix.
+	 * @return void
+	 * @throws RuntimeException If a rewrite statement fails to execute.
+	 */
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void {
+		if ( $source_prefix === $dest_prefix ) {
+			return;
+		}
+
+		// The single prefix-embedded option_name in the options table.
+		$options_sql = $this->wpdb->prepare(
+			'UPDATE %i SET option_name = %s WHERE option_name = %s',
+			$dest_prefix . 'options',
+			$dest_prefix . 'user_roles',
+			$source_prefix . 'user_roles'
+		);
+		$this->run_rewrite( (string) $options_sql, 'options.option_name' );
+
+		// Every usermeta meta_key beginning with the source prefix: swap the leading
+		// prefix for the destination one. esc_like() escapes the prefix's own "_" so
+		// it is matched literally, not as a LIKE wildcard.
+		$like         = $this->wpdb->esc_like( $source_prefix ) . '%';
+		$usermeta_sql = $this->wpdb->prepare(
+			'UPDATE %i SET meta_key = CONCAT(%s, SUBSTRING(meta_key, %d)) WHERE meta_key LIKE %s',
+			$dest_prefix . 'usermeta',
+			$dest_prefix,
+			strlen( $source_prefix ) + 1,
+			$like
+		);
+		$this->run_rewrite( (string) $usermeta_sql, 'usermeta.meta_key' );
+	}
+
+	/**
+	 * Run one prepared prefix-rewrite statement, failing loudly on a query error.
+	 *
+	 * Mirrors {@see self::execute_sql()}'s failure detection (a real `$wpdb` returns
+	 * `false` on a failed query without necessarily setting `last_error`), but is kept
+	 * separate so the verbatim-replay contract of execute_sql() is not muddied — the
+	 * SQL here is prepared by this class, not replayed from an archive.
+	 *
+	 * @param string $sql     A prepared SQL statement.
+	 * @param string $context Short label naming the column being rewritten, for diagnostics.
+	 * @return void
+	 * @throws RuntimeException If the statement fails to execute.
+	 */
+	private function run_rewrite( string $sql, string $context ): void {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is prepared by rewrite_prefix_keys() via $wpdb->prepare(); a schema/data-modifying restore statement has no caching benefit.
+		$result = $this->wpdb->query( $sql );
+		if ( false === $result || '' !== $this->wpdb->last_error ) {
+			$last_error = '' !== $this->wpdb->last_error ? (string) $this->wpdb->last_error : 'query returned false';
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $context is a hardcoded label and $last_error is the driver's message, reported verbatim for diagnostics; exception path, not HTML output.
+				sprintf( 'WpdbAdapter: prefix-key rewrite of %s failed: %s', $context, $last_error )
+			);
+		}
+	}
+
+	/**
 	 * Encode a single row value into its SQL literal form.
 	 *
 	 * Null becomes NULL. Numeric scalar values are emitted unquoted

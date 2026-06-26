@@ -239,6 +239,55 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * Restore must finalise a cross-prefix rewrite after replaying every db_chunk.
+	 *
+	 * Once the walk is done the database tables exist with the destination prefix, so
+	 * the runner asks the DatabaseWriter to rewrite the prefix embedded in the
+	 * options/usermeta key columns — recorded here as a single rewrite call.
+	 *
+	 * @return void
+	 */
+	public function test_restore_finalises_the_prefix_rewrite(): void {
+		$db     = new FakeDbAdapter();
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db, 'wp_', 'xyz_' )
+		);
+
+		$runner->restore(
+			self::build_archive_stream(
+				array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) )
+			)
+		);
+
+		$this->assertSame( array( array( 'wp_', 'xyz_' ) ), $db->rewrite_calls() );
+	}
+
+	/**
+	 * Verify must NOT finalise a prefix rewrite — it writes nothing to the database.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_finalise_the_prefix_rewrite(): void {
+		$db     = new FakeDbAdapter();
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db, 'wp_', 'xyz_' )
+		);
+
+		$runner->verify(
+			self::build_archive_stream(
+				array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) )
+			)
+		);
+
+		$this->assertSame( array(), $db->rewrite_calls(), 'verify() must not rewrite the prefix.' );
+		$this->assertSame( array(), $db->executed_statements(), 'verify() must not execute any statement.' );
+	}
+
+	/**
 	 * A file entry must be restored to the destination filesystem.
 	 *
 	 * @return void

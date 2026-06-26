@@ -550,14 +550,43 @@ final class ImportCommand {
 			}
 		}
 
+		// Read the source table prefix from the archive's provenance (format v1.1).
+		// When it differs from the destination site's prefix, the DatabaseWriter
+		// rewrites table identifiers and the options/usermeta key columns so the
+		// restored database adopts the destination's prefix (ADR 0008). Both prefixes
+		// are validated to a sane identifier shape; the source prefix is from the
+		// archive, so an invalid one is dropped (treated as no rewrite) rather than
+		// reaching the SQL.
+		$source_prefix = self::valid_table_prefix( $archive_reader->provenance()->table_prefix() );
+		$dest_prefix   = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
 		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
 		// reader starts from a known position.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
 		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+	}
+
+	/**
+	 * Validate a table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Returns the prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything else
+	 * (null, empty, or a value carrying SQL metacharacters from a crafted archive)
+	 * yields '', which the DatabaseWriter reads as "no rewrite", so an untrusted prefix
+	 * can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**
