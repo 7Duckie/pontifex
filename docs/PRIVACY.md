@@ -12,7 +12,7 @@ machine running WP-CLI, on data the Pontifex authors never see.
 ## What Pontifex stores, and where
 
 - **The archive (`.wpmig`)** you create, at the path you choose. It
-  contains your entire site, including the whole database — user
+  contains your site's content and the whole database — user
   accounts, password hashes, secret keys, and customer data. Treat it
   as highly sensitive: store it outside the web root and delete it
   securely when you are done. See
@@ -33,11 +33,12 @@ the home for any such decision.
 
 ## Your responsibilities as an operator
 
-Because a `.wpmig` is your whole site in one file, you control its
-privacy once it leaves WordPress: choose a secure transfer channel,
-keep archives out of web-accessible directories, and delete them when
-they are no longer needed. Encryption of archives at rest arrives in
-v0.2.0 ([`roadmap.md`](roadmap.md)).
+Because a `.wpmig` holds your content and the whole database in one
+file, you control its privacy once it leaves WordPress: choose a
+secure transfer channel, keep archives out of web-accessible
+directories, and delete them when they are no longer needed.
+Encryption of archives at rest arrives in v0.2.0
+([`roadmap.md`](roadmap.md)).
 
 ---
 
