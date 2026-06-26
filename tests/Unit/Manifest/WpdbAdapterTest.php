@@ -293,4 +293,48 @@ final class WpdbAdapterTest extends TestCase {
 
 		( new WpdbAdapter( $wpdb ) )->execute_sql( 'CREATE TABLE wp_x (id INT);' );
 	}
+
+	/**
+	 * The prefix-key rewrite must run one prepared UPDATE for options and one for usermeta.
+	 *
+	 * @return void
+	 */
+	public function test_rewrite_prefix_keys_runs_two_updates(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'UPDATE prepared' );
+		$wpdb->expects( $this->exactly( 2 ) )->method( 'query' )->willReturn( 1 );
+
+		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'xyz_' );
+	}
+
+	/**
+	 * The prefix-key rewrite must do nothing when the prefixes are equal.
+	 *
+	 * @return void
+	 */
+	public function test_rewrite_prefix_keys_same_prefix_does_nothing(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->expects( $this->never() )->method( 'query' );
+
+		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'wp_' );
+	}
+
+	/**
+	 * The prefix-key rewrite must throw when a rewrite UPDATE fails.
+	 *
+	 * @return void
+	 */
+	public function test_rewrite_prefix_keys_throws_on_query_failure(): void {
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = '';
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'UPDATE prepared' );
+		$wpdb->method( 'query' )->willReturn( false );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'prefix-key rewrite' );
+
+		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'xyz_' );
+	}
 }

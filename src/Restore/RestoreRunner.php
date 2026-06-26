@@ -145,6 +145,12 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			},
 			$on_bytes
 		);
+
+		// Every db_chunk has now been replayed, so the options and usermeta tables
+		// exist with the destination prefix. Finalise any cross-prefix restore by
+		// rewriting the prefix embedded in their key columns (a no-op otherwise). This
+		// runs only on restore(), never verify(), which writes nothing.
+		$this->database_writer->finalise_prefix_rewrite();
 	}
 
 	/**
