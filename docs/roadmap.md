@@ -196,6 +196,10 @@ the longer-running operational features land.
 
 ### What ships, in roughly this order
 
+- **Content-only by default** — a backup captures `wp-content` plus the
+  whole database, the everyday working-WordPress-to-working-WordPress
+  default; `--whole-site` opts into the entire installation (WordPress
+  core and `wp-config.php`) for cloning onto a bare server (ADR 0008).
 - **Admin UI** for non-CLI users, following the Swiss-design language
   documented in [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md#design-language).
   Promotion of design-language guidance to a dedicated
