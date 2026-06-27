@@ -146,6 +146,16 @@ final class RestoreController {
 	private const STATS_OPTION = 'pontifex_import_stats';
 
 	/**
+	 * The wp_options key holding the rollback counters (mirrors RollbackCommand).
+	 *
+	 * A rollback is an undo, not a transfer, so it is counted separately from the
+	 * import counters and stays out of the transfer history.
+	 *
+	 * @var string
+	 */
+	private const ROLLBACK_STATS_OPTION = 'pontifex_rollback_stats';
+
+	/**
 	 * PHP error types that are fatal and uncatchable, so they bypass the try/catch.
 	 *
 	 * @var int[]
@@ -380,8 +390,9 @@ final class RestoreController {
 	 * The `wp_ajax_pontifex_rollback` handler. Refuses without capability and
 	 * nonce, finds the most recent safety archive (a clear message when there is
 	 * none), verifies it, then replays it. No new safety archive is taken — the
-	 * same as `wp pontifex rollback` — and the import counters are not touched,
-	 * because a rollback is an undo, not a tracked transfer.
+	 * same as `wp pontifex rollback`. A rollback is an undo, not a transfer, so the
+	 * import counters and transfer history are left untouched; instead it bumps its
+	 * own rollback counters so the Overview shows rollback activity.
 	 *
 	 * @return void
 	 */
@@ -418,6 +429,14 @@ final class RestoreController {
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
 			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+				$this->bump_counters(
+					array(
+						'attempted' => 1,
+						'failed'    => 1,
+					),
+					self::ROLLBACK_STATS_OPTION,
+					'bytes_rolled_back'
+				);
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
@@ -433,6 +452,17 @@ final class RestoreController {
 				// The rollback replayed the database too, so flush the now-stale option
 				// cache (see restore() for the full rationale) before anything reads it.
 				$this->wordpress_context->flush_cache();
+				// Record the rollback in its own counters — separate from the import
+				// transfer counters and history — so Overview shows rollback activity.
+				$this->bump_counters(
+					array(
+						'attempted'         => 1,
+						'succeeded'         => 1,
+						'bytes_rolled_back' => $size,
+					),
+					self::ROLLBACK_STATS_OPTION,
+					'bytes_rolled_back'
+				);
 
 				$this->finish( $source );
 
@@ -451,6 +481,14 @@ final class RestoreController {
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin rollback failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+			$this->bump_counters(
+				array(
+					'attempted' => 1,
+					'failed'    => 1,
+				),
+				self::ROLLBACK_STATS_OPTION,
+				'bytes_rolled_back'
+			);
 			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
 		}
 	}
@@ -877,23 +915,27 @@ final class RestoreController {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Read-modify-write the stored import counters by a delta.
+	 * Read-modify-write a stored counters option by a delta.
 	 *
 	 * Mirrors ImportCommand's counter handling so a browser restore updates the
-	 * same Overview figures as a CLI import.
+	 * same Overview figures as a CLI import. The option and its byte-total key are
+	 * parameters so the same routine maintains both the import counters (default)
+	 * and the separate rollback counters.
 	 *
-	 * @param array<string, int> $delta The amounts to add, keyed by counter name.
+	 * @param array<string, int> $delta     The amounts to add, keyed by counter name.
+	 * @param string             $option    The wp_options key to update. Defaults to the import counters.
+	 * @param string             $bytes_key The counter key holding the byte total. Defaults to bytes_imported.
 	 * @return void
 	 */
-	private function bump_counters( array $delta ): void {
+	private function bump_counters( array $delta, string $option = self::STATS_OPTION, string $bytes_key = 'bytes_imported' ): void {
 		$defaults = array(
-			'attempted'      => 0,
-			'succeeded'      => 0,
-			'failed'         => 0,
-			'bytes_imported' => 0,
+			'attempted' => 0,
+			'succeeded' => 0,
+			'failed'    => 0,
+			$bytes_key  => 0,
 		);
 
-		$current = $this->wordpress_context->option_value( self::STATS_OPTION, $defaults );
+		$current = $this->wordpress_context->option_value( $option, $defaults );
 		$current = is_array( $current ) ? $current : array();
 
 		$merged = array();
@@ -901,7 +943,7 @@ final class RestoreController {
 			$merged[ $key ] = $this->counter_int( $current, $key ) + $this->counter_int( $delta, $key );
 		}
 
-		$this->wordpress_context->save_option( self::STATS_OPTION, $merged );
+		$this->wordpress_context->save_option( $option, $merged );
 	}
 
 	/**

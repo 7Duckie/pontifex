@@ -135,6 +135,58 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * A successful rollback flushes the cache and records its own counters.
+	 *
+	 * The rollback replays the database with raw SQL, so the cache is flushed before
+	 * the counter write (or it is lost), and the counters land in the separate
+	 * rollback option so the admin Overview's Rollbacks row reflects a CLI rollback.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_a_successful_rollback_in_the_counters(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$flushed = false;
+		$stats   = null;
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) {
+				unset( $name );
+				return $fallback;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' )->once()->andReturnUsing(
+			static function () use ( &$flushed ): void {
+				$flushed = true;
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$stats ): void {
+				if ( 'pontifex_rollback_stats' === $name ) {
+					$stats = $value;
+				}
+			}
+		);
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $context );
+		$command( array(), array( 'yes' => true ) );
+
+		$this->assertTrue( $flushed, 'A rollback must flush the stale option cache before recording.' );
+		$this->assertIsArray( $stats );
+		$this->assertSame( 1, $stats['attempted'] );
+		$this->assertSame( 1, $stats['succeeded'] );
+		$this->assertSame( 0, $stats['failed'] );
+		$this->assertArrayHasKey( 'bytes_rolled_back', $stats );
+	}
+
+	/**
 	 * --dry-run verifies the archive and never restores.
 	 *
 	 * @return void
@@ -191,18 +243,31 @@ final class InvokeBranchesTest extends TestCase {
 	/**
 	 * Build a RollbackCommand with injected store, runner, and logger.
 	 *
-	 * The Environment and WordPressContext are bare mocks: with a store and a
-	 * runner injected, neither default-wiring path is reached.
+	 * The Environment is a bare mock (its default-wiring path is never reached). The
+	 * WordPressContext is stubbed to tolerate the post-rollback counter write, or a
+	 * caller may inject one to assert on it.
 	 *
 	 * @param RollbackStoreInterface $store          The injected store.
 	 * @param RestoreRunnerInterface $restore_runner The injected restore engine.
 	 * @param LoggerInterface        $logger         The injected logger.
+	 * @param WordPressContext|null  $context        Optional. A custom context to assert on; a tolerant stub by default.
 	 * @return RollbackCommand
 	 */
-	private function build_command( $store, $restore_runner, $logger ): RollbackCommand {
+	private function build_command( $store, $restore_runner, $logger, ?WordPressContext $context = null ): RollbackCommand {
+		if ( null === $context ) {
+			$context = Mockery::mock( WordPressContext::class );
+			$context->shouldReceive( 'option_value' )->andReturnUsing(
+				static function ( string $name, $fallback = false ) {
+					unset( $name );
+					return $fallback;
+				}
+			);
+			$context->shouldReceive( 'save_option' );
+			$context->shouldReceive( 'flush_cache' );
+		}
 		return new RollbackCommand(
 			Mockery::mock( Environment::class ),
-			Mockery::mock( WordPressContext::class ),
+			$context,
 			$store,
 			$restore_runner,
 			$logger,
