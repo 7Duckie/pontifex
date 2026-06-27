@@ -16,13 +16,15 @@ use Pontifex\WordPress\WordPressContext;
 /**
  * Renders the Pontifex Verify screen.
  *
- * The page is static: a short explanation, a shared progress bar and result
- * line, and a table of the backups on disk, each with a "Verify" action. The
- * work — reading the archive and checking every hash — happens over admin-ajax
- * in {@see VerifyController}, so a long check never blocks the page. This class
- * only renders, capability-gated and with every value escaped at output; the
- * script that drives the Verify actions is enqueued by {@see Menu} on this
- * screen, and carries the `pontifex_verify` nonce.
+ * The page is static: a short explanation, a list of the backups on disk to
+ * choose from, and a Verify button with a shared progress bar and result line.
+ * The operator selects a backup (clicking a row, which is then outlined — there
+ * are no radios) and clicks Verify; the work — reading the archive and checking
+ * every hash — happens over admin-ajax in {@see VerifyController}, so a long
+ * check never blocks the page. This class only renders, capability-gated and
+ * with every value escaped at output; the script that drives the
+ * select-then-verify flow is enqueued by {@see Menu} on this screen, and carries
+ * the `pontifex_verify` nonce.
  *
  * The list helpers ({@see self::backup_rows()}, {@see self::backup_when()},
  * {@see self::file_size()}) mirror {@see BackupPage}'s; folding the shared
@@ -66,8 +68,8 @@ final class VerifyPage {
 	 * Render the Verify screen.
 	 *
 	 * The WordPress menu callback. Refuses without the managing capability, then
-	 * prints the header, the verify control region, and the table of backups —
-	 * every dynamic value escaped at the point of output.
+	 * prints the header, the explanation, the list of backups, and the Verify
+	 * control — every dynamic value escaped at the point of output.
 	 *
 	 * @return void
 	 */
@@ -79,13 +81,15 @@ final class VerifyPage {
 		echo '<div class="wrap pontifex pontifex-admin">';
 
 		printf(
-			'<header class="pontifex-header"><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
-			esc_html__( 'Pontifex — Verify', 'pontifex' ),
+			'<header class="pontifex-header"><p class="pontifex-eyebrow">%s</p><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
+			esc_html__( 'Pontifex', 'pontifex' ),
+			esc_html__( 'Verify', 'pontifex' ),
 			esc_html__( 'Check a backup\'s integrity without restoring it.', 'pontifex' )
 		);
 
-		$this->render_intro();
+		$this->render_explanation();
 		$this->render_backups( $this->backup_rows() );
+		$this->render_action();
 
 		echo '</div>';
 	}
@@ -112,21 +116,17 @@ final class VerifyPage {
 	}
 
 	/**
-	 * Render the explanation and the shared progress and result regions.
+	 * Render the explanation of what verifying does.
 	 *
 	 * @return void
 	 */
-	private function render_intro(): void {
+	private function render_explanation(): void {
 		echo '<section class="pontifex-section">';
 		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Verify a backup', 'pontifex' ) );
 		printf(
 			'<p class="pontifex-lead">%s</p>',
-			esc_html__( 'Verifying re-reads a backup and checks every hash, without changing your site or its database. Pick a backup below; its result appears here. Encrypted backups can only be verified with the WP-CLI command.', 'pontifex' )
+			esc_html__( 'Verifying re-reads a backup and checks every hash, without changing your site or its database. Choose a backup below, then verify it; its result appears at the bottom. Encrypted backups can only be verified with the WP-CLI command.', 'pontifex' )
 		);
-		echo '<div class="pontifex-progress-track" id="pontifex-verify-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-verify-bar"></span></div>';
-		echo '<p class="pontifex-progress" id="pontifex-verify-progress" aria-live="polite"></p>';
-		echo '<p class="pontifex-timing" id="pontifex-verify-timing" aria-live="polite"></p>';
-		echo '<p class="pontifex-notice" id="pontifex-verify-result" aria-live="polite"></p>';
 		echo '</section>';
 	}
 
@@ -146,27 +146,54 @@ final class VerifyPage {
 			return;
 		}
 
-		echo '<table class="pontifex-table"><thead><tr>';
 		printf(
-			'<th>%s</th><th>%s</th><th>%s</th><th>%s</th>',
+			'<div class="pontifex-restore-list" role="radiogroup" aria-label="%s">',
+			esc_attr__( 'Choose a backup to verify', 'pontifex' )
+		);
+
+		printf(
+			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span></div>',
 			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
-			esc_html__( 'Size', 'pontifex' ),
-			esc_html__( 'Actions', 'pontifex' )
+			esc_html__( 'Size', 'pontifex' )
 		);
-		echo '</tr></thead><tbody>';
+
 		foreach ( $rows as $row ) {
 			printf(
-				'<tr><td>%s</td><td>%s</td><td>%s</td>'
-				. '<td class="pontifex-actions"><button type="button" class="pontifex-verify-backup" data-file="%s">%s</button></td></tr>',
+				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" data-file="%1$s">'
+				. '<span class="pontifex-restore-name">%2$s</span>'
+				. '<span class="pontifex-restore-when">%3$s</span>'
+				. '<span class="pontifex-restore-size">%4$s</span>'
+				. '</button>',
+				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
 				esc_html( $row['when'] ),
-				esc_html( $row['size'] ),
-				esc_attr( $row['filename'] ),
-				esc_html__( 'Verify', 'pontifex' )
+				esc_html( $row['size'] )
 			);
 		}
-		echo '</tbody></table>';
+
+		echo '</div>';
+		echo '</section>';
+	}
+
+	/**
+	 * Render the Verify button and the shared progress and result regions.
+	 *
+	 * The button stays disabled until a backup is selected; the script enforces that
+	 * and drives the verify over admin-ajax, the same select-then-act flow as Restore.
+	 *
+	 * @return void
+	 */
+	private function render_action(): void {
+		echo '<section class="pontifex-section">';
+		printf(
+			'<button type="button" class="pontifex-button" id="pontifex-verify-run" disabled>%s</button>',
+			esc_html__( 'Verify', 'pontifex' )
+		);
+		echo '<div class="pontifex-progress-track" id="pontifex-verify-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-verify-bar"></span></div>';
+		echo '<p class="pontifex-progress" id="pontifex-verify-progress" aria-live="polite"></p>';
+		echo '<p class="pontifex-timing" id="pontifex-verify-timing" aria-live="polite"></p>';
+		echo '<p class="pontifex-notice" id="pontifex-verify-result" aria-live="polite"></p>';
 		echo '</section>';
 	}
 

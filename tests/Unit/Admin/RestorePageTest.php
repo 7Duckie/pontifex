@@ -1,6 +1,6 @@
 <?php
 /**
- * Tests for VerifyPage — the admin Verify screen renderer.
+ * Tests for RestorePage — the admin Restore screen renderer.
  *
  * @package Pontifex\Tests\Unit\Admin
  */
@@ -12,7 +12,8 @@ namespace Pontifex\Tests\Unit\Admin;
 use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Admin\BackupStore;
-use Pontifex\Admin\VerifyPage;
+use Pontifex\Admin\RestorePage;
+use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use RuntimeException;
@@ -20,12 +21,12 @@ use RuntimeException;
 /**
  * Covers the capability gate, the backup-row data, and a render smoke test.
  *
- * The pure data method {@see VerifyPage::backup_rows()} is asserted directly;
- * {@see VerifyPage::render()} is exercised as a capability gate and a smoke test,
- * the same split BackupPage uses. wp_date is stubbed to UTC gmdate so the
- * formatted time is deterministic.
+ * The pure data method {@see RestorePage::backup_rows()} is asserted directly;
+ * {@see RestorePage::render()} is exercised as a capability gate and a smoke test,
+ * the same split the other admin pages use. wp_date is stubbed to UTC gmdate so
+ * the formatted time is deterministic.
  */
-final class VerifyPageTest extends TestCase {
+final class RestorePageTest extends TestCase {
 
 	/**
 	 * Temporary content directory the store is rooted at for one test.
@@ -41,10 +42,15 @@ final class VerifyPageTest extends TestCase {
 	 */
 	protected function setUp(): void {
 		parent::setUp();
-		$this->base = sys_get_temp_dir() . '/pontifex-verify-page-' . uniqid( '', true );
+		$this->base = sys_get_temp_dir() . '/pontifex-restore-page-' . uniqid( '', true );
 		Functions\when( 'wp_date' )->alias(
 			static function ( string $format, ?int $timestamp = null ): string {
 				return gmdate( $format, $timestamp ?? 0 );
+			}
+		);
+		Functions\when( 'wp_kses' )->alias(
+			static function ( string $content ): string {
+				return $content;
 			}
 		);
 	}
@@ -73,7 +79,7 @@ final class VerifyPageTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		( new VerifyPage( $this->context(), new BackupStore( $this->base ) ) )->render();
+		( new RestorePage( $this->context(), new BackupStore( $this->base ), $this->rollback_store() ) )->render();
 	}
 
 	/**
@@ -87,7 +93,7 @@ final class VerifyPageTest extends TestCase {
 		$this->seed( $store, 'pontifex-backup-20260101T090000Z.wpmig' );
 		$this->seed( $store, 'pontifex-backup-20260301T120000Z.wpmig' );
 
-		$rows = ( new VerifyPage( $this->context(), $store ) )->backup_rows();
+		$rows = ( new RestorePage( $this->context(), $store, $this->rollback_store() ) )->backup_rows();
 
 		$this->assertCount( 2, $rows );
 		$this->assertSame( 'pontifex-backup-20260301T120000Z.wpmig', $rows[0]['filename'], 'Newest backup comes first.' );
@@ -96,11 +102,11 @@ final class VerifyPageTest extends TestCase {
 	}
 
 	/**
-	 * Renders the backups as click-to-select rows, with no radio, plus one Verify button.
+	 * Renders the backups list as click-to-select rows, with no radio, plus the action box.
 	 *
 	 * @return void
 	 */
-	public function test_render_lists_backups_with_a_verify_action(): void {
+	public function test_render_lists_backups_with_a_selectable_action(): void {
 		Functions\when( 'current_user_can' )->justReturn( true );
 
 		$store = new BackupStore( $this->base );
@@ -109,7 +115,7 @@ final class VerifyPageTest extends TestCase {
 		$this->seed( $store, $name );
 
 		ob_start();
-		( new VerifyPage( $this->context(), $store ) )->render();
+		( new RestorePage( $this->context(), $store, $this->rollback_store() ) )->render();
 		$html = (string) ob_get_clean();
 
 		$this->assertStringContainsString( $name, $html );
@@ -117,8 +123,52 @@ final class VerifyPageTest extends TestCase {
 		$this->assertStringContainsString( 'data-file="' . $name . '"', $html, 'The row carries its filename for selection.' );
 		$this->assertStringContainsString( 'role="radiogroup"', $html, 'The chooser is an accessible radio group.' );
 		$this->assertStringNotContainsString( 'type="radio"', $html, 'There are no radio inputs — the selected row is outlined instead.' );
-		$this->assertStringContainsString( 'id="pontifex-verify-run"', $html, 'A single Verify button drives the selected backup.' );
-		$this->assertStringContainsString( 'pontifex-verify-timing', $html );
+		$this->assertStringContainsString( 'id="pontifex-restore-action"', $html, 'The typed-action box is present.' );
+		$this->assertStringContainsString( 'id="pontifex-restore-run"', $html, 'The Run button is present.' );
+	}
+
+	/**
+	 * Lists the available safety archive with its date and the rollback guidance.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_the_safety_archive_for_rollback(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->andReturn( '/x/pontifex/rollback/pre-import-rollback-20260301T084500Z.wpmig' );
+
+		ob_start();
+		( new RestorePage( $this->context(), $store, $rollback ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'Roll back', $html, 'The rollback section is shown.' );
+		$this->assertStringContainsString( 'pre-import-rollback-20260301T084500Z.wpmig', $html, 'The safety archive is listed.' );
+		$this->assertStringContainsString( '08:45 on 01-03-2026', $html, 'Its date is shown in the table.' );
+		$this->assertStringContainsString( 'download that backup before rolling back', $html, 'The rollback guidance is shown.' );
+		$this->assertStringNotContainsString( 'No safety archive', $html, 'The empty message is hidden when an archive exists.' );
+	}
+
+	/**
+	 * Hides the safety-archive table and shows the empty message when none exists.
+	 *
+	 * @return void
+	 */
+	public function test_render_hides_rollback_when_no_safety_archive(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		ob_start();
+		( new RestorePage( $this->context(), $store, $this->rollback_store() ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'No safety archive is available to roll back to', $html );
+		$this->assertStringNotContainsString( 'Safety archive', $html, 'No archive table header when there is none.' );
 	}
 
 	// -------------------------------------------------------------------------
@@ -138,6 +188,17 @@ final class VerifyPageTest extends TestCase {
 			}
 		);
 		return $context;
+	}
+
+	/**
+	 * A RollbackStore mock reporting no safety archive available.
+	 *
+	 * @return RollbackStoreInterface&\Mockery\MockInterface
+	 */
+	private function rollback_store() {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->andReturn( null );
+		return $store;
 	}
 
 	/**

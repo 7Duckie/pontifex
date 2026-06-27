@@ -192,6 +192,15 @@ final class RealWordPressContext implements WordPressContext {
 	}
 
 	/**
+	 * Flush WordPress's object cache after a raw-SQL database replay.
+	 *
+	 * @return void
+	 */
+	public function flush_cache(): void {
+		wp_cache_flush();
+	}
+
+	/**
 	 * Resolve the cross-URL migration class allowlist from the filter.
 	 *
 	 * Reads `apply_filters( 'pontifex_serialized_classes', array() )` and keeps

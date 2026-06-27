@@ -17,6 +17,8 @@ use Pontifex\Admin\BackupPage;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
+use Pontifex\Admin\RestoreController;
+use Pontifex\Admin\RestorePage;
 use Pontifex\Admin\VerifyController;
 use Pontifex\Admin\VerifyPage;
 use Pontifex\Environment\Environment;
@@ -36,7 +38,7 @@ use Psr\Log\NullLogger;
 final class AdminBootstrapTest extends TestCase {
 
 	/**
-	 * Attaches the menu, the assets, and the four Backup admin-ajax actions.
+	 * Attaches the menu, the assets, and the Backup, Verify and Restore admin-ajax actions.
 	 *
 	 * @return void
 	 */
@@ -48,7 +50,7 @@ final class AdminBootstrapTest extends TestCase {
 			}
 		);
 
-		( new AdminBootstrap( $this->menu(), $this->controller(), $this->verify_controller() ) )->register();
+		( new AdminBootstrap( $this->menu(), $this->controller(), $this->verify_controller(), $this->restore_controller() ) )->register();
 
 		$this->assertContains( 'admin_menu', $hooks );
 		$this->assertContains( 'admin_enqueue_scripts', $hooks );
@@ -59,6 +61,9 @@ final class AdminBootstrapTest extends TestCase {
 		$this->assertContains( 'wp_ajax_pontifex_delete_backup', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_verify', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_verify_progress', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_restore', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_rollback', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_restore_progress', $hooks );
 	}
 
 	/**
@@ -80,7 +85,12 @@ final class AdminBootstrapTest extends TestCase {
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() )
 		);
-		return new Menu( $overview, $backup, $verify );
+		$restore  = new RestorePage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() ),
+			Mockery::mock( RollbackStoreInterface::class )
+		);
+		return new Menu( $overview, $backup, $verify, $restore );
 	}
 
 	/**
@@ -107,6 +117,21 @@ final class AdminBootstrapTest extends TestCase {
 			Mockery::mock( Environment::class ),
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() ),
+			new NullLogger()
+		);
+	}
+
+	/**
+	 * A real RestoreController over mocked dependencies.
+	 *
+	 * @return RestoreController
+	 */
+	private function restore_controller(): RestoreController {
+		return new RestoreController(
+			Mockery::mock( Environment::class ),
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() ),
+			Mockery::mock( RollbackStoreInterface::class ),
 			new NullLogger()
 		);
 	}

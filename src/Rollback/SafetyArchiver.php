@@ -135,10 +135,11 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param string        $wordpress_root Absolute path of the WordPress installation to archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void` with each chunk's raw source byte count.
+	 * @param callable|null $on_total       Optional callback, called once before copying with the estimated total source bytes, as `( int $estimated_bytes ): void`, so the caller can show a determinate bar.
 	 * @return string The absolute path of the safety archive written.
 	 * @throws RuntimeException If the preflight refuses, or the archive cannot be written.
 	 */
-	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null ): string {
+	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null, ?callable $on_total = null ): string {
 		$this->store->ensure_directory();
 
 		// The safety archive follows the restore's scope (ADR 0008): a content-only
@@ -150,6 +151,12 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		$path_prefix      = $this->content_only ? 'wp-content' : '';
 		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, $path_prefix );
 		$entry_plans      = $manifest_builder->build( $wordpress_root );
+
+		// Report the estimated total up front so a caller (the admin Backing-up bar)
+		// can show determinate progress, the same way the Backup screen does.
+		if ( null !== $on_total ) {
+			$on_total( $entry_plans->estimated_bytes() );
+		}
 
 		$this->preflight_disk_space( $entry_plans );
 

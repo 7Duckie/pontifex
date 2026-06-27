@@ -34,6 +34,16 @@
 	margin-bottom: calc(var(--pontifex-step) * 4);
 }
 
+.pontifex-admin .pontifex-eyebrow {
+	margin: 0 0 calc(var(--pontifex-step) * 0.75);
+	padding: 0;
+	font-size: 12px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	color: var(--pontifex-muted);
+}
+
 .pontifex-admin .pontifex-title {
 	margin: 0;
 	padding: 0;
@@ -123,8 +133,11 @@
 	border-bottom: 2px solid var(--pontifex-ink);
 }
 
+/* Data rows sit indented under the flush-left column headers — the same offset the
+   backup chooser's rows have (its 12px padding + 2px selection border), so every
+   table on every screen reads the same way: headers flush, data indented. */
 .pontifex-admin .pontifex-table td {
-	padding: calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 2) calc(var(--pontifex-step) * 1.5) 0;
+	padding: calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 2) calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 1.75);
 	border-bottom: 1px solid var(--pontifex-rule);
 	font-variant-numeric: tabular-nums;
 }
@@ -267,6 +280,160 @@
 .pontifex-admin .pontifex-verify-backup:disabled {
 	opacity: 0.5;
 	cursor: default;
+}
+
+/* Restore -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-hint {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * 2) 0;
+	color: var(--pontifex-muted);
+}
+
+/* The command words in the lead are ink, not muted, so they read as the words to type. */
+.pontifex-admin .pontifex-restore-lead .pontifex-emph {
+	color: var(--pontifex-ink);
+}
+
+/* The backup chooser, shared by the Restore and Verify screens: a grid of
+   selectable rows, not a table, so the same select-then-act pattern appears on
+   both. The head and the rows share the same columns and a matching left inset
+   so they align. */
+.pontifex-admin .pontifex-restore-head {
+	display: grid;
+	grid-template-columns: 1fr 168px 64px;
+	gap: calc(var(--pontifex-step) * 2);
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
+	border-bottom: 2px solid var(--pontifex-ink);
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-restore-row {
+	display: grid;
+	grid-template-columns: 1fr 168px 64px;
+	gap: calc(var(--pontifex-step) * 2);
+	align-items: baseline;
+	width: 100%;
+	padding: calc(var(--pontifex-step) * 1.5);
+	border: 2px solid transparent;
+	border-bottom: 1px solid var(--pontifex-rule);
+	border-radius: 0;
+	background: none;
+	color: var(--pontifex-ink);
+	font: inherit;
+	font-variant-numeric: tabular-nums;
+	text-align: left;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-restore-row:hover:not(:disabled) {
+	background: var(--pontifex-fill);
+}
+
+/* The selected backup is shown by an all-round accent border with a little margin
+   so it stands clear of its neighbours — no radio, no dot, no fill. */
+.pontifex-admin .pontifex-restore-row.is-selected {
+	border: 2px solid var(--pontifex-accent);
+	margin: calc(var(--pontifex-step) * 0.75) 0;
+}
+
+.pontifex-admin .pontifex-restore-row.is-selected .pontifex-restore-name {
+	font-weight: 600;
+}
+
+.pontifex-admin .pontifex-restore-row:focus-visible {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: -2px;
+}
+
+.pontifex-admin .pontifex-restore-row:disabled {
+	cursor: default;
+}
+
+.pontifex-admin .pontifex-restore-when,
+.pontifex-admin .pontifex-restore-size {
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-action-label {
+	display: block;
+	margin: 0 0 var(--pontifex-step);
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-action-input {
+	display: block;
+	width: 300px;
+	max-width: 100%;
+	margin: 0 0 calc(var(--pontifex-step) * 2.5);
+	padding: calc(var(--pontifex-step) * 1.25) calc(var(--pontifex-step) * 1.5);
+	border: 0;
+	border-radius: 0;
+	background: var(--pontifex-paper);
+	box-shadow: none;
+	color: var(--pontifex-ink);
+	font: inherit;
+}
+
+.pontifex-admin .pontifex-action-input:focus {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 1px;
+}
+
+/* Signed-out modal --------------------------------------------------------- */
+
+/*
+ * Shown only after a restore or rollback signed the operator out: a blocking
+ * overlay whose single action is to log back in. There is deliberately no close
+ * control and no dismiss-on-backdrop, so the sign-out cannot be missed or assumed
+ * away the way the old inline notice could.
+ */
+.pontifex-admin .pontifex-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: calc(var(--pontifex-step) * 2);
+	background: rgba(17, 17, 17, 0.55);
+}
+
+.pontifex-admin .pontifex-modal {
+	max-width: 30rem;
+	width: 100%;
+	padding: calc(var(--pontifex-step) * 5);
+	background: var(--pontifex-paper);
+	border-top: 2px solid var(--pontifex-ink);
+}
+
+/* The overline title: hierarchy through type, not a coloured alert bar. */
+.pontifex-admin .pontifex-modal-title {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-muted);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.pontifex-admin .pontifex-modal-message {
+	max-width: 40ch;
+	margin: 0 0 calc(var(--pontifex-step) * 4);
+	color: var(--pontifex-ink);
+	line-height: 1.5;
+}
+
+.pontifex-admin .pontifex-modal-actions {
+	margin: 0;
 }
 
 /* Narrow screens ------------------------------------------------------------ */

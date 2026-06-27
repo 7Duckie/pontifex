@@ -102,7 +102,8 @@ final class BackupPageTest extends TestCase {
 		$page->render();
 		$output = (string) ob_get_clean();
 
-		$this->assertStringContainsString( 'Pontifex — Backup', $output );
+		$this->assertStringContainsString( '<p class="pontifex-eyebrow">Pontifex</p>', $output );
+		$this->assertStringContainsString( '<h1 class="pontifex-title">Backup</h1>', $output );
 		$this->assertStringContainsString( 'id="pontifex-create-backup"', $output );
 		$this->assertStringContainsString( 'id="pontifex-backup-track"', $output );
 		$this->assertStringContainsString( 'role="progressbar"', $output );
