@@ -12,11 +12,10 @@ namespace Pontifex\Admin;
 /**
  * Registers the top-level "Pontifex" admin menu and enqueues its stylesheet.
  *
- * Version 0.5.0 builds the admin UI screen by screen: the Overview, Backup and
- * Verify screens sit under a top-level menu, with the Restore slice still to come
- * as a sibling subpage. The menu and every page require the `manage_options`
- * capability (the WordPress "manage this site" gate): the admin UI is
- * deny-by-default, unlike the shell-trust CLI.
+ * Version 0.5.0 builds the admin UI screen by screen: the Overview, Backup,
+ * Verify and Restore screens sit under a top-level menu. The menu and every page
+ * require the `manage_options` capability (the WordPress "manage this site"
+ * gate): the admin UI is deny-by-default, unlike the shell-trust CLI.
  *
  * The stylesheet is enqueued only on Pontifex screens, identified by the hook
  * suffixes WordPress returns from add_menu_page(), so the plugin adds nothing to
@@ -60,6 +59,13 @@ final class Menu {
 	private VerifyPage $verify;
 
 	/**
+	 * The Restore page controller.
+	 *
+	 * @var RestorePage
+	 */
+	private RestorePage $restore;
+
+	/**
 	 * The hook suffixes WordPress assigned to the Pontifex screens.
 	 *
 	 * Collected as the pages register so {@see self::enqueue_assets()} can tell a
@@ -70,18 +76,25 @@ final class Menu {
 	private array $page_hooks = array();
 
 	/**
-	 * The hook suffix of the Backup screen — one of the two screens that load a script.
+	 * The hook suffix of the Backup screen — one of the screens that load a script.
 	 *
 	 * @var string
 	 */
 	private string $backup_hook = '';
 
 	/**
-	 * The hook suffix of the Verify screen — the other screen that loads a script.
+	 * The hook suffix of the Verify screen — another screen that loads a script.
 	 *
 	 * @var string
 	 */
 	private string $verify_hook = '';
+
+	/**
+	 * The hook suffix of the Restore screen — another screen that loads a script.
+	 *
+	 * @var string
+	 */
+	private string $restore_hook = '';
 
 	/**
 	 * Construct the menu around its page controllers.
@@ -89,11 +102,13 @@ final class Menu {
 	 * @param OverviewPage $overview The Overview page controller.
 	 * @param BackupPage   $backup   The Backup page controller.
 	 * @param VerifyPage   $verify   The Verify page controller.
+	 * @param RestorePage  $restore  The Restore page controller.
 	 */
-	public function __construct( OverviewPage $overview, BackupPage $backup, VerifyPage $verify ) {
+	public function __construct( OverviewPage $overview, BackupPage $backup, VerifyPage $verify, RestorePage $restore ) {
 		$this->overview = $overview;
 		$this->backup   = $backup;
 		$this->verify   = $verify;
+		$this->restore  = $restore;
 	}
 
 	/**
@@ -143,6 +158,15 @@ final class Menu {
 			array( $this->verify, 'render' )
 		);
 
+		$restore_hook = add_submenu_page(
+			self::SLUG,
+			__( 'Pontifex — Restore', 'pontifex' ),
+			__( 'Restore', 'pontifex' ),
+			self::CAPABILITY,
+			self::SLUG . '-restore',
+			array( $this->restore, 'render' )
+		);
+
 		if ( is_string( $overview_hook ) && '' !== $overview_hook ) {
 			$this->page_hooks[] = $overview_hook;
 		}
@@ -155,6 +179,11 @@ final class Menu {
 		if ( is_string( $verify_hook ) && '' !== $verify_hook ) {
 			$this->page_hooks[] = $verify_hook;
 			$this->verify_hook  = $verify_hook;
+		}
+
+		if ( is_string( $restore_hook ) && '' !== $restore_hook ) {
+			$this->page_hooks[] = $restore_hook;
+			$this->restore_hook = $restore_hook;
 		}
 	}
 
@@ -174,7 +203,7 @@ final class Menu {
 		}
 
 		$base    = defined( 'PONTIFEX_PLUGIN_URL' ) ? (string) constant( 'PONTIFEX_PLUGIN_URL' ) : '';
-		$version = defined( 'PONTIFEX_VERSION' ) ? (string) constant( 'PONTIFEX_VERSION' ) : false;
+		$version = $this->assets_version();
 
 		wp_enqueue_style(
 			'pontifex-admin',
@@ -190,6 +219,54 @@ final class Menu {
 		if ( '' !== $this->verify_hook && $hook_suffix === $this->verify_hook ) {
 			$this->enqueue_verify_script( $base, $version );
 		}
+
+		if ( '' !== $this->restore_hook && $hook_suffix === $this->restore_hook ) {
+			$this->enqueue_restore_script( $base, $version );
+		}
+	}
+
+	/**
+	 * Version the admin assets by their newest modification time.
+	 *
+	 * The query-string version on the enqueued CSS and JS is what tells the browser
+	 * whether to refetch them. The plugin version alone is not enough: during
+	 * development the same version ships repeatedly with changed assets, so the
+	 * browser would serve a stale, cached script against fresh markup. Using the
+	 * newest asset mtime means any edit to a stylesheet or script busts the cache
+	 * for the whole admin UI. Falls back to the plugin version when the files (or
+	 * the plugin directory) cannot be read.
+	 *
+	 * @return string|false The version string, or false when none can be determined.
+	 */
+	private function assets_version(): string|false {
+		$latest = 0;
+
+		if ( defined( 'PONTIFEX_PLUGIN_DIR' ) ) {
+			$dir   = (string) constant( 'PONTIFEX_PLUGIN_DIR' );
+			$files = array(
+				'assets/admin/pontifex-admin.css',
+				'assets/admin/pontifex-backup.js',
+				'assets/admin/pontifex-verify.js',
+				'assets/admin/pontifex-restore.js',
+			);
+			foreach ( $files as $relative_path ) {
+				$path = $dir . $relative_path;
+				if ( ! file_exists( $path ) ) {
+					continue;
+				}
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filemtime -- Reading the modification time of a plugin-owned asset to version it for cache-busting; WP_Filesystem is unavailable in CLI/test contexts.
+				$mtime = filemtime( $path );
+				if ( false !== $mtime && $mtime > $latest ) {
+					$latest = $mtime;
+				}
+			}
+		}
+
+		if ( $latest > 0 ) {
+			return (string) $latest;
+		}
+
+		return defined( 'PONTIFEX_VERSION' ) ? (string) constant( 'PONTIFEX_VERSION' ) : false;
 	}
 
 	/**
@@ -276,6 +353,52 @@ final class Menu {
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'  => __( 'Time elapsed - %s', 'pontifex' ),
 					'failed'   => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+				),
+			)
+		);
+	}
+
+	/**
+	 * Enqueue and configure the Restore screen's script.
+	 *
+	 * Drives the typed-action box (restore / rollback) over admin-ajax. Localised
+	 * with the ajax URL, a `pontifex_restore` nonce, and the translated strings it
+	 * shows; the server re-checks the capability and nonce on every action.
+	 *
+	 * @param string       $base    The plugin's base URL.
+	 * @param string|false $version The asset version, or false when undefined.
+	 * @return void
+	 */
+	private function enqueue_restore_script( string $base, string|false $version ): void {
+		wp_enqueue_script(
+			'pontifex-restore',
+			$base . 'assets/admin/pontifex-restore.js',
+			array(),
+			$version,
+			true
+		);
+
+		wp_localize_script(
+			'pontifex-restore',
+			'pontifexRestore',
+			array(
+				'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
+				'nonce'    => wp_create_nonce( RestoreController::NONCE_ACTION ),
+				'loginUrl' => wp_login_url(),
+				'strings'  => array(
+					'starting'       => __( 'Starting…', 'pontifex' ),
+					'verifying'      => __( 'Verifying the backup…', 'pontifex' ),
+					'backingUp'      => __( 'Backing up your content…', 'pontifex' ),
+					'restoring'      => __( 'Restoring…', 'pontifex' ),
+					'rollingBack'    => __( 'Rolling back…', 'pontifex' ),
+					/* translators: 1: bytes done so far, 2: total bytes, both as human-readable sizes */
+					'progress'       => __( '%1$s of %2$s', 'pontifex' ),
+					/* translators: %s: elapsed time, e.g. 0:48 */
+					'elapsed'        => __( 'Time elapsed - %s', 'pontifex' ),
+					'failed'         => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'signedOutTitle' => __( 'Restore complete', 'pontifex' ),
+					'signedOut'      => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
+					'loginLink'      => __( 'Log in', 'pontifex' ),
 				),
 			)
 		);

@@ -15,6 +15,7 @@ use Pontifex\Admin\BackupPage;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
+use Pontifex\Admin\RestorePage;
 use Pontifex\Admin\VerifyPage;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
@@ -50,7 +51,12 @@ final class MenuTest extends TestCase {
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() )
 		);
-		return new Menu( $overview, $backup, $verify );
+		$restore  = new RestorePage(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() ),
+			Mockery::mock( RollbackStoreInterface::class )
+		);
+		return new Menu( $overview, $backup, $verify, $restore );
 	}
 
 	/**
@@ -139,15 +145,22 @@ final class MenuTest extends TestCase {
 		Functions\when( 'add_submenu_page' )->alias(
 			static function () use ( &$calls ): string {
 				++$calls;
-				if ( 1 === $calls ) {
-					return 'pontifex_page_overview';
+				switch ( $calls ) {
+					case 1:
+						return 'pontifex_page_overview';
+					case 2:
+						return 'pontifex_page_pontifex-backup';
+					case 3:
+						return 'pontifex_page_pontifex-verify';
+					default:
+						return 'pontifex_page_pontifex-restore';
 				}
-				return 2 === $calls ? 'pontifex_page_pontifex-backup' : 'pontifex_page_pontifex-verify';
 			}
 		);
 		Functions\when( 'wp_enqueue_style' )->justReturn( null );
 		Functions\when( 'admin_url' )->returnArg();
 		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
+		Functions\when( 'wp_login_url' )->justReturn( 'login-url' );
 
 		$script_handle = '';
 		Functions\when( 'wp_enqueue_script' )->alias(
@@ -182,15 +195,22 @@ final class MenuTest extends TestCase {
 		Functions\when( 'add_submenu_page' )->alias(
 			static function () use ( &$calls ): string {
 				++$calls;
-				if ( 1 === $calls ) {
-					return 'pontifex_page_overview';
+				switch ( $calls ) {
+					case 1:
+						return 'pontifex_page_overview';
+					case 2:
+						return 'pontifex_page_pontifex-backup';
+					case 3:
+						return 'pontifex_page_pontifex-verify';
+					default:
+						return 'pontifex_page_pontifex-restore';
 				}
-				return 2 === $calls ? 'pontifex_page_pontifex-backup' : 'pontifex_page_pontifex-verify';
 			}
 		);
 		Functions\when( 'wp_enqueue_style' )->justReturn( null );
 		Functions\when( 'admin_url' )->returnArg();
 		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
+		Functions\when( 'wp_login_url' )->justReturn( 'login-url' );
 
 		$script_handle = '';
 		Functions\when( 'wp_enqueue_script' )->alias(
@@ -212,5 +232,55 @@ final class MenuTest extends TestCase {
 
 		$this->assertSame( 'pontifex-verify', $script_handle, 'The Verify script should be enqueued on the Verify screen.' );
 		$this->assertTrue( $localized, 'The Verify script should be localised with its configuration.' );
+	}
+
+	/**
+	 * Loads and localises the Restore script on the Restore screen only.
+	 *
+	 * @return void
+	 */
+	public function test_enqueue_assets_loads_the_script_on_the_restore_screen(): void {
+		$calls = 0;
+		Functions\when( 'add_menu_page' )->justReturn( 'toplevel_page_pontifex' );
+		Functions\when( 'add_submenu_page' )->alias(
+			static function () use ( &$calls ): string {
+				++$calls;
+				switch ( $calls ) {
+					case 1:
+						return 'pontifex_page_overview';
+					case 2:
+						return 'pontifex_page_pontifex-backup';
+					case 3:
+						return 'pontifex_page_pontifex-verify';
+					default:
+						return 'pontifex_page_pontifex-restore';
+				}
+			}
+		);
+		Functions\when( 'wp_enqueue_style' )->justReturn( null );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
+		Functions\when( 'wp_login_url' )->justReturn( 'login-url' );
+
+		$script_handle = '';
+		Functions\when( 'wp_enqueue_script' )->alias(
+			static function ( string $handle ) use ( &$script_handle ): void {
+				$script_handle = $handle;
+			}
+		);
+		$localized = false;
+		Functions\when( 'wp_localize_script' )->alias(
+			static function () use ( &$localized ): bool {
+				$localized = true;
+				return true;
+			}
+		);
+
+		$menu = $this->menu();
+		$menu->register_pages();
+		$menu->enqueue_assets( 'pontifex_page_pontifex-restore' );
+
+		$this->assertSame( 'pontifex-restore', $script_handle, 'The Restore script should be enqueued on the Restore screen.' );
+		$this->assertTrue( $localized, 'The Restore script should be localised with its configuration.' );
 	}
 }

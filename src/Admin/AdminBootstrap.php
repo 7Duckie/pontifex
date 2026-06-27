@@ -53,16 +53,25 @@ final class AdminBootstrap {
 	private VerifyController $verify_controller;
 
 	/**
+	 * The controller behind the Restore screen's admin-ajax actions.
+	 *
+	 * @var RestoreController
+	 */
+	private RestoreController $restore_controller;
+
+	/**
 	 * Construct the bootstrap around the menu registrar and the controllers.
 	 *
-	 * @param Menu             $menu              The menu registrar to hook into WordPress.
-	 * @param BackupController $backup_controller The controller serving the Backup screen's actions.
-	 * @param VerifyController $verify_controller The controller serving the Verify screen's actions.
+	 * @param Menu              $menu               The menu registrar to hook into WordPress.
+	 * @param BackupController  $backup_controller  The controller serving the Backup screen's actions.
+	 * @param VerifyController  $verify_controller  The controller serving the Verify screen's actions.
+	 * @param RestoreController $restore_controller The controller serving the Restore screen's actions.
 	 */
-	public function __construct( Menu $menu, BackupController $backup_controller, VerifyController $verify_controller ) {
-		$this->menu              = $menu;
-		$this->backup_controller = $backup_controller;
-		$this->verify_controller = $verify_controller;
+	public function __construct( Menu $menu, BackupController $backup_controller, VerifyController $verify_controller, RestoreController $restore_controller ) {
+		$this->menu               = $menu;
+		$this->backup_controller  = $backup_controller;
+		$this->verify_controller  = $verify_controller;
+		$this->restore_controller = $restore_controller;
 	}
 
 	/**
@@ -88,12 +97,14 @@ final class AdminBootstrap {
 		$overview = new OverviewPage( $context, $rollback_store, $plugin_version );
 		$backup   = new BackupPage( $context, $backup_store );
 		$verify   = new VerifyPage( $context, $backup_store );
+		$restore  = new RestorePage( $context, $backup_store, $rollback_store );
 
-		$logger            = new FileLogger( $content_dir . '/pontifex/logs', self::debug_enabled(), protect_directory: true );
-		$backup_controller = new BackupController( $environment, $context, $backup_store, $logger );
-		$verify_controller = new VerifyController( $environment, $context, $backup_store, $logger );
+		$logger             = new FileLogger( $content_dir . '/pontifex/logs', self::debug_enabled(), protect_directory: true );
+		$backup_controller  = new BackupController( $environment, $context, $backup_store, $logger );
+		$verify_controller  = new VerifyController( $environment, $context, $backup_store, $logger );
+		$restore_controller = new RestoreController( $environment, $context, $backup_store, $rollback_store, $logger );
 
-		return new self( new Menu( $overview, $backup, $verify ), $backup_controller, $verify_controller );
+		return new self( new Menu( $overview, $backup, $verify, $restore ), $backup_controller, $verify_controller, $restore_controller );
 	}
 
 	/**
@@ -131,5 +142,9 @@ final class AdminBootstrap {
 
 		add_action( 'wp_ajax_pontifex_verify', array( $this->verify_controller, 'verify' ) );
 		add_action( 'wp_ajax_pontifex_verify_progress', array( $this->verify_controller, 'progress' ) );
+
+		add_action( 'wp_ajax_pontifex_restore', array( $this->restore_controller, 'restore' ) );
+		add_action( 'wp_ajax_pontifex_rollback', array( $this->restore_controller, 'rollback' ) );
+		add_action( 'wp_ajax_pontifex_restore_progress', array( $this->restore_controller, 'progress' ) );
 	}
 }

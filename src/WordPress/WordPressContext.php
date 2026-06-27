@@ -208,6 +208,20 @@ interface WordPressContext {
 	public function save_option( string $name, mixed $value, bool $autoload = false ): void;
 
 	/**
+	 * Flush WordPress's in-memory and persistent object cache.
+	 *
+	 * Equivalent to wp_cache_flush(). Called after a restore has replayed the
+	 * database with raw SQL: WordPress's option cache (and any persistent object
+	 * cache) still holds the pre-restore values, so a later option_value()/
+	 * save_option() would read and write against state that no longer matches the
+	 * database — silently losing the post-restore counter writes. Flushing makes
+	 * subsequent reads and writes see the restored database.
+	 *
+	 * @return void
+	 */
+	public function flush_cache(): void;
+
+	/**
 	 * The class allowlist for unserialising during a cross-URL migration.
 	 *
 	 * Resolves the `pontifex_serialized_classes` filter (threat-model §1,
