@@ -60,24 +60,30 @@ final class OverviewPageTest extends TestCase {
 	}
 
 	/**
-	 * Reads both counter options into one activity row each.
+	 * Reads all three counter options into one activity row each.
 	 *
 	 * @return void
 	 */
-	public function test_stats_rows_reads_export_and_import_counters(): void {
+	public function test_stats_rows_reads_export_import_and_rollback_counters(): void {
 		$context = $this->context_with(
 			array(
-				'pontifex_export_stats' => array(
+				'pontifex_export_stats'   => array(
 					'attempted'      => 5,
 					'succeeded'      => 4,
 					'failed'         => 1,
 					'bytes_exported' => 2048,
 				),
-				'pontifex_import_stats' => array(
+				'pontifex_import_stats'   => array(
 					'attempted'      => 2,
 					'succeeded'      => 2,
 					'failed'         => 0,
 					'bytes_imported' => 1024,
+				),
+				'pontifex_rollback_stats' => array(
+					'attempted'         => 3,
+					'succeeded'         => 3,
+					'failed'            => 0,
+					'bytes_rolled_back' => 512,
 				),
 			)
 		);
@@ -85,13 +91,16 @@ final class OverviewPageTest extends TestCase {
 
 		$rows = $page->stats_rows();
 
-		$this->assertCount( 2, $rows );
+		$this->assertCount( 3, $rows );
 		$this->assertSame( 5, $rows[0]['attempted'] );
 		$this->assertSame( 4, $rows[0]['succeeded'] );
 		$this->assertSame( 1, $rows[0]['failed'] );
 		$this->assertSame( '2048 B', $rows[0]['size'] );
 		$this->assertSame( 2, $rows[1]['succeeded'] );
 		$this->assertSame( '1024 B', $rows[1]['size'] );
+		$this->assertSame( 'Rollbacks', $rows[2]['operation'] );
+		$this->assertSame( 3, $rows[2]['succeeded'] );
+		$this->assertSame( '512 B', $rows[2]['size'] );
 	}
 
 	/**

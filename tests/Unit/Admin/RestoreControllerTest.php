@@ -519,6 +519,83 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * A successful rollback flushes the cache and records its own rollback counters.
+	 *
+	 * The rollback replays the database, so the cache is flushed before recording (or
+	 * the write is lost), and the figures land in the separate rollback counters —
+	 * not the import counters — so Overview's Rollbacks row reflects the undo.
+	 *
+	 * @return void
+	 */
+	public function test_successful_rollback_flushes_then_records_rollback_counters(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once();
+
+		$flushed       = false;
+		$flushed_first = null;
+		$stats         = null;
+		$context       = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'format_size' )->andReturnUsing(
+			static function ( int $bytes ): string {
+				return $bytes . ' B';
+			}
+		);
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) {
+				unset( $name );
+				return $fallback;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' )->once()->andReturnUsing(
+			static function () use ( &$flushed ): void {
+				$flushed = true;
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$flushed, &$flushed_first, &$stats ): void {
+				if ( 'pontifex_rollback_stats' === $name ) {
+					$flushed_first = $flushed;
+					$stats         = $value;
+				}
+			}
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			$runner,
+			null
+		);
+
+		$controller->rollback();
+
+		$this->assertTrue( $flushed, 'The cache must be flushed after the rollback replay.' );
+		$this->assertTrue( $flushed_first, 'Rollback counters must be written AFTER the cache flush.' );
+		$this->assertIsArray( $stats );
+		$this->assertSame( 1, $stats['attempted'], 'A successful rollback must record the attempt.' );
+		$this->assertSame( 1, $stats['succeeded'] );
+		$this->assertSame( 0, $stats['failed'] );
+		$this->assertArrayHasKey( 'bytes_rolled_back', $stats );
+	}
+
+	/**
 	 * Refuses to roll back when there is no safety archive.
 	 *
 	 * @return void

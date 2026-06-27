@@ -48,6 +48,13 @@ final class OverviewPage {
 	private const IMPORT_STATS_OPTION = 'pontifex_import_stats';
 
 	/**
+	 * The wp_options key holding the rollback counters (mirrors RollbackCommand).
+	 *
+	 * @var string
+	 */
+	private const ROLLBACK_STATS_OPTION = 'pontifex_rollback_stats';
+
+	/**
 	 * The format a safety archive's UTC timestamp is encoded with in its name.
 	 *
 	 * Mirrors {@see \Pontifex\Rollback\RollbackStore}'s naming contract
@@ -139,7 +146,11 @@ final class OverviewPage {
 	}
 
 	/**
-	 * Build the two transfer-activity rows (export and import).
+	 * Build the three activity rows: export, import, and rollback.
+	 *
+	 * Rollbacks are counted separately from imports: a rollback is an undo, not a
+	 * transfer, so it has its own counters and stays out of the recent-transfers
+	 * history below.
 	 *
 	 * @return array<int, array<string, int|string>> One row per operation.
 	 */
@@ -147,6 +158,7 @@ final class OverviewPage {
 		return array(
 			$this->operation_row( __( 'Backups (export)', 'pontifex' ), self::EXPORT_STATS_OPTION, 'bytes_exported' ),
 			$this->operation_row( __( 'Restores (import)', 'pontifex' ), self::IMPORT_STATS_OPTION, 'bytes_imported' ),
+			$this->operation_row( __( 'Rollbacks', 'pontifex' ), self::ROLLBACK_STATS_OPTION, 'bytes_rolled_back' ),
 		);
 	}
 
