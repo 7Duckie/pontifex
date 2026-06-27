@@ -82,8 +82,9 @@ final class BackupPage {
 		echo '<div class="wrap pontifex pontifex-admin">';
 
 		printf(
-			'<header class="pontifex-header"><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
-			esc_html__( 'Pontifex — Backup', 'pontifex' ),
+			'<header class="pontifex-header"><p class="pontifex-eyebrow">%s</p><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
+			esc_html__( 'Pontifex', 'pontifex' ),
+			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Create a full backup of this site and download it.', 'pontifex' )
 		);
 

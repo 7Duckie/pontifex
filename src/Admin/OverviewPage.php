@@ -108,8 +108,9 @@ final class OverviewPage {
 		echo '<div class="wrap pontifex pontifex-admin">';
 
 		printf(
-			'<header class="pontifex-header"><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
+			'<header class="pontifex-header"><p class="pontifex-eyebrow">%s</p><h1 class="pontifex-title">%s</h1><p class="pontifex-subtitle">%s</p></header>',
 			esc_html__( 'Pontifex', 'pontifex' ),
+			esc_html__( 'Overview', 'pontifex' ),
 			esc_html(
 				sprintf(
 					/* translators: %s: plugin version */
