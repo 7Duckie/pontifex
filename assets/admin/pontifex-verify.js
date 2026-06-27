@@ -1,13 +1,14 @@
 /*
  * Pontifex admin Verify screen behaviour.
  *
- * Drives the per-backup "Verify" actions over admin-ajax: one background request
- * reads and hash-checks the chosen backup while this script polls a second
- * endpoint for progress, then shows the sound-or-broken verdict. No build step —
- * plain browser JavaScript, shipped as-is. Configuration (the ajax URL, the
- * nonce, and the translated strings) arrives on window.pontifexVerify via
- * wp_localize_script; every request carries the nonce, and the server re-checks
- * the capability and nonce on each action.
+ * The operator selects a backup — clicking a row, which is then outlined; there
+ * are no radios — and clicks Verify. One background request reads and hash-checks
+ * the chosen backup while this script polls a second endpoint for progress, then
+ * shows the sound-or-broken verdict. This is the same select-then-act pattern as
+ * the Restore screen. No build step — plain browser JavaScript, shipped as-is.
+ * Configuration (the ajax URL, the nonce, and the translated strings) arrives on
+ * window.pontifexVerify via wp_localize_script; every request carries the nonce,
+ * and the server re-checks the capability and nonce on each action.
  */
 ( function () {
 	'use strict';
@@ -68,10 +69,10 @@
 	}
 
 	/**
-	 * Fill the progress bar to the fraction of entries verified so far.
+	 * Fill the progress bar to the fraction of bytes verified so far.
 	 *
-	 * @param {number} done  Entries verified so far.
-	 * @param {number} total Total entries to verify.
+	 * @param {number} done  Bytes verified so far.
+	 * @param {number} total Total bytes to verify.
 	 */
 	function setBar( done, total ) {
 		var pct = total > 0 ? Math.round( ( done / total ) * 100 ) : 0;
@@ -126,26 +127,73 @@
 	}
 
 	/**
-	 * Enable or disable every Verify button, so only one runs at a time.
+	 * The filename of the selected backup, or null when none is selected.
 	 *
-	 * @param {boolean} enabled Whether the Verify buttons should be clickable.
+	 * @return {?string} The selected backup filename, or null.
 	 */
-	function setVerifyEnabled( enabled ) {
+	function selectedFile() {
+		var selected = document.querySelector( '.pontifex-restore-row.is-selected' );
+		return selected ? selected.getAttribute( 'data-file' ) : null;
+	}
+
+	/**
+	 * Select one backup row, outline it, and clear the others.
+	 *
+	 * @param {Element} chosen The row button to select.
+	 */
+	function selectRow( chosen ) {
 		Array.prototype.forEach.call(
-			document.querySelectorAll( '.pontifex-verify-backup' ),
-			function ( btn ) {
-				btn.disabled = ! enabled;
+			document.querySelectorAll( '.pontifex-restore-row' ),
+			function ( row ) {
+				var on = row === chosen;
+				row.classList.toggle( 'is-selected', on );
+				row.setAttribute( 'aria-checked', on ? 'true' : 'false' );
 			}
 		);
 	}
 
 	/**
-	 * Verify one backup: poll for progress while the verify request completes.
-	 *
-	 * @param {HTMLButtonElement} button The verify button, carrying data-file.
+	 * Enable the Verify button only when a backup is selected.
 	 */
-	function startVerify( button ) {
-		setVerifyEnabled( false );
+	function updateRunButton() {
+		var run = document.getElementById( 'pontifex-verify-run' );
+		if ( run ) {
+			run.disabled = null === selectedFile();
+		}
+	}
+
+	/**
+	 * Enable or disable the row buttons and the Verify button while one runs.
+	 *
+	 * @param {boolean} enabled Whether the controls should be usable.
+	 */
+	function setControlsEnabled( enabled ) {
+		Array.prototype.forEach.call(
+			document.querySelectorAll( '.pontifex-restore-row' ),
+			function ( row ) {
+				row.disabled = ! enabled;
+			}
+		);
+		if ( enabled ) {
+			updateRunButton();
+		} else {
+			var run = document.getElementById( 'pontifex-verify-run' );
+			if ( run ) {
+				run.disabled = true;
+			}
+		}
+	}
+
+	/**
+	 * Verify the selected backup: poll for progress while the request completes.
+	 */
+	function startVerify() {
+		var file = selectedFile();
+		if ( null === file ) {
+			return;
+		}
+
+		setControlsEnabled( false );
 		setText( 'pontifex-verify-result', '' );
 		setText( 'pontifex-verify-progress', cfg.strings.starting );
 		setText( 'pontifex-verify-timing', '' );
@@ -171,7 +219,7 @@
 			} ).catch( function () {} );
 		}, 1000 );
 
-		request( 'pontifex_verify', { file: button.getAttribute( 'data-file' ) } ).then( function ( res ) {
+		request( 'pontifex_verify', { file: file } ).then( function ( res ) {
 			window.clearInterval( poll );
 			finishVerify( ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed );
 		} ).catch( function () {
@@ -192,22 +240,30 @@
 		showBar( false );
 		setText( 'pontifex-verify-progress', '' );
 		setText( 'pontifex-verify-timing', '' );
-		setVerifyEnabled( true );
+		setControlsEnabled( true );
 		setText( 'pontifex-verify-result', message );
 	}
 
 	/**
-	 * Wire every Verify button present on the page.
+	 * Wire the backup row buttons and the Verify button.
 	 */
 	function init() {
 		Array.prototype.forEach.call(
-			document.querySelectorAll( '.pontifex-verify-backup' ),
-			function ( button ) {
-				button.addEventListener( 'click', function () {
-					startVerify( button );
+			document.querySelectorAll( '.pontifex-restore-row' ),
+			function ( row ) {
+				row.addEventListener( 'click', function () {
+					if ( ! row.disabled ) {
+						selectRow( row );
+						updateRunButton();
+					}
 				} );
 			}
 		);
+
+		var run = document.getElementById( 'pontifex-verify-run' );
+		if ( run ) {
+			run.addEventListener( 'click', startVerify );
+		}
 	}
 
 	if ( 'loading' === document.readyState ) {

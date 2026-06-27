@@ -96,7 +96,7 @@ final class VerifyPageTest extends TestCase {
 	}
 
 	/**
-	 * Renders the backups table with a Verify action per backup.
+	 * Renders the backups as click-to-select rows, with no radio, plus one Verify button.
 	 *
 	 * @return void
 	 */
@@ -113,9 +113,12 @@ final class VerifyPageTest extends TestCase {
 		$html = (string) ob_get_clean();
 
 		$this->assertStringContainsString( $name, $html );
-		$this->assertStringContainsString( 'pontifex-verify-backup', $html );
+		$this->assertStringContainsString( 'class="pontifex-restore-row"', $html, 'Each backup is a selectable row.' );
+		$this->assertStringContainsString( 'data-file="' . $name . '"', $html, 'The row carries its filename for selection.' );
+		$this->assertStringContainsString( 'role="radiogroup"', $html, 'The chooser is an accessible radio group.' );
+		$this->assertStringNotContainsString( 'type="radio"', $html, 'There are no radio inputs — the selected row is outlined instead.' );
+		$this->assertStringContainsString( 'id="pontifex-verify-run"', $html, 'A single Verify button drives the selected backup.' );
 		$this->assertStringContainsString( 'pontifex-verify-timing', $html );
-		$this->assertStringContainsString( 'data-file="' . $name . '"', $html );
 	}
 
 	// -------------------------------------------------------------------------
