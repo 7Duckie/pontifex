@@ -222,6 +222,7 @@ final class Menu {
 
 		if ( '' !== $this->restore_hook && $hook_suffix === $this->restore_hook ) {
 			$this->enqueue_restore_script( $base, $version );
+			$this->enqueue_upload_script( $base, $version );
 		}
 	}
 
@@ -248,6 +249,7 @@ final class Menu {
 				'assets/admin/pontifex-backup.js',
 				'assets/admin/pontifex-verify.js',
 				'assets/admin/pontifex-restore.js',
+				'assets/admin/pontifex-upload.js',
 			);
 			foreach ( $files as $relative_path ) {
 				$path = $dir . $relative_path;
@@ -399,6 +401,55 @@ final class Menu {
 					'signedOutTitle' => __( 'Restore complete', 'pontifex' ),
 					'signedOut'      => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
 					'loginLink'      => __( 'Log in', 'pontifex' ),
+				),
+			)
+		);
+	}
+
+	/**
+	 * Enqueue and configure the foreign-backup upload script.
+	 *
+	 * Loaded alongside the Restore screen's own script, since uploading a backup
+	 * taken on another server is how a foreign archive joins this site's restore
+	 * list. Localised with the ajax URL, a `pontifex_upload` nonce, a chunk size
+	 * derived from the site's upload ceiling (with headroom for the request's other
+	 * fields), and the translated strings it shows; the server re-checks the
+	 * capability and the nonce on every chunk.
+	 *
+	 * @param string       $base    The plugin's base URL.
+	 * @param string|false $version The asset version, or false when undefined.
+	 * @return void
+	 */
+	private function enqueue_upload_script( string $base, string|false $version ): void {
+		wp_enqueue_script(
+			'pontifex-upload',
+			$base . 'assets/admin/pontifex-upload.js',
+			array(),
+			$version,
+			true
+		);
+
+		// The whole request body is the chunk plus a handful of small fields (the nonce,
+		// the id, the offset, the total, the name), so the chunk is kept below the upload
+		// ceiling by a margin large enough for those fields.
+		$ceiling    = (int) wp_max_upload_size();
+		$headroom   = 32 * 1024;
+		$chunk_size = $ceiling > $headroom ? $ceiling - $headroom : $ceiling;
+
+		wp_localize_script(
+			'pontifex-upload',
+			'pontifexUpload',
+			array(
+				'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
+				'nonce'     => wp_create_nonce( UploadController::NONCE_ACTION ),
+				'chunkSize' => $chunk_size,
+				'strings'   => array(
+					'starting' => __( 'Uploading…', 'pontifex' ),
+					/* translators: 1: bytes uploaded so far, 2: total bytes, both as human-readable sizes */
+					'progress' => __( '%1$s of %2$s', 'pontifex' ),
+					'done'     => __( 'Upload complete.', 'pontifex' ),
+					'failed'   => __( 'The upload could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'noFile'   => __( 'No file chosen', 'pontifex' ),
 				),
 			)
 		);

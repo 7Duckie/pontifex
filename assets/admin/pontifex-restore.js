@@ -191,6 +191,16 @@
 	}
 
 	/**
+	 * Whether the "relink this backup to this site" box is ticked.
+	 *
+	 * @return {boolean} True when the restore should rewrite the backup's links here.
+	 */
+	function migrateChecked() {
+		var box = document.getElementById( 'pontifex-restore-migrate' );
+		return !! ( box && box.checked );
+	}
+
+	/**
 	 * Whether the given action can run now (valid word, plus a selection for restore).
 	 *
 	 * @param {string} action The normalised action word.
@@ -265,7 +275,7 @@
 	 */
 	function startRun( action ) {
 		var ajaxAction = 'restore' === action ? 'pontifex_restore' : 'pontifex_rollback';
-		var extra = 'restore' === action ? { file: selectedFile() } : null;
+		var extra = 'restore' === action ? { file: selectedFile(), migrate: migrateChecked() ? '1' : '' } : null;
 
 		setControlsEnabled( false );
 		setText( 'pontifex-restore-result', '' );

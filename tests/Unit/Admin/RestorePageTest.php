@@ -125,6 +125,11 @@ final class RestorePageTest extends TestCase {
 		$this->assertStringNotContainsString( 'type="radio"', $html, 'There are no radio inputs — the selected row is outlined instead.' );
 		$this->assertStringContainsString( 'id="pontifex-restore-action"', $html, 'The typed-action box is present.' );
 		$this->assertStringContainsString( 'id="pontifex-restore-run"', $html, 'The Run button is present.' );
+		$this->assertStringContainsString( 'id="pontifex-restore-migrate"', $html, 'The opt-in link-rewrite checkbox is present.' );
+		$this->assertStringContainsString( 'type="checkbox"', $html, 'The link-rewrite opt-in is a checkbox.' );
+		$this->assertStringContainsString( 'id="pontifex-upload-file"', $html, 'The upload file picker is present.' );
+		$this->assertStringContainsString( 'id="pontifex-upload-run"', $html, 'The upload button is present.' );
+		$this->assertStringContainsString( 'accept=".wpmig"', $html, 'The picker accepts only .wpmig files.' );
 	}
 
 	/**

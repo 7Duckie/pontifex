@@ -107,6 +107,7 @@ final class RestorePage {
 
 		$this->render_explanation();
 		$this->render_backups( $this->backup_rows() );
+		$this->render_upload();
 		$this->render_rollback();
 		$this->render_action();
 
@@ -211,12 +212,63 @@ final class RestorePage {
 	}
 
 	/**
+	 * Render the "upload a backup from another site" section.
+	 *
+	 * A file picker and Upload button drive the chunked upload (see the upload
+	 * script and {@see UploadController}). A completed, validated upload joins the
+	 * backups list above, ready to restore — the no-shell-access way to bring a
+	 * backup taken on another server onto this one.
+	 *
+	 * @return void
+	 */
+	private function render_upload(): void {
+		echo '<section class="pontifex-section pontifex-upload">';
+		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Upload a backup from another site', 'pontifex' ) );
+
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'Have a .wpmig backup made on another server? Upload it here and it joins the list above, ready to restore.', 'pontifex' )
+		);
+
+		// A custom picker: the native file input is visually hidden (but still the
+		// accessible control), a styled label triggers it, and the chosen filename is
+		// shown in the Swiss caption style rather than the browser's own rendering.
+		echo '<div class="pontifex-upload-field">';
+		echo '<input type="file" id="pontifex-upload-file" class="pontifex-upload-input" accept=".wpmig">';
+		printf(
+			'<label class="pontifex-upload-choose" for="pontifex-upload-file">%s</label>',
+			esc_html__( 'Choose backup file', 'pontifex' )
+		);
+		printf(
+			'<span class="pontifex-upload-name" id="pontifex-upload-name">%s</span>',
+			esc_html__( 'No file chosen', 'pontifex' )
+		);
+		echo '</div>';
+
+		printf(
+			'<button type="button" class="pontifex-button" id="pontifex-upload-run" disabled>%s</button>',
+			esc_html__( 'Upload', 'pontifex' )
+		);
+
+		echo '<div class="pontifex-progress-track" id="pontifex-upload-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-upload-bar"></span></div>';
+		echo '<p class="pontifex-progress" id="pontifex-upload-progress" aria-live="polite"></p>';
+		echo '<p class="pontifex-notice" id="pontifex-upload-result" aria-live="polite"></p>';
+
+		echo '</section>';
+	}
+
+	/**
 	 * Render the rollback hint, the typed-action box, and the shared progress regions.
 	 *
 	 * @return void
 	 */
 	private function render_action(): void {
 		echo '<section class="pontifex-section pontifex-restore-action">';
+
+		printf(
+			'<label class="pontifex-action-toggle" for="pontifex-restore-migrate"><input type="checkbox" id="pontifex-restore-migrate"> %s</label>',
+			esc_html__( 'This backup came from another site — rewrite its links to this site\'s address', 'pontifex' )
+		);
 
 		printf(
 			'<label class="pontifex-action-label" for="pontifex-restore-action">%s</label>',

@@ -99,6 +99,36 @@ final class BackupStore {
 	private const CANCEL_SENTINEL = '.pontifex-cancel';
 
 	/**
+	 * Subdirectory, under the content directory, where in-progress uploads assemble.
+	 *
+	 * A sibling of the backups directory: a foreign backup uploaded from the browser
+	 * lands here as a `.part` file, chunk by chunk, and is moved into the backups
+	 * directory only once complete and proven to be a real archive.
+	 *
+	 * @var string
+	 */
+	private const UPLOADS_SUBDIRECTORY = 'pontifex/uploads';
+
+	/**
+	 * Extension of an in-progress upload's part file.
+	 *
+	 * @var string
+	 */
+	private const PART_EXTENSION = '.part';
+
+	/**
+	 * The pattern an upload id must match to name a part file.
+	 *
+	 * Only letters and digits, 8 to 64 of them — long enough to be unguessable,
+	 * and admitting nothing (no dot, slash, or separator) that could carry the part
+	 * file out of the uploads directory. The browser mints a 32-character hex token;
+	 * anything failing this pattern is refused before any filesystem path is built.
+	 *
+	 * @var string
+	 */
+	private const UPLOAD_ID_PATTERN = '/^[A-Za-z0-9]{8,64}$/';
+
+	/**
 	 * Absolute path of the backups directory.
 	 *
 	 * @var string
@@ -106,12 +136,21 @@ final class BackupStore {
 	private string $directory;
 
 	/**
+	 * Absolute path of the in-progress uploads directory.
+	 *
+	 * @var string
+	 */
+	private string $uploads;
+
+	/**
 	 * Construct a store rooted at the given content directory.
 	 *
 	 * @param string $content_dir Absolute path of the WordPress content directory (WP_CONTENT_DIR).
 	 */
 	public function __construct( string $content_dir ) {
-		$this->directory = rtrim( $content_dir, '/' ) . '/' . self::SUBDIRECTORY;
+		$root            = rtrim( $content_dir, '/' );
+		$this->directory = $root . '/' . self::SUBDIRECTORY;
+		$this->uploads   = $root . '/' . self::UPLOADS_SUBDIRECTORY;
 	}
 
 	/**
@@ -267,5 +306,238 @@ final class BackupStore {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the plugin-owned cancel sentinel; its failure must not abort the backup lifecycle.
 			@unlink( $path );
 		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Uploads — assembling a foreign backup posted in chunks from the browser.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Return the absolute path of the in-progress uploads directory.
+	 *
+	 * @return string The absolute uploads directory path.
+	 */
+	public function uploads_directory(): string {
+		return $this->uploads;
+	}
+
+	/**
+	 * Create the uploads directory (mode 0700, web-blocked) if it does not exist.
+	 *
+	 * The same policy as the backups directory: an uploaded backup is a full copy of
+	 * another site, so its assembly area is owner-only and locked against direct web
+	 * access. Asserted here, so the caller gets an exception when the directory
+	 * cannot be made.
+	 *
+	 * @return void
+	 * @throws RuntimeException If the directory cannot be created.
+	 */
+	public function ensure_uploads_directory(): void {
+		if ( ! ProtectedDirectory::ensure( $this->uploads, self::DIRECTORY_MODE ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
+				sprintf( 'BackupStore: could not create the uploads directory: %s', $this->uploads )
+			);
+		}
+	}
+
+	/**
+	 * Append a chunk to an upload's part file, returning the assembled size so far.
+	 *
+	 * The first chunk (`$first`) opens the part file fresh, truncating any earlier
+	 * part left under the same id, so a re-used id starts clean rather than appending
+	 * to stale bytes; later chunks append. The chunk's bytes are streamed from the
+	 * temporary upload file into the part file, never held whole in memory. Returns
+	 * the total number of bytes now in the part file.
+	 *
+	 * @param string $id       The upload id (validated; see {@see self::UPLOAD_ID_PATTERN}).
+	 * @param string $chunk_path Absolute path of the temporary file holding this chunk.
+	 * @param bool   $first    Whether this is the first chunk of the upload.
+	 * @return int The assembled size, in bytes, after appending this chunk.
+	 * @throws RuntimeException If the id is malformed or the part file cannot be written.
+	 */
+	public function append_chunk( string $id, string $chunk_path, bool $first ): int {
+		$part = $this->upload_part_path( $id );
+		if ( null === $part ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
+				'BackupStore: refusing a malformed upload id.'
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming an upload chunk into the plugin-owned part file; WP_Filesystem is unavailable in CLI/ajax contexts.
+		$source = fopen( $chunk_path, 'rb' );
+		if ( false === $source ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
+				'BackupStore: could not read the uploaded chunk.'
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the plugin-owned part file to assemble the upload; WP_Filesystem is unavailable in CLI/ajax contexts.
+		$destination = fopen( $part, $first ? 'wb' : 'ab' );
+		if ( false === $destination ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the chunk stream after a failed part-file open.
+			fclose( $source );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
+				'BackupStore: could not open the upload part file.'
+			);
+		}
+
+		stream_copy_to_stream( $source, $destination );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the chunk stream once copied.
+		fclose( $source );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the part-file stream once the chunk is appended.
+		fclose( $destination );
+
+		return $this->upload_size( $id );
+	}
+
+	/**
+	 * Return the assembled size, in bytes, of an upload's part file.
+	 *
+	 * Zero when the id is malformed or no part file exists, so a bad id is a
+	 * dead-end rather than an error.
+	 *
+	 * @param string $id The upload id.
+	 * @return int The bytes assembled so far, or 0.
+	 */
+	public function upload_size( string $id ): int {
+		$part = $this->upload_part_path( $id );
+		if ( null === $part || ! is_file( $part ) ) {
+			return 0;
+		}
+		clearstatcache( true, $part );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filesize -- Reading the plugin-owned part file's assembled size; WP_Filesystem is unavailable in CLI/ajax contexts.
+		$size = filesize( $part );
+		return false === $size ? 0 : (int) $size;
+	}
+
+	/**
+	 * Open an upload's assembled part file for reading, or null when there is none.
+	 *
+	 * The caller (the upload controller) reads the completed file to prove it parses
+	 * as an archive before it is finalised, and closes the stream itself.
+	 *
+	 * @param string $id The upload id.
+	 * @return resource|null A read stream on the part file, or null when the id is bad or no part exists.
+	 */
+	public function open_upload( string $id ) {
+		$part = $this->upload_part_path( $id );
+		if ( null === $part || ! is_file( $part ) ) {
+			return null;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the plugin-owned part file to validate the assembled upload; WP_Filesystem is unavailable in CLI/ajax contexts.
+		$stream = fopen( $part, 'rb' );
+		return false === $stream ? null : $stream;
+	}
+
+	/**
+	 * Discard an in-progress upload by removing its part file.
+	 *
+	 * Best-effort and safe on a bad id or a missing part: an abandoned or refused
+	 * upload must be able to clean up without raising.
+	 *
+	 * @param string $id The upload id.
+	 * @return void
+	 */
+	public function discard_upload( string $id ): void {
+		$part = $this->upload_part_path( $id );
+		if ( null === $part || ! is_file( $part ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a plugin-owned upload part file; its failure must not raise.
+		@unlink( $part );
+	}
+
+	/**
+	 * Finalise a completed upload: move its part file into the backups directory.
+	 *
+	 * The assembled part file is renamed into the backups directory under the normal
+	 * `pontifex-backup-<UTC>.wpmig` name for the given moment. Nothing is ever
+	 * overwritten: if a backup already holds that exact second, the stamp is advanced
+	 * a second at a time until a free name is found. Returns the absolute path of the
+	 * stored backup.
+	 *
+	 * @param string            $id  The upload id whose part file to store.
+	 * @param DateTimeImmutable $now The moment to stamp the stored backup with.
+	 * @return string The absolute path of the stored backup.
+	 * @throws RuntimeException If the id is bad, no part file exists, or the move fails.
+	 */
+	public function finalise_upload( string $id, DateTimeImmutable $now ): string {
+		$part = $this->upload_part_path( $id );
+		if ( null === $part || ! is_file( $part ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
+				'BackupStore: there is no completed upload to finalise.'
+			);
+		}
+
+		$this->ensure_directory();
+
+		$moment = $now;
+		$target = $this->next_backup_path( $moment );
+		while ( file_exists( $target ) ) {
+			$moment = $moment->modify( '+1 second' );
+			$target = $this->next_backup_path( $moment );
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- Moving the plugin-owned, validated upload into the backups directory; WP_Filesystem is unavailable in CLI/ajax contexts.
+		if ( ! rename( $part, $target ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
+				sprintf( 'BackupStore: could not store the uploaded backup at %s', $target )
+			);
+		}
+
+		return $target;
+	}
+
+	/**
+	 * Remove abandoned upload part files older than the given age.
+	 *
+	 * An interrupted upload leaves a part file behind. Swept on the next upload's
+	 * first chunk so stale attempts do not accumulate, comparing each part's
+	 * modification time against the cutoff; fresh parts (including other uploads in
+	 * flight) are kept.
+	 *
+	 * @param int $max_age_seconds Age, in seconds, past which a part file is removed.
+	 * @return void
+	 */
+	public function sweep_stale_uploads( int $max_age_seconds ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Listing the plugin-owned uploads directory; WP_Filesystem is unavailable in CLI/ajax contexts.
+		$parts = glob( $this->uploads . '/*' . self::PART_EXTENSION );
+		if ( false === $parts ) {
+			return;
+		}
+
+		$cutoff = time() - $max_age_seconds;
+		foreach ( $parts as $part ) {
+			clearstatcache( true, $part );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filemtime -- Reading a plugin-owned part file's age to sweep stale uploads; WP_Filesystem is unavailable in CLI/ajax contexts.
+			$mtime = filemtime( $part );
+			if ( false !== $mtime && $mtime < $cutoff ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a stale plugin-owned upload part file.
+				@unlink( $part );
+			}
+		}
+	}
+
+	/**
+	 * Build the absolute part-file path for an upload id, or null when the id is bad.
+	 *
+	 * The single gate every upload method passes an id through: it admits only the
+	 * strict {@see self::UPLOAD_ID_PATTERN} (letters and digits), so a crafted id
+	 * carrying a separator can never turn into a path outside the uploads directory.
+	 *
+	 * @param string $id The upload id supplied by the request.
+	 * @return string|null The absolute part-file path, or null when the id is malformed.
+	 */
+	private function upload_part_path( string $id ): ?string {
+		if ( 1 !== preg_match( self::UPLOAD_ID_PATTERN, $id ) ) {
+			return null;
+		}
+		return $this->uploads . '/' . $id . self::PART_EXTENSION;
 	}
 }
