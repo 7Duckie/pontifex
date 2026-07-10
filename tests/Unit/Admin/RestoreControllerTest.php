@@ -23,6 +23,8 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Migrate\RewriteReport;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -70,6 +72,9 @@ final class RestoreControllerTest extends TestCase {
 		parent::setUp();
 		$this->base = sys_get_temp_dir() . '/pontifex-restore-controller-' . uniqid( '', true );
 		$this->json = array();
+		// The relink flag is read through sanitize_text_field on every restore; stub it
+		// as the identity so the controller's own logic is what the tests exercise.
+		Functions\when( 'sanitize_text_field' )->returnArg();
 	}
 
 	/**
@@ -166,6 +171,117 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertTrue( $this->json['data']['restored'] );
 		$this->assertSame( 3, $this->json['data']['entries'] );
+	}
+
+	/**
+	 * The opt-in box rewrites the backup's links to THIS site's URL after the restore.
+	 *
+	 * With the migrate flag set, the controller reads the archive's source URL and
+	 * rewrites it to the destination's own site_url() — never a typed address — so a
+	 * backup taken on another server serves correctly here. The source URL is read
+	 * from the still-open archive after the restore; the target is the live site. No
+	 * login_url is returned: the site has not moved, so the page's own login still
+	 * applies.
+	 *
+	 * @return void
+	 */
+	public function test_restore_with_the_migrate_flag_rewrites_links_to_this_site(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file']    = $name;
+		$_POST['migrate'] = '1';
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once();
+
+		$report = new RewriteReport( 3, array(), 10, 7, 7, 0 );
+
+		$migrator = Mockery::mock( UrlMigratorInterface::class );
+		$migrator->shouldReceive( 'source_url' )->once()->andReturn( 'https://old-site.example' );
+		$migrator->shouldReceive( 'migrate' )->once()
+			->with( 'https://old-site.example', 'https://this-site.test' )
+			->andReturn( $report );
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->context(),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'], $_POST['migrate'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$this->assertArrayNotHasKey( 'login_url', $this->json['data'], 'A same-site relink does not move the site, so no new login URL is returned.' );
+	}
+
+	/**
+	 * Without the migrate flag, an ordinary restore never touches the migrator.
+	 *
+	 * The default — the box unticked — must leave the link rewriter untouched, so an
+	 * ordinary restore is unaffected. An injected migrator whose methods are forbidden
+	 * proves the rewrite path is not entered.
+	 *
+	 * @return void
+	 */
+	public function test_restore_without_the_migrate_flag_does_not_rewrite_links(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once();
+
+		$migrator = Mockery::mock( UrlMigratorInterface::class );
+		$migrator->shouldReceive( 'source_url' )->never();
+		$migrator->shouldReceive( 'migrate' )->never();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->context(),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
 	}
 
 	/**
@@ -685,6 +801,7 @@ final class RestoreControllerTest extends TestCase {
 		);
 		$context->shouldReceive( 'save_option' );
 		$context->shouldReceive( 'flush_cache' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
 		return $context;
 	}
 

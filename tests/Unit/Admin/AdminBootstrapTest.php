@@ -19,6 +19,7 @@ use Pontifex\Admin\Menu;
 use Pontifex\Admin\OverviewPage;
 use Pontifex\Admin\RestoreController;
 use Pontifex\Admin\RestorePage;
+use Pontifex\Admin\UploadController;
 use Pontifex\Admin\VerifyController;
 use Pontifex\Admin\VerifyPage;
 use Pontifex\Environment\Environment;
@@ -50,7 +51,7 @@ final class AdminBootstrapTest extends TestCase {
 			}
 		);
 
-		( new AdminBootstrap( $this->menu(), $this->controller(), $this->verify_controller(), $this->restore_controller() ) )->register();
+		( new AdminBootstrap( $this->menu(), $this->controller(), $this->verify_controller(), $this->restore_controller(), $this->upload_controller() ) )->register();
 
 		$this->assertContains( 'admin_menu', $hooks );
 		$this->assertContains( 'admin_enqueue_scripts', $hooks );
@@ -64,6 +65,7 @@ final class AdminBootstrapTest extends TestCase {
 		$this->assertContains( 'wp_ajax_pontifex_restore', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_rollback', $hooks );
 		$this->assertContains( 'wp_ajax_pontifex_restore_progress', $hooks );
+		$this->assertContains( 'wp_ajax_pontifex_upload_chunk', $hooks );
 	}
 
 	/**
@@ -132,6 +134,19 @@ final class AdminBootstrapTest extends TestCase {
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() ),
 			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
+		);
+	}
+
+	/**
+	 * A real UploadController over mocked dependencies.
+	 *
+	 * @return UploadController
+	 */
+	private function upload_controller(): UploadController {
+		return new UploadController(
+			Mockery::mock( WordPressContext::class ),
+			new BackupStore( sys_get_temp_dir() ),
 			new NullLogger()
 		);
 	}

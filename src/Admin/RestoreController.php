@@ -18,6 +18,8 @@ use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Manifest\WpdbAdapter;
+use Pontifex\Migrate\UrlMigrator;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -220,6 +222,16 @@ final class RestoreController {
 	private ?SafetyArchiverInterface $safety_archiver;
 
 	/**
+	 * The cross-URL migrator used when a new URL is supplied with a restore.
+	 *
+	 * Optional: when null and a URL is given, a UrlMigrator over the live $wpdb is
+	 * wired (matching ImportCommand). Tests inject a fake fulfilling the interface.
+	 *
+	 * @var UrlMigratorInterface|null
+	 */
+	private ?UrlMigratorInterface $url_migrator;
+
+	/**
 	 * Whether this request holds the single-runner lock.
 	 *
 	 * @var bool
@@ -236,6 +248,7 @@ final class RestoreController {
 	 * @param LoggerInterface              $logger            Records a failure's real cause.
 	 * @param RestoreRunnerInterface|null  $restore_runner    Optional. When null, a default live-site engine is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a default archiver is used.
+	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and a URL is given, a UrlMigrator over the live $wpdb is wired.
 	 */
 	public function __construct(
 		Environment $environment,
@@ -244,7 +257,8 @@ final class RestoreController {
 		RollbackStoreInterface $rollback_store,
 		LoggerInterface $logger,
 		?RestoreRunnerInterface $restore_runner = null,
-		?SafetyArchiverInterface $safety_archiver = null
+		?SafetyArchiverInterface $safety_archiver = null,
+		?UrlMigratorInterface $url_migrator = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
@@ -253,6 +267,7 @@ final class RestoreController {
 		$this->logger            = $logger;
 		$this->restore_runner    = $restore_runner;
 		$this->safety_archiver   = $safety_archiver;
+		$this->url_migrator      = $url_migrator;
 	}
 
 	/**
@@ -277,6 +292,11 @@ final class RestoreController {
 		if ( null === $path ) {
 			wp_send_json_error( array( 'message' => __( 'That backup could not be found.', 'pontifex' ) ), 404 );
 		}
+
+		// The opt-in "relink to this site" box turns this into a cross-URL migration run
+		// after the restore, rewriting the backup's own URL to this destination's. Read
+		// before any side effect; the target is always this site, never a typed address.
+		$migrate = $this->migrate_requested();
 
 		if ( ! $this->acquire_lock() ) {
 			wp_send_json_error( array( 'message' => __( 'A restore is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
@@ -335,6 +355,17 @@ final class RestoreController {
 					)
 				);
 			} else {
+				// For a relink restore, read the backup's own source URL before the
+				// restore consumes the stream; the rewrite runs on the restored database
+				// afterwards.
+				$migrator   = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
+				$source_url = '';
+				if ( null !== $migrator ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream so source_url can re-read its provenance; not a WP_Filesystem operation.
+					rewind( $source );
+					$source_url = $migrator->source_url( $source );
+				}
+
 				// Phase 2: the pre-import safety archive (the undo), then phase 3: restore.
 				$this->take_safety_archive();
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
@@ -347,6 +378,15 @@ final class RestoreController {
 				// silently lost (a stale "exists" cache makes update_option run an UPDATE
 				// that matches zero rows in the just-replaced wp_options).
 				$this->wordpress_context->flush_cache();
+
+				// Phase 4 (relink only): rewrite the backup's own URL to this site's across
+				// the restored database, serialised-safe (ADR 0006). The target is always
+				// this destination — never a typed address — so a relinked site can only
+				// ever point at the address the operator is already looking at, and the
+				// site does not move, so no new login URL is needed.
+				$migration = null !== $migrator
+					? $migrator->migrate( $source_url, $this->wordpress_context->site_url() )
+					: null;
 
 				$this->finish( $source );
 				// The pre-restore `attempted` bump was wiped when the replay replaced
@@ -365,13 +405,21 @@ final class RestoreController {
 					array(
 						'restored' => true,
 						'entries'  => $entries,
-						'message'  => sprintf(
-							/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: the backup filename */
-							__( 'Restored — %1$d entries (%2$s) written from %3$s. Your site now matches that backup.', 'pontifex' ),
-							$entries,
-							$this->wordpress_context->format_size( $size ),
-							basename( (string) $path )
-						),
+						'message'  => null !== $migration
+							? sprintf(
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten */
+								__( 'Restored and relinked — %1$d entries (%2$s) written, then the backup\'s links were rewritten to this site across %3$d database rows.', 'pontifex' ),
+								$entries,
+								$this->wordpress_context->format_size( $size ),
+								$migration->rows_changed()
+							)
+							: sprintf(
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: the backup filename */
+								__( 'Restored — %1$d entries (%2$s) written from %3$s. Your site now matches that backup.', 'pontifex' ),
+								$entries,
+								$this->wordpress_context->format_size( $size ),
+								basename( (string) $path )
+							),
 					)
 				);
 			}
@@ -913,6 +961,21 @@ final class RestoreController {
 	// -------------------------------------------------------------------------
 	// Counters.
 	// -------------------------------------------------------------------------
+
+	/**
+	 * Whether the operator ticked "relink this backup to this site".
+	 *
+	 * The nonce is already verified by {@see self::is_authorised()}. A checkbox, so
+	 * the target is never a typed address: when set, the restore rewrites the
+	 * backup's own URL to this destination's site_url() afterwards. Absent (the box
+	 * unticked) means an ordinary same-URL restore.
+	 *
+	 * @return bool True when the relink box is ticked.
+	 */
+	private function migrate_requested(): bool {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() before this method runs.
+		return isset( $_POST['migrate'] ) && '' !== sanitize_text_field( wp_unslash( (string) $_POST['migrate'] ) );
+	}
 
 	/**
 	 * Read-modify-write a stored counters option by a delta.

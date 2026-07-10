@@ -261,17 +261,18 @@ final class MenuTest extends TestCase {
 		Functions\when( 'admin_url' )->returnArg();
 		Functions\when( 'wp_create_nonce' )->justReturn( 'nonce' );
 		Functions\when( 'wp_login_url' )->justReturn( 'login-url' );
+		Functions\when( 'wp_max_upload_size' )->justReturn( 8 * 1024 * 1024 );
 
-		$script_handle = '';
+		$handles = array();
 		Functions\when( 'wp_enqueue_script' )->alias(
-			static function ( string $handle ) use ( &$script_handle ): void {
-				$script_handle = $handle;
+			static function ( string $handle ) use ( &$handles ): void {
+				$handles[] = $handle;
 			}
 		);
-		$localized = false;
+		$localized = array();
 		Functions\when( 'wp_localize_script' )->alias(
-			static function () use ( &$localized ): bool {
-				$localized = true;
+			static function ( string $handle, string $object_name ) use ( &$localized ): bool {
+				$localized[] = $object_name;
 				return true;
 			}
 		);
@@ -280,7 +281,9 @@ final class MenuTest extends TestCase {
 		$menu->register_pages();
 		$menu->enqueue_assets( 'pontifex_page_pontifex-restore' );
 
-		$this->assertSame( 'pontifex-restore', $script_handle, 'The Restore script should be enqueued on the Restore screen.' );
-		$this->assertTrue( $localized, 'The Restore script should be localised with its configuration.' );
+		$this->assertContains( 'pontifex-restore', $handles, 'The Restore script should be enqueued on the Restore screen.' );
+		$this->assertContains( 'pontifex-upload', $handles, 'The upload script should be enqueued on the Restore screen too.' );
+		$this->assertContains( 'pontifexRestore', $localized, 'The Restore script should be localised with its configuration.' );
+		$this->assertContains( 'pontifexUpload', $localized, 'The upload script should be localised with its configuration.' );
 	}
 }

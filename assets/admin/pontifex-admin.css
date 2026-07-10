@@ -388,6 +388,131 @@
 	outline-offset: 1px;
 }
 
+/* Upload file field --------------------------------------------------------- */
+
+/*
+ * The browser's native file control is replaced entirely with the Swiss
+ * vocabulary. The real input is visually hidden (but remains the accessible,
+ * focusable control); a sharp outlined label triggers it — ink hairline, no
+ * fill, inverting to ink on hover, distinct from the solid-accent primary
+ * "Upload" button — and the chosen filename shows as a muted caption.
+ */
+.pontifex-admin .pontifex-upload-field {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: calc(var(--pontifex-step) * 1.5);
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+}
+
+.pontifex-admin .pontifex-upload-input {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	border: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.pontifex-admin .pontifex-upload-choose {
+	display: inline-block;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	border: 1px solid var(--pontifex-muted);
+	background: var(--pontifex-paper);
+	color: var(--pontifex-ink);
+	font-weight: 400;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-upload-choose:hover {
+	background: var(--pontifex-fill);
+	border-color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-upload-input:focus-visible + .pontifex-upload-choose {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 2px;
+}
+
+.pontifex-admin .pontifex-upload-name {
+	color: var(--pontifex-muted);
+	font-size: 13px;
+}
+
+/* Relink checkbox ----------------------------------------------------------- */
+
+/*
+ * The opt-in relink control: a sharp square box (ink hairline, filling with the
+ * accent and a white tick when ticked) beside its label, replacing the rounded
+ * OS checkbox. Restraint over alarm — the accent marks the active state, nothing
+ * signals warning.
+ */
+.pontifex-admin .pontifex-action-toggle {
+	display: flex;
+	align-items: flex-start;
+	gap: calc(var(--pontifex-step) * 1.5);
+	max-width: 60ch;
+	margin: 0 0 calc(var(--pontifex-step) * 2.5);
+	color: var(--pontifex-ink);
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"] {
+	appearance: none;
+	-webkit-appearance: none;
+	position: relative;
+	flex: 0 0 auto;
+	width: 18px;
+	height: 18px;
+	min-width: 18px;
+	margin: 1px 0 0;
+	padding: 0;
+	border: 1px solid var(--pontifex-muted);
+	border-radius: 0;
+	background: var(--pontifex-paper);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+/*
+ * wp-admin styles native checkboxes and injects its own dashicon tick through a
+ * ::before on :checked. With appearance:none that tick would render a second,
+ * off-centre mark over ours, so it is suppressed here and the single tick below
+ * is drawn as a ::after centred inside the box.
+ */
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]::before {
+	content: none;
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:checked {
+	background: var(--pontifex-accent);
+	border-color: var(--pontifex-accent);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 6px;
+	width: 4px;
+	height: 8px;
+	border: solid transparent;
+	border-width: 0 2px 2px 0;
+	transform: rotate(45deg);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:checked::after {
+	border-color: var(--pontifex-paper);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:focus-visible {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 1px;
+}
+
 /* Signed-out modal --------------------------------------------------------- */
 
 /*
