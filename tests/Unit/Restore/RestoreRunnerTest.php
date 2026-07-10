@@ -860,4 +860,91 @@ final class RestoreRunnerTest extends TestCase {
 
 		$runner->restore( self::build_archive_stream( $plans ) );
 	}
+
+	/**
+	 * Build a RestoreRunner constrained by a runtime memory limit.
+	 *
+	 * @param int                $memory_limit_bytes The PHP memory limit in bytes (0 for unlimited).
+	 * @param FakeDbAdapter|null $db                 Optional adapter; if null, a fresh one is created.
+	 * @return RestoreRunner Ready to call restore() / verify() on.
+	 */
+	private function make_runner_with_memory_limit( int $memory_limit_bytes, ?FakeDbAdapter $db = null ): RestoreRunner {
+		$db = $db ?? new FakeDbAdapter();
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db ),
+			null,
+			$memory_limit_bytes
+		);
+	}
+
+	/**
+	 * Restoring must refuse an entry whose declared size exceeds the memory budget.
+	 *
+	 * A 40-byte memory limit gives a 10-byte per-entry budget (a quarter); an 11-byte
+	 * file is refused before it is decoded or dispatched, so a legitimately large
+	 * chunk fails closed on a memory-constrained web request rather than OOM-fatalling
+	 * mid-restore. The destination is left untouched.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_an_entry_over_the_memory_budget(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_memory_limit( 40, $db );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$this->assert_refused(
+			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
+			$db
+		);
+	}
+
+	/**
+	 * Verifying must refuse an over-budget entry too, so the pre-write preview gate
+	 * rejects a backup the real restore would refuse — before any restore begins.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_an_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$this->expectException( RuntimeException::class );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * A restore comfortably within the memory budget must still succeed.
+	 *
+	 * @return void
+	 */
+	public function test_restore_within_the_memory_budget_succeeds(): void {
+		// 1 MiB memory limit → 256 KiB per-entry budget; an 11-byte file is well within it.
+		$runner = $this->make_runner_with_memory_limit( 1048576 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * An unlimited memory limit (0) applies no per-entry cap — the CLI escape hatch.
+	 *
+	 * The same 11-byte file that a 40-byte limit refuses restores here, because a
+	 * CLI run (which reports memory_limit -1 → 0 bytes) is trusted to hold whatever
+	 * the restore needs.
+	 *
+	 * @return void
+	 */
+	public function test_unlimited_memory_applies_no_per_entry_cap(): void {
+		$runner = $this->make_runner_with_memory_limit( 0 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
 }

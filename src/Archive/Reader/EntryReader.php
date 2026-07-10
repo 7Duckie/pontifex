@@ -202,6 +202,13 @@ final class EntryReader {
 			throw new RuntimeException( 'EntryReader: entry header is malformed.', 0, $e );
 		}
 
+		// Refuse an entry whose declared decoded size exceeds the caller's budget before
+		// decoding it. Under a memory-derived budget (a web request), this fails closed
+		// with a clear message instead of OOM-fatalling mid-decode on a legitimately
+		// large db_chunk. The header's declared size is trusted only to refuse, never to
+		// allocate; the decode still enforces the same ceiling as it runs.
+		$this->refuse_if_over_budget( $header, $max_decoded_bytes );
+
 		// Read codec_id and verify it matches the manifest entry.
 		$codec_id = ByteOrder::unpack_uint16( substr( $record_bytes, $header_end, ByteOrder::UINT16_SIZE ) );
 		if ( $codec_id !== $manifest_entry->codec_id() ) {
@@ -284,14 +291,15 @@ final class EntryReader {
 	 * reports progress mid-entry through the optional callback, so a single large
 	 * entry no longer blocks the walk.
 	 *
-	 * @param resource      $source         A seekable, readable stream containing the archive.
-	 * @param ManifestEntry $manifest_entry The manifest entry pointing at the on-disk record.
-	 * @param callable|null $on_bytes       Optional progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record streams.
+	 * @param resource      $source            A seekable, readable stream containing the archive.
+	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record.
+	 * @param callable|null $on_bytes          Optional progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record streams.
+	 * @param int|null      $max_decoded_bytes Optional decoded-size budget; when given, an entry whose header declares more decoded bytes than this is refused before the walk continues. Null enforces no such budget.
 	 * @return void
 	 * @throws InvalidArgumentException If $source is not a valid stream resource.
-	 * @throws RuntimeException         If the record is truncated, or its hash does not match the bytes on disk or the manifest.
+	 * @throws RuntimeException         If the record is truncated, its declared decoded size exceeds the budget, or its hash does not match the bytes on disk or the manifest.
 	 */
-	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null ): void {
+	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null, ?int $max_decoded_bytes = null ): void {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
 		}
@@ -301,6 +309,14 @@ final class EntryReader {
 			throw new RuntimeException(
 				sprintf( 'EntryReader: entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $length )
 			);
+		}
+
+		// When a decoded-byte budget is given, refuse an over-budget entry here — before
+		// any restore begins — so the browser's pre-write verify gate rejects a backup the
+		// real restore would refuse mid-way, rather than starting and failing part-written.
+		// Only the small header is read to learn the declared size; nothing is decoded.
+		if ( null !== $max_decoded_bytes ) {
+			$this->refuse_if_over_budget( $this->peek_header( $source, $manifest_entry ), $max_decoded_bytes );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -347,6 +363,95 @@ final class EntryReader {
 		}
 		if ( ! hash_equals( $manifest_entry->entry_hash(), $computed_hash ) ) {
 			throw new RuntimeException( 'EntryReader: on-disk entry hash does not match the manifest entry_hash.' );
+		}
+	}
+
+	/**
+	 * Refuse an entry whose declared decoded size exceeds the given budget.
+	 *
+	 * The shared guard for both {@see self::read_entry()} (before it decodes) and
+	 * {@see self::verify_entry()} (before any restore begins), using the header's
+	 * declared decoded size ({@see EntryHeader::estimated_bytes()}). A null budget
+	 * means no limit. The declared size is trusted only to fail closed, never to size
+	 * an allocation, and the decode still enforces the same ceiling as it runs.
+	 *
+	 * @param EntryHeader $header            The parsed entry header.
+	 * @param int|null    $max_decoded_bytes The maximum decoded bytes permitted, or null for no limit.
+	 * @return void
+	 * @throws RuntimeException If the declared decoded size exceeds the budget.
+	 */
+	private function refuse_if_over_budget( EntryHeader $header, ?int $max_decoded_bytes ): void {
+		if ( null === $max_decoded_bytes ) {
+			return;
+		}
+		$declared = $header->estimated_bytes();
+		if ( $declared > $max_decoded_bytes ) {
+			throw new RuntimeException(
+				sprintf(
+					'EntryReader: entry declares %d decoded bytes, exceeding the %d-byte budget for this restore.',
+					(int) $declared,
+					(int) $max_decoded_bytes
+				)
+			);
+		}
+	}
+
+	/**
+	 * Read and parse only an entry's header from the source stream.
+	 *
+	 * A light alternative to {@see self::read_entry()} for a caller that needs the
+	 * header's declared metadata without decoding the payload — the verify path's
+	 * budget check. Seeks to the entry, reads the length-prefixed header block, and
+	 * parses it; the stream position afterwards is inside the record, so the caller
+	 * re-seeks before its own read.
+	 *
+	 * @param resource      $source         The source stream.
+	 * @param ManifestEntry $manifest_entry The entry pointing at the record.
+	 * @return EntryHeader The parsed header.
+	 * @throws RuntimeException If the seek or read fails, or the header is malformed.
+	 */
+	private function peek_header( $source, ManifestEntry $manifest_entry ): EntryHeader {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$prefix = fread( $source, EntryHeader::LENGTH_PREFIX_SIZE );
+		if ( false === $prefix || strlen( $prefix ) !== EntryHeader::LENGTH_PREFIX_SIZE ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: could not read the entry header length at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+			);
+		}
+
+		$header_length = ByteOrder::unpack_uint32( $prefix );
+		if ( EntryHeader::LENGTH_PREFIX_SIZE + $header_length > $manifest_entry->length() ) {
+			throw new RuntimeException(
+				sprintf( 'EntryReader: declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $manifest_entry->length() )
+			);
+		}
+
+		$header_bytes = '';
+		$remaining    = $header_length;
+		while ( $remaining > 0 ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+			$chunk = fread( $source, (int) min( self::READ_CHUNK_SIZE, $remaining ) );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new RuntimeException(
+					sprintf( 'EntryReader: could not read the entry header at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+				);
+			}
+			$header_bytes .= $chunk;
+			$remaining    -= strlen( $chunk );
+		}
+
+		try {
+			return EntryHeader::from_bytes( $prefix . $header_bytes );
+		} catch ( InvalidArgumentException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+			throw new RuntimeException( 'EntryReader: entry header is malformed.', 0, $e );
 		}
 	}
 
