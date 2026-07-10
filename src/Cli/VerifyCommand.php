@@ -363,7 +363,13 @@ final class VerifyCommand {
 
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
-		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+		return new RestoreRunner(
+			$entry_reader,
+			$file_writer,
+			$database_writer,
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+		);
 	}
 
 	/**

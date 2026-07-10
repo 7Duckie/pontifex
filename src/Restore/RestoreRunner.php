@@ -33,7 +33,9 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *
  *  - {@see RestoreRunner::__construct()} — takes the three
  *    collaborators that do the actual work, plus an optional set of
- *    defensive limits (defaulting to the conservative ArchiveLimits).
+ *    defensive limits (defaulting to the conservative ArchiveLimits)
+ *    and an optional runtime memory limit (0/null for unlimited) that
+ *    refuses an entry too large to decode within the request's memory.
  *    Stateless after construction; safe to reuse across many archives.
  *  - {@see RestoreRunner::restore()} — given a seekable readable
  *    stream containing a Pontifex archive, read, verify, and write
@@ -106,18 +108,41 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private ArchiveLimits $limits;
 
 	/**
+	 * The per-entry decoded-byte budget derived from the runtime memory limit, or 0
+	 * for no memory-derived cap.
+	 *
+	 * @var int
+	 */
+	private int $entry_memory_budget;
+
+	/**
+	 * Fraction of the runtime memory limit a single entry's decoded payload may use.
+	 *
+	 * A quarter: reading an entry peaks at several coexisting copies (the buffered
+	 * record, a substr, and the decoded payload string), so an entry is refused well
+	 * before the request runs out of memory rather than OOM-fatalling mid-restore.
+	 *
+	 * @var int
+	 */
+	private const MEMORY_BUDGET_DIVISOR = 4;
+
+	/**
 	 * Construct a RestoreRunner with its collaborators and optional limits.
 	 *
-	 * @param EntryReader        $entry_reader    Decodes individual entry records.
-	 * @param FileWriter         $file_writer     Writes filesystem entries to disk.
-	 * @param DatabaseWriter     $database_writer Replays db_chunk entries into the database.
-	 * @param ArchiveLimits|null $limits          Defensive limits to enforce; null applies the conservative defaults.
+	 * @param EntryReader        $entry_reader      Decodes individual entry records.
+	 * @param FileWriter         $file_writer       Writes filesystem entries to disk.
+	 * @param DatabaseWriter     $database_writer   Replays db_chunk entries into the database.
+	 * @param ArchiveLimits|null $limits            Defensive limits to enforce; null applies the conservative defaults.
+	 * @param int|null           $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
 	 */
-	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null ) {
-		$this->entry_reader    = $entry_reader;
-		$this->file_writer     = $file_writer;
-		$this->database_writer = $database_writer;
-		$this->limits          = $limits ?? ArchiveLimits::defaults();
+	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null ) {
+		$this->entry_reader        = $entry_reader;
+		$this->file_writer         = $file_writer;
+		$this->database_writer     = $database_writer;
+		$this->limits              = $limits ?? ArchiveLimits::defaults();
+		$this->entry_memory_budget = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 )
+			? intdiv( $memory_limit_bytes, self::MEMORY_BUDGET_DIVISOR )
+			: 0;
 	}
 
 	/**
@@ -187,7 +212,12 @@ final class RestoreRunner implements RestoreRunnerInterface {
 
 		$done = 0;
 		foreach ( $entries as $manifest_entry ) {
-			$this->entry_reader->verify_entry( $archive_source, $manifest_entry, $on_bytes );
+			$this->entry_reader->verify_entry(
+				$archive_source,
+				$manifest_entry,
+				$on_bytes,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
 			++$done;
 			if ( null !== $on_entry_verified ) {
 				$on_entry_verified( $done, $total );
@@ -240,6 +270,9 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		foreach ( $entries as $manifest_entry ) {
 			$remaining   = $total_budget - $decoded_so_far;
 			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
+			if ( $this->entry_memory_budget > 0 && $this->entry_memory_budget < $entry_limit ) {
+				$entry_limit = $this->entry_memory_budget;
+			}
 
 			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit, $on_bytes );
 

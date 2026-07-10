@@ -320,7 +320,9 @@ final class VerifyController {
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
 			new FileWriter( $this->resolve_wordpress_root() ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) )
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) ),
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);
 	}
 
