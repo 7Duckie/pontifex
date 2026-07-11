@@ -64,17 +64,24 @@ final class SafetyArchiverTest extends TestCase {
 	}
 
 	/**
-	 * A created safety archive is well-formed and owner-only; older ones are pruned.
+	 * A created safety archive is well-formed and owner-only; the oldest beyond the floor is pruned.
+	 *
+	 * The retention floor is 2 (ADR 0005 as amended): the archive just written
+	 * plus the previous one — the undo the auto-rollback and `wp pontifex
+	 * rollback` depend on — survive, and only older archives are pruned.
 	 *
 	 * @return void
 	 */
-	public function test_create_writes_a_restorable_archive_and_prunes_older(): void {
+	public function test_create_writes_a_restorable_archive_and_prunes_beyond_the_floor(): void {
 		$store = new RollbackStore( $this->base );
 		$store->ensure_directory();
 
-		// An older safety archive that retention (N=1) must prune.
+		// Two older safety archives: the newer must survive (it is the previous
+		// restore's undo), the older must be pruned.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
 		touch( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
 
 		$plans = array(
 			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
@@ -90,14 +97,75 @@ final class SafetyArchiverTest extends TestCase {
 
 		$path = $archiver->create( '/var/www/html' );
 
-		// The returned archive exists, is owner-only, and is the only one left.
+		// The returned archive exists, is owner-only, and only the floor remains.
 		$this->assertFileExists( $path );
 		$this->assertSame( 0600, fileperms( $path ) & 0777, 'A safety archive must be owner read/write only.' );
-		$this->assertCount( 1, $store->archives(), 'Retention N=1 should prune the older archive.' );
+		$this->assertCount( 2, $store->archives(), 'Retention must keep the new archive plus the previous one, and prune the rest.' );
+		$this->assertFileDoesNotExist( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig', 'The archive beyond the floor must be pruned.' );
+		$this->assertFileExists( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig', 'The previous archive — the standing undo — must survive.' );
 		$this->assertSame( $path, $store->most_recent() );
 
 		// The archive is well-formed: it reads back with the two entries.
 		$this->assertSame( 2, $this->entry_count( $path ), 'The written archive should contain both entries.' );
+	}
+
+	/**
+	 * A retention below the floor is clamped up to 2, never honoured.
+	 *
+	 * A second restore's safety archive must never prune the first restore's —
+	 * that archive is the only undo for the state the second restore overwrites,
+	 * and both the auto-rollback and the manual rollback depend on it. The floor
+	 * lives in the constructor so no call site can reintroduce the loss.
+	 *
+	 * @return void
+	 */
+	public function test_retention_below_the_floor_is_clamped_to_two(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
+
+		$plans    = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			1
+		);
+
+		$archiver->create( '/var/www/html' );
+
+		$this->assertCount( 2, $store->archives(), 'A requested retention of 1 must be clamped to the floor of 2.' );
+	}
+
+	/**
+	 * A retention above the floor is honoured as given.
+	 *
+	 * @return void
+	 */
+	public function test_retention_above_the_floor_is_honoured(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
+
+		$plans    = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			3
+		);
+
+		$archiver->create( '/var/www/html' );
+
+		$this->assertCount( 3, $store->archives(), 'A retention above the floor must be honoured as given.' );
 	}
 
 	/**
@@ -118,7 +186,7 @@ final class SafetyArchiverTest extends TestCase {
 			$this->wordpress_context_mock(),
 			$store,
 			$this->manifest_builder_returning( $plans ),
-			1,
+			2,
 			true
 		);
 
