@@ -803,7 +803,7 @@ final class RestoreController {
 	 * @return SafetyArchiver An archiver ready to write a content-only pre-import safety archive.
 	 */
 	private function default_safety_archiver(): SafetyArchiver {
-		return new SafetyArchiver( $this->environment, $this->wordpress_context, $this->rollback_store, null, 1, true );
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, $this->rollback_store, null, 2, true );
 	}
 
 	/**

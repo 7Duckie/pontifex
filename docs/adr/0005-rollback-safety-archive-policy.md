@@ -1,7 +1,7 @@
 # 0005 — rollback: pre-import safety archive (location, retention, default-on)
 
-- **Status:** Accepted, 2026-06-22.
-- **Deciders:** 7Duckie (v0.2.0 slice 2 planning).
+- **Status:** Accepted, 2026-06-22. Amended 2026-07-11 (retention floor raised to 2 — see Amendment).
+- **Deciders:** 7Duckie (v0.2.0 slice 2 planning; amendment: v0.5.0 hardening).
 
 ## Context
 
@@ -54,3 +54,24 @@ archive lives, how many are kept, and whether taking one is the default.
 - The export pipeline is reused through a new `SafetyArchiver` seam; migrating
   `ExportCommand` onto it is a later cleanup, not part of this slice.
 - A future `wp pontifex reset` reuses the same safety-archive pattern.
+
+## Amendment — 2026-07-11: retention floor raised to 2
+
+**New information:** since this ADR was accepted, a failed restore automatically
+rolls the site back to its safety archive (v0.5.0 hardening), and the admin
+Restore screen makes running several restores in a session routine. Both undo
+paths — the automatic roll-back and the operator's manual `wp pontifex
+rollback` — depend on the *previous* safety archive still existing. With N = 1,
+the safety archive taken for a second restore prunes the first restore's
+archive, silently destroying the only undo for the site state the second
+restore is about to overwrite.
+
+**Amended decision:** safety archives are retained with a **floor of 2**,
+independent of any general backup retention. `SafetyArchiver` enforces the
+floor itself (callers cannot lower it below 2), so no future call site can
+reintroduce the loss. Everything else in this ADR stands: location, naming,
+permissions, default-on, the preflight, and rollback restoring the most recent
+archive.
+
+**Cost:** the bounded disk cost rises from one site-sized archive to two; the
+preflight's early warning applies unchanged.

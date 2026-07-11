@@ -722,7 +722,7 @@ final class ImportCommand {
 			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
 			: sys_get_temp_dir();
 
-		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ), null, 1, $content_only );
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ), null, 2, $content_only );
 	}
 
 	/**

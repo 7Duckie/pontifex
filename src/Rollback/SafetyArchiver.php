@@ -50,6 +50,22 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	private const ARCHIVE_MODE = 0600;
 
 	/**
+	 * The minimum number of safety archives retained, whatever the caller asks for.
+	 *
+	 * The floor is 2 because both undo paths — the automatic roll-back when a
+	 * restore fails and the operator's manual `wp pontifex rollback` — depend on
+	 * the *previous* safety archive still existing. With a retention of 1, the
+	 * safety archive taken for a second restore would prune the first restore's
+	 * archive: the only undo for the site state the second restore is about to
+	 * overwrite. Enforcing the floor here, rather than only at call sites, means
+	 * no future caller can reintroduce that loss. (Amends ADR 0005, which set
+	 * N = 1 before the automatic roll-back existed.)
+	 *
+	 * @var int
+	 */
+	private const MIN_RETENTION = 2;
+
+	/**
 	 * The Environment abstraction (PHP version, free disk space, constants).
 	 *
 	 * @var Environment
@@ -85,6 +101,8 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	/**
 	 * How many of the newest safety archives to retain after writing.
 	 *
+	 * Never below {@see self::MIN_RETENTION}; the constructor clamps it.
+	 *
 	 * @var int
 	 */
 	private int $retention;
@@ -110,7 +128,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param WordPressContext              $wordpress_context WordPress-specific facts for provenance and the database scan.
 	 * @param RollbackStoreInterface        $store             The rollback directory the archive is written into.
 	 * @param ManifestBuilderInterface|null $manifest_builder  Optional. When null, a default scanner-backed builder is used.
-	 * @param int                           $retention         How many newest archives to keep (ADR 0005 default: 1).
+	 * @param int                           $retention         How many newest archives to keep (ADR 0005 as amended; clamped to at least MIN_RETENTION so a second restore can never prune the first's undo).
 	 * @param bool                          $content_only      Optional. Take a content-only safety archive (scan root passed to create() must be WP_CONTENT_DIR); default false takes a whole-site one.
 	 */
 	public function __construct(
@@ -118,14 +136,14 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		WordPressContext $wordpress_context,
 		RollbackStoreInterface $store,
 		?ManifestBuilderInterface $manifest_builder = null,
-		int $retention = 1,
+		int $retention = self::MIN_RETENTION,
 		bool $content_only = false
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
 		$this->manifest_builder  = $manifest_builder;
-		$this->retention         = $retention;
+		$this->retention         = max( self::MIN_RETENTION, $retention );
 		$this->content_only      = $content_only;
 	}
 
