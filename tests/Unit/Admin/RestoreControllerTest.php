@@ -414,6 +414,152 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * A restore that fails mid-replay is automatically rolled back to its prior state.
+	 *
+	 * The safety archive is taken, the replay then fails, and the failure handler replays
+	 * that safety archive to recover the site — reported as an automatic rollback rather
+	 * than a bare failure.
+	 *
+	 * @return void
+	 */
+	public function test_restore_auto_rolls_back_after_a_failed_replay(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		// The safety archive the restore takes; recovery replays it, so it must be a real
+		// (placeholder) file the injected engine reads.
+		$safety_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $safety_path, 'x' );
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		// Forward: verify passes, replay throws. Recovery: verify passes, replay succeeds.
+		$replays = 0;
+		$runner  = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays ): void {
+				++$replays;
+				if ( 1 === $replays ) {
+					throw new RuntimeException( 'replay failed mid-restore' );
+				}
+			}
+		);
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 500, $this->json['status'] );
+		$this->assertStringContainsString( 'automatically rolled back', $this->json['data']['message'] );
+	}
+
+	/**
+	 * When the restore fails and the auto-rollback also fails, the operator is told plainly.
+	 *
+	 * The recovery replay is best-effort; if it too fails the site may be partially
+	 * restored, and the message says so rather than implying a clean recovery.
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_when_auto_recovery_also_fails(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$safety_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive.
+		file_put_contents( $safety_path, 'x' );
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		// Both the forward replay and the recovery replay throw.
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andThrow( new RuntimeException( 'replay failed' ) );
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 500, $this->json['status'] );
+		$this->assertStringContainsString( 'automatic recovery also failed', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A restore that fails before the safety archive is taken reports the site unchanged.
+	 *
+	 * Here the safety archive creation itself fails, so the database was never written; no
+	 * recovery is attempted and the operator is told the site was not changed.
+	 *
+	 * @return void
+	 */
+	public function test_restore_failure_before_the_safety_archive_reports_site_unchanged(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		// The safety archive fails to write, so the restore never touches the database.
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'no disk space' ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->never();
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 500, $this->json['status'] );
+		$this->assertStringContainsString( 'was not changed', $this->json['data']['message'] );
+	}
+
+	/**
 	 * Refuses a whole-site backup: the admin restore is content-only.
 	 *
 	 * A whole-site backup (one that includes WordPress core and wp-config.php) has no

@@ -167,6 +167,7 @@ final class InvokeBranchesTest extends TestCase {
 	public function test_invoke_with_yes_flag_short_circuits_confirmation(): void {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'confirm' );
 
 		$command = new ImportCommand(
@@ -197,6 +198,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -221,6 +223,7 @@ final class InvokeBranchesTest extends TestCase {
 	public function test_invoke_logs_info_on_success(): void {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->atLeast()->once();
@@ -254,10 +257,13 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
-		$logger->shouldReceive( 'error' )->once();
+		// Two errors are logged: the import failure, then the auto-recovery failure (the
+		// safety archive path here is a placeholder the recovery cannot open).
+		$logger->shouldReceive( 'error' )->twice();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -272,6 +278,71 @@ final class InvokeBranchesTest extends TestCase {
 		$this->expectExceptionMessage( 'simulated restore failure' );
 
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * A restore that fails mid-replay is automatically rolled back from the safety archive.
+	 *
+	 * The forward replay throws; the failure handler then opens the safety archive and
+	 * replays it (verify then restore) to recover the site, warning the operator that an
+	 * automatic rollback occurred. The original import error still propagates so the
+	 * command exits non-zero.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_auto_rolls_back_after_a_failed_replay(): void {
+		// A real (placeholder) safety archive file the recovery can open.
+		$safety_path = sys_get_temp_dir() . '/pontifex-safety-' . uniqid( '', true ) . '.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $safety_path, 'x' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		// Forward: replay throws. Recovery: verify passes, replay succeeds.
+		$replays        = 0;
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+		$restore_runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays ): void {
+				++$replays;
+				if ( 1 === $replays ) {
+					throw new RuntimeException( 'simulated restore failure' );
+				}
+			}
+		);
+
+		$rolled_back = false;
+		$wp_cli      = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->atLeast()->once()->andReturnUsing(
+			static function ( string $message ) use ( &$rolled_back ): void {
+				if ( str_contains( $message, 'automatically rolled back' ) ) {
+					$rolled_back = true;
+				}
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		try {
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+			$this->fail( 'The import should re-throw the restore failure after recovering.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'simulated restore failure', $error->getMessage() );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the placeholder safety archive.
+			@unlink( $safety_path );
+		}
+
+		$this->assertTrue( $rolled_back, 'The operator is warned that the site was automatically rolled back.' );
 	}
 
 	/**
@@ -292,6 +363,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'confirm' );
 
 		$command = new ImportCommand(
@@ -328,6 +400,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -361,6 +434,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -400,6 +474,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
@@ -442,6 +517,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -476,6 +552,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -511,6 +588,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'confirm' );
 
 		$command = new ImportCommand(
@@ -558,6 +636,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing to restore' ) );
 
 		$command = new ImportCommand(
@@ -601,6 +680,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing a whole-site archive' ) );
 
 		$command = new ImportCommand(
@@ -638,6 +718,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing a legacy archive' ) );
 
 		$command = new ImportCommand(
@@ -668,6 +749,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
