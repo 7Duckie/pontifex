@@ -313,6 +313,29 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * The table's average stored row width from SHOW TABLE STATUS, or 0 when unknown.
+	 *
+	 * Reads the storage engine's own `Avg_row_length` figure — for InnoDB an
+	 * estimate, but the right order of magnitude, which is all chunk sizing
+	 * needs. Any failure (query error, missing row, absent column) reports 0,
+	 * and the scanner falls back to its fixed estimate: the figure is a sizing
+	 * hint, never a correctness input.
+	 *
+	 * @param string $table_name Fully prefixed table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table_name ): int {
+		$this->assert_prefixed_table( $table_name );
+		$sql = $this->wpdb->prepare( 'SHOW TABLE STATUS LIKE %s', $this->wpdb->esc_like( $table_name ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a live sizing read has no caching benefit.
+		$status = $this->wpdb->get_row( $sql, ARRAY_A );
+		if ( ! is_array( $status ) || ! isset( $status['Avg_row_length'] ) || ! is_numeric( $status['Avg_row_length'] ) ) {
+			return 0;
+		}
+		return max( 0, (int) $status['Avg_row_length'] );
+	}
+
+	/**
 	 * Run one prepared prefix-rewrite statement, failing loudly on a query error.
 	 *
 	 * Mirrors {@see self::execute_sql()}'s failure detection (a real `$wpdb` returns

@@ -439,6 +439,48 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * The average row width must come from SHOW TABLE STATUS's Avg_row_length.
+	 *
+	 * @return void
+	 */
+	public function test_average_row_bytes_reads_avg_row_length(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'SHOW TABLE STATUS prepared' );
+		$wpdb->method( 'get_row' )->willReturn(
+			array(
+				'Name'           => 'wp_posts',
+				'Avg_row_length' => '3172',
+			)
+		);
+
+		$this->assertSame( 3172, ( new WpdbAdapter( $wpdb ) )->average_row_bytes( 'wp_posts' ) );
+	}
+
+	/**
+	 * The average row width must report 0 when the status row is unusable.
+	 *
+	 * A missing row (query error), an absent column, or a non-numeric value all
+	 * report 0 — the "unknown" answer that sends the scanner to its fixed
+	 * estimate; sizing is a hint, never a gate.
+	 *
+	 * @return void
+	 */
+	public function test_average_row_bytes_reports_zero_when_unknown(): void {
+		$missing = $this->mock_wpdb();
+		$missing->method( 'esc_like' )->willReturnArgument( 0 );
+		$missing->method( 'prepare' )->willReturn( 'SHOW TABLE STATUS prepared' );
+		$missing->method( 'get_row' )->willReturn( null );
+		$this->assertSame( 0, ( new WpdbAdapter( $missing ) )->average_row_bytes( 'wp_posts' ) );
+
+		$junk = $this->mock_wpdb();
+		$junk->method( 'esc_like' )->willReturnArgument( 0 );
+		$junk->method( 'prepare' )->willReturn( 'SHOW TABLE STATUS prepared' );
+		$junk->method( 'get_row' )->willReturn( array( 'Avg_row_length' => 'not-a-number' ) );
+		$this->assertSame( 0, ( new WpdbAdapter( $junk ) )->average_row_bytes( 'wp_posts' ) );
+	}
+
+	/**
 	 * The prefix listing must refuse an empty prefix.
 	 *
 	 * An empty prefix would list the entire database — never what the leftover
