@@ -253,6 +253,37 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Canned average row widths, keyed by table name.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $average_row_bytes = array();
+
+	/**
+	 * Register a canned average row width for a table.
+	 *
+	 * @param string $name  Table name.
+	 * @param int    $bytes Average bytes per row to report.
+	 * @return void
+	 */
+	public function set_average_row_bytes( string $name, int $bytes ): void {
+		$this->average_row_bytes[ $name ] = $bytes;
+	}
+
+	/**
+	 * Return the canned average row width, or 0 when none was registered.
+	 *
+	 * Mirrors WpdbAdapter's unknown-answer contract: 0 tells the scanner to
+	 * fall back to its fixed estimate.
+	 *
+	 * @param string $table_name Table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table_name ): int {
+		return $this->average_row_bytes[ $table_name ] ?? 0;
+	}
+
+	/**
 	 * List known tables (registered or marked existing) beginning with the prefix.
 	 *
 	 * @param string $prefix The literal name prefix to match; must not be empty.

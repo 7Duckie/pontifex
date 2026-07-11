@@ -161,4 +161,23 @@ interface DatabaseAdapter {
 	 * @throws RuntimeException If $prefix is empty (a full-database listing is never intended).
 	 */
 	public function list_tables_by_prefix( string $prefix ): array;
+
+	/**
+	 * The table's average stored row width, in bytes, or 0 when unknown.
+	 *
+	 * Used by {@see DatabaseScanner} to size chunks from the table's real row
+	 * width rather than a fixed guess, so a wide-row table (huge serialised
+	 * options, page-builder LONGTEXT) produces proportionally fewer rows per
+	 * chunk and every chunk stays near the byte budget — keeping the archive
+	 * restorable under a memory-budgeted web request.
+	 *
+	 * The figure is a sizing hint, not a correctness input: implementations
+	 * report the storage engine's own estimate and return 0 when it cannot be
+	 * read, in which case the scanner falls back to its fixed estimate. A wrong
+	 * answer only changes how a table is split, never what is captured.
+	 *
+	 * @param string $table_name Fully prefixed table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table_name ): int;
 }
