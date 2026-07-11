@@ -16,6 +16,8 @@ use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
+use RuntimeException;
+use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
@@ -87,6 +89,41 @@ final class ExportRunnerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filesize -- Measuring the test's own output file to cross-check the reported byte count.
 		$this->assertSame( (int) filesize( $this->temp_output_path ), $result->bytes_written(), 'Reported bytes should match the file on disk.' );
 		$this->assertSame( 2, $this->entry_count( $this->temp_output_path ), 'The written archive should read back with both entries.' );
+	}
+
+	/**
+	 * A failed export must not clobber a prior good archive at the output path.
+	 *
+	 * The archive is written to a sibling temp file and moved into place only on success,
+	 * so a write that fails part-way (here, an entry whose source throws) leaves any prior
+	 * archive at the output path untouched — and no temp file behind.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_export_does_not_clobber_a_prior_archive(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a prior good archive at the output path.
+		file_put_contents( $this->temp_output_path, 'PRIOR-GOOD-ARCHIVE' );
+
+		$plans  = array(
+			$this->file_plan( 'index.php', "<?php\n" ),
+			$this->failing_plan( 'wp-content/broken.bin' ),
+		);
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$threw = false;
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+		} catch ( Throwable $error ) {
+			unset( $error );
+			$threw = true;
+		}
+
+		$this->assertTrue( $threw, 'A failing entry source must abort the export.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the output path to confirm the prior archive survived.
+		$this->assertSame( 'PRIOR-GOOD-ARCHIVE', file_get_contents( $this->temp_output_path ), 'A failed export must not clobber the prior archive.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'The temp export file is cleaned up on failure.' );
 	}
 
 	/**
@@ -258,6 +295,27 @@ final class ExportRunnerTest extends TestCase {
 	private function file_plan( string $path, string $contents ): EntryPlan {
 		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
 		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build an EntryPlan whose deferred source throws when the writer opens it.
+	 *
+	 * Used to fail an export mid-write without a real I/O error, so the atomic-write
+	 * guarantee can be exercised.
+	 *
+	 * @param string $path Relative archive path for the entry.
+	 * @return EntryPlan A plan whose source raises when pulled.
+	 */
+	private function failing_plan( string $path ): EntryPlan {
+		$header = EntryHeader::for_file( $path, 10, 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan(
+			$header,
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			static function () {
+				throw new RuntimeException( 'simulated entry source failure' );
+			}
+		);
 	}
 
 	/**
