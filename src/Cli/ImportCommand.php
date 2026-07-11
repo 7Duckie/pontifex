@@ -345,6 +345,10 @@ final class ImportCommand {
 			$this->progress->advance();
 		};
 
+		// The safety archive's path, once taken — the undo the failure handler replays to
+		// recover the site if the restore then fails part-written. Null until it is taken.
+		$safety_path = null;
+
 		try {
 			// Wire the restore engine. For an encrypted archive this reads the salt and
 			// collects the passphrase, so it sits inside the try where a failure is logged.
@@ -384,7 +388,7 @@ final class ImportCommand {
 				$this->bump_counters( array( 'attempted' => 1 ) );
 
 				if ( ! $no_rollback ) {
-					$this->take_safety_archive( $whole_site );
+					$safety_path = $this->take_safety_archive( $whole_site );
 				}
 
 				$restore_runner->restore( $source, $on_entry );
@@ -428,6 +432,18 @@ final class ImportCommand {
 				$this->bump_counters( array( 'failed' => 1 ) );
 				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
 			}
+
+			// If the safety archive was taken, the restore may have written part of the
+			// database, so replay it to return the site to its pre-import state before the
+			// command exits with the failure. When it was not taken the site was not changed.
+			if ( null !== $safety_path ) {
+				if ( $this->recover_from_safety_archive( $safety_path, $allow_unsafe ) ) {
+					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
+				} else {
+					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
+				}
+			}
+
 			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
@@ -620,9 +636,10 @@ final class ImportCommand {
 	 * whole-site for a --whole-site restore (ADR 0008).
 	 *
 	 * @param bool $whole_site True for a whole-site restore; false for a content-only restore.
-	 * @return void
+	 * @return string The absolute path of the safety archive written — the undo the import
+	 *                automatically replays if the restore then fails.
 	 */
-	private function take_safety_archive( bool $whole_site ): void {
+	private function take_safety_archive( bool $whole_site ): string {
 		$safety_archiver = $this->safety_archiver ?? $this->build_default_safety_archiver( ! $whole_site );
 
 		$on_entry = function ( int $done, int $total ): void {
@@ -638,6 +655,55 @@ final class ImportCommand {
 
 		$this->logger->info( 'Safety archive written.', array( 'safety_archive' => $path ) );
 		WP_CLI::log( sprintf( 'Safety archive written: %s (undo this import with: wp pontifex rollback)', PathRedactor::from_environment()->redact( $path ) ) );
+
+		return $path;
+	}
+
+	/**
+	 * Replay a safety archive to recover the site after a failed import.
+	 *
+	 * Called only from the import failure handler, once the safety archive has been taken
+	 * and the restore has then failed — so the database may be part-written. It opens the
+	 * safety archive (a plain archive of the site's prior state), verifies it, and replays
+	 * it unrestricted, returning the site to its pre-import state. Wrapped so it can never
+	 * throw out of the failure handler: a recovery that itself fails is reported by
+	 * returning false, not escalated over the original import error.
+	 *
+	 * @param string $safety_path           The absolute path of the safety archive to replay.
+	 * @param bool   $allow_unsafe_symlinks Whether to allow escaping symlink targets (mirrors the import).
+	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 */
+	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks ): bool {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the plugin-owned safety archive for recovery; an unopenable file is reported below, not raised as a WP-CLI halt.
+		$recovery_source = @fopen( $safety_path, 'rb' );
+		if ( false === $recovery_source ) {
+			$this->logger->error( 'Import auto-recovery failed: could not open the safety archive.', array( 'safety_archive' => $safety_path ) );
+			return false;
+		}
+
+		try {
+			// A safety archive is a plain archive of the site's own prior state, so its
+			// replay needs no passphrase and no required prefix — unrestricted, like a
+			// rollback. Verify it first, so a corrupt safety archive is not written back.
+			$runner = $this->restore_runner ?? $this->build_default_restore_runner( $recovery_source, false, $allow_unsafe_symlinks, null );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the verify walk re-reads it; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$runner->verify( $recovery_source );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$runner->restore( $recovery_source );
+
+			return true;
+		} catch ( Throwable $recovery_error ) {
+			$this->logger->error( 'Import auto-recovery failed.', array( 'exception' => $recovery_error ) );
+			return false;
+		} finally {
+			if ( is_resource( $recovery_source ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the recovery stream opened above; not a WP_Filesystem operation.
+				fclose( $recovery_source );
+			}
+		}
 	}
 
 	/**

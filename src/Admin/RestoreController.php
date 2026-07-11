@@ -307,6 +307,10 @@ final class RestoreController {
 
 		$size   = $this->archive_size( (string) $path );
 		$source = null;
+		// The safety archive's path, once taken — the undo the failure handler replays to
+		// recover the site if the restore then fails part-written. Null until it is taken,
+		// so a failure before that point knows the site was not yet changed.
+		$safety_path = null;
 		try {
 			$source = $this->open_source( (string) $path );
 
@@ -367,7 +371,7 @@ final class RestoreController {
 				}
 
 				// Phase 2: the pre-import safety archive (the undo), then phase 3: restore.
-				$this->take_safety_archive();
+				$safety_path = $this->take_safety_archive();
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size );
@@ -426,9 +430,56 @@ final class RestoreController {
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin restore failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+
+			// If the safety archive was taken, the restore may have written part of the
+			// database, so replay it to return the site to its pre-restore state. When it was
+			// not taken (the failure preceded it), the site was not changed and nothing is
+			// replayed. Recovery never throws — it reports whether the site was restored.
+			$recovered = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path ) : null;
+
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovered ) ), 500 );
+		}
+	}
+
+	/**
+	 * Replay a safety archive to recover the site after a failed restore.
+	 *
+	 * Called only from the restore failure handler, once the safety archive has been
+	 * taken and the restore has then failed — so the database may be part-written. It
+	 * opens the safety archive, verifies it, and replays it unrestricted (like a
+	 * rollback), returning the site to its pre-restore state. It is wrapped so it can
+	 * never throw out of the failure handler: a recovery that itself fails is reported
+	 * as such, not escalated.
+	 *
+	 * @param string $path The absolute path of the safety archive to replay.
+	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 */
+	private function recover_from_safety_archive( string $path ): bool {
+		$source = null;
+		try {
+			$size   = $this->archive_size( $path );
+			$source = $this->open_source( $path );
+			// A safety archive is the site's own undo, so its replay is unrestricted — no
+			// required prefix, matching a rollback.
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+
+			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+				$this->finish( $source );
+				return false;
+			}
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the recovery walk re-reads it; not a WP_Filesystem operation.
+			rewind( $source );
+			$this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
+			$this->wordpress_context->flush_cache();
+			$this->finish( $source );
+			return true;
+		} catch ( Throwable $recovery_error ) {
+			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+			return false;
 		}
 	}
 
@@ -537,8 +588,21 @@ final class RestoreController {
 				self::ROLLBACK_STATS_OPTION,
 				'bytes_rolled_back'
 			);
-			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->rollback_failure_message() ), 500 );
 		}
+	}
+
+	/**
+	 * The message returned when a rollback itself fails.
+	 *
+	 * Distinct from {@see self::failure_message()}: a rollback has no undo of its own, so
+	 * a failure part-way may leave the site partially rolled back, and the only recovery
+	 * is to restore a backup.
+	 *
+	 * @return string A human-readable rollback-failure message.
+	 */
+	private function rollback_failure_message(): string {
+		return __( 'The rollback could not be completed. Your site may be partially rolled back — restore a backup to recover. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	/**
@@ -658,9 +722,10 @@ final class RestoreController {
 	 * a determinate byte bar that fills as the content is copied — the same progress
 	 * the Backup screen shows, so the experience is consistent across the two.
 	 *
-	 * @return void
+	 * @return string The absolute path of the safety archive written — the undo the
+	 *                restore automatically replays if the restore then fails.
 	 */
-	private function take_safety_archive(): void {
+	private function take_safety_archive(): string {
 		$archiver = $this->safety_archiver ?? $this->default_safety_archiver();
 
 		$this->set_progress( self::PHASE_BACKING_UP, 0, 0 );
@@ -680,7 +745,7 @@ final class RestoreController {
 			}
 		};
 
-		$this->safety_archiver_create( $archiver, $on_bytes, $on_total );
+		return $this->safety_archiver_create( $archiver, $on_bytes, $on_total );
 	}
 
 	/**
@@ -692,10 +757,10 @@ final class RestoreController {
 	 * @param SafetyArchiverInterface $archiver The archiver to run.
 	 * @param callable                $on_bytes The byte-progress callback.
 	 * @param callable                $on_total The estimated-total callback, for a determinate bar.
-	 * @return void
+	 * @return string The absolute path of the safety archive just written.
 	 */
-	private function safety_archiver_create( SafetyArchiverInterface $archiver, callable $on_bytes, callable $on_total ): void {
-		$archiver->create( $this->resolve_content_root(), null, $on_bytes, $on_total );
+	private function safety_archiver_create( SafetyArchiverInterface $archiver, callable $on_bytes, callable $on_total ): string {
+		return $archiver->create( $this->resolve_content_root(), null, $on_bytes, $on_total );
 	}
 
 	// -------------------------------------------------------------------------
@@ -866,17 +931,28 @@ final class RestoreController {
 	}
 
 	/**
-	 * The message returned when a restore or rollback fails.
+	 * The message returned when a restore fails.
 	 *
 	 * The underlying error is recorded in the log; the operator sees a plain
-	 * sentence rather than an exception string.
+	 * sentence rather than an exception string, and is told whether the site was
+	 * automatically rolled back.
 	 *
-	 * @param Throwable $error The failure (kept to keep the signature honest; not echoed).
+	 * @param Throwable $error     The failure (kept to keep the signature honest; not echoed).
+	 * @param bool|null $recovered Recovery outcome: true if the site was auto-rolled back to
+	 *                             its pre-restore state, false if that recovery also failed,
+	 *                             or null when no recovery was attempted (the site was not
+	 *                             changed, or this is a rollback failure).
 	 * @return string A human-readable failure message.
 	 */
-	private function failure_message( Throwable $error ): string {
+	private function failure_message( Throwable $error, ?bool $recovered = null ): string {
 		unset( $error );
-		return __( 'The restore could not be completed. Your site may be partially restored — roll back to recover. Check the Pontifex log for details.', 'pontifex' );
+		if ( true === $recovered ) {
+			return __( 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.', 'pontifex' );
+		}
+		if ( false === $recovered ) {
+			return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
+		}
+		return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	// -------------------------------------------------------------------------
