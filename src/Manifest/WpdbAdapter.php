@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Manifest;
 
+use Pontifex\Database\HardenedTableListing;
 use RuntimeException;
 use wpdb;
 
@@ -49,6 +50,8 @@ use wpdb;
  */
 final class WpdbAdapter implements DatabaseAdapter {
 
+	use HardenedTableListing;
+
 	/**
 	 * The wpdb instance this adapter wraps.
 	 *
@@ -76,20 +79,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * @throws RuntimeException If $wpdb signals a query error.
 	 */
 	public function list_tables(): array {
-		$pattern = $this->wpdb->esc_like( $this->wpdb->prefix ) . '%';
-		$sql     = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; this satisfies the prepared-query contract.
-		$rows = $this->wpdb->get_col( $sql );
-
-		if ( '' !== $this->wpdb->last_error ) {
-			$last_error = (string) $this->wpdb->last_error;
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: list_tables query failed: %s', $last_error ) );
-		}
-
-		$tables = array_values( array_map( 'strval', $rows ) );
-		sort( $tables, SORT_STRING );
-		return $tables;
+		return $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
 	}
 
 	/**

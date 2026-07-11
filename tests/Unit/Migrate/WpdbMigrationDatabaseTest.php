@@ -88,6 +88,27 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 	}
 
 	/**
+	 * The list_tables method refuses an empty result even with no error signalled.
+	 *
+	 * A silently-failed SHOW TABLES returns [] with an empty last_error under
+	 * suppress_errors; a real install always has {prefix}options, so the migration must
+	 * refuse rather than rewrite zero tables and report a hollow success.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_refuses_an_empty_result_without_error(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'get_var' )->willReturn( null );
+
+		$this->expectException( RuntimeException::class );
+
+		( new WpdbMigrationDatabase( $wpdb ) )->list_tables();
+	}
+
+	/**
 	 * A single-column primary key returns that column's name.
 	 *
 	 * @return void

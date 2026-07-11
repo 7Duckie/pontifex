@@ -73,6 +73,28 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * The list_tables method must refuse an empty result even with no error signalled.
+	 *
+	 * A silently-failed query returns [] from get_col() (not false), and last_error is empty
+	 * under suppress_errors — so both failure signals can be silent at once. A real install
+	 * always has {prefix}options, so an empty result is a failure, and a backup must not be
+	 * produced with no database tables in it.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_refuses_an_empty_result_without_error(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'get_var' )->willReturn( null );
+
+		$this->expectException( RuntimeException::class );
+
+		( new WpdbAdapter( $wpdb ) )->list_tables();
+	}
+
+	/**
 	 * The row_count method must return the integer value from $wpdb->get_var().
 	 *
 	 * @return void

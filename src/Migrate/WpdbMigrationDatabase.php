@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Migrate;
 
 use InvalidArgumentException;
+use Pontifex\Database\HardenedTableListing;
 use RuntimeException;
 use wpdb;
 
@@ -37,6 +38,8 @@ use wpdb;
  * database.
  */
 final class WpdbMigrationDatabase implements MigrationDatabase {
+
+	use HardenedTableListing;
 
 	/**
 	 * The wpdb instance this adapter wraps.
@@ -93,20 +96,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 			return $this->tables;
 		}
 
-		$pattern = $this->wpdb->esc_like( $this->wpdb->prefix ) . '%';
-		$sql     = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; Plugin Check does not track the preparation across the assignment.
-		$rows = $this->wpdb->get_col( $sql );
-
-		if ( '' !== $this->wpdb->last_error ) {
-			$last_error = (string) $this->wpdb->last_error;
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbMigrationDatabase: list_tables query failed: %s', $last_error ) );
-		}
-
-		$tables = array_values( array_map( 'strval', $rows ) );
-		sort( $tables, SORT_STRING );
-		return $tables;
+		return $this->list_prefixed_tables( $this->wpdb, 'WpdbMigrationDatabase' );
 	}
 
 	/**
