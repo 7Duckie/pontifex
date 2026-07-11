@@ -359,4 +359,96 @@ final class WpdbAdapterTest extends TestCase {
 
 		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'xyz_' );
 	}
+
+	/**
+	 * A staging prefix must be prepended to the table names the rewrite targets.
+	 *
+	 * During a staging-table restore the options/usermeta copies carry the
+	 * staging prefix until the cut-over; the UPDATEs must land on those staged
+	 * names, never on the still-live tables.
+	 *
+	 * @return void
+	 */
+	public function test_rewrite_prefix_keys_targets_staged_tables(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$prepared_tables = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query, ...$args ) use ( &$prepared_tables ): string {
+				$prepared_tables[] = (string) $args[0];
+				return 'UPDATE prepared';
+			}
+		);
+		$wpdb->method( 'query' )->willReturn( 1 );
+
+		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'xyz_', 'pontifexstg_' );
+
+		$this->assertSame(
+			array( 'pontifexstg_xyz_options', 'pontifexstg_xyz_usermeta' ),
+			$prepared_tables,
+			'The UPDATEs must target the staged copies, not the live tables.'
+		);
+	}
+
+	/**
+	 * The table_exists() probe must report true when SHOW TABLES finds the name.
+	 *
+	 * @return void
+	 */
+	public function test_table_exists_reports_a_found_table(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'SHOW TABLES prepared' );
+		$wpdb->method( 'get_var' )->willReturn( 'wp_posts' );
+
+		$this->assertTrue( ( new WpdbAdapter( $wpdb ) )->table_exists( 'wp_posts' ) );
+	}
+
+	/**
+	 * The table_exists() probe must report false on no result — including a query error.
+	 *
+	 * A wrong "does not exist" is the safe direction: the cut-over RENAME stays
+	 * the atomic arbiter and fails whole if the answer mattered.
+	 *
+	 * @return void
+	 */
+	public function test_table_exists_reports_false_when_absent(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'SHOW TABLES prepared' );
+		$wpdb->method( 'get_var' )->willReturn( null );
+
+		$this->assertFalse( ( new WpdbAdapter( $wpdb ) )->table_exists( 'wp_missing' ) );
+	}
+
+	/**
+	 * The prefix listing must return the matching names, alphabetised.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_by_prefix_returns_sorted_matches(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( 'SHOW TABLES prepared' );
+		$wpdb->method( 'get_col' )->willReturn( array( 'pontifexstg_wp_posts', 'pontifexstg_wp_options' ) );
+
+		$this->assertSame(
+			array( 'pontifexstg_wp_options', 'pontifexstg_wp_posts' ),
+			( new WpdbAdapter( $wpdb ) )->list_tables_by_prefix( 'pontifexstg_' )
+		);
+	}
+
+	/**
+	 * The prefix listing must refuse an empty prefix.
+	 *
+	 * An empty prefix would list the entire database — never what the leftover
+	 * sweep intends.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_by_prefix_refuses_an_empty_prefix(): void {
+		$this->expectException( RuntimeException::class );
+
+		( new WpdbAdapter( $this->mock_wpdb() ) )->list_tables_by_prefix( '' );
+	}
 }

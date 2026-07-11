@@ -11,6 +11,7 @@ namespace Pontifex\Restore;
 
 use InvalidArgumentException;
 use RuntimeException;
+use Throwable;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
@@ -56,9 +57,12 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *        and decodes the payload through the codec).
  *     b. Route to FileWriter or DatabaseWriter based on the
  *        entry's kind.
- *  4. If any step throws, the restore halts immediately. v0.1.0 is
- *     fail-fast: anything already written stays on disk / in the
- *     database. Partial-restore cleanup is a Phase 4 (CLI) concern.
+ *  4. If any step throws, the restore halts immediately. Database
+ *     changes never reach the live tables: every db_chunk replays into
+ *     staging tables that are cut over atomically only after the whole
+ *     walk succeeds (ADR 0009), and a failure drops the staging tables.
+ *     Files already written stay on disk; the safety-archive recovery
+ *     layer covers the file half.
  *
  * Internal choices (implementation details; may change without
  * breaking the public API):
@@ -162,20 +166,40 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
-		$this->walk(
-			$archive_source,
-			$on_entry_restored,
-			function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
-				$this->dispatch( $manifest_entry, $result );
-			},
-			$on_bytes
-		);
+		// Reset the writer's staging state and sweep leftovers a crashed earlier
+		// run may have abandoned (ADR 0009).
+		$this->database_writer->begin_staging();
 
-		// Every db_chunk has now been replayed, so the options and usermeta tables
-		// exist with the destination prefix. Finalise any cross-prefix restore by
-		// rewriting the prefix embedded in their key columns (a no-op otherwise). This
-		// runs only on restore(), never verify(), which writes nothing.
-		$this->database_writer->finalise_prefix_rewrite();
+		try {
+			$this->walk(
+				$archive_source,
+				$on_entry_restored,
+				function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
+					$this->dispatch( $manifest_entry, $result );
+				},
+				$on_bytes
+			);
+
+			// Every db_chunk has now been replayed into its staging table. Finalise
+			// any cross-prefix restore by rewriting the prefix embedded in the
+			// options/usermeta key columns of the STAGED copies (a no-op otherwise),
+			// then cut the staged tables over to their live names in one atomic
+			// RENAME. Until that rename the live tables have not been written; after
+			// it the database is entirely the restored one. This runs only on
+			// restore(), never verify(), which writes nothing.
+			$this->database_writer->finalise_prefix_rewrite();
+			$this->database_writer->commit_staged_tables();
+		} catch ( Throwable $error ) {
+			// The cut-over never happened (or failed atomically), so the live
+			// tables are untouched; remove the half-built staging tables. Cleanup
+			// is best-effort and must never mask the original failure.
+			try {
+				$this->database_writer->abort_staging();
+			} catch ( Throwable $cleanup_failure ) {
+				unset( $cleanup_failure );
+			}
+			throw $error;
+		}
 	}
 
 	/**

@@ -132,6 +132,36 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Number of successful execute_sql calls after which one call throws, or -1 for never.
+	 *
+	 * @var int
+	 */
+	private int $fail_after = -1;
+
+	/**
+	 * The error message the deferred failure carries.
+	 *
+	 * @var string
+	 */
+	private string $fail_after_message = '';
+
+	/**
+	 * Configure execute_sql to throw once the given number of calls have succeeded.
+	 *
+	 * Lets a test place a failure mid-replay: the first $successes statements
+	 * record normally, the next call throws, and calls after that succeed again
+	 * (so cleanup statements are still observable).
+	 *
+	 * @param int    $successes How many calls succeed before the failure fires.
+	 * @param string $message   The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_after_executes( int $successes, string $message ): void {
+		$this->fail_after         = $successes;
+		$this->fail_after_message = $message;
+	}
+
+	/**
 	 * Return the SQL statements passed to execute_sql, in order.
 	 *
 	 * @return string[] The recorded statements.
@@ -156,33 +186,91 @@ final class FakeDbAdapter implements DatabaseAdapter {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
 			throw new RuntimeException( $message );
 		}
+		if ( $this->fail_after >= 0 && count( $this->executed_statements ) >= $this->fail_after ) {
+			$this->fail_after = -1;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $fail_after_message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $this->fail_after_message );
+		}
 		$this->executed_statements[] = $sql;
 	}
 
 	/**
-	 * Prefix-key rewrite calls, in order, as [source_prefix, dest_prefix] pairs.
+	 * Prefix-key rewrite calls, in order, as [source_prefix, dest_prefix, staging_prefix] triples.
 	 *
-	 * @var array<int, array{0: string, 1: string}>
+	 * @var array<int, array{0: string, 1: string, 2: string}>
 	 */
 	private array $rewrite_calls = array();
 
 	/**
 	 * Record a prefix-key rewrite call so a test can assert it happened.
 	 *
-	 * @param string $source_prefix The prefix recorded in the archive.
-	 * @param string $dest_prefix   The destination site's prefix.
+	 * @param string $source_prefix  The prefix recorded in the archive.
+	 * @param string $dest_prefix    The destination site's prefix.
+	 * @param string $staging_prefix Physical prefix on the tables being rewritten, or ''.
 	 * @return void
 	 */
-	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void {
-		$this->rewrite_calls[] = array( $source_prefix, $dest_prefix );
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix, string $staging_prefix = '' ): void {
+		$this->rewrite_calls[] = array( $source_prefix, $dest_prefix, $staging_prefix );
 	}
 
 	/**
 	 * Return the recorded prefix-key rewrite calls, in order.
 	 *
-	 * @return array<int, array{0: string, 1: string}> Each entry is [source_prefix, dest_prefix].
+	 * @return array<int, array{0: string, 1: string, 2: string}> Each entry is [source_prefix, dest_prefix, staging_prefix].
 	 */
 	public function rewrite_calls(): array {
 		return $this->rewrite_calls;
+	}
+
+	/**
+	 * Table names table_exists() reports as present.
+	 *
+	 * Registered tables (add_table) count as existing too, so scanner-focused
+	 * tests keep working; writer-focused tests can mark extra live tables here.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $existing_tables = array();
+
+	/**
+	 * Mark a table as existing for table_exists(), without registering scan data.
+	 *
+	 * @param string $name The table name to report as present.
+	 * @return void
+	 */
+	public function mark_table_existing( string $name ): void {
+		$this->existing_tables[ $name ] = true;
+	}
+
+	/**
+	 * Whether the table was registered via add_table() or mark_table_existing().
+	 *
+	 * @param string $table_name The exact table name to look for.
+	 * @return bool True when the table is known to the fake.
+	 */
+	public function table_exists( string $table_name ): bool {
+		return isset( $this->tables[ $table_name ] ) || isset( $this->existing_tables[ $table_name ] );
+	}
+
+	/**
+	 * List known tables (registered or marked existing) beginning with the prefix.
+	 *
+	 * @param string $prefix The literal name prefix to match; must not be empty.
+	 * @return string[] Matching table names in alphabetical order.
+	 * @throws RuntimeException If $prefix is empty, mirroring WpdbAdapter.
+	 */
+	public function list_tables_by_prefix( string $prefix ): array {
+		if ( '' === $prefix ) {
+			throw new RuntimeException( 'FakeDbAdapter::list_tables_by_prefix: prefix must not be empty.' );
+		}
+		$names = array();
+		foreach ( array_merge( array_keys( $this->tables ), array_keys( $this->existing_tables ) ) as $name ) {
+			if ( str_starts_with( $name, $prefix ) ) {
+				$names[ $name ] = true;
+			}
+		}
+		$names = array_keys( $names );
+		sort( $names, SORT_STRING );
+		return $names;
 	}
 }

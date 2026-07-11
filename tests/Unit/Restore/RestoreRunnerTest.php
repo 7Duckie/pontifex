@@ -261,7 +261,7 @@ final class RestoreRunnerTest extends TestCase {
 			)
 		);
 
-		$this->assertSame( array( array( 'wp_', 'xyz_' ) ), $db->rewrite_calls() );
+		$this->assertSame( array( array( 'wp_', 'xyz_', 'pontifexstg_' ) ), $db->rewrite_calls() );
 	}
 
 	/**
@@ -348,9 +348,10 @@ final class RestoreRunnerTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$executed = $db->executed_statements();
-		$this->assertCount( 2, $executed );
-		$this->assertSame( 'CREATE TABLE `wp_options` (id INT)', $executed[0] );
-		$this->assertSame( 'INSERT INTO `wp_options` VALUES (1)', $executed[1] );
+		$this->assertCount( 3, $executed, 'Two replayed statements plus the atomic cut-over RENAME.' );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_wp_options` (id INT)', $executed[0] );
+		$this->assertSame( 'INSERT INTO `pontifexstg_wp_options` VALUES (1)', $executed[1] );
+		$this->assertSame( 'RENAME TABLE `pontifexstg_wp_options` TO `wp_options`', $executed[2] );
 	}
 
 	/**
@@ -376,9 +377,10 @@ final class RestoreRunnerTest extends TestCase {
 		// Files on disk.
 		$this->assertTrue( file_exists( $this->fixture_root . '/a.txt' ) );
 		$this->assertTrue( file_exists( $this->fixture_root . '/b.txt' ) );
-		// db_chunk on adapter.
-		$this->assertCount( 1, $db->executed_statements() );
-		$this->assertSame( 'CREATE TABLE `wp_posts` (id INT)', $db->executed_statements()[0] );
+		// db_chunk on adapter: the staged replay plus the atomic cut-over RENAME.
+		$this->assertCount( 2, $db->executed_statements() );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_wp_posts` (id INT)', $db->executed_statements()[0] );
+		$this->assertSame( 'RENAME TABLE `pontifexstg_wp_posts` TO `wp_posts`', $db->executed_statements()[1] );
 	}
 
 	/**
@@ -946,5 +948,39 @@ final class RestoreRunnerTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * A restore that fails mid-replay must abort staging and never cut over.
+	 *
+	 * The atomicity contract (ADR 0009): a database failure during the replay
+	 * leaves the live tables untouched, because every statement ran against
+	 * staging tables — which are then dropped. No RENAME may appear in the
+	 * executed statements, and the failure propagates to the caller.
+	 *
+	 * @return void
+	 */
+	public function test_failed_restore_aborts_staging_and_never_renames(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array(
+			self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ),
+			self::db_chunk_plan( 'wp_posts', 1, "CREATE TABLE `wp_posts` (id INT);\n" ),
+		);
+		// The first chunk replays; the second chunk's statement fails.
+		$db->fail_after_executes( 1, 'simulated mid-replay failure' );
+
+		try {
+			$runner->restore( self::build_archive_stream( $plans ) );
+			$this->fail( 'restore() should propagate the mid-replay failure.' );
+		} catch ( RuntimeException $failure ) {
+			$this->assertSame( 'simulated mid-replay failure', $failure->getMessage() );
+		}
+
+		$executed = $db->executed_statements();
+		foreach ( $executed as $statement ) {
+			$this->assertStringNotContainsString( 'RENAME TABLE', $statement, 'A failed restore must never reach the cut-over.' );
+		}
+		$this->assertContains( 'DROP TABLE IF EXISTS `pontifexstg_wp_options`', $executed, 'The staged table must be dropped by the abort.' );
 	}
 }
