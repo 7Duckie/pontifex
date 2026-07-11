@@ -68,7 +68,7 @@ jobs:
           tools: composer:v2
 
       - name: Cache Composer downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.composer/cache
           key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
@@ -144,7 +144,7 @@ jobs:
           tools: composer:v2
 
       - name: Cache Composer downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.composer/cache
           key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
