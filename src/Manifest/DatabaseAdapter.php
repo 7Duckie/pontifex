@@ -116,10 +116,49 @@ interface DatabaseAdapter {
 	 * it is bounded and never touches serialised data. Implementations must escape
 	 * both prefixes — the source prefix comes from the archive and is untrusted.
 	 *
-	 * @param string $source_prefix The prefix recorded in the archive (the rows' current prefix).
-	 * @param string $dest_prefix   The destination site's prefix (the rows' target prefix).
+	 * During a staging-table restore (ADR 0009) the replayed tables carry a
+	 * physical staging prefix on top of the destination prefix until the atomic
+	 * cut-over; $staging_prefix names that extra prefix so the rewrite targets
+	 * the staged copies, not the still-live tables.
+	 *
+	 * @param string $source_prefix  The prefix recorded in the archive (the rows' current prefix).
+	 * @param string $dest_prefix    The destination site's prefix (the rows' target prefix).
+	 * @param string $staging_prefix Optional. A physical prefix currently prepended to the tables being rewritten; default '' (rewrite the live tables).
 	 * @return void
 	 * @throws RuntimeException If a rewrite statement fails to execute.
 	 */
-	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void;
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix, string $staging_prefix = '' ): void;
+
+	/**
+	 * Whether a table with exactly this name exists in the database.
+	 *
+	 * Used by the staging-table restore (ADR 0009) to decide, per table, whether
+	 * the atomic cut-over must move a live table aside (`T → old, staged → T`)
+	 * or simply install a table new to the destination (`staged → T`).
+	 * Implementations must match the name literally (escaping any pattern
+	 * characters), and should report "does not exist" on a query error: a wrong
+	 * "exists" answer merely adds a harmless move-aside, while the cut-over
+	 * RENAME itself stays the atomic arbiter — if the answer was wrong in the
+	 * dangerous direction the RENAME fails as a whole and no changes are made.
+	 *
+	 * @param string $table_name The exact table name to look for.
+	 * @return bool True when the table exists.
+	 */
+	public function table_exists( string $table_name ): bool;
+
+	/**
+	 * List every table whose name begins with the given prefix.
+	 *
+	 * Used by the staging-table restore (ADR 0009) to sweep leftover
+	 * `pontifexstg_*` / `pontifexold_*` tables a crashed earlier run may have
+	 * abandoned. Unlike {@see self::list_tables()}, the prefix is the caller's,
+	 * not the WordPress prefix, and an empty result is an ordinary answer, not
+	 * a failure. Implementations should return an empty list on a query error —
+	 * the sweep is best-effort housekeeping, never a gate.
+	 *
+	 * @param string $prefix The literal name prefix to match; must not be empty.
+	 * @return string[] Matching table names in alphabetical order; empty when none match.
+	 * @throws RuntimeException If $prefix is empty (a full-database listing is never intended).
+	 */
+	public function list_tables_by_prefix( string $prefix ): array;
 }

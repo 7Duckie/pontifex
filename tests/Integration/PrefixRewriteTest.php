@@ -39,6 +39,8 @@ final class PrefixRewriteTest extends TestCase {
 		'srcpfx_usermeta',
 		'dstpfx_options',
 		'dstpfx_usermeta',
+		'pontifexstg_dstpfx_options',
+		'pontifexstg_dstpfx_usermeta',
 	);
 
 	/**
@@ -91,14 +93,22 @@ final class PrefixRewriteTest extends TestCase {
 			. "INSERT INTO `srcpfx_usermeta` (`umeta_id`, `user_id`, `meta_key`, `meta_value`) VALUES (1, 1, 'srcpfx_capabilities', 'a:0:{}'), (2, 1, 'srcpfx_user_level', '10'), (3, 1, 'unrelated_key', 'keep'), (4, 1, 'srcpfxZcollide', 'keep');\n";
 
 		$writer = new DatabaseWriter( new WpdbAdapter( $wpdb ), 'srcpfx_', 'dstpfx_' );
+		$writer->begin_staging();
 		$writer->write_entry( self::db_chunk( 'srcpfx_options', 3, $options_sql ) );
 		$writer->write_entry( self::db_chunk( 'srcpfx_usermeta', 3, $usermeta_sql ) );
 		$writer->finalise_prefix_rewrite();
+
+		// Until the cut-over, the replay lives only in staging tables (ADR 0009).
+		$this->assertFalse( $this->table_exists( 'dstpfx_options' ), 'Before the cut-over the live name must not exist.' );
+		$this->assertTrue( $this->table_exists( 'pontifexstg_dstpfx_options' ), 'The replay must land in the staging table.' );
+
+		$writer->commit_staged_tables();
 
 		// The tables were created under the destination prefix, not the source one.
 		$this->assertTrue( $this->table_exists( 'dstpfx_options' ), 'The options table should exist under the destination prefix.' );
 		$this->assertTrue( $this->table_exists( 'dstpfx_usermeta' ), 'The usermeta table should exist under the destination prefix.' );
 		$this->assertFalse( $this->table_exists( 'srcpfx_options' ), 'No table should be left under the source prefix.' );
+		$this->assertFalse( $this->table_exists( 'pontifexstg_dstpfx_options' ), 'No staging table should survive the cut-over.' );
 
 		// options.option_name: the anchored user_roles key was rewritten; siteurl was not.
 		$this->assertSame( 1, $this->option_name_count( 'dstpfx_user_roles' ), 'user_roles must carry the destination prefix.' );

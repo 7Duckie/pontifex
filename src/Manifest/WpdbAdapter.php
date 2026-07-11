@@ -224,12 +224,18 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * with `esc_like()` on the LIKE pattern — because the source prefix comes from the
 	 * archive and is untrusted. A no-op when the prefixes are equal.
 	 *
-	 * @param string $source_prefix The prefix recorded in the archive.
-	 * @param string $dest_prefix   The destination site's prefix.
+	 * When $staging_prefix is non-empty the UPDATEs target the physically-staged
+	 * copies (`{staging_prefix}{dest_prefix}options` / `…usermeta`) a
+	 * staging-table restore builds before its atomic cut-over (ADR 0009), so the
+	 * still-live tables are never written.
+	 *
+	 * @param string $source_prefix  The prefix recorded in the archive.
+	 * @param string $dest_prefix    The destination site's prefix.
+	 * @param string $staging_prefix Optional. A physical prefix currently prepended to the tables being rewritten; default '' (rewrite the live tables).
 	 * @return void
 	 * @throws RuntimeException If a rewrite statement fails to execute.
 	 */
-	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix ): void {
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix, string $staging_prefix = '' ): void {
 		if ( $source_prefix === $dest_prefix ) {
 			return;
 		}
@@ -237,7 +243,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		// The single prefix-embedded option_name in the options table.
 		$options_sql = $this->wpdb->prepare(
 			'UPDATE %i SET option_name = %s WHERE option_name = %s',
-			$dest_prefix . 'options',
+			$staging_prefix . $dest_prefix . 'options',
 			$dest_prefix . 'user_roles',
 			$source_prefix . 'user_roles'
 		);
@@ -249,12 +255,61 @@ final class WpdbAdapter implements DatabaseAdapter {
 		$like         = $this->wpdb->esc_like( $source_prefix ) . '%';
 		$usermeta_sql = $this->wpdb->prepare(
 			'UPDATE %i SET meta_key = CONCAT(%s, SUBSTRING(meta_key, %d)) WHERE meta_key LIKE %s',
-			$dest_prefix . 'usermeta',
+			$staging_prefix . $dest_prefix . 'usermeta',
 			$dest_prefix,
 			strlen( $source_prefix ) + 1,
 			$like
 		);
 		$this->run_rewrite( (string) $usermeta_sql, 'usermeta.meta_key' );
+	}
+
+	/**
+	 * Whether a table with exactly this name exists in the database.
+	 *
+	 * SHOW TABLES LIKE with the name esc_like()-escaped, so underscores in the
+	 * name match literally rather than as LIKE wildcards. A query error reports
+	 * "does not exist" — the safe direction: the cut-over RENAME is the atomic
+	 * arbiter, and a missed move-aside makes the RENAME fail whole rather than
+	 * touch the live table (see {@see DatabaseAdapter::table_exists()}).
+	 *
+	 * @param string $table_name The exact table name to look for.
+	 * @return bool True when the table exists.
+	 */
+	public function table_exists( string $table_name ): bool {
+		$sql = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $this->wpdb->esc_like( $table_name ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a liveness probe for the restore cut-over has no caching benefit.
+		$found = $this->wpdb->get_var( $sql );
+		return null !== $found;
+	}
+
+	/**
+	 * List every table whose name begins with the given prefix.
+	 *
+	 * SHOW TABLES LIKE with the prefix esc_like()-escaped, so its underscores
+	 * match literally. Returns an empty list on a query error: this feeds the
+	 * best-effort sweep of leftover staging tables, where an empty answer means
+	 * "nothing to sweep", never a gate (a real `$wpdb` returns `[]` from
+	 * get_col() on failure, which is exactly the contract here).
+	 *
+	 * @param string $prefix The literal name prefix to match; must not be empty.
+	 * @return string[] Matching table names in alphabetical order; empty when none match.
+	 * @throws RuntimeException If $prefix is empty (a full-database listing is never intended).
+	 */
+	public function list_tables_by_prefix( string $prefix ): array {
+		if ( '' === $prefix ) {
+			throw new RuntimeException( 'WpdbAdapter::list_tables_by_prefix: prefix must not be empty.' );
+		}
+		$sql = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $this->wpdb->esc_like( $prefix ) . '%' );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; the leftover-table sweep reads live schema state, so caching does not apply.
+		$tables = $this->wpdb->get_col( $sql );
+		$names  = array();
+		foreach ( $tables as $table ) {
+			if ( is_string( $table ) && '' !== $table ) {
+				$names[] = $table;
+			}
+		}
+		sort( $names, SORT_STRING );
+		return $names;
 	}
 
 	/**
