@@ -298,6 +298,90 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A backup is refused when the named database lock is held elsewhere.
+	 *
+	 * The named lock is the primary single-runner guard: the database grants it
+	 * to exactly one connection, atomically, so two simultaneous create()
+	 * requests can never both pass — the check-then-set race the transient
+	 * guard alone cannot close. A request that failed to acquire must not
+	 * release the lock either, or it would free the running backup's lock.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_when_the_named_lock_is_held_elsewhere(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( false );
+		$context->shouldNotReceive( 'release_named_lock' );
+
+		$controller = new BackupController(
+			$this->environment_mock(),
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->create();
+			$this->fail( 'create() should refuse while the named lock is held elsewhere.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'A refused backup must write nothing.' );
+	}
+
+	/**
+	 * The named lock is handed back when the transient guard refuses a backup.
+	 *
+	 * The transient is the secondary guard, checked only while the named lock is
+	 * held. When it refuses — a crashed run's transient still inside its TTL —
+	 * the named lock just taken must be released again; under a persistent
+	 * database connection it would otherwise linger and block every later run.
+	 *
+	 * @return void
+	 */
+	public function test_create_hands_back_the_named_lock_when_the_transient_guard_refuses(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_backup_lock' === $key ? time() : false;
+			}
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once()->with( 'pontifex_backup_lock' );
+
+		$controller = new BackupController(
+			$this->environment_mock(),
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->create();
+			$this->fail( 'create() should refuse while the lock transient is set.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
 	 * Refuses a cancel request without the managing capability.
 	 *
 	 * @return void
@@ -635,6 +719,8 @@ final class BackupControllerTest extends TestCase {
 			}
 		);
 		$context->shouldReceive( 'save_option' );
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
 		return $context;
 	}
 

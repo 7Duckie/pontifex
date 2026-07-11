@@ -348,6 +348,8 @@ final class RestoreControllerTest extends TestCase {
 				}
 			}
 		);
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
 
 		$controller = new RestoreController(
 			$this->environment(),
@@ -678,6 +680,113 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * Refuses a restore when the named database lock is held elsewhere.
+	 *
+	 * The named lock is the primary single-runner guard: the database grants it
+	 * to exactly one connection, atomically, so two simultaneous restore
+	 * requests can never both pass — the check-then-set race the transient
+	 * guard alone cannot close. A request that failed to acquire must not
+	 * release the lock either, or it would free the running operation's lock.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_when_the_named_lock_is_held_elsewhere(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->justReturn( false );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_restore_lock' )->andReturn( false );
+		$context->shouldNotReceive( 'release_named_lock' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			$store,
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should refuse while the named lock is held elsewhere.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * The named lock is handed back when the transient guard refuses a restore.
+	 *
+	 * The transient is the secondary guard, checked only while the named lock is
+	 * held. When it refuses — a crashed run's transient still inside its TTL —
+	 * the named lock just taken must be released again; under a persistent
+	 * database connection it would otherwise linger and block every later run.
+	 *
+	 * @return void
+	 */
+	public function test_restore_hands_back_the_named_lock_when_the_transient_guard_refuses(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_restore_lock' === $key ? time() : false;
+			}
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_restore_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once()->with( 'pontifex_restore_lock' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			$store,
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should refuse while the lock transient is set.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
 	 * Reports byte progress against the archive size as the restore reads.
 	 *
 	 * @return void
@@ -835,6 +944,8 @@ final class RestoreControllerTest extends TestCase {
 				}
 			}
 		);
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
 
 		$controller = new RestoreController(
 			$this->environment(),
@@ -948,6 +1059,8 @@ final class RestoreControllerTest extends TestCase {
 		$context->shouldReceive( 'save_option' );
 		$context->shouldReceive( 'flush_cache' );
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
 		return $context;
 	}
 

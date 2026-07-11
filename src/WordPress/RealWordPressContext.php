@@ -238,4 +238,55 @@ final class RealWordPressContext implements WordPressContext {
 		}
 		return array_values( $classes );
 	}
+
+	/**
+	 * Acquire a site-scoped named database lock without blocking.
+	 *
+	 * The lock name is scoped server-side: DATABASE() and the table prefix
+	 * are folded into an MD5 hash, so the name is unique to this site and
+	 * always fits MySQL's 64-character lock-name limit regardless of how
+	 * long the database name or prefix is. The zero timeout means the call
+	 * never waits. Only the literal '1' result — "this connection now holds
+	 * the lock" — counts as acquired; '0' (held by another connection) and
+	 * NULL (query error) both report failure, so an error fails closed.
+	 *
+	 * The name expression must stay identical to release_named_lock()'s, or
+	 * a release would target a different lock than the acquire took.
+	 *
+	 * @param string $name The lock's logical name.
+	 * @return bool True if this connection now holds the lock; false if it is held elsewhere or the query failed.
+	 */
+	public function acquire_named_lock( string $name ): bool {
+		$wpdb = $this->wpdb_instance();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- The argument is a $wpdb->prepare() call; a lock acquisition is inherently uncacheable and has no higher-level WordPress API.
+		$result = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT GET_LOCK(CONCAT('pontifex_', MD5(CONCAT_WS('|', DATABASE(), %s))), 0)",
+				$wpdb->prefix . '|' . $name
+			)
+		);
+		return '1' === (string) $result;
+	}
+
+	/**
+	 * Release a named database lock previously acquired by this request.
+	 *
+	 * Computes the same site-scoped name as acquire_named_lock() and asks
+	 * the server to release it. Releasing a lock this connection does not
+	 * hold is harmless: RELEASE_LOCK() reports 0 or NULL and changes
+	 * nothing, so cleanup paths may call this unconditionally.
+	 *
+	 * @param string $name The lock's logical name, as passed to acquire_named_lock().
+	 * @return void
+	 */
+	public function release_named_lock( string $name ): void {
+		$wpdb = $this->wpdb_instance();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- The argument is a $wpdb->prepare() call; a lock release is inherently uncacheable and has no higher-level WordPress API.
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT RELEASE_LOCK(CONCAT('pontifex_', MD5(CONCAT_WS('|', DATABASE(), %s))))",
+				$wpdb->prefix . '|' . $name
+			)
+		);
+	}
 }
