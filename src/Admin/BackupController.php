@@ -66,9 +66,13 @@ final class BackupController {
 	/**
 	 * The transient key marking that a backup is currently running.
 	 *
-	 * A single-runner lock: create() refuses a second backup while this is set, so
-	 * two concurrent exports can never fight over the progress transient. Carries a
-	 * TTL so a crash that skips the shutdown handler still self-heals.
+	 * The secondary single-runner guard: the primary is an atomic named
+	 * database lock (this constant doubles as its logical name), and this
+	 * transient is checked only while that lock is held — see
+	 * {@see self::acquire_lock()}. create() refuses a second backup while
+	 * either guard is engaged, so two concurrent exports can never fight
+	 * over the progress transient. Carries a TTL so a crash that skips the
+	 * shutdown handler still self-heals.
 	 *
 	 * @var string
 	 */
@@ -709,12 +713,29 @@ final class BackupController {
 	}
 
 	/**
-	 * Acquire the single-runner backup lock, or report that it is already held.
+	 * Acquire the single-runner backup lock, or report that a backup is already running.
+	 *
+	 * Two independent guards, and both must pass. The primary is a named
+	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
+	 * server grants it atomically, so two simultaneous requests can never
+	 * both acquire — closing the check-then-set race a transient alone
+	 * cannot — and it vanishes with the connection if the request crashes.
+	 * The transient stays as a second, independent guard behind it: checked
+	 * only while the named lock is held, its old race is gone, and it still
+	 * refuses a run in the rare case a runner's named lock is silently lost
+	 * mid-operation (on old MySQL, other code taking its own named lock on
+	 * the same connection releases ours).
 	 *
 	 * @return bool True if the lock was acquired; false if a backup is already running.
 	 */
 	private function acquire_lock(): bool {
+		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
+			return false;
+		}
 		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
+			// A concurrent runner, or a crashed run's transient still inside its
+			// TTL: refuse, and hand back the named lock just taken.
+			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 			return false;
 		}
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
@@ -729,6 +750,7 @@ final class BackupController {
 	 */
 	private function release_lock(): void {
 		delete_transient( self::LOCK_TRANSIENT );
+		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 		$this->lock_held = false;
 	}
 
