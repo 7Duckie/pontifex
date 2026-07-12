@@ -86,6 +86,7 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @return string[]
 	 */
 	public function list_tables(): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
@@ -99,6 +100,7 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the table was not registered.
 	 */
 	public function primary_key( string $table ): ?string {
+		$this->maybe_fail( __FUNCTION__ );
 		$this->require_table( $table );
 		return $this->tables[ $table ]['primary_key'];
 	}
@@ -113,6 +115,7 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the table was not registered.
 	 */
 	public function read_rows( string $table, int $offset, int $limit ): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$this->require_table( $table );
 		$this->reads[] = array(
 			'table'  => $table,
@@ -177,6 +180,44 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Test-double diagnostic; $table and $primary_key are test-controlled identifiers; exception path, not HTML output.
 			sprintf( 'FakeMigrationDatabase: no row in "%s" has %s = %s.', $table, $primary_key, (string) $primary_key_value )
 		);
+	}
+
+	/**
+	 * Failure messages queued per method name; consumed on the next call.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $queued_failures = array();
+
+	/**
+	 * Queue the next call to the named method to throw a RuntimeException.
+	 *
+	 * Mirrors the real adapter's contract — every read throws on a $wpdb
+	 * failure — so orchestration can be unit-tested against a failing
+	 * database without WordPress mocking.
+	 *
+	 * @param string $method  The method name, e.g. "row_count".
+	 * @param string $message The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_next( string $method, string $message ): void {
+		$this->queued_failures[ $method ] = $message;
+	}
+
+	/**
+	 * Throw the queued failure for the method, if one is armed.
+	 *
+	 * @param string $method The method name being invoked.
+	 * @return void
+	 * @throws RuntimeException When a failure was queued for the method.
+	 */
+	private function maybe_fail( string $method ): void {
+		if ( isset( $this->queued_failures[ $method ] ) ) {
+			$message = $this->queued_failures[ $method ];
+			unset( $this->queued_failures[ $method ] );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $message );
+		}
 	}
 
 	/**

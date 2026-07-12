@@ -205,6 +205,61 @@ final class DatabaseRewriterTest extends TestCase {
 	}
 
 	/**
+	 * A failed row read aborts the pass loudly — never a silently half-rewritten table.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_row_read_is_not_swallowed(): void {
+		$db = new FakeMigrationDatabase();
+		$db->add_table(
+			'wp_options',
+			'option_id',
+			array(
+				array(
+					'option_id'    => '1',
+					'option_value' => 'https://old.test',
+				),
+			)
+		);
+		$db->fail_next( 'read_rows', 'simulated read failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated read failure' );
+
+		( new DatabaseRewriter( $db, new SerialisedReplacer() ) )->rewrite( 'old.test', 'new.example' );
+	}
+
+	/**
+	 * A failed key inspection aborts, and is never conflated with "no key, skip".
+	 *
+	 * The adapter returns null for a table with no usable key (the walk skips
+	 * it, reported) and THROWS when the keys cannot be inspected at all; the
+	 * pass must preserve that distinction — treating an inspection failure as
+	 * a skip would silently leave a whole table unmigrated.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_key_inspection_aborts_rather_than_skips(): void {
+		$db = new FakeMigrationDatabase();
+		$db->add_table(
+			'wp_options',
+			'option_id',
+			array(
+				array(
+					'option_id'    => '1',
+					'option_value' => 'https://old.test',
+				),
+			)
+		);
+		$db->fail_next( 'primary_key', 'simulated key-inspection failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated key-inspection failure' );
+
+		( new DatabaseRewriter( $db, new SerialisedReplacer() ) )->rewrite( 'old.test', 'new.example' );
+	}
+
+	/**
 	 * A wide-row table is read a few rows at a time; narrow tables keep the ceiling.
 	 *
 	 * A batch is held in memory whole, so its size must be bounded by bytes:

@@ -50,6 +50,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return string[]
 	 */
 	public function list_tables(): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
@@ -62,6 +63,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return int
 	 */
 	public function row_count( string $table_name ): int {
+		$this->maybe_fail( __FUNCTION__ );
 		return $this->tables[ $table_name ]['row_count'] ?? 0;
 	}
 
@@ -72,6 +74,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return string
 	 */
 	public function dump_table_schema( string $table_name ): string {
+		$this->maybe_fail( __FUNCTION__ );
 		return $this->tables[ $table_name ]['schema'] ?? '';
 	}
 
@@ -90,6 +93,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return string SQL bytes (empty when the range yields no rows).
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
+		$this->maybe_fail( __FUNCTION__ );
 		$row_count = $this->row_count( $table_name );
 		$end       = min( $offset + $limit, $row_count );
 		if ( $offset >= $end ) {
@@ -280,6 +284,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return int Average bytes per row; 0 when unknown.
 	 */
 	public function average_row_bytes( string $table_name ): int {
+		$this->maybe_fail( __FUNCTION__ );
 		return $this->average_row_bytes[ $table_name ] ?? 0;
 	}
 
@@ -316,6 +321,44 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 */
 	public function charset_calls(): array {
 		return $this->charset_calls;
+	}
+
+	/**
+	 * Failure messages queued per method name; consumed on the next call.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $queued_failures = array();
+
+	/**
+	 * Queue the next call to the named method to throw a RuntimeException.
+	 *
+	 * Mirrors the real adapter's contract — every read throws on a $wpdb
+	 * failure — so orchestration can be unit-tested against a failing
+	 * database without WordPress mocking.
+	 *
+	 * @param string $method  The method name, e.g. "row_count".
+	 * @param string $message The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_next( string $method, string $message ): void {
+		$this->queued_failures[ $method ] = $message;
+	}
+
+	/**
+	 * Throw the queued failure for the method, if one is armed.
+	 *
+	 * @param string $method The method name being invoked.
+	 * @return void
+	 * @throws RuntimeException When a failure was queued for the method.
+	 */
+	private function maybe_fail( string $method ): void {
+		if ( isset( $this->queued_failures[ $method ] ) ) {
+			$message = $this->queued_failures[ $method ];
+			unset( $this->queued_failures[ $method ] );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $message );
+		}
 	}
 
 	/**
