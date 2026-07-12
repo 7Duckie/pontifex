@@ -439,6 +439,147 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * Row dumps must be ordered by the primary key so pagination is stable.
+	 *
+	 * Without an ORDER BY, MySQL guarantees no row order, so consecutive OFFSET
+	 * windows can overlap or leave gaps — the root of a real live-site incident.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_orders_by_the_primary_key(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d OFFSET %d', $prepared, 'The row dump must carry an ORDER BY over the primary key.' );
+	}
+
+	/**
+	 * A composite primary key must order by every key column, in key order.
+	 *
+	 * SHOW KEYS reports one row per key column with its Seq_in_index; the clause
+	 * must follow that sequence (e.g. term_relationships orders by object_id,
+	 * then term_taxonomy_id), not the arrival order of the rows.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_orders_composite_keys_in_key_order(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					// Deliberately out of key order, as arrival order is not guaranteed.
+					return array(
+						array(
+							'Column_name'  => 'term_taxonomy_id',
+							'Seq_in_index' => '2',
+						),
+						array(
+							'Column_name'  => 'object_id',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_term_relationships', 0, 10 );
+
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `object_id`, `term_taxonomy_id` LIMIT %d OFFSET %d', $prepared );
+	}
+
+	/**
+	 * A table without a primary key must order by every column.
+	 *
+	 * The only deterministic sort left; such tables are rare and usually small.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_without_a_primary_key_orders_by_all_columns(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturn( array() );
+		$wpdb->method( 'get_col' )->willReturn( array( 'colour', 'shape' ) );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_keyless', 0, 10 );
+
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `colour`, `shape` LIMIT %d OFFSET %d', $prepared );
+	}
+
+	/**
+	 * The ordering columns must be resolved once per table, not once per chunk.
+	 *
+	 * A large table dumps as many chunks; the SHOW KEYS schema read is cached so
+	 * every chunk after the first pays nothing for the stable order.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_caches_the_ordering_columns_per_table(): void {
+		$wpdb      = $this->mock_wpdb();
+		$key_reads = 0;
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ): string {
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ) use ( &$key_reads ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					++$key_reads;
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		$adapter = new WpdbAdapter( $wpdb );
+		$adapter->dump_table_rows( 'wp_posts', 0, 10 );
+		$adapter->dump_table_rows( 'wp_posts', 10, 10 );
+		$adapter->dump_table_rows( 'wp_posts', 20, 10 );
+
+		$this->assertSame( 1, $key_reads, 'SHOW KEYS must run once per table, not once per chunk.' );
+	}
+
+	/**
 	 * The average row width must come from SHOW TABLE STATUS's Avg_row_length.
 	 *
 	 * @return void
