@@ -172,7 +172,7 @@ final class EntryReader {
 	 * @param int|null      $memory_budget     Optional memory-derived per-entry budget. Applies only to entries the reader must buffer whole (encrypted entries and db_chunks); a plain file entry streams through chunk-sized memory, so no memory refusal applies to it. Null enforces no memory budget.
 	 * @return EntryReadResult The parsed header and decoded payload (string- or stream-shaped).
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, or the decoded payload exceeds a budget.
+	 * @throws RuntimeException         If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, the decoded payload exceeds a budget, or a file entry's decoded byte count differs from its declared size.
 	 */
 	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES, ?callable $on_bytes = null, ?int $memory_budget = null ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
@@ -317,6 +317,7 @@ final class EntryReader {
 				$manifest_entry,
 				self::tighter_limit( $max_decoded_bytes, $memory_budget )
 			);
+			$this->refuse_size_mismatch( $header, strlen( $decoded_payload ), $manifest_entry );
 			return new EntryReadResult( $header, $decoded_payload );
 		}
 
@@ -324,6 +325,7 @@ final class EntryReader {
 			$decoded_payload = $this->decode_spool_to_string( $compression_codec_id, $spool, self::tighter_limit( $max_decoded_bytes, $memory_budget ) );
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 			fclose( $spool );
+			$this->refuse_size_mismatch( $header, strlen( $decoded_payload ), $manifest_entry );
 			return new EntryReadResult( $header, $decoded_payload );
 		}
 
@@ -340,9 +342,54 @@ final class EntryReader {
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 		fclose( $spool );
+		try {
+			$this->refuse_size_mismatch( $header, $decoded_bytes, $manifest_entry );
+		} catch ( RuntimeException $e ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
+			fclose( $output );
+			throw $e;
+		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a php://temp spool, not a filesystem path.
 		rewind( $output );
 		return EntryReadResult::for_stream( $header, $output, $decoded_bytes );
+	}
+
+	/**
+	 * Refuse a file entry whose decoded byte count contradicts its declared size.
+	 *
+	 * The second guard behind the writer's own write-time size correction
+	 * (defence in depth): a conforming writer always records the byte count it
+	 * actually captured, so a mismatch here means the archive was produced by a
+	 * writer that hit the scan-to-write race without correcting for it — the
+	 * file changed while it was being backed up and the archive holds different
+	 * content than it declares. Restoring such an entry would silently write a
+	 * truncated or inflated file, so the reader fails closed instead. Applies
+	 * to file entries only: a db_chunk's byte_count is a sizing estimate, and
+	 * directories and symlinks carry no payload.
+	 *
+	 * @param EntryHeader   $header         The parsed entry header.
+	 * @param int           $decoded_size   The byte count the payload actually decoded to.
+	 * @param ManifestEntry $manifest_entry The entry being read, for diagnostic context.
+	 * @return void
+	 * @throws RuntimeException If a file entry's decoded byte count differs from its declared size.
+	 */
+	private function refuse_size_mismatch( EntryHeader $header, int $decoded_size, ManifestEntry $manifest_entry ): void {
+		if ( ! $header->is_file() || null === $header->size() ) {
+			return;
+		}
+		if ( $header->size() === $decoded_size ) {
+			return;
+		}
+		throw new RuntimeException(
+			sprintf(
+				'EntryReader: entry %d ("%s") declares %d bytes but its payload decoded to %d. The file changed while it was being backed up and this archive does not hold the content it claims; refusing to restore it silently wrong.',
+				(int) $manifest_entry->index(),
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->path() is reported verbatim for diagnostic context; exception path, not HTML output.
+				(string) $header->path(),
+				(int) $header->size(),
+				(int) $decoded_size
+			)
+		);
 	}
 
 	/**

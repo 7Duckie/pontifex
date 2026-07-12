@@ -101,6 +101,16 @@ What follows from this choice — positive, negative, and neutral?
   Branch promotion model: feature -> dev -> staging -> main, tiered gates.
 - [ADR 0008](./0008-content-only-backup-scope.md) —
   Backups are content-only by default (wp-content + database); whole-site opt-in.
+- [ADR 0009](./0009-atomic-staging-table-restore.md) —
+  Restore replays into staging tables and cuts over with one atomic RENAME.
+- [ADR 0010](./0010-streaming-restore-read-path.md) —
+  Restore reads stream what can stream; verify before decode.
+- [ADR 0011](./0011-consistent-snapshot-export.md) —
+  Exports dump inside a consistent snapshot on a dedicated connection.
+- [ADR 0012](./0012-signature-enforcement-policy.md) —
+  A supplied or pinned trusted public key makes the signature mandatory.
+- [ADR 0013](./0013-truthful-capture-of-files-changing-mid-backup.md) —
+  Files changing mid-backup: record what was read, warn, refuse the lie on restore.
 
 ## Further reading
 

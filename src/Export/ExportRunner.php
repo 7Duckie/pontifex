@@ -149,7 +149,7 @@ final class ExportRunner {
 	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
-	 * @return ExportResult The bytes written and the entry count.
+	 * @return ExportResult The bytes written, the entry count, and any files that changed while being read.
 	 * @throws Throwable If the temp destination cannot be opened (RuntimeException), writing an entry fails (whatever the archive writer raised, re-thrown), or the completed archive cannot be moved into place (RuntimeException). In every failure the temp file is discarded and any prior archive at the output path is left untouched.
 	 */
 	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
@@ -169,6 +169,20 @@ final class ExportRunner {
 		$temp_path   = $this->temp_destination_path( $output_path );
 		$destination = $this->open_destination( $temp_path );
 
+		// Collect the files the archive writer reports as changed between the scan
+		// and the write (shrunk or grown mid-export). Each entry was written with
+		// the byte count actually captured, so the archive itself is truthful; the
+		// list rides the result so callers can warn the user which files were
+		// moving while the backup ran.
+		$changed_files   = array();
+		$on_file_changed = static function ( string $path, int $declared_size, int $actual_size ) use ( &$changed_files ): void {
+			$changed_files[] = array(
+				'path'          => $path,
+				'declared_size' => $declared_size,
+				'actual_size'   => $actual_size,
+			);
+		};
+
 		try {
 			$bytes_written = self::build_archive_writer()->write_archive(
 				$provenance,
@@ -177,7 +191,8 @@ final class ExportRunner {
 				$on_entry,
 				$options->encryption(),
 				$options->signing(),
-				$on_bytes
+				$on_bytes,
+				$on_file_changed
 			);
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the completed temp archive before moving it into place; not a WP_Filesystem operation.
 			fclose( $destination );
@@ -195,7 +210,7 @@ final class ExportRunner {
 		// complete one.
 		$this->move_into_place( $temp_path, $output_path );
 
-		return new ExportResult( $bytes_written, $entry_count );
+		return new ExportResult( $bytes_written, $entry_count, $changed_files );
 	}
 
 	/**

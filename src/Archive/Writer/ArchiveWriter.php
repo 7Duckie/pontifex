@@ -128,13 +128,14 @@ final class ArchiveWriter {
 	 * @param EncryptionContext|null $encryption       Encryption inputs (cipher, key, salt); when supplied the header's encrypted flag is set, every entry is encrypted with a per-entry nonce, and the salt is written into the footer; null produces an unencrypted archive.
 	 * @param SigningContext|null    $signing          Signing inputs (signer, secret key, key id); when supplied the header's signed flag is set and a 100-byte Ed25519 signature block over the SHA-256 of every byte through the footer is appended. Requires a seekable, readable destination. null produces an unsigned archive.
 	 * @param callable|null          $on_bytes_read    Optional byte-progress callback forwarded to each entry's codec, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry as well as between entries.
+	 * @param callable|null          $on_file_changed  Optional callback run when a file entry's source yielded a different byte count than its header declared (the file changed between the caller's scan and the write), called as `( string $path, int $declared_size, int $actual_size ): void`. The entry is written with the actual captured size; this callback lets the caller warn the user.
 	 * @return int Total bytes written to the destination during this call.
 	 * @throws InvalidArgumentException If $destination is not a stream resource, any element
 	 *                                  of $entry_plans is not an EntryPlan, or signing was requested
 	 *                                  but the destination is not seekable and readable.
 	 * @throws RuntimeException         If any block fails to serialise, any write fails, a nonce cannot be generated, or signing fails.
 	 */
-	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null ): int {
+	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null, ?callable $on_file_changed = null ): int {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
@@ -240,6 +241,13 @@ final class ArchiveWriter {
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the per-entry payload source opened just above; bounds open handles to one regardless of entry count.
 					fclose( $source );
 				}
+			}
+
+			// Report a file whose content changed between the caller's scan and this
+			// write, so the caller can warn the user; the entry itself was already
+			// written with the actual captured size by EntryWriter.
+			if ( $result->size_was_corrected() && null !== $on_file_changed ) {
+				$on_file_changed( (string) $plan->header()->path(), (int) $result->declared_size(), (int) $result->actual_size() );
 			}
 
 			$bytes_written     += $result->total_entry_length();
