@@ -38,6 +38,10 @@ Thumbs.db
 *.sql
 *.wpmig
 *.wpmig.snapshot
+# The one deliberate exception: the committed conformance golden archive
+# (Appendix A of docs/archive-format.md) — a tiny canonical fixture, never a
+# real backup.
+!tests/Fixtures/*.wpmig
 
 # Logs
 *.log

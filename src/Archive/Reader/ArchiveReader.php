@@ -331,11 +331,28 @@ final class ArchiveReader {
 		}
 
 		try {
-			return Header::from_bytes( $bytes );
+			$header = Header::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
 			throw new RuntimeException( 'ArchiveReader: archive header is malformed or not a Pontifex archive.', 0, $e );
 		}
+
+		// The format's compatibility contract (archive-format.md section 13): a
+		// higher MAJOR version means structural changes this reader cannot
+		// interpret, so it must refuse rather than misread — a minor bump stays
+		// readable.
+		if ( $header->major() > Header::FORMAT_MAJOR_V1 ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: this archive is format version %d.%d, but this reader supports major version %d at most. Update Pontifex to restore it.',
+					(int) $header->major(),
+					(int) $header->minor(),
+					(int) Header::FORMAT_MAJOR_V1
+				)
+			);
+		}
+
+		return $header;
 	}
 
 	/**
