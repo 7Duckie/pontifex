@@ -228,12 +228,12 @@ JPEG, PNG, MP4, and similar media are already compressed. Re-running them throug
 
 A reader processing an untrusted archive must enforce limits:
 
-- **Maximum entry count.** A manifest claiming a billion entries is malicious or broken. Reject anything above a sensible threshold — we suggest 10 million as an upper bound for v1 readers.
-- **Maximum compressed entry size.** A 10 GB compressed entry is suspicious in a WordPress context. We suggest 4 GB as the upper bound for v1 readers.
-- **Maximum decompression ratio.** Zip-bomb-style compression can decompress to far more than the source data. We suggest a 1000:1 ratio cap, with the reader aborting decompression once this is exceeded.
-- **Maximum manifest size.** The manifest is JSON; even a large archive should produce a manifest of at most a few MB. Reject manifests over 100 MB.
+- **Maximum entry count.** A manifest claiming a billion entries is malicious or broken. Reject anything above a sensible threshold.
+- **Maximum decoded entry size.** A reader should cap how many bytes a single entry may decode to; the PHP reference reader defaults to 2 GiB and lets orchestrating callers pass a tighter, archive-derived budget.
+- **Maximum decompression ratio.** Zip-bomb-style compression can decompress to far more than the source data; the reader must abort decoding once its budget is exceeded rather than trusting declared sizes.
+- **Maximum manifest size.** The manifest is JSON; even a large archive produces a manifest of a few MB. The PHP reference reader rejects manifests over 16 MiB (roughly 50,000 entries with headroom); an implementation expecting larger sites may raise this, but must cap it at something.
 
-These are recommendations, not requirements. Implementers may set tighter or looser limits based on what their environment can safely handle.
+These are recommendations, not requirements — except that having *no* limit is non-conforming for a reader of untrusted archives. The PHP reference implementation's shipped values are the tested baseline. Implementers may set tighter or looser limits based on what their environment can safely handle.
 
 ### 7.2 Verification order is mandatory
 
