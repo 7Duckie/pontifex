@@ -133,7 +133,10 @@ final class EntryReaderTest extends TestCase {
 		$this->assertInstanceOf( EntryReadResult::class, $result );
 		$this->assertSame( EntryHeader::KIND_FILE, $result->header()->kind() );
 		$this->assertSame( 'test.txt', $result->header()->path() );
-		$this->assertSame( $contents, $result->payload() );
+		// A plain file entry's payload arrives as a stream (ADR 0010).
+		$this->assertTrue( $result->is_streamed() );
+		$this->assertSame( strlen( $contents ), $result->decoded_size() );
+		$this->assertSame( $contents, stream_get_contents( $result->payload_stream() ) );
 	}
 
 	/**
@@ -148,7 +151,9 @@ final class EntryReaderTest extends TestCase {
 
 		$result = self::make_reader()->read_entry( $fixture[0], $fixture[1] );
 
-		$this->assertSame( $contents, $result->payload() );
+		$this->assertTrue( $result->is_streamed() );
+		$this->assertSame( $contents, stream_get_contents( $result->payload_stream() ) );
+		$this->assertSame( strlen( $contents ), $result->decoded_size(), 'decoded_size() must report the decompressed byte count.' );
 		$this->assertSame( 'compressible.txt', $result->header()->path() );
 	}
 
