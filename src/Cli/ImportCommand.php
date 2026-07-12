@@ -92,9 +92,14 @@ use Pontifex\WordPress\WordPressContext;
  *
  * [--public-key=<path>]
  * : Verify the archive's Ed25519 signature against this public-key file (from
- *   `wp pontifex keygen`) BEFORE restoring. A signed archive whose signature
- *   fails is refused and nothing is written. Without it, a signed archive is
- *   restored with a warning that its signature was not verified.
+ *   `wp pontifex keygen`) BEFORE restoring. Supplying a trusted key makes the
+ *   signature MANDATORY (ADR 0012): an archive that is unsigned — including
+ *   one whose signature was stripped — is refused, and a signature that fails
+ *   is refused; nothing is written either way. Define PONTIFEX_PUBLIC_KEY (the
+ *   key file's path) in wp-config.php to pin the key once and enforce this on
+ *   every run; an explicit --public-key overrides the pin. Without any key,
+ *   a signed archive is restored with a warning that its signature was not
+ *   verified — plain integrity hashes detect corruption, not tampering.
  *
  * [--allow-unsafe-symlinks]
  * : Allow restoring symlink entries whose target points outside the site root
@@ -875,22 +880,32 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Resolve the --public-key option to a loaded public key, or null when absent.
+	 * Resolve the trusted public key from the flag or the site's pin, or null when neither exists.
 	 *
-	 * A bad or unreadable key file is the operator's mistake, so it exits via
-	 * WP_CLI::error rather than being treated as a restore failure.
+	 * The --public-key flag names a key for this run; when it is absent, the
+	 * PONTIFEX_PUBLIC_KEY constant (defined once in wp-config.php) supplies the
+	 * site's pinned key, so signature enforcement does not rest on a human
+	 * remembering a flag every time (ADR 0012). An explicit flag overrides the
+	 * pin. A bad or unreadable key file is the operator's mistake, so it exits
+	 * via WP_CLI::error rather than being treated as a restore failure.
 	 *
 	 * @param array<string, string|bool> $associative_args The CLI's associative args.
-	 * @return string|null The 32-byte public key, or null when --public-key was not supplied.
+	 * @return string|null The 32-byte public key, or null when no flag was supplied and no pin is defined.
 	 */
 	private function resolve_public_key( array $associative_args ): ?string {
-		if ( ! isset( $associative_args['public-key'] ) || '' === $associative_args['public-key'] || true === $associative_args['public-key'] ) {
+		$path = null;
+		if ( isset( $associative_args['public-key'] ) && '' !== $associative_args['public-key'] && true !== $associative_args['public-key'] ) {
+			$path = (string) $associative_args['public-key'];
+		} elseif ( $this->environment->is_constant_defined( 'PONTIFEX_PUBLIC_KEY' ) ) {
+			$path = (string) $this->environment->constant_value( 'PONTIFEX_PUBLIC_KEY' );
+		}
+		if ( null === $path || '' === $path ) {
 			return null;
 		}
 
 		$key = '';
 		try {
-			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
+			$key = SigningKeys::load_public_key( $path );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
@@ -901,14 +916,17 @@ final class ImportCommand {
 	/**
 	 * Verify the archive's signature before restoring, refusing a bad one.
 	 *
-	 * Runs before any write. Unsigned archive: nothing to check (a stray
-	 * --public-key earns a warning). Signed with no key: warn that the signature
-	 * is unverified and proceed. Signed with a key: a failed signature aborts the
-	 * import via WP_CLI::error so nothing is written; a good one logs that it
-	 * verified.
+	 * Runs before any write. A supplied or pinned trusted key makes the
+	 * signature MANDATORY (ADR 0012): an unsigned archive — including one whose
+	 * signature was stripped, which yields a well-formed unsigned archive — is
+	 * refused, because the unkeyed integrity hashes detect corruption, not
+	 * tampering, and the signature is the only tamper defence. Signed with no
+	 * key: warn that the signature is unverified and proceed. Signed with a
+	 * key: a failed signature aborts the import via WP_CLI::error so nothing
+	 * is written; a good one logs that it verified.
 	 *
 	 * @param resource    $source     The open archive stream.
-	 * @param string|null $public_key The trusted public key, or null when none was supplied.
+	 * @param string|null $public_key The trusted public key, or null when none was supplied or pinned.
 	 * @return void
 	 */
 	private function verify_signature_gate( $source, ?string $public_key ): void {
@@ -916,7 +934,7 @@ final class ImportCommand {
 
 		if ( null === $reader->signature() ) {
 			if ( null !== $public_key ) {
-				WP_CLI::warning( __( 'A public key was supplied with --public-key, but this archive is not signed.', 'pontifex' ) );
+				WP_CLI::error( __( 'A trusted public key was supplied, but this archive is NOT signed — and a stripped signature looks exactly like this. The signature is the only tamper defence (integrity hashes detect corruption, not tampering), so this restore is refused. If you trust this archive, re-run without --public-key (and without a PONTIFEX_PUBLIC_KEY pin); to make backups verifiable, sign exports with --sign.', 'pontifex' ) );
 			}
 			return;
 		}

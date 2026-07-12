@@ -15,7 +15,10 @@ use Mockery;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Crypto\SigningKeypair;
+use Pontifex\Archive\Format\ArchiveSignature;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Header;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Writer\ArchiveWriter;
@@ -613,6 +616,183 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * An unsigned archive is refused when a trusted key is supplied.
+	 *
+	 * ADR 0012: supplying a key declares "only signed archives are trusted".
+	 * The unkeyed integrity hashes detect corruption, not tampering, so an
+	 * unsigned archive under a trusted key must refuse before any write.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_refuses_an_unsigned_archive_when_a_key_is_supplied(): void {
+		self::write_archive_to( $this->temp_archive_path, null );
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing unsigned' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'        => true,
+				'public-key' => $this->temp_archive_path . '.pub',
+			)
+		);
+	}
+
+	/**
+	 * The strip attack: a signed archive with its signature removed is refused.
+	 *
+	 * The exact downgrade the audit found: clear the header's signed flag and
+	 * truncate the trailing signature block, and the archive presents as a
+	 * well-formed UNSIGNED one (the unkeyed hashes need no rebuilding, since
+	 * none of them covers the header flags). Under a trusted key it must now
+	 * refuse — previously it restored with no warning at all.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_refuses_a_stripped_signature_when_a_key_is_supplied(): void {
+		$keypair = SigningKeypair::generate();
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		SigningKeys::write_keypair( $keypair, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+		self::strip_signature( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing stripped' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'        => true,
+				'public-key' => $this->temp_archive_path . '.pub',
+			)
+		);
+	}
+
+	/**
+	 * A pinned key enforces signatures with no flag on the command line.
+	 *
+	 * PONTIFEX_PUBLIC_KEY in wp-config.php is the durable trust anchor: the
+	 * decision is made once in configuration instead of resting on a human
+	 * remembering --public-key on every run.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_enforces_a_pinned_key_without_the_flag(): void {
+		self::write_archive_to( $this->temp_archive_path, null );
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$environment = $this->build_environment_mock_with_pin( $this->temp_archive_path . '.pub' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing unsigned under pin' ) );
+
+		$command = new ImportCommand(
+			$environment,
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * An explicit --public-key overrides the pinned key for that run.
+	 *
+	 * Explicit beats ambient: the pin names the WRONG key here, the flag names
+	 * the right one, and the signed archive restores.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_flag_overrides_the_pinned_key(): void {
+		$keypair = SigningKeypair::generate();
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ), Scope::content_only( array() ) );
+		SigningKeys::write_keypair( $keypair, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.wrong.key', $this->temp_archive_path . '.wrong.pub' );
+
+		$environment = $this->build_environment_mock_with_pin( $this->temp_archive_path . '.wrong.pub' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'success' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'error' );
+
+		$command = new ImportCommand(
+			$environment,
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'        => true,
+				'public-key' => $this->temp_archive_path . '.pub',
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path, 'The flag key verified the signature, so the restore ran (no error was raised).' );
+	}
+
+	/**
 	 * A signed archive that fails the supplied public key is refused before any restore.
 	 *
 	 * The signature gate runs before the safety archive and the restore, so a
@@ -786,7 +966,47 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/var/www/html' );
 		$mock->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
 		$mock->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/var/www/html/wp-content' );
+		// No pinned key by default; pin-specific tests build their own mock.
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
 		return $mock;
+	}
+
+	/**
+	 * Build an Environment mock whose PONTIFEX_PUBLIC_KEY pin names the given key file.
+	 *
+	 * @param string $public_key_path Absolute path of the pinned public-key file.
+	 * @return Environment&\Mockery\MockInterface
+	 */
+	private function build_environment_mock_with_pin( string $public_key_path ) {
+		$mock = Mockery::mock( Environment::class );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/var/www/html' );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/var/www/html/wp-content' );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( $public_key_path );
+		return $mock;
+	}
+
+	/**
+	 * Perform the signature-strip attack on an archive file in place.
+	 *
+	 * Clears the header's signed flag and truncates the trailing signature
+	 * block — after which the archive is a well-formed UNSIGNED one, because
+	 * none of the unkeyed hashes covers the header flags. This is the exact
+	 * downgrade ADR 0012 closes.
+	 *
+	 * @param string $path Absolute path of the signed archive to strip.
+	 * @return void
+	 */
+	private static function strip_signature( string $path ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test fixture manipulation of a temp archive.
+		$bytes = (string) file_get_contents( $path );
+		$flags = ByteOrder::unpack_uint32( substr( $bytes, 12, 4 ) );
+		$bytes = substr_replace( $bytes, ByteOrder::pack_uint32( $flags & ~Header::FLAG_SIGNED ), 12, 4 );
+		$bytes = substr( $bytes, 0, -ArchiveSignature::SIZE );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture manipulation of a temp archive.
+		file_put_contents( $path, $bytes );
 	}
 
 	/**

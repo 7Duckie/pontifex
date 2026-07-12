@@ -202,7 +202,7 @@ The `kind` field is one of:
 - `directory` — present only to record permissions on an otherwise-empty directory. Payload is zero-length.
 - `symlink` — payload contains the link target as UTF-8.
 
-The per-entry hash is the foundation of tamper detection: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing.
+The per-entry hash is the foundation of **corruption detection**: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing. These hashes are unkeyed, so they detect accidents (bit rot, truncation, a bad transfer), not attackers — anyone who can modify the file can recompute them. Tamper detection is the signature's job (section 12).
 
 ## 7. Compression codecs
 
@@ -375,12 +375,23 @@ The signature is **detached and optional**. v1 archives are not required to carr
 
 `.wpmig` integrity rests on four mechanisms, each catching a different class of problem:
 
-| Mechanism                       | Detects                                                       |
-|---------------------------------|---------------------------------------------------------------|
-| Per-entry SHA-256 hash          | Modification of any single entry                              |
-| Manifest hash in footer         | Modification of the manifest itself                           |
-| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)          |
-| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key   |
+| Mechanism                       | Detects                                                                          |
+|---------------------------------|-----------------------------------------------------------------------------------|
+| Per-entry SHA-256 hash          | Accidental modification of any single entry (unkeyed — an attacker can recompute) |
+| Manifest hash in footer         | Accidental modification of the manifest itself (unkeyed, as above)                |
+| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)                              |
+| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key                       |
+
+The distinction in the first two rows matters. The plain SHA-256 hashes are
+**corruption** detection: they catch bit rot, truncation, and transfer errors.
+They are not a **tamper** defence, because anyone who can edit the file can
+recompute every hash so it still matches — and a signature can be *stripped*
+(signed flag cleared, trailing block removed), leaving a well-formed unsigned
+archive. The Ed25519 signature is therefore the only tamper defence, and it
+protects only when the reader enforces it: a reader holding a trusted public
+key (supplied per run, or pinned in configuration) MUST refuse an archive that
+is unsigned or whose signature does not verify. A reader with no trusted key
+provides corruption detection only, and must not claim otherwise.
 
 ### 12.1 On-import verification flow
 
@@ -392,7 +403,7 @@ A conforming reader performs verification in this order:
 4. **Read manifest.** Compute and verify manifest hash against the value in the footer.
 5. **Walk entries from manifest.** For each entry, seek to its offset, read the stored bytes, compute SHA-256, and compare to the manifest's expected hash.
 6. **If encrypted:** decrypt each entry's payload using the derived key, the per-entry nonce, and the entry header as AAD. AES-GCM will fail the authentication tag check if any byte has been modified.
-7. **If signed:** verify the Ed25519 signature — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against the trusted public key — if the operator has supplied one.
+7. **Signature enforcement:** when the operator has supplied or pinned a trusted public key, the archive MUST be signed and the Ed25519 signature MUST verify — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key; an unsigned archive is refused as presumed-tampered (a stripped signature is indistinguishable from never-signed). With no trusted key, a signed archive's signature goes unverified and the reader should say so.
 
 Any failure at any step halts the import. The reader must report which step failed, which entry or block was affected, and what the expected versus actual values were. Specifically: "Entry #1273 (`wp-content/uploads/2024/01/banner.jpg`): expected hash `a1b2…`, got `f7e8…`" — not "Import failed."
 
