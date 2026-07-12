@@ -11,6 +11,7 @@ namespace Pontifex\Restore;
 
 use InvalidArgumentException;
 use RuntimeException;
+use Throwable;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
@@ -33,7 +34,9 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *
  *  - {@see RestoreRunner::__construct()} — takes the three
  *    collaborators that do the actual work, plus an optional set of
- *    defensive limits (defaulting to the conservative ArchiveLimits).
+ *    defensive limits (defaulting to the conservative ArchiveLimits)
+ *    and an optional runtime memory limit (0/null for unlimited) that
+ *    refuses an entry too large to decode within the request's memory.
  *    Stateless after construction; safe to reuse across many archives.
  *  - {@see RestoreRunner::restore()} — given a seekable readable
  *    stream containing a Pontifex archive, read, verify, and write
@@ -54,9 +57,12 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *        and decodes the payload through the codec).
  *     b. Route to FileWriter or DatabaseWriter based on the
  *        entry's kind.
- *  4. If any step throws, the restore halts immediately. v0.1.0 is
- *     fail-fast: anything already written stays on disk / in the
- *     database. Partial-restore cleanup is a Phase 4 (CLI) concern.
+ *  4. If any step throws, the restore halts immediately. Database
+ *     changes never reach the live tables: every db_chunk replays into
+ *     staging tables that are cut over atomically only after the whole
+ *     walk succeeds (ADR 0009), and a failure drops the staging tables.
+ *     Files already written stay on disk; the safety-archive recovery
+ *     layer covers the file half.
  *
  * Internal choices (implementation details; may change without
  * breaking the public API):
@@ -106,18 +112,41 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private ArchiveLimits $limits;
 
 	/**
+	 * The per-entry decoded-byte budget derived from the runtime memory limit, or 0
+	 * for no memory-derived cap.
+	 *
+	 * @var int
+	 */
+	private int $entry_memory_budget;
+
+	/**
+	 * Fraction of the runtime memory limit a single entry's decoded payload may use.
+	 *
+	 * A quarter: reading an entry peaks at several coexisting copies (the buffered
+	 * record, a substr, and the decoded payload string), so an entry is refused well
+	 * before the request runs out of memory rather than OOM-fatalling mid-restore.
+	 *
+	 * @var int
+	 */
+	private const MEMORY_BUDGET_DIVISOR = 4;
+
+	/**
 	 * Construct a RestoreRunner with its collaborators and optional limits.
 	 *
-	 * @param EntryReader        $entry_reader    Decodes individual entry records.
-	 * @param FileWriter         $file_writer     Writes filesystem entries to disk.
-	 * @param DatabaseWriter     $database_writer Replays db_chunk entries into the database.
-	 * @param ArchiveLimits|null $limits          Defensive limits to enforce; null applies the conservative defaults.
+	 * @param EntryReader        $entry_reader      Decodes individual entry records.
+	 * @param FileWriter         $file_writer       Writes filesystem entries to disk.
+	 * @param DatabaseWriter     $database_writer   Replays db_chunk entries into the database.
+	 * @param ArchiveLimits|null $limits            Defensive limits to enforce; null applies the conservative defaults.
+	 * @param int|null           $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
 	 */
-	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null ) {
-		$this->entry_reader    = $entry_reader;
-		$this->file_writer     = $file_writer;
-		$this->database_writer = $database_writer;
-		$this->limits          = $limits ?? ArchiveLimits::defaults();
+	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null ) {
+		$this->entry_reader        = $entry_reader;
+		$this->file_writer         = $file_writer;
+		$this->database_writer     = $database_writer;
+		$this->limits              = $limits ?? ArchiveLimits::defaults();
+		$this->entry_memory_budget = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 )
+			? intdiv( $memory_limit_bytes, self::MEMORY_BUDGET_DIVISOR )
+			: 0;
 	}
 
 	/**
@@ -132,41 +161,97 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
 	 */
-	public function restore( $archive_source, ?callable $on_entry_restored = null ): void {
-		$this->walk(
-			$archive_source,
-			$on_entry_restored,
-			function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
-				$this->dispatch( $manifest_entry, $result );
+	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
+		// Reset the writer's staging state and sweep leftovers a crashed earlier
+		// run may have abandoned (ADR 0009). The archive's database character set
+		// rides along from provenance: the replayed SQL's bytes were captured
+		// under it, so the connection must speak it for the replay's duration or
+		// multibyte content is silently transcoded. Provenance is validated by
+		// the reader; the charset string itself is validated by the writer.
+		$provenance = ( new ArchiveReader( $archive_source ) )->provenance();
+		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
+
+		try {
+			$this->walk(
+				$archive_source,
+				$on_entry_restored,
+				function ( ManifestEntry $manifest_entry, EntryReadResult $result ): void {
+					$this->dispatch( $manifest_entry, $result );
+				},
+				$on_bytes
+			);
+
+			// Every db_chunk has now been replayed into its staging table. Finalise
+			// any cross-prefix restore by rewriting the prefix embedded in the
+			// options/usermeta key columns of the STAGED copies (a no-op otherwise),
+			// then cut the staged tables over to their live names in one atomic
+			// RENAME. Until that rename the live tables have not been written; after
+			// it the database is entirely the restored one. This runs only on
+			// restore(), never verify(), which writes nothing.
+			$this->database_writer->finalise_prefix_rewrite();
+			$this->database_writer->commit_staged_tables();
+		} catch ( Throwable $error ) {
+			// The cut-over never happened (or failed atomically), so the live
+			// tables are untouched; remove the half-built staging tables. Cleanup
+			// is best-effort and must never mask the original failure.
+			try {
+				$this->database_writer->abort_staging();
+			} catch ( Throwable $cleanup_failure ) {
+				unset( $cleanup_failure );
 			}
-		);
+			throw $error;
+		}
 	}
 
 	/**
-	 * Read and verify every entry from the archive stream, writing nothing.
+	 * Read and hash-verify every entry from the archive stream, writing nothing.
 	 *
-	 * Runs the identical read-and-verify walk as {@see self::restore()} —
-	 * opening the archive, reading the manifest, decoding and
-	 * hash-verifying each entry — but never routes an entry to a writer,
-	 * so the destination filesystem and database are left untouched. The
-	 * engine behind a dry-run import.
+	 * Opens the archive, reads the manifest, and streams each entry through
+	 * {@see EntryReader::verify_entry()} — hashing the stored bytes and checking
+	 * them against the manifest, without decoding or buffering whole entries.
+	 * Nothing is written to the destination, so this is the engine behind both the
+	 * Verify screen and a dry-run import. Unlike {@see self::restore()} it does not
+	 * decode payloads: a verification only needs the stored bytes to be intact, and
+	 * skipping the decode keeps memory flat and lets a large entry report progress.
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
-	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed or hash verification fails.
+	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
+	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
-	public function verify( $archive_source, ?callable $on_entry_verified = null ): void {
-		$this->walk(
-			$archive_source,
-			$on_entry_verified,
-			static function (): void {
-				// Read and verify only: nothing is written to the destination.
+	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
+		$reader   = new ArchiveReader( $archive_source );
+		$manifest = $reader->manifest();
+		$entries  = $manifest->entries();
+		$total    = count( $entries );
+
+		if ( $total > $this->limits->max_entry_count() ) {
+			throw new RuntimeException(
+				sprintf(
+					'RestoreRunner: archive declares %d entries, exceeding the maximum of %d.',
+					(int) $total,
+					(int) $this->limits->max_entry_count()
+				)
+			);
+		}
+
+		$done = 0;
+		foreach ( $entries as $manifest_entry ) {
+			$this->entry_reader->verify_entry(
+				$archive_source,
+				$manifest_entry,
+				$on_bytes,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
+			++$done;
+			if ( null !== $on_entry_verified ) {
+				$on_entry_verified( $done, $total );
 			}
-		);
+		}
 	}
 
 	/**
@@ -187,9 +272,10 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param resource      $archive_source A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry       Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable      $handle         Receives each decoded entry as `( ManifestEntry $entry, EntryReadResult $result ): void`.
+	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws RuntimeException If the archive is malformed, hash verification fails, a defensive limit is exceeded, or $handle fails.
 	 */
-	private function walk( $archive_source, ?callable $on_entry, callable $handle ): void {
+	private function walk( $archive_source, ?callable $on_entry, callable $handle, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source );
 		$manifest = $reader->manifest();
 
@@ -211,12 +297,22 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		$decoded_so_far = 0;
 
 		foreach ( $entries as $manifest_entry ) {
+			// The bomb ceiling (per-entry and archive-total decoded bytes) applies to
+			// every entry; the memory-derived budget is passed separately, because it
+			// applies only to entries the reader must buffer whole — a plain file
+			// entry streams through chunk-sized memory to a spool (ADR 0010).
 			$remaining   = $total_budget - $decoded_so_far;
 			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
 
-			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit );
+			$result = $this->entry_reader->read_entry(
+				$archive_source,
+				$manifest_entry,
+				$entry_limit,
+				$on_bytes,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
 
-			$decoded_so_far += strlen( $result->payload() );
+			$decoded_so_far += $result->decoded_size();
 			if ( $decoded_so_far > $total_budget ) {
 				throw new RuntimeException(
 					sprintf(

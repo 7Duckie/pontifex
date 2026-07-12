@@ -38,24 +38,23 @@ use Pontifex\Archive\Writer\EntryPlan;
 interface ManifestBuilderInterface {
 
 	/**
-	 * Build a complete EntryPlan list for the given WordPress installation.
+	 * Build a memory-bounded {@see ManifestStream} for the given WordPress installation.
 	 *
-	 * The returned list is ready to feed to
-	 * {@see \Pontifex\Archive\Writer\ArchiveWriter::write_archive()}.
-	 * Each EntryPlan in the returned array carries an opened source
-	 * stream; the caller is responsible for closing the streams
-	 * (typically by passing the EntryPlans through ArchiveWriter,
-	 * which closes them as it consumes them).
+	 * The returned stream is ready to feed to
+	 * {@see \Pontifex\Archive\Writer\ArchiveWriter::write_archive()}. It yields
+	 * {@see EntryPlan} instances one at a time, each carrying a deferred source
+	 * that ArchiveWriter opens and closes as it writes the entry, so the caller
+	 * need not manage source streams and the plans are never all held at once.
 	 *
-	 * Implementations may return an empty array; an empty result is
-	 * a legitimate outcome that produces a valid empty archive
-	 * containing only the header, provenance, manifest, and footer
-	 * blocks.
+	 * Implementations may return an empty stream; an empty result is a
+	 * legitimate outcome that produces a valid empty archive containing only the
+	 * header, provenance, manifest, and footer blocks.
 	 *
-	 * @param string $wordpress_root Absolute filesystem path of the WordPress installation.
-	 * @return EntryPlan[] All entries that should be archived, in implementation-defined order.
+	 * @param string        $wordpress_root   Absolute filesystem path of the WordPress installation.
+	 * @param callable|null $on_scan_progress Optional callback invoked with the running file-scan entry count, so a caller can report scan progress; receives one int argument.
+	 * @return ManifestStream All entries that should be archived, in implementation-defined order.
 	 * @throws InvalidArgumentException If $wordpress_root is empty or not a directory.
-	 * @throws RuntimeException         If the build cannot complete (e.g. a file source stream cannot be opened, a scanner fails).
+	 * @throws RuntimeException         If the build cannot complete (e.g. a scanner fails).
 	 */
-	public function build( string $wordpress_root ): array;
+	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream;
 }

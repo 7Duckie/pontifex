@@ -47,24 +47,26 @@ interface RestoreRunnerInterface {
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null $on_bytes          Optional byte-progress callback called as `( int $bytes ): void` with each chunk's byte count as an entry is read, so a caller can report progress within a large entry.
 	 * @throws InvalidArgumentException If $archive_source is not a valid, seekable stream resource.
 	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any writer fails.
 	 */
-	public function restore( $archive_source, ?callable $on_entry_restored = null ): void;
+	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void;
 
 	/**
-	 * Read and verify every entry from the archive stream, writing nothing.
+	 * Read and hash-verify every entry from the archive stream, writing nothing.
 	 *
-	 * Performs the identical read-and-verify walk as {@see self::restore()}
-	 * — opening the archive, reading the manifest, decoding and
-	 * hash-verifying each entry — but never routes an entry to the
-	 * filesystem or database writers. Touches nothing on the destination;
-	 * the engine behind a dry-run import.
+	 * Opens the archive, reads the manifest, and hash-verifies each entry's stored
+	 * bytes against the manifest — without decoding or buffering whole entries and
+	 * without routing anything to the filesystem or database writers. Touches
+	 * nothing on the destination; the engine behind both the Verify screen and a
+	 * dry-run import.
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
-	 * @throws InvalidArgumentException If $archive_source is not a valid, seekable stream resource.
-	 * @throws RuntimeException         If the archive is malformed or hash verification fails.
+	 * @param callable|null $on_bytes          Optional byte-progress callback called as `( int $bytes ): void` with each chunk's byte count as an entry streams, so a caller can report progress within a large entry.
+	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource.
+	 * @throws RuntimeException         If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
-	public function verify( $archive_source, ?callable $on_entry_verified = null ): void;
+	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void;
 }

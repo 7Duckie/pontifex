@@ -131,7 +131,7 @@ final class ArchiveWriterTest extends TestCase {
 		$header = Header::from_bytes( substr( $bytes, 0, Header::SIZE ) );
 
 		$this->assertSame( Header::FORMAT_MAJOR_V1, $header->major() );
-		$this->assertSame( Header::FORMAT_MINOR_V1_0, $header->minor() );
+		$this->assertSame( Header::FORMAT_MINOR_V1_1, $header->minor() );
 		$this->assertSame( 0, $header->flags() );
 	}
 
@@ -360,6 +360,72 @@ final class ArchiveWriterTest extends TestCase {
 		$this->assertSame( EntryHeader::KIND_FILE, $entries[0]->kind() );
 		$this->assertSame( 'test.txt', $entries[0]->path() );
 		$this->assertSame( 0, $entries[0]->codec_id() );
+	}
+
+	/**
+	 * Forwards the byte-progress callback across every entry's payload.
+	 *
+	 * The callback the export's progress bar rides on must see each entry's raw
+	 * source bytes as the entries stream, so the reported total equals the sum of
+	 * the entries' payload sizes — progress that advances within an entry, not
+	 * only between entries.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_reports_source_bytes_across_entries(): void {
+		$payloads = array( str_repeat( 'a', 100 ), str_repeat( 'b', 250 ), str_repeat( 'c', 70 ) );
+		$plans    = array();
+		foreach ( $payloads as $index => $payload ) {
+			$plans[] = new EntryPlan(
+				EntryHeader::for_file( 'file' . $index . '.txt', strlen( $payload ), 0644, 0, 'application/octet-stream', 0 ),
+				0,
+				self::zero_nonce(),
+				self::memory_stream_with( $payload )
+			);
+		}
+		$expected = strlen( $payloads[0] ) + strlen( $payloads[1] ) + strlen( $payloads[2] );
+
+		$reported = 0;
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			$plans,
+			self::memory_stream(),
+			null,
+			null,
+			null,
+			function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( $expected, $reported, 'The byte callback must see every source byte across all entries.' );
+	}
+
+	/**
+	 * Each entry's source stream is closed after the entry has been written.
+	 *
+	 * This bounds the export's memory: only one source is open at a time, no
+	 * matter how many entries the archive holds. The plan opens a fresh stream
+	 * from its factory, which the writer must close once the entry is on disk.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_closes_each_entry_source(): void {
+		$opened = null;
+		$plan   = new EntryPlan(
+			EntryHeader::for_file( 'a.txt', 4, 0644, 0, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			static function () use ( &$opened ) {
+				$opened = self::memory_stream_with( 'data' );
+				return $opened;
+			}
+		);
+
+		self::make_writer()->write_archive( self::sample_provenance(), array( $plan ), self::memory_stream() );
+
+		$this->assertNotNull( $opened, 'The writer should have opened the deferred source.' );
+		$this->assertFalse( is_resource( $opened ), 'The writer must close each entry source after writing it.' );
 	}
 
 	/**
@@ -699,6 +765,83 @@ final class ArchiveWriterTest extends TestCase {
 			self::sample_provenance(),
 			array(),
 			$dest,
+			static function () use ( &$called ): void {
+				$called = true;
+			}
+		);
+
+		$this->assertFalse( $called );
+	}
+
+	/**
+	 * A file whose source yields different bytes than its header declared must be reported.
+	 *
+	 * The scan-to-write race: the header carries the scan-time size but the
+	 * source has since shrunk. The writer records the truth in the entry (via
+	 * EntryWriter) and must surface the discrepancy through the
+	 * on_file_changed callback so the caller can warn the user.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_reports_a_changed_file_to_the_callback(): void {
+		$steady_payload = 'steady bytes';
+		$steady_plan    = new EntryPlan(
+			EntryHeader::for_file( 'steady.txt', strlen( $steady_payload ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( $steady_payload )
+		);
+
+		// Declared 1000 bytes at scan time; only 400 remain at write time.
+		$shrunk_plan = new EntryPlan(
+			EntryHeader::for_file( 'shrunk.log', 1000, 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( str_repeat( 'B', 400 ) )
+		);
+
+		$reports = array();
+		$dest    = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			array( $steady_plan, $shrunk_plan ),
+			$dest,
+			null,
+			null,
+			null,
+			null,
+			static function ( string $path, int $declared_size, int $actual_size ) use ( &$reports ): void {
+				$reports[] = array( $path, $declared_size, $actual_size );
+			}
+		);
+
+		$this->assertSame( array( array( 'shrunk.log', 1000, 400 ) ), $reports, 'Only the changed file must be reported, with its declared and actual sizes.' );
+	}
+
+	/**
+	 * The on_file_changed callback must stay silent when every file matches its declared size.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_does_not_report_changed_files_when_none_changed(): void {
+		$payload = 'unchanged payload';
+		$plan    = new EntryPlan(
+			EntryHeader::for_file( 'steady.txt', strlen( $payload ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( $payload )
+		);
+
+		$called = false;
+		$dest   = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			array( $plan ),
+			$dest,
+			null,
+			null,
+			null,
+			null,
 			static function () use ( &$called ): void {
 				$called = true;
 			}

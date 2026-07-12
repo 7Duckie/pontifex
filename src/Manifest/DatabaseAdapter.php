@@ -99,4 +99,115 @@ interface DatabaseAdapter {
 	 * @throws RuntimeException If the statement fails to execute.
 	 */
 	public function execute_sql( string $sql ): void;
+
+	/**
+	 * Rewrite the WordPress table prefix embedded in key columns, after a restore.
+	 *
+	 * Used during a cross-prefix restore by {@see \Pontifex\Restore\DatabaseWriter}
+	 * once every db_chunk has been replayed (table identifiers are already rewritten
+	 * to the destination prefix at replay time). The prefix is also embedded in two
+	 * plain key columns, which a table rename does not touch:
+	 *
+	 *  - `{prefix}options.option_name = '{prefix}user_roles'`, and
+	 *  - every `{prefix}usermeta.meta_key` that begins with the prefix
+	 *    (`{prefix}capabilities`, `{prefix}user_level`, `{prefix}user-settings`, …).
+	 *
+	 * The rewrite is column-aware (it updates only the key column, never a value), so
+	 * it is bounded and never touches serialised data. Implementations must escape
+	 * both prefixes — the source prefix comes from the archive and is untrusted.
+	 *
+	 * During a staging-table restore (ADR 0009) the replayed tables carry a
+	 * physical staging prefix on top of the destination prefix until the atomic
+	 * cut-over; $staging_prefix names that extra prefix so the rewrite targets
+	 * the staged copies, not the still-live tables.
+	 *
+	 * @param string $source_prefix  The prefix recorded in the archive (the rows' current prefix).
+	 * @param string $dest_prefix    The destination site's prefix (the rows' target prefix).
+	 * @param string $staging_prefix Optional. A physical prefix currently prepended to the tables being rewritten; default '' (rewrite the live tables).
+	 * @return void
+	 * @throws RuntimeException If a rewrite statement fails to execute.
+	 */
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix, string $staging_prefix = '' ): void;
+
+	/**
+	 * Whether a table with exactly this name exists in the database.
+	 *
+	 * Used by the staging-table restore (ADR 0009) to decide, per table, whether
+	 * the atomic cut-over must move a live table aside (`T → old, staged → T`)
+	 * or simply install a table new to the destination (`staged → T`).
+	 * Implementations must match the name literally (escaping any pattern
+	 * characters), and should report "does not exist" on a query error: a wrong
+	 * "exists" answer merely adds a harmless move-aside, while the cut-over
+	 * RENAME itself stays the atomic arbiter — if the answer was wrong in the
+	 * dangerous direction the RENAME fails as a whole and no changes are made.
+	 *
+	 * @param string $table_name The exact table name to look for.
+	 * @return bool True when the table exists.
+	 */
+	public function table_exists( string $table_name ): bool;
+
+	/**
+	 * List every table whose name begins with the given prefix.
+	 *
+	 * Used by the staging-table restore (ADR 0009) to sweep leftover
+	 * `pontifexstg_*` / `pontifexold_*` tables a crashed earlier run may have
+	 * abandoned. Unlike {@see self::list_tables()}, the prefix is the caller's,
+	 * not the WordPress prefix, and an empty result is an ordinary answer, not
+	 * a failure. Implementations should return an empty list on a query error —
+	 * the sweep is best-effort housekeeping, never a gate.
+	 *
+	 * @param string $prefix The literal name prefix to match; must not be empty.
+	 * @return string[] Matching table names in alphabetical order; empty when none match.
+	 * @throws RuntimeException If $prefix is empty (a full-database listing is never intended).
+	 */
+	public function list_tables_by_prefix( string $prefix ): array;
+
+	/**
+	 * The table's average stored row width, in bytes, or 0 when unknown.
+	 *
+	 * Used by {@see DatabaseScanner} to size chunks from the table's real row
+	 * width rather than a fixed guess, so a wide-row table (huge serialised
+	 * options, page-builder LONGTEXT) produces proportionally fewer rows per
+	 * chunk and every chunk stays near the byte budget — keeping the archive
+	 * restorable under a memory-budgeted web request.
+	 *
+	 * The figure is a sizing hint, not a correctness input: implementations
+	 * report the storage engine's own estimate and return 0 when it cannot be
+	 * read, in which case the scanner falls back to its fixed estimate. A wrong
+	 * answer only changes how a table is split, never what is captured.
+	 *
+	 * @param string $table_name Fully prefixed table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table_name ): int;
+
+	/**
+	 * Set the connection's character set for a database replay.
+	 *
+	 * The connection charset governs how the server interprets the bytes of
+	 * every statement sent over it. A restore replays SQL captured under the
+	 * archive's charset, so the connection must speak that charset for the
+	 * replay's duration or multibyte content is silently transcoded to
+	 * mojibake — the reason standalone dump tools emit SET NAMES in every
+	 * dump. Implementations must fail loudly: proceeding after a failed
+	 * charset change risks exactly the corruption this call prevents.
+	 *
+	 * @param string $charset The archive's character set, e.g. "utf8mb4". Callers validate it; implementations must re-validate before interpolating.
+	 * @return void
+	 * @throws RuntimeException If the charset is malformed or the server refuses it.
+	 */
+	public function set_session_charset( string $charset ): void;
+
+	/**
+	 * Restore the connection's own configured character set after a replay.
+	 *
+	 * The counterpart to {@see self::set_session_charset()}: the replay is
+	 * over, so the connection goes back to the destination site's configured
+	 * charset before any later query runs on it. Best-effort — the replayed
+	 * data is already committed, so a failure here must not undo a completed
+	 * restore.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void;
 }

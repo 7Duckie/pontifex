@@ -56,6 +56,16 @@ use Pontifex\WordPress\WordPressContext;
  */
 final class RollbackCommand {
 
+	/**
+	 * The wp_options key holding the rollback counters (read by the admin Overview).
+	 *
+	 * A rollback is an undo, not a transfer, so it is counted separately from the
+	 * import counters and is not added to the transfer history.
+	 *
+	 * @var string
+	 */
+	private const STATS_OPTION = 'pontifex_rollback_stats';
+
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -218,6 +228,18 @@ final class RollbackCommand {
 				);
 
 				$this->print_summary( $archive_path, $entry_total );
+
+				// The rollback replayed the database with raw SQL, so flush WordPress's
+				// stale option cache before recording, or the counter write is lost
+				// (see RestoreController for the full rationale).
+				$this->wordpress_context->flush_cache();
+				$this->bump_counters(
+					array(
+						'attempted'         => 1,
+						'succeeded'         => 1,
+						'bytes_rolled_back' => $this->archive_size( $archive_path ),
+					)
+				);
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -227,6 +249,14 @@ final class RollbackCommand {
 					'exception' => $error,
 				)
 			);
+			if ( ! $dry_run ) {
+				$this->bump_counters(
+					array(
+						'attempted' => 1,
+						'failed'    => 1,
+					)
+				);
+			}
 			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
@@ -309,7 +339,13 @@ final class RollbackCommand {
 		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
-		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+		return new RestoreRunner(
+			$entry_reader,
+			$file_writer,
+			$database_writer,
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+		);
 	}
 
 	/**
@@ -381,5 +417,48 @@ final class RollbackCommand {
 		WP_CLI::log(
 			sprintf( /* translators: 1: number of entries verified, 2: the archive path */ __( 'Dry run complete: %1$d entries verified in %2$s. No changes were made.', 'pontifex' ), $entry_count, $archive_path )
 		);
+	}
+
+	/**
+	 * Read-modify-write the rollback counters by a delta.
+	 *
+	 * Mirrors ImportCommand's counter handling against the rollback option, so a CLI
+	 * rollback shows on the admin Overview's Rollbacks row.
+	 *
+	 * @param array<string, int> $delta The amounts to add, keyed by counter name.
+	 * @return void
+	 */
+	private function bump_counters( array $delta ): void {
+		$current = $this->wordpress_context->option_value(
+			self::STATS_OPTION,
+			array(
+				'attempted'         => 0,
+				'succeeded'         => 0,
+				'failed'            => 0,
+				'bytes_rolled_back' => 0,
+			)
+		);
+		$current = is_array( $current ) ? $current : array();
+
+		$merged = array();
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_rolled_back' ) as $key ) {
+			$stored         = isset( $current[ $key ] ) && is_numeric( $current[ $key ] ) ? (int) $current[ $key ] : 0;
+			$merged[ $key ] = $stored + ( $delta[ $key ] ?? 0 );
+		}
+
+		$this->wordpress_context->save_option( self::STATS_OPTION, $merged );
+	}
+
+	/**
+	 * The size of the safety archive in bytes, or 0 if it cannot be read.
+	 *
+	 * Recorded as bytes_rolled_back so the Overview's Rollbacks row shows a size.
+	 *
+	 * @param string $archive_path Absolute path to the safety archive, already opened successfully.
+	 * @return int
+	 */
+	private function archive_size( string $archive_path ): int {
+		$size = filesize( $archive_path );
+		return false !== $size ? $size : 0;
 	}
 }

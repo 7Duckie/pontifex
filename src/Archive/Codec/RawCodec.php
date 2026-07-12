@@ -44,6 +44,17 @@ final class RawCodec implements Codec {
 	public const ID = 0x0000;
 
 	/**
+	 * Chunk size, in bytes, for the progress-reporting copy path (8 KiB).
+	 *
+	 * Matches the other codecs' default streaming chunk size. Used only when a
+	 * progress callback is supplied to {@see self::encode()}; the no-callback
+	 * path uses the native stream copy and produces identical bytes.
+	 *
+	 * @var int
+	 */
+	private const COPY_CHUNK_SIZE = 8192;
+
+	/**
 	 * Return the two-byte codec identifier.
 	 *
 	 * @return int The codec identifier (always RawCodec::ID).
@@ -55,13 +66,22 @@ final class RawCodec implements Codec {
 	/**
 	 * Read raw bytes from the input stream and write them to the output stream unchanged.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $on_read is supplied the copy runs chunk-by-chunk and the callback is
+	 * called with each chunk's byte count, so a caller can report byte-level
+	 * progress for a stored (uncompressed) entry; with no callback the faster
+	 * native stream copy is used. The bytes written are identical either way.
+	 *
+	 * @param resource      $input   A readable stream resource.
+	 * @param resource      $output  A writable stream resource.
+	 * @param callable|null $on_read Optional progress callback, called as `( int $bytes ): void` with each chunk's byte count.
 	 * @return int The number of bytes written to $output.
 	 * @throws CodecException On read or write failure.
 	 */
-	public function encode( $input, $output ): int {
-		return $this->stream_copy( $input, $output, null );
+	public function encode( $input, $output, ?callable $on_read = null ): int {
+		if ( null === $on_read ) {
+			return $this->stream_copy( $input, $output, null );
+		}
+		return $this->copy_reporting( $input, $output, $on_read );
 	}
 
 	/**
@@ -128,6 +148,53 @@ final class RawCodec implements Codec {
 			throw new CodecException(
 				sprintf( 'RawCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
 			);
+		}
+
+		return $written;
+	}
+
+	/**
+	 * Copy bytes from one stream to another in chunks, reporting each chunk's size.
+	 *
+	 * The reporting counterpart to {@see self::stream_copy()}: it reads and writes
+	 * in bounded chunks so a progress callback can observe the copy advancing,
+	 * which the one-shot native copy cannot expose. The bytes written are
+	 * identical to the native copy.
+	 *
+	 * @param resource $input   A readable stream resource.
+	 * @param resource $output  A writable stream resource.
+	 * @param callable $on_read Progress callback, called as `( int $bytes ): void` with each chunk's byte count.
+	 * @return int The number of bytes written to $output.
+	 * @throws CodecException If either argument is not a stream resource, or a read or write fails.
+	 */
+	private function copy_reporting( $input, $output, callable $on_read ): int {
+		if ( ! is_resource( $input ) ) {
+			throw new CodecException( 'RawCodec: input argument is not a valid stream resource.' );
+		}
+		if ( ! is_resource( $output ) ) {
+			throw new CodecException( 'RawCodec: output argument is not a valid stream resource.' );
+		}
+
+		$written = 0;
+
+		while ( true ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
+			$chunk = fread( $input, self::COPY_CHUNK_SIZE );
+			if ( false === $chunk ) {
+				throw new CodecException( 'RawCodec: fread() failed during encode.' );
+			}
+			if ( '' === $chunk ) {
+				break;
+			}
+
+			$on_read( strlen( $chunk ) );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
+			$count = fwrite( $output, $chunk );
+			if ( false === $count ) {
+				throw new CodecException( 'RawCodec: fwrite() failed during encode.' );
+			}
+			$written += $count;
 		}
 
 		return $written;

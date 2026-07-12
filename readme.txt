@@ -8,11 +8,11 @@ Stable tag: 0.4.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Back up and migrate an entire WordPress site — files and database — into one openly documented .wpmig archive. CLI-first; never phones home.
+Back up and migrate WordPress — your content and the whole database — in one openly documented .wpmig archive. CLI-first; never phones home.
 
 == Description ==
 
-Pontifex packs an entire WordPress site — every file and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Two promises set it apart:
+Pontifex packs your WordPress content — everything under `wp-content` (themes, plugins, uploads) and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
 
 * **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
 * **It never touches the cloud.** Pontifex runs entirely on your own infrastructure. It never uploads your data, never phones home, and needs no account.
@@ -21,7 +21,7 @@ Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin
 
 = What it does =
 
-* `wp pontifex export` — pack the whole site (files and database) into one `.wpmig` file.
+* `wp pontifex export` — pack your content (`wp-content`) and the database into one `.wpmig` file; `--whole-site` captures WordPress core too.
 * `wp pontifex import` — restore an archive onto WordPress, taking a safety archive automatically first.
 * `wp pontifex verify` — check an archive's integrity (and its signature, if signed) without restoring.
 * `wp pontifex rollback` — undo the most recent import from its safety archive.
@@ -32,7 +32,7 @@ Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin
 
 = Built for other people's live sites =
 
-Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks), fails closed on errors, takes a safety archive before every restore, and never does naive search-replace over serialised data.
+Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks, over-budget entries), restores the database atomically — a failed restore leaves your live tables untouched — takes a safety archive before every restore, and never does naive search-replace over serialised data.
 
 == Installation ==
 

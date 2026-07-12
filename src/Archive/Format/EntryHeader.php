@@ -628,6 +628,37 @@ final class EntryHeader {
 	}
 
 	/**
+	 * Return a copy of this EntryHeader with the original file size updated.
+	 *
+	 * Immutable PSR-7-style update, the sibling of {@see self::with_size_compressed()}.
+	 * Used by the writer when the raw byte count actually read at write time
+	 * differs from the size recorded at scan time — a file that shrank or grew
+	 * between the scan and the write — so the header always records the byte
+	 * count of the content the archive really captured, never a stale claim.
+	 *
+	 * @param int $size New original byte size; must be non-negative.
+	 * @return self A new EntryHeader instance with the updated size and all other fields preserved.
+	 * @throws InvalidArgumentException If this is not a file entry or size is negative.
+	 */
+	public function with_size( int $size ): self {
+		if ( ! $this->is_file() ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->kind is a validated KIND_* constant; exception path, not HTML output.
+				sprintf( 'EntryHeader::with_size: size applies to file entries only; this is a "%s" entry.', $this->kind )
+			);
+		}
+		if ( $size < 0 ) {
+			throw new InvalidArgumentException(
+				sprintf( 'EntryHeader::with_size: size %d must be non-negative.', (int) $size )
+			);
+		}
+
+		$copy       = clone $this;
+		$copy->size = $size;
+		return $copy;
+	}
+
+	/**
 	 * Whether this entry is a regular file.
 	 *
 	 * @return bool True if the kind is KIND_FILE.

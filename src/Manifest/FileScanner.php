@@ -72,13 +72,35 @@ final class FileScanner {
 	private ExclusionRules $exclusions;
 
 	/**
-	 * Construct a FileScanner with exclusion rules.
+	 * Path prefix prepended to every relative path the scan emits.
 	 *
-	 * @param ExclusionRules $exclusions Rules controlling which paths to omit. Use
-	 *                                   ExclusionRules::none() to archive everything.
+	 * Empty for a whole-site scan rooted at the WordPress root, where the relative
+	 * path is already WordPress-root-relative. Set to "wp-content" for a
+	 * content-only scan rooted at WP_CONTENT_DIR, so the emitted paths stay
+	 * WordPress-root-relative (e.g. "plugins/akismet/akismet.php" becomes
+	 * "wp-content/plugins/akismet/akismet.php"). This keeps a content-only scan a
+	 * strict subset of a whole-site one — the same file carries the same recorded
+	 * path either way — which is why the recursion guard and the exclusion patterns
+	 * (both keyed on "wp-content/...") keep matching unchanged.
+	 *
+	 * @var string
 	 */
-	public function __construct( ExclusionRules $exclusions ) {
-		$this->exclusions = $exclusions;
+	private string $path_prefix;
+
+	/**
+	 * Construct a FileScanner with exclusion rules and an optional path prefix.
+	 *
+	 * @param ExclusionRules $exclusions  Rules controlling which paths to omit. Use
+	 *                                     ExclusionRules::none() to archive everything.
+	 * @param string         $path_prefix Prefix prepended to every emitted relative path,
+	 *                                     so a scan rooted below the WordPress root still
+	 *                                     records WordPress-root-relative paths. Defaults
+	 *                                     to '' (the scan root is the WordPress root). Any
+	 *                                     trailing slash is trimmed.
+	 */
+	public function __construct( ExclusionRules $exclusions, string $path_prefix = '' ) {
+		$this->exclusions  = $exclusions;
+		$this->path_prefix = rtrim( $path_prefix, '/' );
 	}
 
 	/**
@@ -93,12 +115,13 @@ final class FileScanner {
 	 * encountered path is unreadable, a symlink target cannot be
 	 * resolved, or a filesystem item is none of file/directory/symlink.
 	 *
-	 * @param string $root Absolute filesystem path of the directory to scan.
+	 * @param string        $root        Absolute filesystem path of the directory to scan.
+	 * @param callable|null $on_progress Optional callback invoked with the running entry count as the walk proceeds, so a caller can report scan progress; receives one int argument.
 	 * @return ScannedEntry[] All entries found, in stable lexicographic order by relative_path.
 	 * @throws InvalidArgumentException If $root is empty or is not an existing directory.
 	 * @throws RuntimeException If a directory cannot be read during the scan, or an entry is unreadable or unclassifiable.
 	 */
-	public function scan( string $root ): array {
+	public function scan( string $root, ?callable $on_progress = null ): array {
 		if ( '' === $root ) {
 			throw new InvalidArgumentException( 'FileScanner: scan root must be non-empty.' );
 		}
@@ -137,6 +160,15 @@ final class FileScanner {
 				// Normalise relative path to forward slashes regardless of host OS.
 				$relative_path = str_replace( '\\', '/', $relative_path );
 
+				// Re-root the path under the configured prefix (e.g. "wp-content") so a
+				// content-only scan rooted at WP_CONTENT_DIR still records
+				// WordPress-root-relative paths. Done before the recursion guard and the
+				// exclusion checks below, so those — which are keyed on "wp-content/..." —
+				// match identically whether this is a content-only or a whole-site scan.
+				if ( '' !== $this->path_prefix ) {
+					$relative_path = $this->path_prefix . '/' . $relative_path;
+				}
+
 				$kind = self::classify( $info, $absolute_path );
 
 				// Structural recursion-prevention invariant: Pontifex's own working directory.
@@ -158,6 +190,10 @@ final class FileScanner {
 				}
 
 				$entries[] = self::build_scanned_entry( $kind, $relative_path, $absolute_path, $info );
+
+				if ( null !== $on_progress ) {
+					$on_progress( count( $entries ) );
+				}
 			}
 		} catch ( UnexpectedValueException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message (carrying the unreadable path from the iterator) for diagnostics; surfaced on the CLI, not HTML output.

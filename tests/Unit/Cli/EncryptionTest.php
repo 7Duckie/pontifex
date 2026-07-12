@@ -216,7 +216,8 @@ final class EncryptionTest extends TestCase {
 		$entry_reader = Encryption::entry_reader( $reader, CodecRegistry::with_defaults(), null );
 		$entry        = $reader->manifest()->entries()[0];
 
-		$this->assertSame( 'plain payload', $entry_reader->read_entry( $source, $entry )->payload() );
+		// A plain file entry's payload arrives as a stream (ADR 0010).
+		$this->assertSame( 'plain payload', stream_get_contents( $entry_reader->read_entry( $source, $entry )->payload_stream() ) );
 	}
 
 	/**

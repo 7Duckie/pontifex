@@ -158,7 +158,28 @@ final class Provenance {
 	private ?string $encryption_disabled_reason;
 
 	/**
-	 * Construct a Provenance with the seven required fields and an optional reason.
+	 * The source site's database table prefix (e.g. "wp_"), or null when unrecorded.
+	 *
+	 * Recorded (format v1.1) so a content-only restore can rewrite the
+	 * source-prefixed table names to the destination's own prefix. Optional:
+	 * absent in archives written before this field existed.
+	 *
+	 * @var string|null
+	 */
+	private ?string $table_prefix;
+
+	/**
+	 * What the archive backed up (content-only vs whole-site), or null when unrecorded.
+	 *
+	 * Optional (format v1.1): absent in archives written before this field
+	 * existed, which a scope-aware reader treats as legacy whole-site.
+	 *
+	 * @var Scope|null
+	 */
+	private ?Scope $scope;
+
+	/**
+	 * Construct a Provenance from its required fields and optional metadata.
 	 *
 	 * @param string            $wp_version                 WordPress version string; must be non-empty.
 	 * @param string            $php_version                PHP version string; must be non-empty.
@@ -168,6 +189,8 @@ final class Provenance {
 	 * @param ExporterInfo      $exporter                   Exporter tool name and version.
 	 * @param DateTimeImmutable $timestamp                  Moment of export; serialised with second precision.
 	 * @param string|null       $encryption_disabled_reason Reason encryption was disabled (non-empty when producing an unencrypted archive, per §8.5), or null when encrypted.
+	 * @param string|null       $table_prefix               Source database table prefix (format v1.1), or null when unrecorded.
+	 * @param Scope|null        $scope                      What the archive backed up (format v1.1), or null when unrecorded.
 	 * @throws InvalidArgumentException If any required string argument is the empty string.
 	 */
 	public function __construct(
@@ -178,7 +201,9 @@ final class Provenance {
 		string $db_collation,
 		ExporterInfo $exporter,
 		DateTimeImmutable $timestamp,
-		?string $encryption_disabled_reason = null
+		?string $encryption_disabled_reason = null,
+		?string $table_prefix = null,
+		?Scope $scope = null
 	) {
 		if ( '' === $wp_version ) {
 			throw new InvalidArgumentException( 'Provenance: wp_version must not be empty.' );
@@ -204,6 +229,8 @@ final class Provenance {
 		$this->exporter                   = $exporter;
 		$this->timestamp                  = $timestamp;
 		$this->encryption_disabled_reason = $encryption_disabled_reason;
+		$this->table_prefix               = $table_prefix;
+		$this->scope                      = $scope;
 	}
 
 	/**
@@ -276,6 +303,24 @@ final class Provenance {
 	 */
 	public function encryption_disabled_reason(): ?string {
 		return $this->encryption_disabled_reason;
+	}
+
+	/**
+	 * Return the source database table prefix, or null when unrecorded.
+	 *
+	 * @return string|null The source table prefix, or null.
+	 */
+	public function table_prefix(): ?string {
+		return $this->table_prefix;
+	}
+
+	/**
+	 * Return what the archive backed up, or null when unrecorded.
+	 *
+	 * @return Scope|null The scope, or null for an archive predating the field.
+	 */
+	public function scope(): ?Scope {
+		return $this->scope;
 	}
 
 	/**
@@ -382,6 +427,15 @@ final class Provenance {
 			'timestamp'    => $this->timestamp->format( DateTimeInterface::ATOM ),
 		);
 
+		// The v1.1 fields, emitted only when set and in a fixed order, so an archive
+		// written without them stays byte-identical to a v1.0 one.
+		if ( null !== $this->table_prefix ) {
+			$data['table_prefix'] = $this->table_prefix;
+		}
+		if ( null !== $this->scope ) {
+			$data['scope'] = $this->scope->to_array();
+		}
+
 		// Emitted only when set, so an unencrypted archive that records no reason (and any
 		// archive written before this field existed) keeps byte-identical provenance. The
 		// writer populates a non-empty reason for an unencrypted archive (§8.5) and leaves
@@ -482,6 +536,24 @@ final class Provenance {
 			$encryption_disabled_reason = $data['encryption_disabled_reason'];
 		}
 
+		// Optional v1.1 fields: absent or null means unrecorded (back-compatible with
+		// archives written before they existed); when present they must validate.
+		$table_prefix = null;
+		if ( array_key_exists( 'table_prefix', $data ) && null !== $data['table_prefix'] ) {
+			if ( ! is_string( $data['table_prefix'] ) ) {
+				throw new InvalidArgumentException( 'Provenance: field "table_prefix" must be a string or null.' );
+			}
+			$table_prefix = $data['table_prefix'];
+		}
+
+		$scope = null;
+		if ( array_key_exists( 'scope', $data ) && null !== $data['scope'] ) {
+			if ( ! is_array( $data['scope'] ) ) {
+				throw new InvalidArgumentException( 'Provenance: field "scope" must be an object or null.' );
+			}
+			$scope = Scope::from_array( $data['scope'] );
+		}
+
 		return new self(
 			$data['wp_version'],
 			$data['php_version'],
@@ -490,7 +562,9 @@ final class Provenance {
 			$data['db_collation'],
 			new ExporterInfo( $data['exporter']['name'], $data['exporter']['version'] ),
 			$timestamp,
-			$encryption_disabled_reason
+			$encryption_disabled_reason,
+			$table_prefix,
+			$scope
 		);
 	}
 }

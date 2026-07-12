@@ -214,7 +214,7 @@ final class ArchiveReaderTest extends TestCase {
 
 		$this->assertInstanceOf( Header::class, $header );
 		$this->assertSame( Header::FORMAT_MAJOR_V1, $header->major() );
-		$this->assertSame( Header::FORMAT_MINOR_V1_0, $header->minor() );
+		$this->assertSame( Header::FORMAT_MINOR_V1_1, $header->minor() );
 	}
 
 	/**

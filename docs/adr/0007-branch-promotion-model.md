@@ -1,7 +1,7 @@
 # 0007 — Branch promotion model: feature -> dev -> staging -> main
 
-- **Status:** Accepted, 2026-06-24.
-- **Deciders:** 7Duckie (v0.5.0 workflow planning).
+- **Status:** Accepted, 2026-06-24. Amended 2026-07-11 (integration suite added to the `dev` gate — see Amendment).
+- **Deciders:** 7Duckie (v0.5.0 workflow planning; amendment: v0.5.0 hardening).
 
 ## Context
 
@@ -127,3 +127,24 @@ locally and advisorily, never as a gate (see idea-bank).
   require switching it to an explicit ref.
 - This ADR governs branching and CI tiers; the day-to-day operating rules live
   in the project's working contract, which is updated to match.
+
+## Amendment — 2026-07-11: the real-database suite joins the `dev` gate
+
+**New information:** the v0.5.0 engine audit found several restore-safety
+defects — non-atomic replay, silent `$wpdb` failure handling, unstable
+pagination — that all merged through green `dev` gates, because the fast gates
+mock WordPress throughout and the only tests touching a real MySQL ran at the
+`staging`/`main` promotions. A green `dev` gate proved nothing about real
+database behaviour on the code paths where Pontifex is most dangerous.
+
+**Amended decision:** the integration suite now runs on **every pull request**,
+including feature pull requests into `dev`, and on pushes to `dev` (so merge
+commits are proven too). The *breadth* stays tiered: a dev-bound run executes
+on the PHP floor (8.2) only, keeping iteration quick, while the release-bound
+promotions keep the full 8.2–8.5 matrix. Plugin Check remains at the
+`staging`/`main` gates — it proves packaging, not correctness. Everything else
+in this ADR stands.
+
+**Cost:** roughly five minutes per feature pull request for one wp-env boot and
+the round-trip suite — cheap against a restore defect reaching a stranger's
+site.

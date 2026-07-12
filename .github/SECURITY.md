@@ -77,13 +77,16 @@ a note explaining that the package is not shipped to users.
 
 ## The import trust boundary
 
-`wp pontifex import` writes an entire site — every file and the whole
-database — from a `.wpmig` archive onto the destination WordPress.
-**Importing an archive grants its author full write access to this
-site's files and database.** A hostile or tampered archive can carry a
-malicious `wp-config.php`, a webshell at a legitimate path, or hostile
-rows in `wp_options` — none of which is malformed, so the reader cannot
-tell them apart from a genuine backup.
+`wp pontifex import` writes an archive's content — the `wp-content`
+tree and the whole database, or (with `--whole-site`) the entire
+installation including WordPress core and `wp-config.php` — from a
+`.wpmig` archive onto the destination WordPress. **Importing an archive
+grants its author full write access to this site's content and
+database** (and its core, under `--whole-site`). A hostile or tampered
+archive can carry a webshell at a legitimate path, hostile rows in
+`wp_options`, or — under `--whole-site` — a malicious `wp-config.php`;
+none of which is malformed, so the reader cannot tell them apart from a
+genuine backup.
 
 Pontifex's job is to refuse *malformed and escaping* input — it verifies
 the archive's integrity hashes, enforces defensive size/entry/ratio

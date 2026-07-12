@@ -112,19 +112,24 @@ jobs:
     name: Integration suite (PHP ${{ matrix.php_version }})
     runs-on: ubuntu-latest
 
-    # Tiered gates (ADR 0007): the round-trip suite is heavy — it boots wp-env
-    # across the whole PHP matrix — so it runs only on the release-bound
-    # promotions: pull requests targeting staging or main, and pushes to those
-    # branches or a release tag. Feature pull requests into dev get the fast
-    # gates only, so day-to-day iteration stays quick.
+    # Tiered gates (ADR 0007, as amended 2026-07-11): the real-database
+    # round-trip suite runs on EVERY pull request — the unit suite mocks
+    # WordPress throughout, so a green fast gate proves nothing about real
+    # database behaviour, and the restore-safety findings of the engine audit
+    # all shipped through dev gates that never touched MySQL. What stays
+    # tiered is the breadth: a dev-bound run boots wp-env once, on the PHP
+    # floor, keeping day-to-day iteration quick; the release-bound promotions
+    # (pull requests targeting staging or main, and pushes to those branches
+    # or a release tag) still run the whole PHP matrix — plus pushes to dev,
+    # so every merge commit is proven too.
     if: >-
-      (github.event_name == 'pull_request' && (github.base_ref == 'staging' || github.base_ref == 'main')) ||
-      (github.event_name == 'push' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
 
     strategy:
       fail-fast: false
       matrix:
-        php_version: ['8.2', '8.3', '8.4', '8.5']
+        php_version: ${{ (github.base_ref == 'dev' || github.ref == 'refs/heads/dev') && fromJSON('["8.2"]') || fromJSON('["8.2", "8.3", "8.4", "8.5"]') }}
 
     steps:
       - name: Check out repository

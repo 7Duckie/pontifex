@@ -128,6 +128,38 @@ final class EntryWriterTest extends TestCase {
 	}
 
 	/**
+	 * Forwards the byte-progress callback to the codec as the payload streams.
+	 *
+	 * The callback must receive the entry's raw source bytes as the payload is
+	 * encoded — the hook a caller uses to report progress within a single entry —
+	 * so the reported total equals the source size.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_reports_source_bytes_to_the_callback(): void {
+		$source_contents = str_repeat( 'entry payload chunk; ', 1000 );
+		$source          = self::memory_stream( $source_contents );
+		$destination     = self::memory_stream();
+
+		$header   = EntryHeader::for_file( 'big.txt', strlen( $source_contents ), 0644, 1690000000, 'application/octet-stream', 0 );
+		$reported = 0;
+		self::make_writer()->write_entry(
+			$header,
+			0,
+			self::zero_nonce(),
+			$source,
+			$destination,
+			null,
+			null,
+			function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertSame( strlen( $source_contents ), $reported, 'The callback must see every source byte of the entry.' );
+	}
+
+	/**
 	 * NONCE_SIZE must equal 12 bytes (spec §6).
 	 *
 	 * @return void
@@ -456,5 +488,126 @@ final class EntryWriterTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		$writer->write_entry( $header, 0, self::zero_nonce(), $source, 'not a resource' );
+	}
+
+	/**
+	 * A file that shrank between scan and write must be recorded at its actual size.
+	 *
+	 * The scan-to-write TOCTOU race: the header declares the scan-time size,
+	 * but by write time the file holds fewer bytes. The writer must record the
+	 * byte count it actually captured — never the stale claim — and report the
+	 * discrepancy, so the archive stays truthful and the caller can warn.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_corrects_declared_size_when_the_file_shrank(): void {
+		$actual_contents = str_repeat( 'B', 400 );
+		$source          = self::memory_stream( $actual_contents );
+		$dest            = self::memory_stream();
+
+		// The scan saw 1000 bytes; by write time only 400 remain.
+		$draft_header = EntryHeader::for_file( 'shrunk.log', 1000, 0644, 1690000000, 'application/octet-stream', 0 );
+		$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+		$parts         = self::parse_entry_record( self::read_all( $dest ) );
+		$parsed_header = EntryHeader::from_bytes( $parts['header_bytes'] );
+
+		$this->assertSame( 400, $parsed_header->size(), 'The on-disk header must record the byte count actually captured.' );
+		$this->assertTrue( $result->size_was_corrected(), 'The result must report that the size was corrected.' );
+		$this->assertSame( 1000, $result->declared_size() );
+		$this->assertSame( 400, $result->actual_size() );
+		$this->assertSame( $actual_contents, $parts['payload'], 'The payload must be the bytes actually read.' );
+	}
+
+	/**
+	 * A file that grew between scan and write must be recorded at its actual size.
+	 *
+	 * The growth direction of the same race: without the correction the header
+	 * would under-declare the payload, which also quietly weakens the
+	 * decompression-budget claim a reader relies on.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_corrects_declared_size_when_the_file_grew(): void {
+		$actual_contents = str_repeat( 'C', 250 );
+		$source          = self::memory_stream( $actual_contents );
+		$dest            = self::memory_stream();
+
+		// The scan saw 100 bytes; by write time there are 250.
+		$draft_header = EntryHeader::for_file( 'grew.log', 100, 0644, 1690000000, 'application/octet-stream', 0 );
+		$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+		$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+		$this->assertSame( 250, $parsed_header->size() );
+		$this->assertTrue( $result->size_was_corrected() );
+		$this->assertSame( 100, $result->declared_size() );
+		$this->assertSame( 250, $result->actual_size() );
+	}
+
+	/**
+	 * The trailing hash must cover the CORRECTED header bytes, not the draft.
+	 *
+	 * The hash is computed over the header as written to disk; if it covered
+	 * the stale draft the record would fail verification on read.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_hash_covers_the_corrected_header(): void {
+		$source = self::memory_stream( 'short' );
+		$dest   = self::memory_stream();
+
+		$draft_header = EntryHeader::for_file( 'shrunk.txt', 5000, 0644, 0, 'application/octet-stream', 0 );
+		$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+		$bytes          = self::read_all( $dest );
+		$hashed_portion = substr( $bytes, 0, -Sha256::DIGEST_SIZE );
+
+		$this->assertSame( hash( 'sha256', $hashed_portion, true ), $result->entry_hash() );
+	}
+
+	/**
+	 * An unchanged file must produce no size correction and no report.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_reports_no_correction_when_content_matches(): void {
+		$contents = 'exactly as scanned';
+		$source   = self::memory_stream( $contents );
+		$dest     = self::memory_stream();
+
+		$header = EntryHeader::for_file( 'steady.txt', strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 );
+		$result = self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $dest );
+
+		$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+		$this->assertFalse( $result->size_was_corrected() );
+		$this->assertNull( $result->declared_size() );
+		$this->assertNull( $result->actual_size() );
+		$this->assertSame( strlen( $contents ), $parsed_header->size() );
+	}
+
+	/**
+	 * A db_chunk whose byte_count drifted from its payload must NOT be corrected.
+	 *
+	 * A db_chunk's byte_count is a sizing estimate, not a content claim (its
+	 * truth is guaranteed by the consistent snapshot, ADR 0011), and only file
+	 * entries carry the size field the correction exists for.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_does_not_correct_a_db_chunk_whose_byte_count_drifted(): void {
+		$sql    = "INSERT INTO `wp_options` VALUES (1);\n";
+		$source = self::memory_stream( $sql );
+		$dest   = self::memory_stream();
+
+		// byte_count deliberately does not match the payload length.
+		$header = EntryHeader::for_db_chunk( 0, 'wp_options', 1, 5000, 0 );
+		$result = self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $dest );
+
+		$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+		$this->assertFalse( $result->size_was_corrected() );
+		$this->assertSame( 5000, $parsed_header->byte_count(), 'A db_chunk byte_count must pass through untouched.' );
 	}
 }

@@ -111,6 +111,17 @@ interface WordPressContext {
 	public function wpdb_collation(): string;
 
 	/**
+	 * The table-name prefix the WordPress database is configured to use.
+	 *
+	 * Equivalent to $wpdb->prefix. Recorded in Provenance (format v1.1) so a
+	 * content-only restore can rewrite the source-prefixed table names to the
+	 * destination's own prefix.
+	 *
+	 * @return string e.g. "wp_".
+	 */
+	public function wpdb_prefix(): string;
+
+	/**
 	 * The version string reported by the database server.
 	 *
 	 * Equivalent to $wpdb->get_var('SELECT VERSION()'). Used by
@@ -197,6 +208,20 @@ interface WordPressContext {
 	public function save_option( string $name, mixed $value, bool $autoload = false ): void;
 
 	/**
+	 * Flush WordPress's in-memory and persistent object cache.
+	 *
+	 * Equivalent to wp_cache_flush(). Called after a restore has replayed the
+	 * database with raw SQL: WordPress's option cache (and any persistent object
+	 * cache) still holds the pre-restore values, so a later option_value()/
+	 * save_option() would read and write against state that no longer matches the
+	 * database — silently losing the post-restore counter writes. Flushing makes
+	 * subsequent reads and writes see the restored database.
+	 *
+	 * @return void
+	 */
+	public function flush_cache(): void;
+
+	/**
 	 * The class allowlist for unserialising during a cross-URL migration.
 	 *
 	 * Resolves the `pontifex_serialized_classes` filter (threat-model §1,
@@ -215,4 +240,62 @@ interface WordPressContext {
 	 * @return string[] Class names permitted when unserialising; empty allows none.
 	 */
 	public function serialised_classes_allowlist(): array;
+
+	/**
+	 * Acquire a site-scoped named database lock without blocking.
+	 *
+	 * Wraps MySQL's GET_LOCK(). A named lock is granted by the database
+	 * server to exactly one connection at a time, atomically: there is no
+	 * gap between "is it free?" and "take it" for two simultaneous requests
+	 * to race through, which is the flaw a check-then-set transient lock
+	 * cannot escape. And because the lock belongs to the connection that
+	 * took it, the server releases it the instant that connection dies — a
+	 * crashed request can never leave a permanent stale lock behind.
+	 *
+	 * Named locks are server-wide, not per-database: on shared hosting many
+	 * unrelated sites use one database server, so an unscoped name would
+	 * wrongly serialise operations across strangers' sites. The
+	 * implementation therefore scopes the name to this site (its database
+	 * and table prefix) before asking the server.
+	 *
+	 * The call never waits: if the lock is already held elsewhere it reports
+	 * failure immediately. A query error also reports failure — callers must
+	 * treat "not acquired" as "do not proceed" (fail closed).
+	 *
+	 * @param string $name The lock's logical name, unique per operation (e.g. "pontifex_backup_lock").
+	 * @return bool True if this connection now holds the lock; false if it is held elsewhere or the query failed.
+	 */
+	public function acquire_named_lock( string $name ): bool;
+
+	/**
+	 * Release a named database lock previously acquired by this request.
+	 *
+	 * Wraps MySQL's RELEASE_LOCK() with the same site-scoping as
+	 * {@see self::acquire_named_lock()}. Releasing a lock this connection
+	 * does not hold is harmless — the server simply reports that nothing was
+	 * released — so cleanup paths may release unconditionally.
+	 *
+	 * @param string $name The lock's logical name, as passed to acquire_named_lock().
+	 * @return void
+	 */
+	public function release_named_lock( string $name ): void;
+
+	/**
+	 * Open a dedicated second database connection, or report that the host refuses one.
+	 *
+	 * The consistent-snapshot export (ADR 0011) dumps the database inside a
+	 * REPEATABLE READ transaction. That transaction must not live on the global
+	 * `$wpdb` connection: mid-export writes (progress transients, counters)
+	 * would join it and stay invisible to other requests until commit — the
+	 * admin progress bar would freeze. A dedicated connection gives the dump
+	 * its own snapshot while the global connection stays live, which is how
+	 * standalone dump tools are architected.
+	 *
+	 * Null means the environment refused a second connection (e.g. a shared
+	 * host capping connections per user); callers must degrade gracefully —
+	 * the export falls back to the global connection without a snapshot.
+	 *
+	 * @return wpdb|null A connected second wpdb with the site's table prefix, or null when unavailable.
+	 */
+	public function dedicated_wpdb_connection(): ?wpdb;
 }

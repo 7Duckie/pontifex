@@ -10,10 +10,16 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
 use Mockery;
+use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
@@ -268,6 +274,167 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * The default export scans the wp-content root and records a content-only scope.
+	 *
+	 * Two coupled facts of the content-only default (ADR 0008): the manifest builder
+	 * is handed the resolved wp-content root, and the written archive's provenance
+	 * carries a content-only scope.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_default_writes_a_content_only_archive(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder
+			->shouldReceive( 'build' )
+			->once()
+			->with( '/tmp/wp/wp-content' )
+			->andReturn( ManifestStream::from_plans( array() ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$scope = $this->written_scope( $this->temp_output_path );
+		$this->assertNotNull( $scope, 'A default export should record a scope.' );
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+	}
+
+	/**
+	 * The --whole-site export scans the WordPress root and records a whole-site scope.
+	 *
+	 * The opt-in counterpart: --whole-site hands the manifest builder the WordPress
+	 * root (ABSPATH, with no wp-content prefix), and the written archive's provenance
+	 * records a whole-site scope.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_whole_site_writes_a_whole_site_archive(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder
+			->shouldReceive( 'build' )
+			->once()
+			->with( '/tmp/wp' )
+			->andReturn( ManifestStream::from_plans( array() ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output'     => $this->temp_output_path,
+				'whole-site' => true,
+				'yes'        => true,
+			)
+		);
+
+		$scope = $this->written_scope( $this->temp_output_path );
+		$this->assertNotNull( $scope, 'A whole-site export should record a scope.' );
+		$this->assertFalse( $scope->is_content_only() );
+		$this->assertSame( '', $scope->content_root() );
+	}
+
+	/**
+	 * Files that changed while being read must surface as WP_CLI warnings.
+	 *
+	 * The scan-to-write race: the entry's header declares the scan-time size
+	 * but the source yields different bytes at write time. The engine records
+	 * the truth in the archive; the command must tell the user — one warning
+	 * naming the file with both byte counts, plus a summary. The happy-path
+	 * tests above double as the negative case: the WP_CLI alias mock throws
+	 * on any unexpected warning() call, so a steady export must stay silent.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_warns_when_a_file_changed_during_the_export(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		// The header claims 1000 bytes (the scan-time stat); only 400 remain by write time.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$source = fopen( 'php://memory', 'r+b' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open php://memory.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $source, str_repeat( 'B', 400 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $source );
+
+		$plan = new EntryPlan(
+			EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			$source
+		);
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( array( $plan ) ) );
+
+		$warnings = array();
+		$wp_cli   = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )
+			->twice()
+			->andReturnUsing(
+				static function ( string $message ) use ( &$warnings ): void {
+					$warnings[] = $message;
+				}
+			);
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertStringContainsString( 'wp-content/moving.log', $warnings[0], 'The per-file warning must name the changed file.' );
+		$this->assertStringContainsString( '1000', $warnings[0], 'The per-file warning must state the scan-time byte count.' );
+		$this->assertStringContainsString( '400', $warnings[0], 'The per-file warning must state the captured byte count.' );
+		$this->assertStringContainsString( '1 file changed while the backup ran', $warnings[1], 'The summary must count the changed files.' );
+	}
+
+	/**
+	 * Read the scope recorded in a written archive's provenance.
+	 *
+	 * @param string $path Absolute path to the archive.
+	 * @return Scope|null The recorded scope, or null if none was recorded.
+	 */
+	private function written_scope( string $path ): ?Scope {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the just-written archive to read its provenance back in a unit test.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open the written archive.' );
+		}
+		try {
+			$reader = new ArchiveReader( $source );
+			return $reader->provenance()->scope();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
+			fclose( $source );
+		}
+	}
+
+	/**
 	 * Build an Environment mock with the calls __invoke makes during the happy path.
 	 *
 	 * The mock answers is_dir(parent), is_writable(parent),
@@ -286,6 +453,8 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'constant_value' )->with( 'PONTIFEX_VERSION' )->andReturn( '0.0.0-test' );
 		$mock->shouldReceive( 'is_constant_defined' )->with( 'ABSPATH' )->andReturn( true );
 		$mock->shouldReceive( 'constant_value' )->with( 'ABSPATH' )->andReturn( '/tmp/wp/' );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$mock->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/tmp/wp/wp-content' );
 		$mock->shouldReceive( 'php_version' )->andReturn( '8.1.29' );
 		return $mock;
 	}
@@ -306,6 +475,7 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$mock->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$mock->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$mock->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
@@ -324,7 +494,7 @@ final class InvokeBranchesTest extends TestCase {
 	 */
 	private function build_manifest_builder_mock_returning_empty() {
 		$mock = Mockery::mock( ManifestBuilderInterface::class );
-		$mock->shouldReceive( 'build' )->once()->andReturn( array() );
+		$mock->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
 		return $mock;
 	}
 }

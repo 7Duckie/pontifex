@@ -166,3 +166,16 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex stats', \Pontifex\Cli\StatsCommand::class );
 	\WP_CLI::add_command( 'pontifex diagnostics', \Pontifex\Cli\DiagnosticsCommand::class );
 }
+
+// -----------------------------------------------------------------------------
+// Admin UI
+//
+// Registered only for admin-side requests. The admin screens give non-CLI
+// operators the same operations the `wp pontifex` commands expose, gated by
+// capability and (for actions) a nonce — deny-by-default, unlike the shell-trust
+// CLI. The hooks it registers are inert on non-Pontifex pages.
+// -----------------------------------------------------------------------------
+
+if ( is_admin() ) {
+	\Pontifex\Admin\AdminBootstrap::create()->register();
+}

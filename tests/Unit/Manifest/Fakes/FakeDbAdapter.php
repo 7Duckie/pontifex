@@ -50,6 +50,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return string[]
 	 */
 	public function list_tables(): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
@@ -62,6 +63,7 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return int
 	 */
 	public function row_count( string $table_name ): int {
+		$this->maybe_fail( __FUNCTION__ );
 		return $this->tables[ $table_name ]['row_count'] ?? 0;
 	}
 
@@ -72,28 +74,36 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 * @return string
 	 */
 	public function dump_table_schema( string $table_name ): string {
+		$this->maybe_fail( __FUNCTION__ );
 		return $this->tables[ $table_name ]['schema'] ?? '';
 	}
 
 	/**
-	 * Return a single canned INSERT line per row in the requested range.
+	 * Return one batched multi-row INSERT for the requested range.
+	 *
+	 * Mirrors {@see \Pontifex\Manifest\WpdbAdapter::dump_table_rows()}, which
+	 * packs every row of a chunk into a single INSERT INTO ... VALUES (...),
+	 * (...), ...; statement — NOT one INSERT per row. Tests rely on this
+	 * fidelity so the scanner's predicted statement_count is checked against
+	 * the shape the real emitter produces.
 	 *
 	 * @param string $table_name Registered table name.
 	 * @param int    $offset     Starting row offset.
 	 * @param int    $limit      Maximum number of rows.
-	 * @return string SQL bytes.
+	 * @return string SQL bytes (empty when the range yields no rows).
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
+		$this->maybe_fail( __FUNCTION__ );
 		$row_count = $this->row_count( $table_name );
 		$end       = min( $offset + $limit, $row_count );
 		if ( $offset >= $end ) {
 			return '';
 		}
-		$sql = '';
+		$tuples = array();
 		for ( $i = $offset; $i < $end; ++$i ) {
-			$sql .= "INSERT INTO `{$table_name}` VALUES ({$i});\n";
+			$tuples[] = "({$i})";
 		}
-		return $sql;
+		return "INSERT INTO `{$table_name}` VALUES " . implode( ', ', $tuples ) . ";\n";
 	}
 
 	/**
@@ -126,6 +136,36 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Number of successful execute_sql calls after which one call throws, or -1 for never.
+	 *
+	 * @var int
+	 */
+	private int $fail_after = -1;
+
+	/**
+	 * The error message the deferred failure carries.
+	 *
+	 * @var string
+	 */
+	private string $fail_after_message = '';
+
+	/**
+	 * Configure execute_sql to throw once the given number of calls have succeeded.
+	 *
+	 * Lets a test place a failure mid-replay: the first $successes statements
+	 * record normally, the next call throws, and calls after that succeed again
+	 * (so cleanup statements are still observable).
+	 *
+	 * @param int    $successes How many calls succeed before the failure fires.
+	 * @param string $message   The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_after_executes( int $successes, string $message ): void {
+		$this->fail_after         = $successes;
+		$this->fail_after_message = $message;
+	}
+
+	/**
 	 * Return the SQL statements passed to execute_sql, in order.
 	 *
 	 * @return string[] The recorded statements.
@@ -150,6 +190,196 @@ final class FakeDbAdapter implements DatabaseAdapter {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
 			throw new RuntimeException( $message );
 		}
+		if ( $this->fail_after >= 0 && count( $this->executed_statements ) >= $this->fail_after ) {
+			$this->fail_after = -1;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $fail_after_message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $this->fail_after_message );
+		}
 		$this->executed_statements[] = $sql;
+	}
+
+	/**
+	 * Prefix-key rewrite calls, in order, as [source_prefix, dest_prefix, staging_prefix] triples.
+	 *
+	 * @var array<int, array{0: string, 1: string, 2: string}>
+	 */
+	private array $rewrite_calls = array();
+
+	/**
+	 * Record a prefix-key rewrite call so a test can assert it happened.
+	 *
+	 * @param string $source_prefix  The prefix recorded in the archive.
+	 * @param string $dest_prefix    The destination site's prefix.
+	 * @param string $staging_prefix Physical prefix on the tables being rewritten, or ''.
+	 * @return void
+	 */
+	public function rewrite_prefix_keys( string $source_prefix, string $dest_prefix, string $staging_prefix = '' ): void {
+		$this->rewrite_calls[] = array( $source_prefix, $dest_prefix, $staging_prefix );
+	}
+
+	/**
+	 * Return the recorded prefix-key rewrite calls, in order.
+	 *
+	 * @return array<int, array{0: string, 1: string, 2: string}> Each entry is [source_prefix, dest_prefix, staging_prefix].
+	 */
+	public function rewrite_calls(): array {
+		return $this->rewrite_calls;
+	}
+
+	/**
+	 * Table names table_exists() reports as present.
+	 *
+	 * Registered tables (add_table) count as existing too, so scanner-focused
+	 * tests keep working; writer-focused tests can mark extra live tables here.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $existing_tables = array();
+
+	/**
+	 * Mark a table as existing for table_exists(), without registering scan data.
+	 *
+	 * @param string $name The table name to report as present.
+	 * @return void
+	 */
+	public function mark_table_existing( string $name ): void {
+		$this->existing_tables[ $name ] = true;
+	}
+
+	/**
+	 * Whether the table was registered via add_table() or mark_table_existing().
+	 *
+	 * @param string $table_name The exact table name to look for.
+	 * @return bool True when the table is known to the fake.
+	 */
+	public function table_exists( string $table_name ): bool {
+		return isset( $this->tables[ $table_name ] ) || isset( $this->existing_tables[ $table_name ] );
+	}
+
+	/**
+	 * Canned average row widths, keyed by table name.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $average_row_bytes = array();
+
+	/**
+	 * Register a canned average row width for a table.
+	 *
+	 * @param string $name  Table name.
+	 * @param int    $bytes Average bytes per row to report.
+	 * @return void
+	 */
+	public function set_average_row_bytes( string $name, int $bytes ): void {
+		$this->average_row_bytes[ $name ] = $bytes;
+	}
+
+	/**
+	 * Return the canned average row width, or 0 when none was registered.
+	 *
+	 * Mirrors WpdbAdapter's unknown-answer contract: 0 tells the scanner to
+	 * fall back to its fixed estimate.
+	 *
+	 * @param string $table_name Table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table_name ): int {
+		$this->maybe_fail( __FUNCTION__ );
+		return $this->average_row_bytes[ $table_name ] ?? 0;
+	}
+
+	/**
+	 * Charset calls, in order: the charset for set, or the literal 'RESTORE' for restore.
+	 *
+	 * @var string[]
+	 */
+	private array $charset_calls = array();
+
+	/**
+	 * Record a session-charset switch so a test can assert it happened.
+	 *
+	 * @param string $charset The archive's character set.
+	 * @return void
+	 */
+	public function set_session_charset( string $charset ): void {
+		$this->charset_calls[] = $charset;
+	}
+
+	/**
+	 * Record the hand-back of the connection's own charset.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void {
+		$this->charset_calls[] = 'RESTORE';
+	}
+
+	/**
+	 * Return the recorded charset calls, in order.
+	 *
+	 * @return string[] Charsets passed to set_session_charset, with 'RESTORE' marking each restore call.
+	 */
+	public function charset_calls(): array {
+		return $this->charset_calls;
+	}
+
+	/**
+	 * Failure messages queued per method name; consumed on the next call.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $queued_failures = array();
+
+	/**
+	 * Queue the next call to the named method to throw a RuntimeException.
+	 *
+	 * Mirrors the real adapter's contract — every read throws on a $wpdb
+	 * failure — so orchestration can be unit-tested against a failing
+	 * database without WordPress mocking.
+	 *
+	 * @param string $method  The method name, e.g. "row_count".
+	 * @param string $message The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_next( string $method, string $message ): void {
+		$this->queued_failures[ $method ] = $message;
+	}
+
+	/**
+	 * Throw the queued failure for the method, if one is armed.
+	 *
+	 * @param string $method The method name being invoked.
+	 * @return void
+	 * @throws RuntimeException When a failure was queued for the method.
+	 */
+	private function maybe_fail( string $method ): void {
+		if ( isset( $this->queued_failures[ $method ] ) ) {
+			$message = $this->queued_failures[ $method ];
+			unset( $this->queued_failures[ $method ] );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $message );
+		}
+	}
+
+	/**
+	 * List known tables (registered or marked existing) beginning with the prefix.
+	 *
+	 * @param string $prefix The literal name prefix to match; must not be empty.
+	 * @return string[] Matching table names in alphabetical order.
+	 * @throws RuntimeException If $prefix is empty, mirroring WpdbAdapter.
+	 */
+	public function list_tables_by_prefix( string $prefix ): array {
+		if ( '' === $prefix ) {
+			throw new RuntimeException( 'FakeDbAdapter::list_tables_by_prefix: prefix must not be empty.' );
+		}
+		$names = array();
+		foreach ( array_merge( array_keys( $this->tables ), array_keys( $this->existing_tables ) ) as $name ) {
+			if ( str_starts_with( $name, $prefix ) ) {
+				$names[ $name ] = true;
+			}
+		}
+		$names = array_keys( $names );
+		sort( $names, SORT_STRING );
+		return $names;
 	}
 }

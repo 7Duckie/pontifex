@@ -160,4 +160,25 @@ final class EntryPlanTest extends TestCase {
 
 		$this->assertSame( $source, $plan->source() );
 	}
+
+	/**
+	 * A callable source is held as a factory and opened lazily, fresh on each call.
+	 *
+	 * @return void
+	 */
+	public function test_callable_source_is_opened_lazily(): void {
+		$opens   = 0;
+		$factory = static function () use ( &$opens ) {
+			++$opens;
+			return self::memory_stream();
+		};
+
+		$plan = new EntryPlan( self::sample_header(), 0, self::zero_nonce(), $factory );
+
+		$this->assertSame( 0, $opens, 'The factory must not be invoked at construction.' );
+		$this->assertTrue( is_resource( $plan->source() ), 'source() must return a stream resource.' );
+		$this->assertSame( 1, $opens, 'source() must invoke the factory.' );
+		$plan->source();
+		$this->assertSame( 2, $opens, 'Each source() call opens a fresh stream.' );
+	}
 }

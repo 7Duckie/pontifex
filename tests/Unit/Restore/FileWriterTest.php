@@ -742,4 +742,86 @@ final class FileWriterTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
 		$this->assertSame( 'image-bytes', file_get_contents( $path ) );
 	}
+
+	/**
+	 * A content-only writer must write an entry inside its required prefix.
+	 *
+	 * The restriction allows the prefix tree through unchanged, so a normal
+	 * content-only restore writes wp-content as usual.
+	 *
+	 * @return void
+	 */
+	public function test_required_prefix_allows_entry_within_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$writer->write_entry( self::directory_result( 'wp-content' ) );
+		$writer->write_entry( self::file_result( 'wp-content/plugins/akismet/akismet.php', 'plugin' ) );
+
+		$path = $this->fixture_root . '/wp-content/plugins/akismet/akismet.php';
+		$this->assertFileExists( $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'plugin', file_get_contents( $path ) );
+	}
+
+	/**
+	 * A content-only writer must refuse a WordPress core file.
+	 *
+	 * The write-boundary backstop behind the import scope gate: even if a
+	 * mislabelled content-only archive carried a core path, it is refused and never
+	 * written.
+	 *
+	 * @return void
+	 */
+	public function test_required_prefix_refuses_core_path(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$writer->write_entry( self::file_result( 'wp-includes/version.php', 'core' ) );
+	}
+
+	/**
+	 * A content-only writer must refuse wp-config.php at the site root.
+	 *
+	 * @return void
+	 */
+	public function test_required_prefix_refuses_wp_config(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$writer->write_entry( self::file_result( 'wp-config.php', '<?php' ) );
+	}
+
+	/**
+	 * A content-only writer must NOT refuse a sibling directory whose name merely starts with the prefix.
+	 *
+	 * Defends against a prefix check that uses a bare string-prefix without a slash
+	 * boundary and wrongly admits "wp-content-old".
+	 *
+	 * @return void
+	 */
+	public function test_required_prefix_refuses_lookalike_sibling(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$writer->write_entry( self::file_result( 'wp-content-old/note.txt', 'data' ) );
+	}
+
+	/**
+	 * With no required prefix, the writer writes a core path unrestricted.
+	 *
+	 * Confirms the default (whole-site) restore is unchanged — a null prefix imposes
+	 * no path restriction.
+	 *
+	 * @return void
+	 */
+	public function test_no_required_prefix_writes_core_path(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$writer->write_entry( self::file_result( 'wp-includes/version.php', 'core' ) );
+
+		$this->assertFileExists( $this->fixture_root . '/wp-includes/version.php' );
+	}
 }

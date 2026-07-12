@@ -1,0 +1,570 @@
+/*
+ * Pontifex admin styles.
+ *
+ * Swiss / International Typographic Style: hierarchy through type weight, size
+ * and whitespace rather than boxes, borders or colour; a near-monochrome palette
+ * with a single restrained accent; a consistent spacing rhythm; sharp hairline
+ * rules. See docs/design-language.md. All selectors are scoped under
+ * .pontifex-admin so nothing leaks into the rest of wp-admin.
+ */
+
+.pontifex-admin {
+	--pontifex-ink: #111111;
+	--pontifex-muted: #6b6b6b;
+	--pontifex-rule: #e3e3e3;
+	--pontifex-fill: #f6f6f6;
+	--pontifex-paper: #ffffff;
+	--pontifex-accent: #1a3a8f;
+	--pontifex-step: 8px;
+
+	max-width: 960px;
+	margin-top: calc(var(--pontifex-step) * 3);
+	padding-left: calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-ink);
+	font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+/* Header -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-header {
+	padding-bottom: calc(var(--pontifex-step) * 2);
+	border-bottom: 2px solid var(--pontifex-ink);
+	margin-bottom: calc(var(--pontifex-step) * 4);
+}
+
+.pontifex-admin .pontifex-eyebrow {
+	margin: 0 0 calc(var(--pontifex-step) * 0.75);
+	padding: 0;
+	font-size: 12px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-title {
+	margin: 0;
+	padding: 0;
+	font-size: 34px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	line-height: 1.1;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-subtitle {
+	margin: var(--pontifex-step) 0 0;
+	padding: 0;
+	font-size: 14px;
+	color: var(--pontifex-muted);
+}
+
+/* Sections ------------------------------------------------------------------ */
+
+.pontifex-admin .pontifex-section {
+	margin-bottom: calc(var(--pontifex-step) * 4);
+}
+
+.pontifex-admin .pontifex-section-title {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	padding: 0;
+	font-size: 12px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--pontifex-muted);
+}
+
+/* Transfer activity --------------------------------------------------------- */
+
+.pontifex-admin .pontifex-stat-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: calc(var(--pontifex-step) * 3);
+}
+
+.pontifex-admin .pontifex-stat {
+	display: flex;
+	flex-direction: column;
+	gap: var(--pontifex-step);
+	padding-top: calc(var(--pontifex-step) * 2);
+	border-top: 1px solid var(--pontifex-rule);
+}
+
+.pontifex-admin .pontifex-stat-operation {
+	font-size: 16px;
+	font-weight: 600;
+}
+
+.pontifex-admin .pontifex-stat-line {
+	font-size: 14px;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-figure {
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-stat-size {
+	font-size: 13px;
+	color: var(--pontifex-muted);
+}
+
+/* Tables -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 14px;
+}
+
+.pontifex-admin .pontifex-table th {
+	text-align: left;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+	border-bottom: 2px solid var(--pontifex-ink);
+}
+
+/* Data rows sit indented under the flush-left column headers — the same offset the
+   backup chooser's rows have (its 12px padding + 2px selection border), so every
+   table on every screen reads the same way: headers flush, data indented. */
+.pontifex-admin .pontifex-table td {
+	padding: calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 2) calc(var(--pontifex-step) * 1.5) calc(var(--pontifex-step) * 1.75);
+	border-bottom: 1px solid var(--pontifex-rule);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Empty states -------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-empty {
+	margin: 0;
+	padding: calc(var(--pontifex-step) * 2) 0;
+	color: var(--pontifex-muted);
+	border-top: 1px solid var(--pontifex-rule);
+}
+
+/* Backup --------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-lead {
+	max-width: 60ch;
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-button {
+	display: inline-block;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	border: 0;
+	background: var(--pontifex-accent);
+	color: var(--pontifex-paper);
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+/* The hidden attribute must beat the button's own display rule, so the idle Cancel button and the running Create button are actually hidden. */
+.pontifex-admin .pontifex-button[hidden] {
+	display: none;
+}
+
+.pontifex-admin .pontifex-button:hover:not(:disabled),
+.pontifex-admin .pontifex-button:focus:not(:disabled) {
+	background: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.pontifex-admin .pontifex-progress {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-ink);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+/* Collapse the status lines when empty, so the idle gap to "Your backups" matches the header gap. */
+.pontifex-admin .pontifex-progress:empty,
+.pontifex-admin .pontifex-timing:empty,
+.pontifex-admin .pontifex-notice:empty {
+	display: none;
+}
+
+.pontifex-admin .pontifex-progress-track {
+	height: 3px;
+	margin: calc(var(--pontifex-step) * 2) 0 0;
+	background: var(--pontifex-rule);
+	overflow: hidden;
+}
+
+.pontifex-admin .pontifex-progress-fill {
+	display: block;
+	width: 0;
+	height: 100%;
+	background: var(--pontifex-accent);
+	transition: width 0.3s ease;
+}
+
+/* Scanning phase: the total is unknown, so a segment slides across instead of filling. */
+.pontifex-admin .pontifex-progress-track.is-indeterminate .pontifex-progress-fill {
+	width: 40%;
+	animation: pontifex-scan 2s ease-in-out infinite;
+}
+
+@keyframes pontifex-scan {
+	from {
+		transform: translateX(-110%);
+	}
+
+	to {
+		transform: translateX(275%);
+	}
+}
+
+.pontifex-admin .pontifex-timing {
+	min-height: 1.2em;
+	margin: calc(var(--pontifex-step) / 2) 0 0;
+	color: var(--pontifex-muted);
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
+}
+
+.pontifex-admin .pontifex-notice {
+	min-height: 1.5em;
+	margin: var(--pontifex-step) 0 0;
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-actions {
+	white-space: nowrap;
+}
+
+.pontifex-admin .pontifex-link {
+	color: var(--pontifex-accent);
+}
+
+.pontifex-admin .pontifex-delete-backup,
+.pontifex-admin .pontifex-verify-backup {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pontifex-muted);
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+/* Delete sits after the Download link, so it needs separating; Verify is the only action in its row. */
+.pontifex-admin .pontifex-delete-backup {
+	margin-left: calc(var(--pontifex-step) * 2);
+}
+
+.pontifex-admin .pontifex-delete-backup:hover:not(:disabled),
+.pontifex-admin .pontifex-delete-backup:focus:not(:disabled),
+.pontifex-admin .pontifex-verify-backup:hover:not(:disabled),
+.pontifex-admin .pontifex-verify-backup:focus:not(:disabled) {
+	color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-delete-backup:disabled,
+.pontifex-admin .pontifex-verify-backup:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+/* Restore -------------------------------------------------------------------- */
+
+.pontifex-admin .pontifex-hint {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * 2) 0;
+	color: var(--pontifex-muted);
+}
+
+/* The command words in the lead are ink, not muted, so they read as the words to type. */
+.pontifex-admin .pontifex-restore-lead .pontifex-emph {
+	color: var(--pontifex-ink);
+}
+
+/* The backup chooser, shared by the Restore and Verify screens: a grid of
+   selectable rows, not a table, so the same select-then-act pattern appears on
+   both. The head and the rows share the same columns and a matching left inset
+   so they align. */
+.pontifex-admin .pontifex-restore-head {
+	display: grid;
+	grid-template-columns: 1fr 168px 64px;
+	gap: calc(var(--pontifex-step) * 2);
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
+	border-bottom: 2px solid var(--pontifex-ink);
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-restore-row {
+	display: grid;
+	grid-template-columns: 1fr 168px 64px;
+	gap: calc(var(--pontifex-step) * 2);
+	align-items: baseline;
+	width: 100%;
+	padding: calc(var(--pontifex-step) * 1.5);
+	border: 2px solid transparent;
+	border-bottom: 1px solid var(--pontifex-rule);
+	border-radius: 0;
+	background: none;
+	color: var(--pontifex-ink);
+	font: inherit;
+	font-variant-numeric: tabular-nums;
+	text-align: left;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-restore-row:hover:not(:disabled) {
+	background: var(--pontifex-fill);
+}
+
+/* The selected backup is shown by an all-round accent border with a little margin
+   so it stands clear of its neighbours — no radio, no dot, no fill. */
+.pontifex-admin .pontifex-restore-row.is-selected {
+	border: 2px solid var(--pontifex-accent);
+	margin: calc(var(--pontifex-step) * 0.75) 0;
+}
+
+.pontifex-admin .pontifex-restore-row.is-selected .pontifex-restore-name {
+	font-weight: 600;
+}
+
+.pontifex-admin .pontifex-restore-row:focus-visible {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: -2px;
+}
+
+.pontifex-admin .pontifex-restore-row:disabled {
+	cursor: default;
+}
+
+.pontifex-admin .pontifex-restore-when,
+.pontifex-admin .pontifex-restore-size {
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-action-label {
+	display: block;
+	margin: 0 0 var(--pontifex-step);
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-action-input {
+	display: block;
+	width: 300px;
+	max-width: 100%;
+	margin: 0 0 calc(var(--pontifex-step) * 2.5);
+	padding: calc(var(--pontifex-step) * 1.25) calc(var(--pontifex-step) * 1.5);
+	border: 0;
+	border-radius: 0;
+	background: var(--pontifex-paper);
+	box-shadow: none;
+	color: var(--pontifex-ink);
+	font: inherit;
+}
+
+.pontifex-admin .pontifex-action-input:focus {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 1px;
+}
+
+/* Upload file field --------------------------------------------------------- */
+
+/*
+ * The browser's native file control is replaced entirely with the Swiss
+ * vocabulary. The real input is visually hidden (but remains the accessible,
+ * focusable control); a sharp outlined label triggers it — ink hairline, no
+ * fill, inverting to ink on hover, distinct from the solid-accent primary
+ * "Upload" button — and the chosen filename shows as a muted caption.
+ */
+.pontifex-admin .pontifex-upload-field {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: calc(var(--pontifex-step) * 1.5);
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+}
+
+.pontifex-admin .pontifex-upload-input {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	border: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.pontifex-admin .pontifex-upload-choose {
+	display: inline-block;
+	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	border: 1px solid var(--pontifex-muted);
+	background: var(--pontifex-paper);
+	color: var(--pontifex-ink);
+	font-weight: 400;
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-upload-choose:hover {
+	background: var(--pontifex-fill);
+	border-color: var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-upload-input:focus-visible + .pontifex-upload-choose {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 2px;
+}
+
+.pontifex-admin .pontifex-upload-name {
+	color: var(--pontifex-muted);
+	font-size: 13px;
+}
+
+/* Relink checkbox ----------------------------------------------------------- */
+
+/*
+ * The opt-in relink control: a sharp square box (ink hairline, filling with the
+ * accent and a white tick when ticked) beside its label, replacing the rounded
+ * OS checkbox. Restraint over alarm — the accent marks the active state, nothing
+ * signals warning.
+ */
+.pontifex-admin .pontifex-action-toggle {
+	display: flex;
+	align-items: flex-start;
+	gap: calc(var(--pontifex-step) * 1.5);
+	max-width: 60ch;
+	margin: 0 0 calc(var(--pontifex-step) * 2.5);
+	color: var(--pontifex-ink);
+	cursor: pointer;
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"] {
+	appearance: none;
+	-webkit-appearance: none;
+	position: relative;
+	flex: 0 0 auto;
+	width: 18px;
+	height: 18px;
+	min-width: 18px;
+	margin: 1px 0 0;
+	padding: 0;
+	border: 1px solid var(--pontifex-muted);
+	border-radius: 0;
+	background: var(--pontifex-paper);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+/*
+ * wp-admin styles native checkboxes and injects its own dashicon tick through a
+ * ::before on :checked. With appearance:none that tick would render a second,
+ * off-centre mark over ours, so it is suppressed here and the single tick below
+ * is drawn as a ::after centred inside the box.
+ */
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]::before {
+	content: none;
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:checked {
+	background: var(--pontifex-accent);
+	border-color: var(--pontifex-accent);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 6px;
+	width: 4px;
+	height: 8px;
+	border: solid transparent;
+	border-width: 0 2px 2px 0;
+	transform: rotate(45deg);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:checked::after {
+	border-color: var(--pontifex-paper);
+}
+
+.pontifex-admin .pontifex-action-toggle input[type="checkbox"]:focus-visible {
+	outline: 2px solid var(--pontifex-accent);
+	outline-offset: 1px;
+}
+
+/* Signed-out modal --------------------------------------------------------- */
+
+/*
+ * Shown only after a restore or rollback signed the operator out: a blocking
+ * overlay whose single action is to log back in. There is deliberately no close
+ * control and no dismiss-on-backdrop, so the sign-out cannot be missed or assumed
+ * away the way the old inline notice could.
+ */
+.pontifex-admin .pontifex-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: calc(var(--pontifex-step) * 2);
+	background: rgba(17, 17, 17, 0.55);
+}
+
+.pontifex-admin .pontifex-modal {
+	max-width: 30rem;
+	width: 100%;
+	padding: calc(var(--pontifex-step) * 5);
+	background: var(--pontifex-paper);
+	border-top: 2px solid var(--pontifex-ink);
+}
+
+/* The overline title: hierarchy through type, not a coloured alert bar. */
+.pontifex-admin .pontifex-modal-title {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-muted);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.pontifex-admin .pontifex-modal-message {
+	max-width: 40ch;
+	margin: 0 0 calc(var(--pontifex-step) * 4);
+	color: var(--pontifex-ink);
+	line-height: 1.5;
+}
+
+.pontifex-admin .pontifex-modal-actions {
+	margin: 0;
+}
+
+/* Narrow screens ------------------------------------------------------------ */
+
+@media screen and (max-width: 600px) {
+	.pontifex-admin .pontifex-stat-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

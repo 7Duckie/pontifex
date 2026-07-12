@@ -23,6 +23,8 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Manifest\DatabaseScanner;
+use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
@@ -172,6 +174,63 @@ final class RoundTripTest extends TestCase {
 		// Database came back: same row count, identical row dump (multibyte intact).
 		$this->assertSame( 2, $adapter->row_count( $this->scratch_table ), 'Scratch table row count should survive the round trip.' );
 		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Scratch table rows should be byte-identical after the round trip.' );
+	}
+
+	/**
+	 * A db_chunk built by the real DatabaseScanner must round-trip a multi-row table.
+	 *
+	 * The other database round-trip tests hand-assemble the db_chunk and count its
+	 * statements with substr_count( ";\n" ), so they never exercise DatabaseScanner's
+	 * own statement_count prediction. Here the chunk — both its predicted
+	 * statement_count and its realised SQL — comes straight from the scanner, against a
+	 * real multi-row table. The rows dump as a single batched INSERT, so the scanner
+	 * must predict DROP + CREATE + one INSERT = 3, not one INSERT per row. A wrong
+	 * prediction makes DatabaseWriter reject the chunk and the restore fail closed, which
+	 * is the bug this guards against.
+	 *
+	 * @return void
+	 */
+	public function test_scanner_built_chunk_round_trips_a_multi_row_table(): void {
+		global $wpdb;
+
+		// The shared scratch table starts with 2 rows; widen it so the chunk is
+		// unmistakably multi-row and a per-row miscount would be large.
+		for ( $id = 3; $id <= 10; $id++ ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: widening the scratch table.
+			$wpdb->query( $wpdb->prepare( 'INSERT INTO %i ( id, label ) VALUES ( %d, %s )', $this->scratch_table, $id, 'row ' . $id ) );
+		}
+
+		$adapter     = new WpdbAdapter( $wpdb );
+		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+
+		// Build the chunk through the REAL scanner, so its predicted statement_count
+		// (not a hand-counted one) is what DatabaseWriter validates on restore.
+		$chunks = ( new DatabaseScanner( $adapter, ExclusionRules::none() ) )->scan();
+		$chunk  = null;
+		foreach ( $chunks as $candidate ) {
+			if ( $candidate->table_name() === $this->scratch_table ) {
+				$chunk = $candidate;
+				break;
+			}
+		}
+
+		$this->assertNotNull( $chunk, 'The scanner must produce a chunk for the scratch table.' );
+		$this->assertSame( 0, $chunk->chunk_index(), 'Ten rows fit in a single chunk.' );
+		$this->assertSame( 3, $chunk->statement_count(), 'A multi-row first chunk is DROP + CREATE + one batched INSERT.' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Operating on the scanner's in-memory SQL stream, not a filesystem path.
+		$sql   = (string) stream_get_contents( $chunk->open_sql_stream() );
+		$plans = array( self::db_chunk_plan( $this->scratch_table, $chunk->statement_count(), $sql ) );
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->restore_root ),
+			new DatabaseWriter( new WpdbAdapter( $wpdb ) )
+		);
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( 10, $adapter->row_count( $this->scratch_table ), 'All rows must survive the scanner-built round trip.' );
+		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Rows must be byte-identical after the scanner-built round trip.' );
 	}
 
 	/**
