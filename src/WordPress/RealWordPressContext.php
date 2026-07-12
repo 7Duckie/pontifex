@@ -289,4 +289,26 @@ final class RealWordPressContext implements WordPressContext {
 			)
 		);
 	}
+
+	/**
+	 * Open a dedicated second database connection, or null when the host refuses.
+	 *
+	 * Built from the same DB_* constants the global connection used, through
+	 * {@see DedicatedWpdb} so a refused connection reports failure instead of
+	 * dying inside wp_die() mid-request. The site's table prefix is adopted
+	 * from the global connection so per-table scope guards behave identically.
+	 *
+	 * @return wpdb|null A connected second wpdb, or null when unavailable.
+	 */
+	public function dedicated_wpdb_connection(): ?wpdb {
+		if ( ! defined( 'DB_USER' ) || ! defined( 'DB_PASSWORD' ) || ! defined( 'DB_NAME' ) || ! defined( 'DB_HOST' ) ) {
+			return null;
+		}
+		$connection = new DedicatedWpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		if ( ! $connection->is_connected() ) {
+			return null;
+		}
+		$connection->set_prefix( (string) $this->wpdb_instance()->prefix );
+		return $connection;
+	}
 }

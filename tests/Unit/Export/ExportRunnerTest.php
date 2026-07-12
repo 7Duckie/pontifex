@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Export;
 
 use Mockery;
+use wpdb;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
@@ -21,6 +22,8 @@ use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Manifest\ExclusionRules;
+use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 
@@ -279,6 +282,74 @@ final class ExportRunnerTest extends TestCase {
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
 		return $context;
+	}
+
+	// -------------------------------------------------------------------------
+	// default_manifest_builder(): the snapshot connection and its fallbacks.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The default builder must dump on a dedicated connection inside a snapshot.
+	 *
+	 * ADR 0011: when the context supplies a dedicated connection, the builder
+	 * opens REPEATABLE READ + a consistent snapshot on it and never touches the
+	 * global connection — the property that keeps progress writes visible.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_opens_a_snapshot_on_a_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( 1 );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'START TRANSACTION WITH CONSISTENT SNAPSHOT' )->andReturn( 1 );
+		// The adapter's destructor commits the snapshot when the builder is released.
+		$dedicated->shouldReceive( 'query' )->with( 'COMMIT' )->andReturn( 1 );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldNotReceive( 'wpdb_instance' );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * With no dedicated connection available, the builder must fall back to the global one.
+	 *
+	 * A host capping connections per user refuses the second connection; the
+	 * export must still happen — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_no_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( null );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * A snapshot that cannot open must also fall back to the global connection.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_the_snapshot_cannot_open(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( false );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
 	}
 
 	// -------------------------------------------------------------------------

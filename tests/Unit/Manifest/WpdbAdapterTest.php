@@ -439,6 +439,65 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * Opening a snapshot must set REPEATABLE READ, then begin the transaction —
+	 * and releasing the adapter must commit it.
+	 *
+	 * The destructor commit is the deterministic release of the snapshot's
+	 * metadata locks (ADR 0011): when the export's adapter goes out of scope,
+	 * the locks must go with it, or a restore's cut-over RENAME in the same
+	 * request would block against our own dump.
+	 *
+	 * @return void
+	 */
+	public function test_begin_consistent_snapshot_issues_isolation_then_begin(): void {
+		$wpdb    = $this->mock_wpdb();
+		$queries = array();
+		$wpdb->method( 'query' )->willReturnCallback(
+			static function ( string $sql ) use ( &$queries ) {
+				$queries[] = $sql;
+				return 1;
+			}
+		);
+
+		$adapter = new WpdbAdapter( $wpdb );
+		$this->assertTrue( $adapter->begin_consistent_snapshot() );
+		$this->assertSame(
+			array(
+				'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ',
+				'START TRANSACTION WITH CONSISTENT SNAPSHOT',
+			),
+			$queries,
+			'The isolation level must be set before the snapshot transaction opens.'
+		);
+
+		unset( $adapter );
+		$this->assertSame( 'COMMIT', end( $queries ), 'Releasing the adapter must commit the snapshot it opened.' );
+	}
+
+	/**
+	 * A snapshot that cannot open must report false, never throw.
+	 *
+	 * The caller falls back to dumping without a snapshot — today's behaviour —
+	 * because a possibly-fuzzy backup beats no backup.
+	 *
+	 * @return void
+	 */
+	public function test_begin_consistent_snapshot_reports_failure_quietly(): void {
+		$first = $this->mock_wpdb();
+		$first->method( 'query' )->willReturn( false );
+		$this->assertFalse( ( new WpdbAdapter( $first ) )->begin_consistent_snapshot() );
+
+		$second  = $this->mock_wpdb();
+		$replies = array( 1, false );
+		$second->method( 'query' )->willReturnCallback(
+			static function () use ( &$replies ) {
+				return array_shift( $replies );
+			}
+		);
+		$this->assertFalse( ( new WpdbAdapter( $second ) )->begin_consistent_snapshot(), 'A failed START TRANSACTION must report false too.' );
+	}
+
+	/**
 	 * Row dumps must be ordered by the primary key so pagination is stable.
 	 *
 	 * Without an ORDER BY, MySQL guarantees no row order, so consecutive OFFSET
