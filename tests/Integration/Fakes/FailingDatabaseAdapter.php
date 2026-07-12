@@ -151,4 +151,23 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	public function average_row_bytes( string $table_name ): int {
 		return $this->inner->average_row_bytes( $table_name );
 	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @param string $charset The archive's character set.
+	 * @return void
+	 */
+	public function set_session_charset( string $charset ): void {
+		$this->inner->set_session_charset( $charset );
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void {
+		$this->inner->restore_session_charset();
+	}
 }

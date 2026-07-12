@@ -284,6 +284,41 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Charset calls, in order: the charset for set, or the literal 'RESTORE' for restore.
+	 *
+	 * @var string[]
+	 */
+	private array $charset_calls = array();
+
+	/**
+	 * Record a session-charset switch so a test can assert it happened.
+	 *
+	 * @param string $charset The archive's character set.
+	 * @return void
+	 */
+	public function set_session_charset( string $charset ): void {
+		$this->charset_calls[] = $charset;
+	}
+
+	/**
+	 * Record the hand-back of the connection's own charset.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void {
+		$this->charset_calls[] = 'RESTORE';
+	}
+
+	/**
+	 * Return the recorded charset calls, in order.
+	 *
+	 * @return string[] Charsets passed to set_session_charset, with 'RESTORE' marking each restore call.
+	 */
+	public function charset_calls(): array {
+		return $this->charset_calls;
+	}
+
+	/**
 	 * List known tables (registered or marked existing) beginning with the prefix.
 	 *
 	 * @param string $prefix The literal name prefix to match; must not be empty.
