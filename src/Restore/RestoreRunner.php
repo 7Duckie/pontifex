@@ -292,15 +292,22 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		$decoded_so_far = 0;
 
 		foreach ( $entries as $manifest_entry ) {
+			// The bomb ceiling (per-entry and archive-total decoded bytes) applies to
+			// every entry; the memory-derived budget is passed separately, because it
+			// applies only to entries the reader must buffer whole — a plain file
+			// entry streams through chunk-sized memory to a spool (ADR 0010).
 			$remaining   = $total_budget - $decoded_so_far;
 			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
-			if ( $this->entry_memory_budget > 0 && $this->entry_memory_budget < $entry_limit ) {
-				$entry_limit = $this->entry_memory_budget;
-			}
 
-			$result = $this->entry_reader->read_entry( $archive_source, $manifest_entry, $entry_limit, $on_bytes );
+			$result = $this->entry_reader->read_entry(
+				$archive_source,
+				$manifest_entry,
+				$entry_limit,
+				$on_bytes,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
 
-			$decoded_so_far += strlen( $result->payload() );
+			$decoded_so_far += $result->decoded_size();
 			if ( $decoded_so_far > $total_budget ) {
 				throw new RuntimeException(
 					sprintf(

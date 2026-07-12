@@ -190,7 +190,11 @@ final class FileWriter {
 		$this->ensure_parent_directory( $target_path );
 
 		if ( $header->is_file() ) {
-			$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			if ( $result->is_streamed() ) {
+				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			} else {
+				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			}
 			return;
 		}
 		if ( $header->is_directory() ) {
@@ -384,6 +388,60 @@ final class FileWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
 		$written = @file_put_contents( $target_path, $payload );
 		if ( false === $written ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+			);
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve POSIX mode bits.
+		if ( ! @chmod( $target_path, $mode ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not chmod file "%s".', $target_path )
+			);
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve mtime.
+		if ( ! @touch( $target_path, $mtime ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not set mtime on file "%s".', $target_path )
+			);
+		}
+	}
+
+	/**
+	 * Write file contents from a stream and set mode and mtime.
+	 *
+	 * The streamed twin of {@see self::write_file()} (ADR 0010): the payload is
+	 * copied to disk directly from the reader's spool, so a large file never
+	 * occupies payload-sized memory. The bytes were hash-verified before the
+	 * reader handed the stream over. The source stream is closed here — the
+	 * result's consumer owns it, and this is where it is consumed.
+	 *
+	 * @param string   $target_path Absolute path of the file to write.
+	 * @param resource $payload     Decoded file contents, positioned at the start.
+	 * @param int      $mode        POSIX mode bits to set after writing.
+	 * @param int      $mtime       Unix modification timestamp to set after writing.
+	 * @throws RuntimeException If writing, chmod, or touch fails.
+	 */
+	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime ): void {
+		$this->remove_conflicting_symlink( $target_path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
+		$destination = @fopen( $target_path, 'wb' );
+		if ( false === $destination ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of the reader's spool stream; not a filesystem path.
+			fclose( $payload );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+			);
+		}
+		$copied = stream_copy_to_stream( $payload, $destination );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the restore-time write handle opened above; not a WP_Filesystem operation.
+		$closed = fclose( $destination );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of the reader's spool stream; not a filesystem path.
+		fclose( $payload );
+		if ( false === $copied || ! $closed ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: could not write file "%s".', $target_path )
