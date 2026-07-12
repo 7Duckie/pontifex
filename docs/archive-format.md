@@ -190,7 +190,14 @@ order shown — the order is part of the byte-identical-output contract. A
 }
 ```
 
-- **`size`** — the payload's uncompressed byte count, as an integer.
+- **`size`** — the payload's uncompressed byte count, as an integer. Writers
+  MUST record the byte count actually read when the entry was written — never
+  a stale earlier stat — so a file that changes on disk while the archive is
+  being produced is still described truthfully. Readers MUST refuse a `file`
+  entry whose decoded payload length differs from `size`: with a conforming
+  writer the two always agree, so a mismatch means the archive does not hold
+  the content it claims and restoring the entry would silently write wrong
+  bytes.
 - **`mode`** — the POSIX mode bits as a plain integer (decimal in JSON; `420`
   is `0644` octal). Readers must reject a non-integer.
 - **`mtime`** — the Unix modification timestamp as an integer. Readers must
