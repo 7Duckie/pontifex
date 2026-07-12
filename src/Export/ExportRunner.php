@@ -1,0 +1,334 @@
+<?php
+/**
+ * Pontifex export runner — the shared engine that writes a site archive.
+ *
+ * @package Pontifex\Export
+ */
+
+declare(strict_types=1);
+
+namespace Pontifex\Export;
+
+use DateTimeImmutable;
+use RuntimeException;
+use Throwable;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Environment\Environment;
+use Pontifex\Manifest\DatabaseScanner;
+use Pontifex\Manifest\ExclusionRules;
+use Pontifex\Manifest\FileScanner;
+use Pontifex\Manifest\ManifestBuilder;
+use Pontifex\Manifest\WpdbAdapter;
+use Pontifex\WordPress\WordPressContext;
+
+/**
+ * Writes a Pontifex archive of the current site, shared by every export caller.
+ *
+ * The archive-writing recipe used to be spelled out in full inside
+ * {@see \Pontifex\Cli\ExportCommand} and again inside
+ * {@see \Pontifex\Rollback\SafetyArchiver} (the audit's finding 061). This class
+ * is the single copy both now delegate to, and the one the admin Backup screen
+ * will reuse: given the list of entries to write and a small set of options, it
+ * builds the provenance block, opens the destination, and writes the archive.
+ *
+ * What it deliberately does NOT own, so each caller keeps the behaviour it needs:
+ *
+ *  - Building the entry list. The caller builds it (via
+ *    {@see self::default_manifest_builder()} or its own injected builder) and
+ *    passes it in, because the safety archiver must inspect the list for a
+ *    free-disk preflight before any byte is written, and the admin screen wants
+ *    the entry count up front for its progress bar.
+ *  - Counters, transfer history, logging, and all WP-CLI interaction. Those are
+ *    the caller's concern; the runner stays free of the CLI and of side effects
+ *    beyond writing the one file.
+ *
+ * Stateless after construction; safe to reuse for many exports.
+ */
+final class ExportRunner {
+
+	/**
+	 * Exporter version recorded when the PONTIFEX_VERSION constant is absent.
+	 *
+	 * Matches the fallback the export callers used before this engine existed, so
+	 * an archive written without WordPress loaded (as in a unit test) still has a
+	 * valid, non-empty exporter version.
+	 *
+	 * @var string
+	 */
+	private const FALLBACK_VERSION = '0.0.0-dev';
+
+	/**
+	 * The Environment abstraction (PHP version and constant reads).
+	 *
+	 * @var Environment
+	 */
+	private Environment $environment;
+
+	/**
+	 * The WordPressContext abstraction (site facts for the provenance block).
+	 *
+	 * @var WordPressContext
+	 */
+	private WordPressContext $wordpress_context;
+
+	/**
+	 * Construct an ExportRunner.
+	 *
+	 * @param Environment      $environment       PHP-runtime and constant reads for the provenance block.
+	 * @param WordPressContext $wordpress_context WordPress-specific facts for the provenance block.
+	 */
+	public function __construct( Environment $environment, WordPressContext $wordpress_context ) {
+		$this->environment       = $environment;
+		$this->wordpress_context = $wordpress_context;
+	}
+
+	/**
+	 * Build the standard scanner-backed manifest builder for an export.
+	 *
+	 * Wires a FileScanner and a DatabaseScanner (over the real $wpdb) under the
+	 * given exclusion rules into a ManifestBuilder — the one copy of the wiring
+	 * that the CLI export and the safety archiver previously duplicated. The
+	 * caller invokes build() on the result to get the entry list to pass to
+	 * {@see self::export()}.
+	 *
+	 * @param WordPressContext $wordpress_context Supplies the $wpdb instance for the database scan.
+	 * @param ExclusionRules   $rules             Rules applied to both the file and database scans.
+	 * @param string           $path_prefix       Prefix prepended to every scanned file path, so a scan rooted below the WordPress root still records WordPress-root-relative paths. Pass '' for a whole-site scan rooted at the WordPress root, or 'wp-content' for a content-only scan rooted at WP_CONTENT_DIR.
+	 * @return ManifestBuilder A scanner-backed manifest builder.
+	 */
+	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
+		$file_scanner     = new FileScanner( $rules, $path_prefix );
+		$database_scanner = new DatabaseScanner( self::snapshot_database_adapter( $wordpress_context ), $rules );
+		return new ManifestBuilder( $file_scanner, $database_scanner );
+	}
+
+	/**
+	 * Build the export's database adapter, inside a consistent snapshot where possible.
+	 *
+	 * ADR 0011: the dump runs on a dedicated connection holding a REPEATABLE
+	 * READ consistent snapshot, so every table and chunk is read from the same
+	 * instant of the database while the global connection stays live for
+	 * progress writes and locks. The chunk SQL providers capture this adapter,
+	 * so the snapshot spans the scan and every row window realised later
+	 * during the archive write. When the host refuses a second connection or
+	 * the snapshot cannot be opened, the export falls back to the global
+	 * connection without a snapshot — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @param WordPressContext $wordpress_context WordPress-specific facts and the database connections.
+	 * @return WpdbAdapter The adapter the scanner and chunk providers will read through.
+	 */
+	private static function snapshot_database_adapter( WordPressContext $wordpress_context ): WpdbAdapter {
+		$dedicated = $wordpress_context->dedicated_wpdb_connection();
+		if ( null !== $dedicated ) {
+			$adapter = new WpdbAdapter( $dedicated );
+			if ( $adapter->begin_consistent_snapshot() ) {
+				return $adapter;
+			}
+		}
+		return new WpdbAdapter( $wordpress_context->wpdb_instance() );
+	}
+
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
+	/**
+	 * Write a Pontifex archive of the supplied entries to the destination.
+	 *
+	 * Builds the provenance block from the current runtime, opens the destination
+	 * for writing (read+write, so a signed export can re-read its own bytes), and
+	 * writes the header, provenance, every entry, the manifest, and the footer via
+	 * {@see ArchiveWriter}. The archive is written to a sibling temp file and moved
+	 * onto the output path only once complete, so a prior good archive there is never
+	 * truncated by a write that then fails. The destination is always closed, success
+	 * or failure.
+	 *
+	 * @param ExportOptions                                     $options     Where to write, plus optional encryption, signing, and the unencrypted-archive reason.
+	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
+	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
+	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
+	 * @return ExportResult The bytes written, the entry count, and any files that changed while being read.
+	 * @throws Throwable If the temp destination cannot be opened (RuntimeException), writing an entry fails (whatever the archive writer raised, re-thrown), or the completed archive cannot be moved into place (RuntimeException). In every failure the temp file is discarded and any prior archive at the output path is left untouched.
+	 */
+	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
+		// Capture the entry count up front from Countable — both a plain array and a
+		// ManifestStream satisfy it in O(1); the write consumes the entries by
+		// iterating them.
+		$entry_count = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
+
+		$provenance  = $this->build_provenance( $options );
+		$output_path = $options->output_path();
+
+		// Write to a sibling temp file, never straight to the output path: opening the
+		// output "w+b" would truncate a prior good archive there immediately, so a write
+		// that then fails (an unreadable entry, disk full, a cancelled backup) would leave
+		// the operator with neither the new archive nor the one they had.
+		$temp_path   = $this->temp_destination_path( $output_path );
+		$destination = $this->open_destination( $temp_path );
+
+		// Collect the files the archive writer reports as changed between the scan
+		// and the write (shrunk or grown mid-export). Each entry was written with
+		// the byte count actually captured, so the archive itself is truthful; the
+		// list rides the result so callers can warn the user which files were
+		// moving while the backup ran.
+		$changed_files   = array();
+		$on_file_changed = static function ( string $path, int $declared_size, int $actual_size ) use ( &$changed_files ): void {
+			$changed_files[] = array(
+				'path'          => $path,
+				'declared_size' => $declared_size,
+				'actual_size'   => $actual_size,
+			);
+		};
+
+		try {
+			$bytes_written = self::build_archive_writer()->write_archive(
+				$provenance,
+				$entry_plans,
+				$destination,
+				$on_entry,
+				$options->encryption(),
+				$options->signing(),
+				$on_bytes,
+				$on_file_changed
+			);
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the completed temp archive before moving it into place; not a WP_Filesystem operation.
+			fclose( $destination );
+		} catch ( Throwable $error ) {
+			if ( is_resource( $destination ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp archive stream after a failed write; not a WP_Filesystem operation.
+				fclose( $destination );
+			}
+			$this->discard_temp( $temp_path );
+			throw $error;
+		}
+
+		// The archive is complete on the temp file; move it onto the output path in one
+		// atomic same-directory rename, so a prior archive there is only ever replaced by a
+		// complete one.
+		$this->move_into_place( $temp_path, $output_path );
+
+		return new ExportResult( $bytes_written, $entry_count, $changed_files );
+	}
+
+	/**
+	 * Build a Provenance block from current WordPress and PHP runtime facts.
+	 *
+	 * When the options carry a scope (a scope-aware export), the scope and the
+	 * source database table prefix are recorded too (format v1.1). When they do not
+	 * (the safety archiver), both are left null, so the provenance bytes stay
+	 * identical to a pre-v1.1 archive — the two v1.1 fields travel together.
+	 *
+	 * @param ExportOptions $options The per-export options, supplying the unencrypted-archive reason and the optional scope.
+	 * @return Provenance A fully-populated provenance value object.
+	 */
+	private function build_provenance( ExportOptions $options ): Provenance {
+		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
+			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
+			: self::FALLBACK_VERSION;
+
+		$scope        = $options->scope();
+		$table_prefix = null !== $scope ? $this->wordpress_context->wpdb_prefix() : null;
+
+		return new Provenance(
+			$this->wordpress_context->wp_version(),
+			$this->environment->php_version(),
+			$this->wordpress_context->site_url(),
+			$this->wordpress_context->wpdb_charset(),
+			$this->wordpress_context->wpdb_collation(),
+			new ExporterInfo( 'pontifex', $pontifex_version ),
+			new DateTimeImmutable(),
+			$options->encryption_disabled_reason(),
+			$table_prefix,
+			$scope
+		);
+	}
+
+	/**
+	 * Open the destination file for writing.
+	 *
+	 * Opened read+write ("w+b"): writing is all an unsigned export needs, but a
+	 * signed export re-reads the just-written bytes to compute its signature, so
+	 * the handle must also be readable. The mode truncates on open either way.
+	 *
+	 * @param string $output_path Absolute path to the file to create.
+	 * @return resource A readable, writable binary stream resource.
+	 * @throws RuntimeException If the file cannot be opened for writing.
+	 */
+	private function open_destination( string $output_path ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the destination archive as a stream; @ traps an unopenable-file warning converted to an exception below.
+		$destination = @fopen( $output_path, 'w+b' );
+		if ( false === $destination ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; surfaced on the CLI / in logs, not HTML output.
+				sprintf( 'ExportRunner: could not open the destination archive for writing: %s', $output_path )
+			);
+		}
+		return $destination;
+	}
+
+	/**
+	 * Build the temp file path the archive is written to before it is moved into place.
+	 *
+	 * A sibling of the output path (same directory), so the final {@see self::move_into_place()}
+	 * is an atomic same-filesystem rename. A unique suffix keeps two exports writing to the
+	 * same output path (a user's mistake) from colliding on one temp file.
+	 *
+	 * @param string $output_path The final archive path the export was asked to write.
+	 * @return string The temp file path to write the archive to first.
+	 */
+	private function temp_destination_path( string $output_path ): string {
+		return $output_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+	}
+
+	/**
+	 * Move the completed temp archive onto the output path atomically.
+	 *
+	 * A single rename within one directory is atomic on the underlying filesystem, so the
+	 * output path is only ever the prior archive or the complete new one — never a
+	 * half-written file. A failed rename discards the temp and raises, leaving any prior
+	 * archive at the output path untouched.
+	 *
+	 * @param string $temp_path   The completed temp archive to move.
+	 * @param string $output_path The final path to move it onto.
+	 * @return void
+	 * @throws RuntimeException If the temp archive cannot be moved into place.
+	 */
+	private function move_into_place( string $temp_path, string $output_path ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- Atomically moving the completed archive into place (a same-directory move); WP_Filesystem is unavailable in CLI/ajax contexts.
+		if ( ! rename( $temp_path, $output_path ) ) {
+			$this->discard_temp( $temp_path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; not HTML output.
+				sprintf( 'ExportRunner: could not move the completed archive into place: %s', $output_path )
+			);
+		}
+	}
+
+	/**
+	 * Delete the temp archive, if it exists.
+	 *
+	 * Best-effort cleanup on a failed or aborted export, so a partial temp file is not left
+	 * behind; its own failure must not mask the export's outcome.
+	 *
+	 * @param string $temp_path The temp archive path to remove.
+	 * @return void
+	 */
+	private function discard_temp( string $temp_path ): void {
+		if ( is_file( $temp_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the temp export file; its failure must not mask the export outcome.
+			@unlink( $temp_path );
+		}
+	}
+
+	/**
+	 * Build the ArchiveWriter with the v0.1.0 default codecs.
+	 *
+	 * @return ArchiveWriter A ready-to-use archive writer.
+	 */
+	private static function build_archive_writer(): ArchiveWriter {
+		return new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
+	}
+}

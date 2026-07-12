@@ -190,4 +190,43 @@ final class CountersTest extends TestCase {
 	public function test_counter_int_non_numeric_is_zero(): void {
 		$this->assertSame( 0, $this->invoke_static( 'counter_int', array( 'k' => 'abc' ), 'k' ) );
 	}
+
+	// -------------------------------------------------------------------------
+	// valid_table_prefix
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A normal WordPress table prefix passes through unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_valid_table_prefix_accepts_a_normal_prefix(): void {
+		$this->assertSame( 'wp_', $this->invoke_static( 'valid_table_prefix', 'wp_' ) );
+		$this->assertSame( 'mysite_2_', $this->invoke_static( 'valid_table_prefix', 'mysite_2_' ) );
+	}
+
+	/**
+	 * A null or empty prefix yields '' (no rewrite).
+	 *
+	 * @return void
+	 */
+	public function test_valid_table_prefix_drops_null_and_empty(): void {
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', null ) );
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', '' ) );
+	}
+
+	/**
+	 * A prefix carrying anything but letters, digits, and underscores is dropped.
+	 *
+	 * The source prefix comes from the archive; an unsafe value must never reach a
+	 * rewrite statement, so it is reduced to '' (no rewrite) rather than used.
+	 *
+	 * @return void
+	 */
+	public function test_valid_table_prefix_drops_unsafe_values(): void {
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', "wp_'; DROP TABLE x; --" ) );
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', 'wp-dash' ) );
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', 'wp%' ) );
+		$this->assertSame( '', $this->invoke_static( 'valid_table_prefix', 'wp `back`' ) );
+	}
 }

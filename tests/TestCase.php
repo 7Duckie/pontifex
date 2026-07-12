@@ -44,10 +44,23 @@ abstract class TestCase extends PHPUnitTestCase {
 		parent::setUp();
 		Monkey\setUp();
 
-		// The CLI presentation layer wraps user-facing strings in __(). No
-		// WordPress runtime is loaded here, so stub __() to return its first
-		// argument — the untranslated string the output assertions expect.
-		Monkey\Functions\stubs( array( '__' ) );
+		// The presentation layers wrap user-facing strings in __() and escape
+		// output with the esc_*() helpers. No WordPress runtime is loaded here,
+		// so stub them to return their first argument — the untranslated,
+		// unescaped string the output assertions expect. _n() keeps its real
+		// singular/plural selection so count-sensitive output stays testable.
+		Monkey\Functions\stubs(
+			array(
+				'__',
+				'esc_html',
+				'esc_html__',
+				'esc_attr',
+				'esc_attr__',
+				'_n' => static function ( string $single, string $plural, int $number ): string {
+					return 1 === $number ? $single : $plural;
+				},
+			)
+		);
 	}
 
 	/**

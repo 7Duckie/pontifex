@@ -5,8 +5,9 @@ a documented archive format (`.wpmig`). Every import takes a safety
 archive first, so it can be rolled back.
 
 **Status: pre-alpha.** Pontifex is in early development. Today it can
-audit an environment (`wp pontifex doctor`), pack a whole site into a
-single `.wpmig` archive (`wp pontifex export`), restore that archive
+audit an environment (`wp pontifex doctor`), pack your content and
+database into a single `.wpmig` archive (`wp pontifex export`, or
+`--whole-site` for the entire installation), restore that archive
 onto a WordPress at the same URL (`wp pontifex import`, which takes a
 safety archive first), migrate a site to a new URL
 (`wp pontifex import --url=`) with serialised-data-safe search-replace,
@@ -94,8 +95,10 @@ wp pontifex doctor
 wp pontifex doctor --format=json
 wp pontifex doctor --fields=category,name,status
 
-# Pack the whole site into a single archive
+# Pack your content (wp-content) and database into a single archive
 wp pontifex export --output=/path/to/site.wpmig
+# ...or the entire installation, WordPress core included, for a bare-server clone
+wp pontifex export --output=/path/to/site.wpmig --whole-site
 
 # Restore an archive onto a WordPress at the same URL
 wp pontifex import /path/to/site.wpmig --dry-run   # preview: verify only, write nothing
@@ -111,8 +114,9 @@ search-replace (the defences behind it are recorded in
 [ADR 0006](docs/adr/0006-cross-url-via-post-restore-search-replace.md)).
 See the [roadmap](docs/roadmap.md) for what ships when.
 
-> **Importing writes an entire site onto yours.** Only import a `.wpmig`
-> you produced or fully trust — see
+> **Importing writes an archive's content onto your site** (and its
+> WordPress core too, with `--whole-site`). Only import a `.wpmig` you
+> produced or fully trust — see
 > [the import trust boundary](.github/SECURITY.md#the-import-trust-boundary).
 
 ### A full round trip

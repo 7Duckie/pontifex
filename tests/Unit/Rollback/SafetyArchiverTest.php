@@ -12,6 +12,7 @@ namespace Pontifex\Tests\Unit\Rollback;
 use Mockery;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -63,17 +64,24 @@ final class SafetyArchiverTest extends TestCase {
 	}
 
 	/**
-	 * A created safety archive is well-formed and owner-only; older ones are pruned.
+	 * A created safety archive is well-formed and owner-only; the oldest beyond the floor is pruned.
+	 *
+	 * The retention floor is 2 (ADR 0005 as amended): the archive just written
+	 * plus the previous one — the undo the auto-rollback and `wp pontifex
+	 * rollback` depend on — survive, and only older archives are pruned.
 	 *
 	 * @return void
 	 */
-	public function test_create_writes_a_restorable_archive_and_prunes_older(): void {
+	public function test_create_writes_a_restorable_archive_and_prunes_beyond_the_floor(): void {
 		$store = new RollbackStore( $this->base );
 		$store->ensure_directory();
 
-		// An older safety archive that retention (N=1) must prune.
+		// Two older safety archives: the newer must survive (it is the previous
+		// restore's undo), the older must be pruned.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
 		touch( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
 
 		$plans = array(
 			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
@@ -89,14 +97,134 @@ final class SafetyArchiverTest extends TestCase {
 
 		$path = $archiver->create( '/var/www/html' );
 
-		// The returned archive exists, is owner-only, and is the only one left.
+		// The returned archive exists, is owner-only, and only the floor remains.
 		$this->assertFileExists( $path );
 		$this->assertSame( 0600, fileperms( $path ) & 0777, 'A safety archive must be owner read/write only.' );
-		$this->assertCount( 1, $store->archives(), 'Retention N=1 should prune the older archive.' );
+		$this->assertCount( 2, $store->archives(), 'Retention must keep the new archive plus the previous one, and prune the rest.' );
+		$this->assertFileDoesNotExist( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig', 'The archive beyond the floor must be pruned.' );
+		$this->assertFileExists( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig', 'The previous archive — the standing undo — must survive.' );
 		$this->assertSame( $path, $store->most_recent() );
 
 		// The archive is well-formed: it reads back with the two entries.
 		$this->assertSame( 2, $this->entry_count( $path ), 'The written archive should contain both entries.' );
+	}
+
+	/**
+	 * A retention below the floor is clamped up to 2, never honoured.
+	 *
+	 * A second restore's safety archive must never prune the first restore's —
+	 * that archive is the only undo for the state the second restore overwrites,
+	 * and both the auto-rollback and the manual rollback depend on it. The floor
+	 * lives in the constructor so no call site can reintroduce the loss.
+	 *
+	 * @return void
+	 */
+	public function test_retention_below_the_floor_is_clamped_to_two(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
+
+		$plans    = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			1
+		);
+
+		$archiver->create( '/var/www/html' );
+
+		$this->assertCount( 2, $store->archives(), 'A requested retention of 1 must be clamped to the floor of 2.' );
+	}
+
+	/**
+	 * A retention above the floor is honoured as given.
+	 *
+	 * @return void
+	 */
+	public function test_retention_above_the_floor_is_honoured(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200101T000000Z.wpmig' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Seeding an older fixture archive in a temp directory.
+		touch( $store->directory() . '/pre-import-rollback-20200102T000000Z.wpmig' );
+
+		$plans    = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			3
+		);
+
+		$archiver->create( '/var/www/html' );
+
+		$this->assertCount( 3, $store->archives(), 'A retention above the floor must be honoured as given.' );
+	}
+
+	/**
+	 * A content-only safety archive records a content-only scope and the table prefix.
+	 *
+	 * The pre-import safety archive follows the restore's scope (ADR 0008): a
+	 * content-only restore takes a content-only safety archive, so its provenance
+	 * carries a content-only scope and the source table prefix the destination needs.
+	 *
+	 * @return void
+	 */
+	public function test_create_content_only_records_a_content_only_scope(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans ),
+			2,
+			true
+		);
+
+		$path = $archiver->create( '/var/www/html/wp-content' );
+
+		$provenance = $this->read_provenance( $path );
+		$scope      = $provenance->scope();
+		$this->assertNotNull( $scope, 'A content-only safety archive should record a scope.' );
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+		$this->assertSame( 'wp_', $provenance->table_prefix() );
+	}
+
+	/**
+	 * A whole-site safety archive records a whole-site scope.
+	 *
+	 * The default mode: a --whole-site restore takes a whole-site safety archive,
+	 * whose provenance records a whole-site scope rooted at the site root.
+	 *
+	 * @return void
+	 */
+	public function test_create_whole_site_records_a_whole_site_scope(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( 'wp-config.php', "<?php\n" ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$path = $archiver->create( '/var/www/html' );
+
+		$scope = $this->read_provenance( $path )->scope();
+		$this->assertNotNull( $scope, 'A whole-site safety archive should record a scope.' );
+		$this->assertFalse( $scope->is_content_only() );
+		$this->assertSame( '', $scope->content_root() );
 	}
 
 	/**
@@ -126,6 +254,39 @@ final class SafetyArchiverTest extends TestCase {
 		}
 
 		$this->assertSame( array(), $store->archives(), 'No archive may be written when the preflight refuses.' );
+	}
+
+	/**
+	 * Forwards byte progress from the export to the caller's callback.
+	 *
+	 * @return void
+	 */
+	public function test_create_forwards_byte_progress(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			$this->file_plan( 'wp-content/note.txt', "café ☕\n" ),
+		);
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$reported = 0;
+		$archiver->create(
+			'/var/www/html',
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'create() forwards byte progress from the export pipeline.' );
 	}
 
 	// -------------------------------------------------------------------------
@@ -159,6 +320,7 @@ final class SafetyArchiverTest extends TestCase {
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
 		return $context;
 	}
 
@@ -170,7 +332,7 @@ final class SafetyArchiverTest extends TestCase {
 	 */
 	private function manifest_builder_returning( array $plans ) {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
-		$builder->shouldReceive( 'build' )->once()->andReturn( $plans );
+		$builder->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( $plans ) );
 		return $builder;
 	}
 
@@ -224,6 +386,26 @@ final class SafetyArchiverTest extends TestCase {
 		try {
 			$reader = new ArchiveReader( $source );
 			return $reader->manifest()->entry_count();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
+			fclose( $source );
+		}
+	}
+
+	/**
+	 * Open a written archive and return its parsed provenance block.
+	 *
+	 * @param string $path Absolute path to the archive.
+	 * @return Provenance
+	 */
+	private function read_provenance( string $path ): Provenance {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the just-written archive to read its provenance back.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open the written archive.' );
+		}
+		try {
+			return ( new ArchiveReader( $source ) )->provenance();
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this helper.
 			fclose( $source );

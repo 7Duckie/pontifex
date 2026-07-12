@@ -136,7 +136,7 @@ properties:
    containing minimum data — an install UUID (random, locally
    generated, no IP retained), the plugin version, the WP version, the
    PHP version. The UUID prevents double-counting on repeated
-   requests. Requires a hosted endpoint (a Cloudflare Worker, a small
+   requests. Requires a hosted endpoint (a serverless worker, a small
    VPS, or a CDN-fronted PHP file) and explicit opt-in UI plus a
    documented privacy notice. Counts every opted-in install regardless
    of source.

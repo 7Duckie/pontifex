@@ -9,44 +9,47 @@ declare(strict_types=1);
 
 namespace Pontifex\Cli;
 
-use DateTimeImmutable;
 use RuntimeException;
 use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
-use Pontifex\Archive\Codec\CodecRegistry;
-use Pontifex\Archive\Format\ExporterInfo;
-use Pontifex\Archive\Format\Provenance;
-use Pontifex\Archive\Writer\ArchiveWriter;
-use Pontifex\Archive\Writer\EntryWriter;
-use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ExportResult;
+use Pontifex\Export\ExportRunner;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
-use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
-use Pontifex\Manifest\FileScanner;
-use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Manifest\ManifestBuilderInterface;
-use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
 /**
  * `wp pontifex export` — produce a Pontifex archive of the current WordPress site.
  *
- * Writes a single .wpmig archive file containing every file under the
- * WordPress root (minus exclusions) and every WordPress-prefixed
- * database table (chunked into ~4 MiB pieces). The archive is the
- * complete on-disk artefact needed to restore the site to its
- * current state on a different host.
+ * Writes a single .wpmig archive file. By default the archive is
+ * content-only: every file under wp-content (minus exclusions) plus
+ * every WordPress-prefixed database table (chunked into ~4 MiB
+ * pieces) — the everyday working-WordPress-to-working-WordPress
+ * backup. Pass --whole-site to capture the entire WordPress root
+ * instead, including core and wp-config.php, for cloning onto a bare
+ * destination. Either way the archive is the on-disk artefact needed
+ * to restore the site on a different host.
  *
  * ## OPTIONS
  *
  * --output=<path>
  * : Absolute filesystem path where the archive should be written.
  *   The parent directory must exist and be writable.
+ *
+ * [--whole-site]
+ * : Capture the entire WordPress root — WordPress core and
+ *   wp-config.php included — rather than only wp-content. Use this
+ *   when cloning onto a fresh, empty destination; the default
+ *   content-only archive is the right choice for an existing
+ *   WordPress install.
  *
  * [--exclude-file=<path>]
  * : Path to a file containing additional exclusion patterns, one per
@@ -56,9 +59,9 @@ use Pontifex\WordPress\WordPressContext;
  *   or exact string.
  *
  * [--no-defaults]
- * : Skip the curated default exclusion list (Pontifex's working dir,
- *   wp-content/cache, other backup plugins' directories). Use only
- *   patterns from `--exclude-file`, if any.
+ * : Skip the curated default exclusion list (Pontifex's working dir
+ *   and wp-content/cache). Use only patterns from `--exclude-file`,
+ *   if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
@@ -85,6 +88,7 @@ use Pontifex\WordPress\WordPressContext;
  *
  *     wp pontifex export --output=/tmp/site.wpmig
  *     wp pontifex export --output=/tmp/site.wpmig --yes
+ *     wp pontifex export --output=/tmp/site.wpmig --whole-site --yes
  *     wp pontifex export --output=/tmp/site.wpmig --exclude-file=/tmp/extras.txt
  *     wp pontifex export --output=/tmp/site.wpmig --no-defaults --exclude-file=/tmp/only.txt
  *     wp pontifex export --output=/tmp/site.wpmig --encrypt
@@ -242,6 +246,7 @@ final class ExportCommand {
 		$output_path       = $this->require_output_path( $associative_args );
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
 		$use_defaults      = self::should_use_defaults( $associative_args );
+		$whole_site        = isset( $associative_args['whole-site'] ) && false !== $associative_args['whole-site'];
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
@@ -266,6 +271,7 @@ final class ExportCommand {
 
 		// 3. Confirm with the user (unless --yes).
 		if ( ! $skip_confirmation ) {
+			$this->print_scope_summary( $whole_site );
 			$this->print_exclusion_summary( $exclusion_rules );
 			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
 		}
@@ -323,41 +329,47 @@ final class ExportCommand {
 
 		$this->bump_counters( array( 'attempted' => 1 ) );
 
-		// 4. Build the Provenance block.
-		$provenance = $this->build_provenance( $encryption_disabled_reason );
+		// 4. Resolve the export scope. Content-only (the default) scans wp-content and
+		// records each file under a "wp-content" path prefix, so the recorded paths
+		// stay WordPress-root-relative; --whole-site scans the whole WordPress root
+		// with no prefix. The scope facts are recorded in provenance so a destination
+		// can tell what the archive holds before unpacking it (ADR 0008).
+		$scan_root   = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
+		$path_prefix = $whole_site ? '' : 'wp-content';
+		$scope       = $whole_site
+			? Scope::whole_site( $exclusion_rules->patterns() )
+			: Scope::content_only( $exclusion_rules->patterns() );
 
-		// 5. Wire up the manifest builder if the caller did not supply one.
-		$manifest_builder = $this->manifest_builder ?? $this->build_default_manifest_builder( $exclusion_rules );
+		// 5. Build the entry list (every file plus every database table to archive).
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix );
 
-		// 6. Open the destination file.
-		$destination = $this->open_destination( $output_path );
+		// 6. Write the archive through the shared export engine.
+		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
 
 		try {
-			// 7. Build entry plans and write the archive.
-			$wordpress_root = $this->resolve_wordpress_root();
-			$entry_plans    = $manifest_builder->build( $wordpress_root );
-
-			$archive_writer = self::build_archive_writer();
+			$entry_plans = $manifest_builder->build( $scan_root );
 
 			$this->progress->start( count( $entry_plans ), 'Writing archive' );
-			$bytes_written = $archive_writer->write_archive(
-				$provenance,
+			$result = $export_runner->export(
+				new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason, $scope ),
 				$entry_plans,
-				$destination,
 				function (): void {
 					$this->progress->advance();
-				},
-				$encryption,
-				$signing
+				}
 			);
 			$this->progress->finish();
+
+			$this->print_changed_file_warnings( $result );
+
+			$bytes_written = $result->bytes_written();
 
 			$this->logger->info(
 				'Export complete.',
 				array(
-					'output'  => $output_path,
-					'entries' => count( $entry_plans ),
-					'bytes'   => $bytes_written,
+					'output'        => $output_path,
+					'entries'       => $result->entry_count(),
+					'bytes'         => $bytes_written,
+					'files_changed' => count( $result->changed_files() ),
 				)
 			);
 
@@ -365,12 +377,13 @@ final class ExportCommand {
 				array(
 					'succeeded'      => 1,
 					'bytes_exported' => $bytes_written,
+					'files_changed'  => count( $result->changed_files() ),
 				)
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
-			// 8. Print the summary.
-			$this->print_summary( $output_path, count( $entry_plans ), $bytes_written );
+			// 7. Print the summary.
+			$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Export failed.',
@@ -382,9 +395,6 @@ final class ExportCommand {
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			throw $error;
-		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
-			fclose( $destination );
 		}
 	}
 
@@ -527,53 +537,6 @@ final class ExportCommand {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Build a Provenance block from current WordPress and PHP runtime facts.
-	 *
-	 * Reads wp_version, php_version, site_url, wpdb_charset, and
-	 * wpdb_collation from the injected abstractions. The exporter
-	 * name is the hardcoded literal "pontifex"; the version comes
-	 * from the PONTIFEX_VERSION constant defined in pontifex.php.
-	 *
-	 * @param string|null $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null when encrypting.
-	 * @return Provenance A fully-populated provenance value object.
-	 */
-	private function build_provenance( ?string $encryption_disabled_reason ): Provenance {
-		$pontifex_version = $this->environment->is_constant_defined( 'PONTIFEX_VERSION' )
-			? (string) $this->environment->constant_value( 'PONTIFEX_VERSION' )
-			: '0.0.0-dev';
-
-		$exporter_info = new ExporterInfo( 'pontifex', $pontifex_version );
-
-		return new Provenance(
-			$this->wordpress_context->wp_version(),
-			$this->environment->php_version(),
-			$this->wordpress_context->site_url(),
-			$this->wordpress_context->wpdb_charset(),
-			$this->wordpress_context->wpdb_collation(),
-			$exporter_info,
-			new DateTimeImmutable(),
-			$encryption_disabled_reason
-		);
-	}
-
-	/**
-	 * Build a ManifestBuilder from the supplied exclusion rules.
-	 *
-	 * Used when no ManifestBuilder was passed to the constructor.
-	 * Wires up FileScanner + DatabaseScanner (with a WpdbAdapter
-	 * wrapping the real $wpdb) into a ManifestBuilder.
-	 *
-	 * @param ExclusionRules $exclusion_rules Rules to apply to both scanners.
-	 * @return ManifestBuilder A scanner-backed manifest builder.
-	 */
-	private function build_default_manifest_builder( ExclusionRules $exclusion_rules ): ManifestBuilder {
-		$file_scanner     = new FileScanner( $exclusion_rules );
-		$database_adapter = new WpdbAdapter( $this->wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $exclusion_rules );
-		return new ManifestBuilder( $file_scanner, $database_scanner );
-	}
-
-	/**
 	 * Build the default file logger when the caller supplies none.
 	 *
 	 * Reads WP_CONTENT_DIR and WP_DEBUG through the Environment seam so
@@ -637,22 +600,6 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Build the ArchiveWriter with its writer dependencies.
-	 *
-	 * The codec registry uses the v0.1.0 defaults (RawCodec + GzipCodec).
-	 * The EntryWriter and FooterWriter wrap the registry and the
-	 * footer-serialisation logic respectively.
-	 *
-	 * @return ArchiveWriter A ready-to-use archive writer.
-	 */
-	private static function build_archive_writer(): ArchiveWriter {
-		$codec_registry = CodecRegistry::with_defaults();
-		$entry_writer   = new EntryWriter( $codec_registry );
-		$footer_writer  = new FooterWriter();
-		return new ArchiveWriter( $entry_writer, $footer_writer );
-	}
-
-	/**
 	 * Resolve the WordPress installation root for the file scan.
 	 *
 	 * Reads the ABSPATH constant via the Environment abstraction so
@@ -669,27 +616,22 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Open the destination file for writing.
+	 * Resolve the wp-content root for a content-only file scan.
 	 *
-	 * Opened read+write ("w+b"): writing is all an unsigned export needs, but a
-	 * signed export re-reads the just-written bytes to compute the signature
-	 * digest, so the handle must also be readable. The mode truncates on open
-	 * either way.
+	 * Reads WP_CONTENT_DIR through the Environment abstraction — the directory
+	 * WordPress actually serves wp-content from, which a site may have relocated —
+	 * and falls back to ABSPATH/wp-content (WordPress's own default for the constant)
+	 * when it is not defined, so the resolver still works outside a full WordPress
+	 * request, as in unit tests.
 	 *
-	 * Exits via WP_CLI::error if fopen fails.
-	 *
-	 * @param string $output_path Absolute path to the file to create.
-	 * @return resource A readable, writable binary stream resource.
+	 * @return string The absolute path of the wp-content directory.
+	 * @throws RuntimeException If WP_CONTENT_DIR is undefined and ABSPATH is too (should never happen inside a WordPress request).
 	 */
-	private function open_destination( string $output_path ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the destination archive file as a stream; @ traps an unopenable-file warning that we convert to a WP_CLI error below.
-		$destination = @fopen( $output_path, 'w+b' );
-		if ( false === $destination ) {
-			WP_CLI::error(
-				sprintf( 'Could not open destination for writing: %s', $output_path )
-			);
+	private function resolve_content_root(): string {
+		if ( $this->environment->is_constant_defined( 'WP_CONTENT_DIR' ) ) {
+			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
 		}
-		return $destination;
+		return $this->resolve_wordpress_root() . '/wp-content';
 	}
 
 	// -------------------------------------------------------------------------
@@ -714,6 +656,7 @@ final class ExportCommand {
 				'succeeded'      => 0,
 				'failed'         => 0,
 				'bytes_exported' => 0,
+				'files_changed'  => 0,
 			)
 		);
 
@@ -722,7 +665,7 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Combine the stored counters with a delta into a clean four-key set.
+	 * Combine the stored counters with a delta into a clean five-key set.
 	 *
 	 * Pure function. Tolerant of a missing, partial, or corrupt stored
 	 * value: every counter coerces through counter_int, so a garbage
@@ -734,7 +677,7 @@ final class ExportCommand {
 	 */
 	private static function merge_counters( array $current, array $delta ): array {
 		$merged = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported' ) as $key ) {
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed' ) as $key ) {
 			$merged[ $key ] = self::counter_int( $current, $key ) + self::counter_int( $delta, $key );
 		}
 		return $merged;
@@ -759,6 +702,24 @@ final class ExportCommand {
 	// -------------------------------------------------------------------------
 
 	/**
+	 * Print which scope the export will use, so the user sees it before confirming.
+	 *
+	 * The default changed to content-only in v0.5.x (ADR 0008), so this line is
+	 * also the cue that points a user wanting the old full-site behaviour at
+	 * --whole-site.
+	 *
+	 * @param bool $whole_site True for a whole-site export, false for content-only.
+	 * @return void
+	 */
+	private function print_scope_summary( bool $whole_site ): void {
+		if ( $whole_site ) {
+			WP_CLI::log( __( 'Scope: whole-site (the entire WordPress root, including core and wp-config.php).', 'pontifex' ) );
+			return;
+		}
+		WP_CLI::log( __( 'Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone.', 'pontifex' ) );
+	}
+
+	/**
 	 * Print the active exclusion patterns so the user can review them before confirming.
 	 *
 	 * @param ExclusionRules $exclusion_rules The rules that will be applied to the export.
@@ -774,6 +735,50 @@ final class ExportCommand {
 		foreach ( $patterns as $pattern ) {
 			WP_CLI::log( '  ' . $pattern );
 		}
+	}
+
+	/**
+	 * Warn about files whose content changed while the export was reading them.
+	 *
+	 * The archive records each such file's content at the byte count actually
+	 * captured — never the stale scan-time claim — so the backup is internally
+	 * consistent and restores exactly what was read. The warnings exist because
+	 * the user should know those files were moving while the backup ran and may
+	 * want to re-run the export at a quieter moment.
+	 *
+	 * @param ExportResult $result The completed export's result.
+	 * @return void
+	 */
+	private function print_changed_file_warnings( ExportResult $result ): void {
+		$changed_files = $result->changed_files();
+		if ( array() === $changed_files ) {
+			return;
+		}
+
+		foreach ( $changed_files as $changed_file ) {
+			WP_CLI::warning(
+				sprintf(
+					/* translators: 1: file path, 2: byte count recorded at scan time, 3: byte count actually captured */
+					__( '%1$s changed while it was being read (the scan recorded %2$d bytes; %3$d were captured). The archive records the captured content.', 'pontifex' ),
+					$changed_file['path'],
+					$changed_file['declared_size'],
+					$changed_file['actual_size']
+				)
+			);
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of files that changed during the export */
+				_n(
+					'%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file.',
+					'%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files.',
+					count( $changed_files ),
+					'pontifex'
+				),
+				count( $changed_files )
+			)
+		);
 	}
 
 	/**

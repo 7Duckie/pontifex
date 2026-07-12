@@ -76,15 +76,15 @@ final class HeaderTest extends TestCase {
 	}
 
 	/**
-	 * Header::current_version() must return a v1.0 header with no flags set.
+	 * Header::current_version() must return a v1.1 header with no flags set.
 	 *
 	 * @return void
 	 */
-	public function test_current_version_returns_v1_0_with_no_flags(): void {
+	public function test_current_version_returns_v1_1_with_no_flags(): void {
 		$header = Header::current_version();
 
 		$this->assertSame( 1, $header->major() );
-		$this->assertSame( 0, $header->minor() );
+		$this->assertSame( 1, $header->minor() );
 		$this->assertSame( 0, $header->flags() );
 		$this->assertFalse( $header->is_encrypted() );
 		$this->assertFalse( $header->is_signed() );
@@ -211,7 +211,7 @@ final class HeaderTest extends TestCase {
 
 		$this->assertSame( 16, strlen( $bytes ) );
 		$this->assertSame(
-			"WPMIG\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x00",
+			"WPMIG\x00\x00\x01\x00\x01\x00\x01\x00\x00\x00\x00",
 			$bytes
 		);
 	}

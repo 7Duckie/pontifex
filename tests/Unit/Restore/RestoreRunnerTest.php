@@ -239,6 +239,55 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * Restore must finalise a cross-prefix rewrite after replaying every db_chunk.
+	 *
+	 * Once the walk is done the database tables exist with the destination prefix, so
+	 * the runner asks the DatabaseWriter to rewrite the prefix embedded in the
+	 * options/usermeta key columns — recorded here as a single rewrite call.
+	 *
+	 * @return void
+	 */
+	public function test_restore_finalises_the_prefix_rewrite(): void {
+		$db     = new FakeDbAdapter();
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db, 'wp_', 'xyz_' )
+		);
+
+		$runner->restore(
+			self::build_archive_stream(
+				array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) )
+			)
+		);
+
+		$this->assertSame( array( array( 'wp_', 'xyz_', 'pontifexstg_' ) ), $db->rewrite_calls() );
+	}
+
+	/**
+	 * Verify must NOT finalise a prefix rewrite — it writes nothing to the database.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_finalise_the_prefix_rewrite(): void {
+		$db     = new FakeDbAdapter();
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db, 'wp_', 'xyz_' )
+		);
+
+		$runner->verify(
+			self::build_archive_stream(
+				array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) )
+			)
+		);
+
+		$this->assertSame( array(), $db->rewrite_calls(), 'verify() must not rewrite the prefix.' );
+		$this->assertSame( array(), $db->executed_statements(), 'verify() must not execute any statement.' );
+	}
+
+	/**
 	 * A file entry must be restored to the destination filesystem.
 	 *
 	 * @return void
@@ -299,9 +348,10 @@ final class RestoreRunnerTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$executed = $db->executed_statements();
-		$this->assertCount( 2, $executed );
-		$this->assertSame( 'CREATE TABLE `wp_options` (id INT)', $executed[0] );
-		$this->assertSame( 'INSERT INTO `wp_options` VALUES (1)', $executed[1] );
+		$this->assertCount( 3, $executed, 'Two replayed statements plus the atomic cut-over RENAME.' );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_wp_options` (id INT)', $executed[0] );
+		$this->assertSame( 'INSERT INTO `pontifexstg_wp_options` VALUES (1)', $executed[1] );
+		$this->assertSame( 'RENAME TABLE `pontifexstg_wp_options` TO `wp_options`', $executed[2] );
 	}
 
 	/**
@@ -327,9 +377,10 @@ final class RestoreRunnerTest extends TestCase {
 		// Files on disk.
 		$this->assertTrue( file_exists( $this->fixture_root . '/a.txt' ) );
 		$this->assertTrue( file_exists( $this->fixture_root . '/b.txt' ) );
-		// db_chunk on adapter.
-		$this->assertCount( 1, $db->executed_statements() );
-		$this->assertSame( 'CREATE TABLE `wp_posts` (id INT)', $db->executed_statements()[0] );
+		// db_chunk on adapter: the staged replay plus the atomic cut-over RENAME.
+		$this->assertCount( 2, $db->executed_statements() );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_wp_posts` (id INT)', $db->executed_statements()[0] );
+		$this->assertSame( 'RENAME TABLE `pontifexstg_wp_posts` TO `wp_posts`', $db->executed_statements()[1] );
 	}
 
 	/**
@@ -443,6 +494,30 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * The restore() byte callback fires as each entry's record streams through.
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_bytes_read(): void {
+		$runner   = $this->make_runner();
+		$plans    = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana banana banana' ),
+		);
+		$reported = 0;
+
+		$runner->restore(
+			self::build_archive_stream( $plans ),
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'restore forwards byte progress from each entry read.' );
+	}
+
+	/**
 	 * The verify() walk reads and checks every entry but writes nothing.
 	 *
 	 * A mixed archive (a file and a db_chunk) is verified; afterwards the
@@ -486,6 +561,30 @@ final class RestoreRunnerTest extends TestCase {
 		);
 
 		$this->assertSame( array( array( 1, 2 ), array( 2, 2 ) ), $calls );
+	}
+
+	/**
+	 * The verify() byte callback fires as each entry's record streams through.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reports_bytes_read(): void {
+		$runner   = $this->make_runner();
+		$plans    = array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana banana banana' ),
+		);
+		$reported = 0;
+
+		$runner->verify(
+			self::build_archive_stream( $plans ),
+			null,
+			static function ( int $bytes ) use ( &$reported ): void {
+				$reported += $bytes;
+			}
+		);
+
+		$this->assertGreaterThan( 0, $reported, 'verify forwards byte progress from each entry read.' );
 	}
 
 	/**
@@ -762,5 +861,176 @@ final class RestoreRunnerTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		$runner->restore( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Build a RestoreRunner constrained by a runtime memory limit.
+	 *
+	 * @param int                $memory_limit_bytes The PHP memory limit in bytes (0 for unlimited).
+	 * @param FakeDbAdapter|null $db                 Optional adapter; if null, a fresh one is created.
+	 * @return RestoreRunner Ready to call restore() / verify() on.
+	 */
+	private function make_runner_with_memory_limit( int $memory_limit_bytes, ?FakeDbAdapter $db = null ): RestoreRunner {
+		$db = $db ?? new FakeDbAdapter();
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db ),
+			null,
+			$memory_limit_bytes
+		);
+	}
+
+	/**
+	 * Restoring must refuse a buffered entry whose declared size exceeds the memory budget.
+	 *
+	 * A 40-byte memory limit gives a 10-byte per-entry budget (a quarter); an 11-byte
+	 * db_chunk — a shape the reader must buffer whole — is refused before it is decoded
+	 * or dispatched, so a legitimately large chunk fails closed on a memory-constrained
+	 * web request rather than OOM-fatalling mid-restore. The destination is untouched.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_a_buffered_entry_over_the_memory_budget(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_memory_limit( 40, $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) );
+
+		$this->assert_refused(
+			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
+			$db
+		);
+	}
+
+	/**
+	 * A file entry over the memory budget must restore anyway — it streams.
+	 *
+	 * The memory budget exists to stop payload-sized allocations; a plain file
+	 * entry never makes one (it spools and streams to disk, ADR 0010), so the
+	 * same 11-byte file a 10-byte budget refused before now restores intact.
+	 *
+	 * @return void
+	 */
+	public function test_restore_streams_a_file_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$path = $this->fixture_root . '/note.txt';
+		$this->assertTrue( file_exists( $path ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'hello world', file_get_contents( $path ) );
+	}
+
+	/**
+	 * Verifying must refuse an over-budget buffered entry too, so the pre-write preview
+	 * gate rejects a backup the real restore would refuse — before any restore begins.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_a_buffered_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) );
+
+		$this->expectException( RuntimeException::class );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Verifying must NOT refuse a file entry over the memory budget — it streams on restore.
+	 *
+	 * @return void
+	 */
+	public function test_verify_permits_a_file_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+
+		$this->addToAssertionCount( 1 );
+	}
+
+	/**
+	 * A restore comfortably within the memory budget must still succeed.
+	 *
+	 * @return void
+	 */
+	public function test_restore_within_the_memory_budget_succeeds(): void {
+		// 1 MiB memory limit → 256 KiB per-entry budget; an 11-byte file is well within it.
+		$runner = $this->make_runner_with_memory_limit( 1048576 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * An unlimited memory limit (0) applies no per-entry cap — the CLI escape hatch.
+	 *
+	 * The same 11-byte file that a 40-byte limit refuses restores here, because a
+	 * CLI run (which reports memory_limit -1 → 0 bytes) is trusted to hold whatever
+	 * the restore needs.
+	 *
+	 * @return void
+	 */
+	public function test_unlimited_memory_applies_no_per_entry_cap(): void {
+		$runner = $this->make_runner_with_memory_limit( 0 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * The archive's charset from provenance must wrap the whole replay.
+	 *
+	 * @return void
+	 */
+	public function test_restore_flows_the_archive_charset_through_the_replay(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( array( 'utf8mb4', 'RESTORE' ), $db->charset_calls(), 'The provenance charset must be set before the replay and handed back after it.' );
+	}
+
+	/**
+	 * A restore that fails mid-replay must abort staging and never cut over.
+	 *
+	 * The atomicity contract (ADR 0009): a database failure during the replay
+	 * leaves the live tables untouched, because every statement ran against
+	 * staging tables — which are then dropped. No RENAME may appear in the
+	 * executed statements, and the failure propagates to the caller.
+	 *
+	 * @return void
+	 */
+	public function test_failed_restore_aborts_staging_and_never_renames(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array(
+			self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ),
+			self::db_chunk_plan( 'wp_posts', 1, "CREATE TABLE `wp_posts` (id INT);\n" ),
+		);
+		// The first chunk replays; the second chunk's statement fails.
+		$db->fail_after_executes( 1, 'simulated mid-replay failure' );
+
+		try {
+			$runner->restore( self::build_archive_stream( $plans ) );
+			$this->fail( 'restore() should propagate the mid-replay failure.' );
+		} catch ( RuntimeException $failure ) {
+			$this->assertSame( 'simulated mid-replay failure', $failure->getMessage() );
+		}
+
+		$executed = $db->executed_statements();
+		foreach ( $executed as $statement ) {
+			$this->assertStringNotContainsString( 'RENAME TABLE', $statement, 'A failed restore must never reach the cut-over.' );
+		}
+		$this->assertContains( 'DROP TABLE IF EXISTS `pontifexstg_wp_options`', $executed, 'The staged table must be dropped by the abort.' );
 	}
 }

@@ -45,9 +45,8 @@ use Pontifex\Archive\Format\EntryHeader;
  *    that every element is a string.
  *  - {@see ExclusionRules::none()} — empty rule set; excludes nothing.
  *  - {@see ExclusionRules::default_v010()} — Pontifex's curated default
- *    exclusion list for v0.1.0 (Pontifex's own working dir, the
- *    WordPress core cache directory, and known other-backup-plugin
- *    working directories).
+ *    exclusion list for v0.1.0 (Pontifex's own working dir and the
+ *    WordPress core cache directory).
  *  - {@see ExclusionRules::from_array()} — explicit factory equivalent
  *    to the constructor; documented for callers who prefer factory
  *    methods over direct construction.
@@ -56,13 +55,13 @@ use Pontifex\Archive\Format\EntryHeader;
  *  - {@see ExclusionRules::patterns()} — read-only patterns view.
  *
  * Default-vs-user-control philosophy: {@see ExclusionRules::default_v010()}
- * returns a deliberately small, defensible list — three categories of
- * exclusion where the rationale is clear (recursion prevention,
- * WordPress's own ephemeral cache, other backup plugins' working
- * directories). Pontifex's CLI surface (Phase 4) exposes the active
- * exclusion list before performing an export, so users always see
- * what is being skipped and can override with --no-defaults or
- * --exclude-file.
+ * returns a deliberately small, defensible list — two categories of
+ * exclusion where the rationale is clear (recursion prevention and
+ * WordPress's own ephemeral cache). Everything else a site holds is the
+ * owner's data, so Pontifex does not drop it on their behalf. Pontifex's
+ * CLI surface (Phase 4) exposes the active exclusion list before
+ * performing an export, so users always see what is being skipped and
+ * can override with --no-defaults or --exclude-file.
  *
  * The one exclusion that is NOT in the configurable list — Pontifex's
  * own working directory recursion prevention — is enforced
@@ -118,24 +117,24 @@ final class ExclusionRules {
 	/**
 	 * Build the curated default exclusion list for v0.1.0.
 	 *
-	 * Three categories of exclusion, all with defensible rationale:
+	 * Two categories of exclusion, each with a defensible rationale:
 	 *
 	 *  1. Pontifex's own working directory — prevents recursive
 	 *     archive-of-archives nesting if a previous Pontifex export
-	 *     left files in wp-content/pontifex/.
+	 *     left files in wp-content/pontifex/. (This is also enforced
+	 *     structurally inside FileScanner; the pattern keeps it visible
+	 *     in the printed exclusion summary.)
 	 *  2. WordPress's own ephemeral cache directory — by WordPress
 	 *     convention, wp-content/cache/ holds regenerable cache data
-	 *     used by transient and page-cache plugins. Every mature
-	 *     backup tool excludes it by default.
-	 *  3. Known other-backup-plugin working directories — UpdraftPlus,
-	 *     All-in-One WP Migration, Backup Guard, BackWPup, WP Clone,
-	 *     and Duplicator each create their own backup-output
-	 *     directories. Including these in a Pontifex archive produces
-	 *     an archive-of-archives with zero correctness benefit.
+	 *     used by transient and page-cache plugins, so it is safe to
+	 *     skip and regenerates on the destination.
 	 *
-	 * Pontifex's CLI surfaces this list before running an export, so
-	 * users see what is being skipped and can override with
-	 * --no-defaults or a custom --exclude-file.
+	 * The list is deliberately minimal: anything else a site holds —
+	 * including data other plugins have written — is the owner's data,
+	 * and Pontifex does not decide on their behalf to drop it. Pontifex's
+	 * CLI surfaces this list before running an export, so users see what
+	 * is being skipped and can override with --no-defaults or a custom
+	 * --exclude-file.
 	 *
 	 * @return self A rule set with the v0.1.0 default exclusions.
 	 */
@@ -147,15 +146,6 @@ final class ExclusionRules {
 
 				// WordPress core ephemeral cache (regenerable by design).
 				'wp-content/cache/**',
-
-				// Other backup plugins' working directories.
-				'wp-content/updraft/**',
-				'wp-content/ai1wm-backups/**',
-				'wp-content/backup-guard/**',
-				'wp-content/backwpup-*/**',
-				'wp-content/wp-clone/**',
-				'wp-content/duplicator/**',
-				'wp-content/backups-*/**',
 			)
 		);
 	}
@@ -290,7 +280,7 @@ final class ExclusionRules {
 	 *
 	 * If the prefix portion contains glob characters, fnmatch is
 	 * applied to each path-prefix component instead of strict
-	 * comparison. This handles patterns like "wp-content/backwpup-*\/**"
+	 * comparison. This handles patterns like "wp-content/snapshots-*\/**"
 	 * that target multiple sibling directories.
 	 *
 	 * @param string $pattern       Pattern ending in "/**".

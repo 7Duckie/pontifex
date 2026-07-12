@@ -1,7 +1,7 @@
 # Pontifex Archive Format Specification
 
 **File extension:** `.wpmig`
-**Version:** 1.0 (DRAFT)
+**Version:** 1.1 (DRAFT) — adds the optional `scope` and `table_prefix` provenance fields; v1.0 readers accept v1.1 archives unchanged.
 **Status:** Draft — finalised when Pontifex 0.1.0 ships. Until that point, this specification may change with each minor version release.
 **Licence:** This specification is published under CC BY 4.0. Implementations of the format are not restricted; the spec text itself may be redistributed with attribution.
 
@@ -21,7 +21,7 @@ The *why* — what alternatives we considered, what trade-offs we accepted, what
 
 The format is open: this document is the contract, and any party may build an implementation. Pontifex ships one implementation in PHP (as a WordPress plugin); the project intends to ship a second reference implementation in Go as a standalone command-line tool. Two independent implementations from the same specification, producing byte-identical archives from identical inputs, is the project's working definition of "the specification is correct."
 
-This format takes lessons from prior work, both in the WordPress space (`.wpress`, DupArchive, UpdraftPlus's multi-zip approach, WordPress Playground's proposed core export) and from outside it (TAR, ZIP, BGZF, BorgBackup, Restic, OCI image manifests, the in-toto attestation framework). Where a decision is non-obvious, [§15 — Design rationale and prior art](#15-design-rationale-and-prior-art) explains which prior format informed it.
+This format takes lessons from prior work, both in the WordPress space (existing single-file and multi-archive migration formats, and a proposed core export format) and from outside it (general-purpose and block-compressed archive formats, repository backup tools, and container-image and attestation manifests). Where a decision is non-obvious, [§15 — Design rationale and prior art](#15-design-rationale-and-prior-art) explains which prior format informed it.
 
 ## 2. Goals and non-goals
 
@@ -38,7 +38,7 @@ This format takes lessons from prior work, both in the WordPress space (`.wpress
 
 ### Non-goals
 
-- **Deduplication across archives.** Unlike BorgBackup or Restic, `.wpmig` is a single-archive single-site format, not a deduplicating repository. Each archive is self-contained.
+- **Deduplication across archives.** Unlike deduplicating repository backup tools, `.wpmig` is a single-archive single-site format, not a deduplicating repository. Each archive is self-contained.
 - **Differential or incremental archives.** v1 archives are always full. Differential support is a candidate for v2.
 - **In-place mutation.** A `.wpmig` archive is immutable once written. Subsequent operations produce new archives; they never patch the original.
 - **Replacement for general-purpose archiving.** This is a WordPress-shape-aware format. It is not designed to replace `tar` or `zip` for arbitrary file collections.
@@ -82,7 +82,7 @@ The archive begins with sixteen bytes:
 |-------:|-------:|----------------|----------------------------------------------------|
 |   0    |   8    | Magic          | `0x57 0x50 0x4D 0x49 0x47 0x00 0x00 0x01`          |
 |   8    |   2    | Format major   | uint16 big-endian — `0x0001` for v1                |
-|  10    |   2    | Format minor   | uint16 big-endian — `0x0000` for v1.0              |
+|  10    |   2    | Format minor   | uint16 big-endian — `0x0001` for v1.1 (`0x0000` = v1.0) |
 |  12    |   4    | Flags          | uint32 big-endian bitfield (see below)             |
 
 The magic spells `WPMIG\0\0\x01` in ASCII. The trailing `\x01` is deliberately non-printable: it prevents the file from being mistaken for a UTF-8 text file by tools that probe the first eight bytes.
@@ -113,54 +113,48 @@ Immediately after the header sits the provenance block: a JSON object describing
 - **hash:** SHA-256 of the JSON payload as stored (i.e., after any encryption applied); 32 bytes.
 - **payload:** the JSON object itself, UTF-8 encoded.
 
-The schema of the JSON object (v1):
+The schema of the JSON object:
 
 ```json
 {
-  "format_version": 1,
+  "wp_version": "6.8.0",
+  "php_version": "8.2.18",
+  "url": "https://example.com",
+  "db_charset": "utf8mb4",
+  "db_collation": "utf8mb4_unicode_520_ci",
   "exporter": {
     "name": "pontifex",
-    "version": "0.1.0",
-    "implementation": "php"
+    "version": "0.5.0"
   },
-  "exported_at": "2026-05-21T14:23:01Z",
-  "source": {
-    "url": "https://example.com",
-    "wp_version": "6.8.0",
-    "php_version": "8.2.18",
-    "db_engine": "mysql",
-    "db_version": "8.0.36",
-    "db_charset": "utf8mb4",
-    "db_collation": "utf8mb4_unicode_520_ci",
-    "table_prefix": "wp_",
-    "multisite": false
-  },
+  "timestamp": "2026-05-21T14:23:01+00:00",
+  "table_prefix": "wp_",
   "scope": {
-    "includes_database": true,
-    "includes_uploads": true,
-    "includes_themes": true,
-    "includes_plugins": true,
-    "includes_mu_plugins": true,
+    "content_only": true,
+    "content_root": "wp-content",
+    "includes_core": false,
     "includes_wp_config": false,
-    "excluded_paths": ["wp-content/cache", "wp-content/debug.log"]
+    "includes_database": true,
+    "excluded_paths": ["wp-content/pontifex/**", "wp-content/cache/**"]
   },
-  "plugins_active": [
-    { "slug": "woocommerce", "version": "8.5.0" }
-  ],
-  "themes_active": [
-    { "slug": "twentytwentyfour", "version": "1.2" }
-  ],
-  "encryption_disabled_reason": null,
-  "note": "Optional human-readable note set by the operator at export time."
+  "encryption_disabled_reason": null
 }
 ```
 
 Field rules:
 
-- All timestamps are ISO 8601 with explicit UTC offset.
-- Unknown fields encountered by a reader must be preserved verbatim if the archive is re-emitted (e.g., by a converter); a v1 reader must not strip future-version fields.
-- The `db_charset` and `db_collation` fields are critical for correct database import. Importers must use these values when the destination database supports them. (Mismatched collation is the documented root cause of UTF-8 corruption and emoji loss in existing migration tools — see [§15](#15-design-rationale-and-prior-art).)
-- When the archive is unencrypted, `encryption_disabled_reason` must be a non-empty string explaining why; this is recorded in the audit trail.
+- **Required in every archive:** `wp_version`, `php_version`, `url`, `db_charset`, `db_collation`, `exporter` (with `name` and `version`), and `timestamp`. These are the locked v1 fields (§13.2.3).
+- All timestamps are ISO 8601 with an explicit UTC offset.
+- The `db_charset` and `db_collation` fields are critical for correct database import. Importers must use these values when the destination database supports them. (Mismatched collation is a documented root cause of UTF-8 corruption and emoji loss in migration — see [§15](#15-design-rationale-and-prior-art).)
+- `encryption_disabled_reason` is present and a non-empty string only when the archive is unencrypted (§8.5); it is absent or null otherwise, and when present it is recorded in the audit trail.
+- `table_prefix` (optional, added in v1.1) records the source site's database table prefix, so a content-only restore can rewrite the source-prefixed table names to the destination's own prefix.
+- `scope` (optional, added in v1.1) records what the archive backed up. **Its absence means a legacy whole-site archive** (one written before this field existed). Its fields:
+  - `content_only` (boolean) — true for a content-only archive (the `wp-content` tree plus the whole database), false for a whole-site archive that also carries WordPress core and `wp-config.php`.
+  - `content_root` (string) — the directory the file entries are relative to, given relative to the WordPress root: `wp-content` for a content-only archive, the empty string for a whole-site archive.
+  - `includes_core` (boolean) — whether WordPress core (`wp-admin`, `wp-includes`, the root core PHP files) is in the archive.
+  - `includes_wp_config` (boolean) — whether `wp-config.php` is in the archive.
+  - `includes_database` (boolean) — whether the database is in the archive.
+  - `excluded_paths` (string array) — the exclusion patterns that were applied.
+- Unknown fields encountered by a reader must be preserved verbatim if the archive is re-emitted (e.g., by a converter); a reader must not strip future-version fields.
 
 The provenance block is deliberately the first thing after the header so that a reader can inspect it without having to decrypt or process anything else. Operators about to import an archive can be shown its provenance and prompted to confirm it before any destructive operation begins.
 
@@ -179,19 +173,37 @@ Each entry has the structure:
 +--------+--------+--------+--------+----------+----------+
 ```
 
-The entry header is a JSON object (UTF-8) describing the entry:
+The entry header is a JSON object (UTF-8) describing the entry. The `kind`
+field always comes first, followed by the kind-specific fields in the fixed
+order shown — the order is part of the byte-identical-output contract. A
+`file` entry's header:
 
 ```json
 {
-  "path": "wp-content/themes/twentytwentyfour/style.css",
   "kind": "file",
-  "size_uncompressed": 8842,
-  "size_compressed": 2103,
-  "modified_at": "2026-05-01T09:12:33Z",
-  "mode": "0644",
-  "media_type": "text/css"
+  "path": "wp-content/themes/twentytwentyfour/style.css",
+  "size": 8842,
+  "mode": 420,
+  "mtime": 1767225600,
+  "media_type": "text/css",
+  "size_compressed": 2103
 }
 ```
+
+- **`size`** — the payload's uncompressed byte count, as an integer. Writers
+  MUST record the byte count actually read when the entry was written — never
+  a stale earlier stat — so a file that changes on disk while the archive is
+  being produced is still described truthfully. Readers MUST refuse a `file`
+  entry whose decoded payload length differs from `size`: with a conforming
+  writer the two always agree, so a mismatch means the archive does not hold
+  the content it claims and restoring the entry would silently write wrong
+  bytes.
+- **`mode`** — the POSIX mode bits as a plain integer (decimal in JSON; `420`
+  is `0644` octal). Readers must reject a non-integer.
+- **`mtime`** — the Unix modification timestamp as an integer. Readers must
+  reject a non-integer.
+- **`size_compressed`** — the stored payload's byte count after the codec ran;
+  `0` when written by a streaming writer that cannot know it in advance.
 
 Field rules:
 
@@ -203,12 +215,20 @@ Field rules:
 
 The `kind` field is one of:
 
-- `file` — a regular file.
-- `db_chunk` — a portion of the SQL dump. An additional `chunk_index` field (0-based) is present, and the chunks together form the complete dump when concatenated in `chunk_index` order.
-- `directory` — present only to record permissions on an otherwise-empty directory. Payload is zero-length.
-- `symlink` — payload contains the link target as UTF-8.
+- `file` — a regular file, with the fields shown above.
+- `db_chunk` — a portion of the SQL dump. Its header carries `chunk_index`
+  (0-based; chunks concatenated in `chunk_index` order form the table's
+  complete dump), `table_name` (the source table the chunk belongs to),
+  `statement_count` (the exact number of `;\n`-terminated statements in the
+  payload — readers must refuse a chunk whose parsed count disagrees), and
+  `byte_count` (the payload's uncompressed size), plus `size_compressed`.
+- `directory` — present only to record permissions on an otherwise-empty
+  directory: `path`, `mode` (integer), `size_compressed`. Payload is
+  zero-length.
+- `symlink` — the link target lives in the **header JSON** as a `target`
+  field (`path`, `target`, `size_compressed`); the payload is zero-length.
 
-The per-entry hash is the foundation of tamper detection: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing.
+The per-entry hash is the foundation of **corruption detection**: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing. These hashes are unkeyed, so they detect accidents (bit rot, truncation, a bad transfer), not attackers — anyone who can modify the file can recompute them. Tamper detection is the signature's job (section 12).
 
 ## 7. Compression codecs
 
@@ -231,7 +251,7 @@ Codec policy for v1 writers:
 - **zstd is preferred** when both source and destination support it. The PHP `ext-zstd` extension is detected at runtime; when present, the writer emits codec `0x0002` or `0x0102`. When absent, it falls back to gzip.
 - **none** is used for already-compressed files (JPEG, PNG, MP4, etc.) where re-compression would waste CPU for no size gain. Writers may detect this from `media_type` or by a sampling heuristic.
 
-Readers must support **all** v1 codecs to claim v1 compliance. This is non-negotiable. It is what prevents the kind of silent compatibility drift that has affected `.wpress` over the years, where archives produced by one version of the plugin cannot be read by another because the underlying compression library changed without a corresponding format version bump.
+Readers must support **all** v1 codecs to claim v1 compliance. This is non-negotiable. It is what prevents the kind of silent compatibility drift that has affected some existing WordPress archive formats over the years, where archives produced by one version of a tool cannot be read by another because the underlying compression library changed without a corresponding format version bump.
 
 ## 8. Encryption
 
@@ -316,31 +336,40 @@ The manifest JSON schema:
 
 ```json
 {
-  "format_version": 1,
-  "entry_count": 18341,
   "entries": [
     {
       "index": 0,
       "offset": 1289,
       "length": 2147,
-      "path": "wp-content/themes/twentytwentyfour/style.css",
       "kind": "file",
+      "path": "wp-content/themes/twentytwentyfour/style.css",
       "codec_id": 258,
       "hash": "a1b2c3..."
+    },
+    {
+      "index": 1,
+      "offset": 3436,
+      "length": 278,
+      "kind": "db_chunk",
+      "chunk_index": 0,
+      "codec_id": 258,
+      "hash": "d4e5f6..."
     }
-  ],
-  "totals": {
-    "uncompressed_bytes": 184729382,
-    "compressed_bytes": 38291928
-  }
+  ]
 }
 ```
+
+The top level is a single `entries` array — there is no version, count, or
+totals wrapper (the format version lives in the archive header; the count is
+the array's length). Per entry, `path` is present for `file`, `directory` and
+`symlink` kinds; `chunk_index` is present for `db_chunk`; `hash` is the
+per-entry SHA-256, hex-encoded.
 
 The manifest is the random-access index. Readers wishing to extract a single file scan the manifest, locate that entry's offset, seek there, and read.
 
 The manifest hash recorded in the footer is computed over the manifest's stored bytes. The manifest's per-entry hashes are the same SHA-256 values stored alongside each entry; the manifest is, in effect, a signed table of contents.
 
-**Why the manifest sits at the end rather than at the beginning:** at the time a writer begins streaming entries to disk, it does not yet know the offsets, hashes, or final sizes of those entries. Writing the manifest at the end means the writer can stream entries directly to disk without buffering, then emit a single block of metadata once the entry stream is complete. This matches the strategy used by ZIP (central directory at end), Docker/OCI image layers, and PKZIP.
+**Why the manifest sits at the end rather than at the beginning:** at the time a writer begins streaming entries to disk, it does not yet know the offsets, hashes, or final sizes of those entries. Writing the manifest at the end means the writer can stream entries directly to disk without buffering, then emit a single block of metadata once the entry stream is complete. This matches the strategy used by general-purpose archive formats whose central directory sits at the end of the file, and by container-image manifests.
 
 ## 10. Footer
 
@@ -359,7 +388,7 @@ The footer is the trust anchor for random access: from it, a reader knows where 
 
 ## 11. Optional detached signature
 
-When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25519 is a modern public-key signature scheme — small keys, small signatures, single-step verification — used by OpenSSH, Signal, signify, and minisign.)
+When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25519 is a modern public-key signature scheme — small keys, small signatures, single-step verification — used widely across modern secure systems.)
 
 ```
 +--------+--------+--------+
@@ -371,22 +400,33 @@ When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25
 
 - **key id:** SHA-256 of the public key used.
 - **sig length:** uint32 big-endian; for Ed25519 always `0x00000040`.
-- **sig bytes:** Ed25519 signature over the **SHA-256 digest** of the bytes from offset 0 through the end of the footer — that is, `Ed25519( SHA-256( bytes[0 … end of footer] ) )`. The digest is computed by streaming those bytes, so neither signing nor verifying ever holds the whole archive in memory; this is what keeps signed archives within the streamable-in-both-directions goal (§2) and the writer's memory budget. Signing a digest rather than the raw bytes is the standard construction for messages too large to buffer — it is what minisign does, and the role RFC 8032's Ed25519ph fills — and is sound here because SHA-256 is collision-resistant and the signed bytes begin with the magic and version, so a signature cannot be transferred to another context. The digest covers everything but the signature block itself: the header (including the signed flag), the provenance, every entry, the manifest, and the footer.
+- **sig bytes:** Ed25519 signature over the **SHA-256 digest** of the bytes from offset 0 through the end of the footer — that is, `Ed25519( SHA-256( bytes[0 … end of footer] ) )`. This is **plain Ed25519** (libsodium's `crypto_sign_detached`) whose 32-byte *message* is the SHA-256 digest; it is **not** RFC 8032 Ed25519ph, and an implementation using a real Ed25519ph primitive will produce signatures that do not verify. The digest is computed by streaming those bytes, so neither signing nor verifying ever holds the whole archive in memory — the standard pre-hash construction for messages too large to buffer, sound here because SHA-256 is collision-resistant and the signed bytes begin with the magic and version, so a signature cannot be transferred to another context. The digest covers everything but the signature block itself: the header (including the signed flag), the provenance, every entry, the manifest, and the footer.
 
 **Verification:** an operator who trusts a particular public key can verify the signature — by recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key — to prove the archive was produced by the holder of the corresponding private key. This is independent of encryption: an archive can be signed without being encrypted, and vice versa.
 
-The signature is **detached and optional**. v1 archives are not required to carry one; readers are not required to verify one when present, though they should warn the operator if a signature is present and not verified.
+The signature is **detached and optional** for writers: v1 archives are not required to carry one. Reader obligations follow the trust model in section 12: a reader holding a trusted public key (supplied per run or pinned in configuration) MUST refuse an archive that is unsigned or whose signature does not verify — a stripped signature is indistinguishable from never-signed, and the unkeyed hashes cannot detect tampering. A reader with no trusted key should warn the operator when a signature is present and goes unverified.
 
 ## 12. Integrity and tamper detection
 
 `.wpmig` integrity rests on four mechanisms, each catching a different class of problem:
 
-| Mechanism                       | Detects                                                       |
-|---------------------------------|---------------------------------------------------------------|
-| Per-entry SHA-256 hash          | Modification of any single entry                              |
-| Manifest hash in footer         | Modification of the manifest itself                           |
-| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)          |
-| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key   |
+| Mechanism                       | Detects                                                                          |
+|---------------------------------|-----------------------------------------------------------------------------------|
+| Per-entry SHA-256 hash          | Accidental modification of any single entry (unkeyed — an attacker can recompute) |
+| Manifest hash in footer         | Accidental modification of the manifest itself (unkeyed, as above)                |
+| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)                              |
+| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key                       |
+
+The distinction in the first two rows matters. The plain SHA-256 hashes are
+**corruption** detection: they catch bit rot, truncation, and transfer errors.
+They are not a **tamper** defence, because anyone who can edit the file can
+recompute every hash so it still matches — and a signature can be *stripped*
+(signed flag cleared, trailing block removed), leaving a well-formed unsigned
+archive. The Ed25519 signature is therefore the only tamper defence, and it
+protects only when the reader enforces it: a reader holding a trusted public
+key (supplied per run, or pinned in configuration) MUST refuse an archive that
+is unsigned or whose signature does not verify. A reader with no trusted key
+provides corruption detection only, and must not claim otherwise.
 
 ### 12.1 On-import verification flow
 
@@ -398,7 +438,7 @@ A conforming reader performs verification in this order:
 4. **Read manifest.** Compute and verify manifest hash against the value in the footer.
 5. **Walk entries from manifest.** For each entry, seek to its offset, read the stored bytes, compute SHA-256, and compare to the manifest's expected hash.
 6. **If encrypted:** decrypt each entry's payload using the derived key, the per-entry nonce, and the entry header as AAD. AES-GCM will fail the authentication tag check if any byte has been modified.
-7. **If signed:** verify the Ed25519 signature — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against the trusted public key — if the operator has supplied one.
+7. **Signature enforcement:** when the operator has supplied or pinned a trusted public key, the archive MUST be signed and the Ed25519 signature MUST verify — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key; an unsigned archive is refused as presumed-tampered (a stripped signature is indistinguishable from never-signed). With no trusted key, a signed archive's signature goes unverified and the reader should say so.
 
 Any failure at any step halts the import. The reader must report which step failed, which entry or block was affected, and what the expected versus actual values were. Specifically: "Entry #1273 (`wp-content/uploads/2024/01/banner.jpg`): expected hash `a1b2…`, got `f7e8…`" — not "Import failed."
 
@@ -517,6 +557,8 @@ The format is deliberately extensible. Future minor versions may introduce, with
 - New entry `kind` values for cases v1 did not anticipate.
 - New optional flag bits in the reserved range, subject to the rule in §13.2.4 that readers unable to parse them must reject the archive.
 
+**v1.1 — the first minor revision** added the optional `scope` block and `table_prefix` provenance fields (§5), recording what an archive backed up. A v1.0 reader accepts a v1.1 archive and ignores these additions, per the rules above.
+
 The asymmetry is deliberate: adding things is cheap because readers ignoring an unknown extension is safe; redefining things is expensive because readers acting on misinterpreted bytes is dangerous.
 
 ## 14. Reference implementations
@@ -540,13 +582,13 @@ The Go implementation is deferred because it is not required to ship the v1.0 pl
 
 Each major design decision in this specification was informed by prior work. The relevant influences:
 
-**Length-prefixed streamable entries** are taken from the `.wpress` format used by All-in-One WP Migration, where this layout has proven workable for very large archives on memory-constrained PHP hosts. Reference implementation: [yani-/wpress](https://github.com/yani-/wpress) (MIT). Limitations of `.wpress` that informed our additions: no format versioning; no compression at the format layer (the plugin tacks on its own, and has changed it incompatibly between versions, breaking older backups); no encryption; no checksums; no manifest; lossy metadata (no directory entries, no permissions, no ownership).
+**Length-prefixed streamable entries** are taken from an existing single-file WordPress archive format, where this layout has proven workable for very large archives on memory-constrained PHP hosts. Limitations of that format that informed our additions: no format versioning; no compression at the format layer (its tooling tacks on its own, and has changed it incompatibly between versions, breaking older backups); no encryption; no checksums; no manifest; lossy metadata (no directory entries, no permissions, no ownership).
 
-**Manifest at the end with a footer pointer** is taken from the PKZIP and ZIP family of formats, where the central directory at the end of the file enables fast random access and stream writing simultaneously. The same pattern is used by Docker/OCI image manifests. Reference: [PKWARE APPNOTE.TXT](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
+**Manifest at the end with a footer pointer** is taken from general-purpose archive formats whose central directory sits at the end of the file, enabling fast random access and stream writing simultaneously. The same pattern is used by container-image manifests.
 
-**Per-entry independent compression with a codec ID** is taken from BGZF (Blocked GZIP Format), which uses block-level independence to enable random-access decompression of bioinformatics datasets. Reference: [SAM/BAM specification §4](https://samtools.github.io/hts-specs/SAMv1.pdf). The pattern lets us decompress individual entries without unpacking the whole archive, and lets us mix codecs based on what is available on the source host.
+**Per-entry independent compression with a codec ID** is taken from block-compressed archive formats, which use block-level independence to enable random-access decompression of large datasets. The pattern lets us decompress individual entries without unpacking the whole archive, and lets us mix codecs based on what is available on the source host.
 
-**Encryption by default with passphrase-derived keys** is taken from BorgBackup and Restic, both of which refuse to create an unencrypted repository without explicit opt-in. References: [BorgBackup security model](https://borgbackup.readthedocs.io/en/stable/internals/security.html), [Restic references](https://restic.readthedocs.io/en/stable/100_references.html). The observation behind this choice: backups in transit between hosts, sitting in cloud storage, or shared between collaborators are a high-value target. Optional encryption is, in practice, almost-no encryption, because operators forget. Encryption by default is the only setting that actually protects data.
+**Encryption by default with passphrase-derived keys** is taken from modern deduplicating backup tools, which refuse to create an unencrypted repository without explicit opt-in. The observation behind this choice: backups in transit between hosts, sitting in cloud storage, or shared between collaborators are a high-value target. Optional encryption is, in practice, almost-no encryption, because operators forget. Encryption by default is the only setting that actually protects data.
 
 **Argon2id key derivation with conservative parameters** follows the recommendations of [RFC 9106](https://www.rfc-editor.org/rfc/rfc9106.html). Argon2id balances protection against side-channel attacks (Argon2i's strength) with protection against GPU brute-force (Argon2d's strength).
 
@@ -554,27 +596,27 @@ Each major design decision in this specification was informed by prior work. The
 
 **Nonce construction from counter and randomness** follows the pattern documented in [RFC 5116 §3.2](https://www.rfc-editor.org/rfc/rfc5116) for AEAD nonce management. The counter portion guarantees uniqueness within an archive; the random portion guards against accidental reuse across archives with the same key.
 
-**SHA-256 per-entry hashing for integrity** is borrowed from the general pattern used by Git (content-addressed blobs), OCI image manifests, and Sigstore. SHA-256 was chosen rather than the slightly faster BLAKE2b/BLAKE3 because SHA-256 is available in PHP's built-in `hash()` function without requiring any extra extension — a strict baseline-availability decision for the WordPress hosting environment.
+**SHA-256 per-entry hashing for integrity** is borrowed from the general pattern of content-addressed storage used by version-control and container-image systems. SHA-256 was chosen rather than the slightly faster BLAKE2b/BLAKE3 because SHA-256 is available in PHP's built-in `hash()` function without requiring any extra extension — a strict baseline-availability decision for the WordPress hosting environment.
 
-**Optional Ed25519 detached signatures** follow the pattern used by minisign and signify, which provide simple file-level signing without the complexity of PGP-style web of trust. The signature is deliberately detached and optional: most operators will not use it, but those who need cryptographic provenance can.
+**Optional Ed25519 detached signatures** follow the pattern of simple file-level signing tools, which provide signing without the complexity of a full web-of-trust system. The signature is deliberately detached and optional: most operators will not use it, but those who need cryptographic provenance can.
 
-**Provenance metadata schema** is informed by what real WordPress migration plugins struggle with in practice. Reports of importing archives where source and destination databases have different default collations produce corruption — UTF-8 characters silently converted to Latin-1, emojis turned into "?" symbols, and so on. Explicitly recording the source charset and collation in provenance lets the importer detect the mismatch and either compensate or refuse cleanly. See user reports such as the [WordPress.org support topic on UTF-8 → Latin-1 conversion in Duplicator](https://wordpress.org/support/plugin/duplicator/) and the [collation failure on six-year-old Duplicator backups](https://wordpress.org/support/plugin/duplicator/) — both representative of a broad pattern.
+**Provenance metadata schema** is informed by what real WordPress migration plugins struggle with in practice. Reports of importing archives where source and destination databases have different default collations produce corruption — UTF-8 characters silently converted to Latin-1, emojis turned into "?" symbols, and so on. Explicitly recording the source charset and collation in provenance lets the importer detect the mismatch and either compensate or refuse cleanly. This collation-mismatch corruption is a broad, well-reported pattern across existing migration tools.
 
-**Per-entry hashes as the foundation of tamper detection, with separate manifest and footer hashes**, comes from BorgBackup, where the [check command](https://borgbackup.readthedocs.io/en/stable/usage/check.html) distinguishes between cheap CRC verification and full cryptographic verification. We adopt the cryptographic version as the default rather than offering it as a power-user option.
+**Per-entry hashes as the foundation of tamper detection, with separate manifest and footer hashes**, comes from modern deduplicating backup tools, which distinguish between cheap CRC verification and full cryptographic verification. We adopt the cryptographic version as the default rather than offering it as a power-user option.
 
-**Operator override (`--force`) with persistent audit logging** is informed by repeated reports in plugin support threads where users encounter restore failures and have no way to know what failed or whether partial recovery is possible — the [WordPress.org support topic where the import gets stuck mid-process](https://wordpress.org/support/topic/import-process-gets-stuck/) is one of many. Rather than refuse outright, we provide a deliberate override path that records exactly what was overridden, when, and by whom. The persistent admin notice approach is borrowed from how WordPress itself signals security-relevant configuration to administrators.
+**Operator override (`--force`) with persistent audit logging** is informed by repeated reports in plugin support threads where users encounter restore failures and have no way to know what failed or whether partial recovery is possible. Rather than refuse outright, we provide a deliberate override path that records exactly what was overridden, when, and by whom. The persistent admin notice approach is borrowed from how WordPress itself signals security-relevant configuration to administrators.
 
-**"Lose the passphrase, lose the data"** is taken from BorgBackup's documentation, which is unambiguous on this point. Some tools attempt to provide passphrase recovery; these mechanisms become attack surface in their own right. v1 takes the position that operators are responsible for passphrase management.
+**"Lose the passphrase, lose the data"** is the standard position of serious passphrase-based backup tools, which are unambiguous on this point. Some tools attempt to provide passphrase recovery; these mechanisms become attack surface in their own right. v1 takes the position that operators are responsible for passphrase management.
 
 ### Prior art we considered and did not adopt
 
-**WordPress Playground's ZIP-based export format** is the closest existing fit and is explicitly designed by Automattic-funded developers as a candidate WordPress core standard. See [the export format design discussion](https://github.com/WordPress/wordpress-playground/issues/1563). It is not adopted because: (a) it does not provide encryption or integrity guarantees beyond ZIP's CRC32; (b) it is still under active design at the time of writing; (c) it does not capture the migration-specific provenance (source URL, charset, plugin set) essential for correct search-replace operations. We follow its WordPress-aware directory conventions where applicable.
+**A proposed WordPress core export format** built on ZIP is the closest existing fit, designed as a candidate WordPress core standard. It is not adopted because: (a) it does not provide encryption or integrity guarantees beyond ZIP's CRC32; (b) it is still under active design at the time of writing; (c) it does not capture the migration-specific provenance (source URL, charset, plugin set) essential for correct search-replace operations. We follow its WordPress-aware directory conventions where applicable.
 
-**`.tar.zst.age` composition** of three Unix tools (tar for structure, zstd for compression, age for encryption) was considered. It is a strong technical solution but provides no place for migration-specific metadata, no format-level versioning of the combination, and is ergonomically poor for non-Unix users — most of the WordPress audience.
+**A composition of stock Unix tools** (an archive container for structure, a compressor, and an encryption tool) was considered. It is a strong technical solution but provides no place for migration-specific metadata, no format-level versioning of the combination, and is ergonomically poor for non-Unix users — most of the WordPress audience.
 
-**BorgBackup and Restic repository formats** were considered. They are wrong-shape for our use case: deduplicating repository formats designed for "many backups accumulating in a vault over time," not single-file portable archives suitable for moving between hosts.
+**Deduplicating repository formats** were considered. They are wrong-shape for our use case: designed for "many backups accumulating in a vault over time," not single-file portable archives suitable for moving between hosts.
 
-**`.daf` (DupArchive)** was considered. It is undocumented; the format internals are not part of the public Duplicator documentation. Adopting an undocumented format would defeat the purpose of writing this specification.
+**An undocumented proprietary migration format** was considered. Its internals are not publicly documented. Adopting an undocumented format would defeat the purpose of writing this specification.
 
 ## 16. References
 
@@ -587,34 +629,44 @@ The following references informed this specification. URLs are stable as of May 
 - NIST SP 800-38D — Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC. <https://csrc.nist.gov/publications/detail/sp/800-38d/final>
 - ISO 8601 — Date and time representations.
 
-### Format specifications
-
-- ZIP File Format Specification (PKWARE APPNOTE.TXT). <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>
-- TAR (GNU). <https://www.gnu.org/software/tar/manual/html_node/Standard.html>
-- BGZF (Blocked GZIP). SAM/BAM specification §4. <https://samtools.github.io/hts-specs/SAMv1.pdf>
-- OCI Image Manifest Specification. <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
-- in-toto Attestation Framework. <https://github.com/in-toto/attestation>
-
-### Existing backup and migration formats
-
-- WPRESS reference implementation. <https://github.com/yani-/wpress>
-- wpressarc — wpress↔tar converter. <https://github.com/kugland/wpressarc>
-- WordPress Playground export format discussion. <https://github.com/WordPress/wordpress-playground/issues/1563>
-- BorgBackup internals. <https://borgbackup.readthedocs.io/en/stable/internals.html>
-- BorgBackup security model. <https://borgbackup.readthedocs.io/en/stable/internals/security.html>
-- Restic design references. <https://restic.readthedocs.io/en/stable/100_references.html>
-- ZFS Send Stream format. <https://openzfs.org/wiki/Documentation/ZfsSend>
-
-### User reports informing design
-
-- WordPress.org support: "Import process gets stuck" (All-in-One WP Migration). <https://wordpress.org/support/topic/import-process-gets-stuck/>
-- WebHostingAdvices: "All-in-One WP Migration Import Stuck — solutions". <https://webhostingadvices.com/all-in-one-wp-migration-import-stuck/>
-
 ## 17. Appendices
 
 ### Appendix A: Test vectors
 
-*(To be added when the v1.0 specification is finalised. Reference implementations must produce byte-identical output from these inputs.)*
+A canonical v1.1 archive is committed in the Pontifex repository at
+`tests/Fixtures/conformance-v1_1.wpmig`, together with a conformance test
+(`tests/Unit/Archive/ConformanceTest.php`) that rebuilds it from the inputs
+below and asserts byte identity. A reference implementation must produce these
+exact bytes from these exact inputs.
+
+**Inputs.** Provenance: WordPress `6.6.1`, PHP `8.2.0`, URL
+`https://conformance.example`, charset `utf8mb4`, collation
+`utf8mb4_unicode_520_ci`, exporter `pontifex 1.0.0`, exported at
+`2026-01-01T00:00:00+00:00`. Four entries, all raw codec (id `0`) with
+zero-filled nonces, in this order:
+
+1. `file` — path `wp-content/hello.txt`, contents `hello wpmig\n` (12 bytes),
+   mode `420` (0644), mtime `1767225600`, media type `text/plain`.
+2. `directory` — path `wp-content/uploads`, mode `493` (0755).
+3. `symlink` — path `wp-content/link`, target `../hello.txt`.
+4. `db_chunk` — table `wp_options`, chunk 0, 3 statements, payload
+   `DROP TABLE IF EXISTS \`wp_options\`;\nCREATE TABLE \`wp_options\` (id INT);\nINSERT INTO \`wp_options\` VALUES (1);\n` (106 bytes).
+
+**Expected output.** Total size **1802 bytes**; whole-file SHA-256
+`bb6cdc326fd715ec83986992639ab1e30e2d6e202a43ea2bb5da95e84d039cb4`.
+
+Header (16 bytes, hex): `57504d49470000010001000100000000` — the 8-byte magic
+`WPMIG\x00\x00\x01`, major `0x0001`, minor `0x0001`, flags `0x00000000`, all
+big-endian.
+
+Manifest entry table:
+
+| index | kind      | offset | length | entry SHA-256 (hex) |
+|-------|-----------|--------|--------|----------------------|
+| 0     | file      | 284    | 194    | `16edd8a48c5ab1780e18fb6e21a5a64b2771bdd98e0d813d543e0d6919cffa62` |
+| 1     | directory | 478    | 129    | `d6927f23eecc5a6394bd1464cd679f9636b90d7f7c46a8175c114f39bbff0737` |
+| 2     | symlink   | 607    | 137    | `1d5b40a5eafac3572570109e5df8497cfd905dcc4c396c338ac5cf8eb4be6b4a` |
+| 3     | db_chunk  | 744    | 278    | `77a552dbd7232e9c7b612672f9f760c6f4642ef1f6d8af589a8922f0c54efd81` |
 
 ### Appendix B: Glossary
 

@@ -240,11 +240,11 @@ final class ExclusionRulesTest extends TestCase {
 	 * @return void
 	 */
 	public function test_tree_pattern_with_glob_prefix_matches_multiple_trees(): void {
-		$rules = new ExclusionRules( array( 'wp-content/backwpup-*/**' ) );
+		$rules = new ExclusionRules( array( 'wp-content/snapshots-*/**' ) );
 
-		$this->assertTrue( $rules->matches( 'wp-content/backwpup-1234', EntryHeader::KIND_DIRECTORY ) );
-		$this->assertTrue( $rules->matches( 'wp-content/backwpup-1234/log.txt', EntryHeader::KIND_FILE ) );
-		$this->assertTrue( $rules->matches( 'wp-content/backwpup-abc', EntryHeader::KIND_DIRECTORY ) );
+		$this->assertTrue( $rules->matches( 'wp-content/snapshots-1234', EntryHeader::KIND_DIRECTORY ) );
+		$this->assertTrue( $rules->matches( 'wp-content/snapshots-1234/log.txt', EntryHeader::KIND_FILE ) );
+		$this->assertTrue( $rules->matches( 'wp-content/snapshots-abc', EntryHeader::KIND_DIRECTORY ) );
 		$this->assertFalse( $rules->matches( 'wp-content/uploads', EntryHeader::KIND_DIRECTORY ) );
 	}
 
@@ -296,20 +296,40 @@ final class ExclusionRulesTest extends TestCase {
 	}
 
 	/**
-	 * The default_v010 factory must include known other-backup-plugin working directories.
+	 * The default_v010 factory must hold only the two structural exclusions.
+	 *
+	 * The curated defaults were trimmed (ADR 0008) to just Pontifex's own working
+	 * directory and WordPress's regenerable cache; anything else a site holds is
+	 * the owner's data and is kept by default.
 	 *
 	 * @return void
 	 */
-	public function test_default_v010_includes_other_backup_plugin_dirs(): void {
+	public function test_default_v010_holds_only_the_two_structural_exclusions(): void {
 		$patterns = ExclusionRules::default_v010()->patterns();
 
-		$this->assertContains( 'wp-content/updraft/**', $patterns );
-		$this->assertContains( 'wp-content/ai1wm-backups/**', $patterns );
-		$this->assertContains( 'wp-content/backup-guard/**', $patterns );
-		$this->assertContains( 'wp-content/backwpup-*/**', $patterns );
-		$this->assertContains( 'wp-content/wp-clone/**', $patterns );
-		$this->assertContains( 'wp-content/duplicator/**', $patterns );
-		$this->assertContains( 'wp-content/backups-*/**', $patterns );
+		$this->assertSame(
+			array( 'wp-content/pontifex/**', 'wp-content/cache/**' ),
+			$patterns
+		);
+	}
+
+	/**
+	 * The default_v010 factory must no longer exclude other tools' working directories.
+	 *
+	 * Whatever data another plugin has written under wp-content is the site owner's
+	 * data; Pontifex keeps it rather than deciding on their behalf to drop it. The
+	 * directory names below are illustrative — the point is that an arbitrary
+	 * plugin-data directory is not excluded. Defends against a regression that
+	 * reinstates a curated drop-list.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_keeps_other_plugin_directories(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertFalse( $rules->matches( 'wp-content/some-backup-plugin/backup-2026-01-01.zip', EntryHeader::KIND_FILE ) );
+		$this->assertFalse( $rules->matches( 'wp-content/another-plugins-data/site.dat', EntryHeader::KIND_FILE ) );
+		$this->assertFalse( $rules->matches( 'wp-content/backups-abc123', EntryHeader::KIND_DIRECTORY ) );
 	}
 
 	/**
@@ -323,8 +343,6 @@ final class ExclusionRulesTest extends TestCase {
 		$this->assertTrue( $rules->matches( 'wp-content/pontifex', EntryHeader::KIND_DIRECTORY ) );
 		$this->assertTrue( $rules->matches( 'wp-content/pontifex/logs/2026.log', EntryHeader::KIND_FILE ) );
 		$this->assertTrue( $rules->matches( 'wp-content/cache/page/index.html', EntryHeader::KIND_FILE ) );
-		$this->assertTrue( $rules->matches( 'wp-content/updraft/backup-2026-01-01.zip', EntryHeader::KIND_FILE ) );
-		$this->assertTrue( $rules->matches( 'wp-content/backwpup-abc123', EntryHeader::KIND_DIRECTORY ) );
 	}
 
 	/**

@@ -112,6 +112,7 @@ final class ArchiveWriter {
 		$this->footer_writer = $footer_writer;
 	}
 
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
 	/**
 	 * Write a complete archive to the destination stream.
 	 *
@@ -121,27 +122,23 @@ final class ArchiveWriter {
 	 * current seek position to EOF.
 	 *
 	 * @param Provenance             $provenance       Source-site context to embed in the provenance block.
-	 * @param array<EntryPlan>       $entry_plans      Entries to write, in archive order. May be empty.
+	 * @param iterable<EntryPlan>    $entry_plans      Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param resource               $destination      Writable stream resource; bytes are written from its current seek position and it is advanced by the returned byte count.
 	 * @param callable|null          $on_entry_written Optional callback run once after each entry, as function(int $done, int $total): void; lets a caller drive a progress indicator while the archive layer stays UI-agnostic.
 	 * @param EncryptionContext|null $encryption       Encryption inputs (cipher, key, salt); when supplied the header's encrypted flag is set, every entry is encrypted with a per-entry nonce, and the salt is written into the footer; null produces an unencrypted archive.
 	 * @param SigningContext|null    $signing          Signing inputs (signer, secret key, key id); when supplied the header's signed flag is set and a 100-byte Ed25519 signature block over the SHA-256 of every byte through the footer is appended. Requires a seekable, readable destination. null produces an unsigned archive.
+	 * @param callable|null          $on_bytes_read    Optional byte-progress callback forwarded to each entry's codec, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry as well as between entries.
+	 * @param callable|null          $on_file_changed  Optional callback run when a file entry's source yielded a different byte count than its header declared (the file changed between the caller's scan and the write), called as `( string $path, int $declared_size, int $actual_size ): void`. The entry is written with the actual captured size; this callback lets the caller warn the user.
 	 * @return int Total bytes written to the destination during this call.
 	 * @throws InvalidArgumentException If $destination is not a stream resource, any element
 	 *                                  of $entry_plans is not an EntryPlan, or signing was requested
 	 *                                  but the destination is not seekable and readable.
 	 * @throws RuntimeException         If any block fails to serialise, any write fails, a nonce cannot be generated, or signing fails.
 	 */
-	public function write_archive( Provenance $provenance, array $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null ): int {
+	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null, ?callable $on_file_changed = null ): int {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
-		}
-		foreach ( $entry_plans as $i => $plan ) {
-			if ( ! $plan instanceof EntryPlan ) {
-				throw new InvalidArgumentException(
-					sprintf( 'ArchiveWriter: $entry_plans[%d] must be an EntryPlan instance.', (int) $i )
-				);
-			}
 		}
 		if ( null !== $signing ) {
 			self::assert_signable_destination( $destination );
@@ -152,7 +149,12 @@ final class ArchiveWriter {
 			$encryption->consume();
 		}
 
-		$total = count( $entry_plans );
+		// The entry list may be a lazily-streamed ManifestStream as well as a plain
+		// array, so each plan is validated inside the write loop (which pulls one at
+		// a time) rather than in an up-front pass that would consume a stream. The
+		// progress total comes from Countable, which both an array and a
+		// ManifestStream satisfy in O(1).
+		$total = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
 
 		// Serialise the variable-length blocks that we can build up front.
 		// Provenance can throw JsonException in principle.
@@ -177,7 +179,7 @@ final class ArchiveWriter {
 		if ( null !== $signing ) {
 			$flags |= Header::FLAG_SIGNED;
 		}
-		$header = new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_0, $flags );
+		$header = new Header( Header::FORMAT_MAJOR_V1, Header::FORMAT_MINOR_V1_1, $flags );
 
 		$header_bytes  = $header->to_bytes();
 		$bytes_written = 0;
@@ -191,7 +193,18 @@ final class ArchiveWriter {
 		// Entries: for each plan, record the offset where the entry starts.
 		// Delegate to EntryWriter, then build a ManifestEntry from the result.
 		$manifest_entries = array();
-		foreach ( $entry_plans as $i => $plan ) {
+		$index            = 0;
+		foreach ( $entry_plans as $plan ) {
+			// Validate here, one at a time, so a lazy stream is not consumed by an
+			// up-front pass. $index is tracked explicitly rather than taken from the
+			// foreach key, so the entry index (used for the nonce and the manifest)
+			// is correct for any iterable, not only a 0..N-1 keyed array.
+			if ( ! $plan instanceof EntryPlan ) {
+				throw new InvalidArgumentException(
+					sprintf( 'ArchiveWriter: $entry_plans[%d] must be an EntryPlan instance.', (int) $index )
+				);
+			}
+
 			$offset_before = $bytes_written;
 
 			// For an encrypted archive, upgrade the codec id to its encrypted variant,
@@ -203,24 +216,43 @@ final class ArchiveWriter {
 			$key      = null;
 			if ( null !== $encryption ) {
 				$codec_id = CodecId::with_aes_gcm( $codec_id );
-				$nonce    = self::encryption_nonce( $i );
+				$nonce    = self::encryption_nonce( $index );
 				$cipher   = $encryption->cipher();
 				$key      = $encryption->key();
 			}
 
-			$result = $this->entry_writer->write_entry(
-				$plan->header(),
-				$codec_id,
-				$nonce,
-				$plan->source(),
-				$destination,
-				$cipher,
-				$key
-			);
+			// Open this entry's source only now, and close it the moment the entry
+			// is written, so exactly one source is open at a time — the export's
+			// memory then stays flat no matter how many entries the archive holds.
+			$source = $plan->source();
+			try {
+				$result = $this->entry_writer->write_entry(
+					$plan->header(),
+					$codec_id,
+					$nonce,
+					$source,
+					$destination,
+					$cipher,
+					$key,
+					$on_bytes_read
+				);
+			} finally {
+				if ( is_resource( $source ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the per-entry payload source opened just above; bounds open handles to one regardless of entry count.
+					fclose( $source );
+				}
+			}
+
+			// Report a file whose content changed between the caller's scan and this
+			// write, so the caller can warn the user; the entry itself was already
+			// written with the actual captured size by EntryWriter.
+			if ( $result->size_was_corrected() && null !== $on_file_changed ) {
+				$on_file_changed( (string) $plan->header()->path(), (int) $result->declared_size(), (int) $result->actual_size() );
+			}
 
 			$bytes_written     += $result->total_entry_length();
 			$manifest_entries[] = self::build_manifest_entry(
-				$i,
+				$index,
 				$offset_before,
 				$result->total_entry_length(),
 				$result->entry_hash(),
@@ -229,8 +261,10 @@ final class ArchiveWriter {
 			);
 
 			if ( null !== $on_entry_written ) {
-				$on_entry_written( $i + 1, $total );
+				$on_entry_written( $index + 1, $total );
 			}
+
+			++$index;
 		}
 
 		// Manifest.

@@ -110,12 +110,17 @@ final class ZstdCodec implements Codec {
 	 * frame (a few bytes of header and footer); this is how the format works,
 	 * not a bug.
 	 *
-	 * @param resource $input  A readable stream resource.
-	 * @param resource $output A writable stream resource.
+	 * When $on_read is supplied it is called with each chunk's raw input byte
+	 * count as the input streams in, so a caller can report byte-level progress;
+	 * it has no effect on the bytes written.
+	 *
+	 * @param resource      $input   A readable stream resource.
+	 * @param resource      $output  A writable stream resource.
+	 * @param callable|null $on_read Optional progress callback, called as `( int $bytes ): void` with each chunk's raw input byte count.
 	 * @return int The number of bytes written to $output.
 	 * @throws CodecException If ext-zstd is unavailable, on read/write failure, or on a zstd-internal error.
 	 */
-	public function encode( $input, $output ): int {
+	public function encode( $input, $output, ?callable $on_read = null ): int {
 		$this->assert_available();
 		$this->assert_streams( $input, $output );
 
@@ -134,6 +139,10 @@ final class ZstdCodec implements Codec {
 			}
 			if ( '' === $chunk ) {
 				break;
+			}
+
+			if ( null !== $on_read ) {
+				$on_read( strlen( $chunk ) );
 			}
 
 			$compressed = zstd_compress_add( $ctx, $chunk, false );

@@ -65,9 +65,14 @@ use Pontifex\WordPress\WordPressContext;
  *
  * [--public-key=<path>]
  * : Verify the archive's Ed25519 signature against this public-key file (from
- *   `wp pontifex keygen`). A signed archive whose signature fails is reported
- *   BROKEN. Without it, a signed archive is checked for integrity only, with a
- *   warning that its signature was not verified.
+ *   `wp pontifex keygen`). Supplying a trusted key makes the signature
+ *   MANDATORY (ADR 0012): an unsigned archive — including one whose signature
+ *   was stripped — is reported BROKEN, as is a failed signature. Define
+ *   PONTIFEX_PUBLIC_KEY (the key file's path) in wp-config.php to pin the key
+ *   once and enforce this on every run; an explicit --public-key overrides
+ *   the pin. Without any key, a signed archive is checked for integrity only,
+ *   with a warning that its signature was not verified — plain integrity
+ *   hashes detect corruption, not tampering.
  *
  * ## EXAMPLES
  *
@@ -363,7 +368,13 @@ final class VerifyCommand {
 
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
-		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+		return new RestoreRunner(
+			$entry_reader,
+			$file_writer,
+			$database_writer,
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+		);
 	}
 
 	/**
@@ -405,22 +416,32 @@ final class VerifyCommand {
 	}
 
 	/**
-	 * Resolve the --public-key option to a loaded public key, or null when absent.
+	 * Resolve the trusted public key from the flag or the site's pin, or null when neither exists.
 	 *
-	 * A bad or unreadable key file is the operator's mistake, not a broken
+	 * The --public-key flag names a key for this run; when it is absent, the
+	 * PONTIFEX_PUBLIC_KEY constant (defined once in wp-config.php) supplies the
+	 * site's pinned key, so signature enforcement does not rest on a human
+	 * remembering a flag every time (ADR 0012). An explicit flag overrides the
+	 * pin. A bad or unreadable key file is the operator's mistake, not a broken
 	 * archive, so it exits via WP_CLI::error rather than the broken-verdict path.
 	 *
 	 * @param array<string, string|bool> $associative_args The CLI's associative args.
-	 * @return string|null The 32-byte public key, or null when --public-key was not supplied.
+	 * @return string|null The 32-byte public key, or null when no flag was supplied and no pin is defined.
 	 */
 	private function resolve_public_key( array $associative_args ): ?string {
-		if ( ! isset( $associative_args['public-key'] ) || '' === $associative_args['public-key'] || true === $associative_args['public-key'] ) {
+		$path = null;
+		if ( isset( $associative_args['public-key'] ) && '' !== $associative_args['public-key'] && true !== $associative_args['public-key'] ) {
+			$path = (string) $associative_args['public-key'];
+		} elseif ( $this->environment->is_constant_defined( 'PONTIFEX_PUBLIC_KEY' ) ) {
+			$path = (string) $this->environment->constant_value( 'PONTIFEX_PUBLIC_KEY' );
+		}
+		if ( null === $path || '' === $path ) {
 			return null;
 		}
 
 		$key = '';
 		try {
-			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
+			$key = SigningKeys::load_public_key( $path );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
@@ -431,22 +452,25 @@ final class VerifyCommand {
 	/**
 	 * Check the archive's signature as the final verification step.
 	 *
-	 * Unsigned archive: nothing to check (a stray --public-key earns a warning).
-	 * Signed with no key: warn that the signature was not verified, stay sound.
-	 * Signed with a key: a failed signature throws (caught as a BROKEN verdict);
-	 * a good one logs that it verified.
+	 * A supplied or pinned trusted key makes the signature MANDATORY (ADR
+	 * 0012): an unsigned archive — including one whose signature was stripped,
+	 * which yields a well-formed unsigned archive — throws (caught as a BROKEN
+	 * verdict), because the unkeyed integrity hashes detect corruption, not
+	 * tampering. Signed with no key: warn that the signature was not verified,
+	 * stay sound. Signed with a key: a failed signature throws too; a good one
+	 * logs that it verified.
 	 *
 	 * @param resource    $source     The open archive stream.
-	 * @param string|null $public_key The trusted public key, or null when none was supplied.
+	 * @param string|null $public_key The trusted public key, or null when none was supplied or pinned.
 	 * @return void
-	 * @throws RuntimeException If the archive is signed and the signature does not verify against $public_key.
+	 * @throws RuntimeException If a trusted key exists and the archive is unsigned, or its signature does not verify against $public_key.
 	 */
 	private function check_signature( $source, ?string $public_key ): void {
 		$reader = new ArchiveReader( $source );
 
 		if ( null === $reader->signature() ) {
 			if ( null !== $public_key ) {
-				WP_CLI::warning( __( 'A public key was supplied with --public-key, but this archive is not signed.', 'pontifex' ) );
+				throw new RuntimeException( 'a trusted public key was supplied but this archive is NOT signed — and a stripped signature looks exactly like this. The signature is the only tamper defence, so the archive is treated as broken.' );
 			}
 			return;
 		}

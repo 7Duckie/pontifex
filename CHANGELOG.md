@@ -14,10 +14,98 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.5.0 — the admin UI and the longer-running
-operational features (resumable and scheduled exports, transports, selective
-content, multisite) — begins after this tag. See
-[`docs/roadmap.md`](docs/roadmap.md).
+Nothing yet. Work toward v0.6.0 — the longer-running operational features
+(resumable and scheduled exports, transports, selective content, multisite) —
+begins after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.5.0] — 2026-07-13 — The admin interface
+
+The release that takes Pontifex beyond the command line: a complete admin
+interface over the existing engine, and the closure of the engine-audit
+hardening backlog — every audit observation now carries a shipped fix or a
+recorded, deliberate deferral (ADRs 0009–0013). One breaking change for
+signed archives; one changed default for backup scope. Both below.
+
+### Changed
+
+- **BREAKING — a trusted public key makes the signature mandatory** (ADR 0012).
+  Supplying `--public-key`, or pinning `PONTIFEX_PUBLIC_KEY` in `wp-config.php`,
+  now refuses an unsigned archive on import and reports it BROKEN on verify — a
+  stripped signature is indistinguishable from never-signed, and the unkeyed
+  hashes cannot detect tampering. Behaviour with no key anywhere is unchanged;
+  there is deliberately no separate `--require-signature` flag.
+- **Backups default to content-only** (ADR 0008): `wp-content` plus the whole
+  database — the everyday working-WordPress-to-working-WordPress scope.
+  `--whole-site` opts into the entire installation for cloning onto a bare
+  server. The scope is recorded in the archive's provenance (format v1.1).
+- **The format specification now matches the shipped bytes exactly.** Six
+  documentation drifts corrected, a committed golden conformance archive with
+  worked Appendix A vectors, byte-identity proven across PHP 8.2–8.5, and the
+  reader now refuses an archive with a higher format major version — the gate
+  the spec always promised.
+- **`readme.txt` claims the specific safety properties Pontifex actually has**
+  instead of a blanket "fails closed on errors".
+
+### Added
+
+- **The admin interface** — for people who never touch a terminal, following
+  the project's Swiss-typography design language:
+  - **Overview**: operation counters and transfer history at a glance.
+  - **Backup**: create with a live byte-based progress bar and time estimate,
+    cancel mid-run, download, and delete — with warnings naming any file that
+    changed while it was being read.
+  - **Verify**: pick a backup, hash-check every entry, get the sound-or-broken
+    verdict with progress.
+  - **Restore / Rollback**: typed-action confirmation, phase-labelled progress,
+    a pre-restore safety archive, and honest failure reporting — a restore
+    whose verdict never arrives says the result is unknown and points at
+    Rollback instead of inviting a blind retry.
+  - **Cross-server upload**: chunked upload of a `.wpmig` taken on another
+    site, sized to the host's upload ceiling, validated before it joins the
+    backup list.
+- **`PONTIFEX_PUBLIC_KEY`** — pin a trusted public key in `wp-config.php` so
+  every import and verify on the site enforces signatures without per-command
+  flags.
+- **Changed-file detection on export** (ADR 0013): a file that shrinks or grows
+  between the scan and the write is recorded at the byte count actually
+  captured, warned about per file, and counted in a new `files_changed` export
+  statistic — the archive never claims content it does not hold.
+
+### Fixed
+
+- **A failed database restore can no longer harm the live tables** (ADR 0009):
+  every chunk replays into staging tables and one atomic `RENAME TABLE` cuts
+  over; failure at any point aborts staging with the live site untouched, and
+  an automatic safety-archive replay backstops the file half.
+- **Restores stream within web memory limits** (ADR 0010): entries are
+  hash-verified before decode and large plain files decode stream-to-stream,
+  so a browser-initiated restore no longer risks memory exhaustion on large
+  files; verify and restore enforce the same decoded-size budgets.
+- **Exports are consistent under concurrent writes** (ADR 0011): the dump runs
+  inside a REPEATABLE READ consistent snapshot on a dedicated connection
+  (falling back gracefully where hosts refuse one), with row windows ordered by
+  primary key and per-table chunk sizing from real row statistics — the
+  original unstable-pagination incident is closed at the root.
+- **A failed export can no longer clobber a prior good archive**: archives are
+  written to a sibling temp file and atomically renamed into place only when
+  complete.
+- **Concurrent operations are refused atomically**: the single-runner guard is
+  a server-side named lock (site-scoped), so two simultaneous restores can no
+  longer interleave.
+- **A second restore can no longer delete the first restore's undo**: safety
+  archive retention is floored at two.
+- **Replays run under the source archive's charset**, so legacy
+  latin1/utf8mb3 content migrates without mojibake; **`guid` columns are
+  preserved verbatim** during URL rewrites, matching WordPress convention.
+- **A backup with no database is refused at two independent layers**, so an
+  empty table listing can never produce a hash-correct but useless archive.
+- **A file entry whose decoded size contradicts its header is refused on
+  restore** (ADR 0013) — an archive that lost data to a pre-fix writer race
+  fails closed instead of silently restoring a wrong-sized file.
+- **The admin screens keep their accessibility promises**: the backup chooser
+  is a real keyboard radio group (roving tabindex, arrow keys), progress bars
+  carry accessible names tied to their status lines, and indeterminate phases
+  no longer announce a stale percentage.
 
 ## [0.4.6] — 2026-06-24 — WordPress.org readiness and i18n
 
@@ -335,8 +423,8 @@ archives are **unencrypted**.
 - **Import trust boundary documented** in
   [`.github/SECURITY.md`](.github/SECURITY.md): importing a `.wpmig`
   grants its author full write access to the target, so only trusted
-  archives should be imported. A peer-CVE security review (Wordfence /
-  WPScan / Patchstack) informed the hardening above.
+  archives should be imported. A review against published WordPress
+  vulnerability data informed the hardening above.
 
 ## [0.0.6] — pre-alpha (tests strengthened; v0.1.0 scope settled)
 
@@ -534,7 +622,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/7Duckie/pontifex/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/7Duckie/pontifex/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/7Duckie/pontifex/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/7Duckie/pontifex/compare/v0.4.3...v0.4.4

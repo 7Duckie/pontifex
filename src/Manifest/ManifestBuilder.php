@@ -24,10 +24,11 @@ use Pontifex\Archive\Writer\EntryWriter;
  * is responsible for two things:
  *
  *  1. Calling FileScanner against the WordPress root and converting
- *     each ScannedEntry into an EntryPlan with an opened source stream.
+ *     each ScannedEntry into an EntryPlan whose source is opened lazily
+ *     at write time rather than held open from build.
  *  2. Calling DatabaseScanner and converting each ScannedDbChunk into
- *     an EntryPlan whose source stream is the chunk's lazily-produced
- *     SQL bytes.
+ *     an EntryPlan whose source produces the chunk's SQL bytes lazily
+ *     when the entry is written.
  *
  * The returned list is the input to {@see \Pontifex\Archive\Writer\ArchiveWriter::write_archive()},
  * making this class the bridge between manifest enumeration and
@@ -89,49 +90,104 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	}
 
 	/**
-	 * Build a complete EntryPlan list for the given WordPress installation.
+	 * Build a memory-bounded ManifestStream for the given WordPress installation.
 	 *
-	 * The returned list is ready to feed to ArchiveWriter::write_archive().
-	 * Each EntryPlan carries an opened source stream; the caller is
-	 * responsible for closing the streams (typically by passing the
-	 * EntryPlans through ArchiveWriter, which closes them as it
-	 * consumes them).
+	 * The returned stream is ready to feed to ArchiveWriter::write_archive(). It
+	 * holds only the lightweight scan results and builds each EntryPlan on demand
+	 * as the writer pulls it, so the plans are never all in memory at once and the
+	 * export's peak memory does not grow with the number of entries. Each plan
+	 * still carries a deferred source — a factory that opens the file, empty
+	 * stream, or database-chunk SQL only when that entry is written — which
+	 * ArchiveWriter opens as it writes the entry and closes immediately after.
 	 *
-	 * @param string $wordpress_root Absolute filesystem path of the WP installation.
-	 * @return EntryPlan[] All entries that should be archived, in deterministic order.
+	 * @param string        $wordpress_root   Absolute filesystem path of the WP installation.
+	 * @param callable|null $on_scan_progress Optional callback invoked with the running file-scan entry count, so a caller can report scan progress before the write begins; receives one int argument.
+	 * @return ManifestStream All entries that should be archived, in deterministic order (files, then database chunks).
 	 * @throws InvalidArgumentException If $wordpress_root is empty or not a directory.
-	 * @throws RuntimeException         If a file source stream cannot be opened.
+	 * @throws RuntimeException         If the filesystem or database scan fails.
 	 */
-	public function build( string $wordpress_root ): array {
-		$plans = array();
+	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream {
+		// Scan filesystem then database. Both scanners already return their output
+		// sorted; we preserve that order (files first, then database chunks). The
+		// scan results are lightweight value objects — paths, sizes, deferred
+		// sources — never file contents, so holding the two lists costs little.
+		$file_items = $this->file_scanner->scan( $wordpress_root, $on_scan_progress );
+		$db_items   = $this->database_scanner->scan();
 
-		// Filesystem entries first, then database chunks.
-		// Both scanners already return their output sorted; we preserve that order.
-		foreach ( $this->file_scanner->scan( $wordpress_root ) as $scanned_entry ) {
-			$plans[] = self::plan_for_scanned_entry( $scanned_entry );
+		// Every Pontifex backup contains the whole database, so a backup with no database
+		// chunks means the database was not captured — a silent, catastrophic data-loss risk
+		// on restore. Refuse it here, at the assembly boundary, independently of the
+		// adapter's own empty-table guard.
+		$this->refuse_when_no_database( $db_items );
+
+		// Sum the estimated original sizes once, for the safety-archive disk
+		// preflight: file sizes from the scan, database sizes from each chunk's
+		// byte_count(). This equals the previous per-plan sum of
+		// EntryHeader::estimated_bytes(), without building a single plan.
+		$estimated_bytes = 0;
+		foreach ( $file_items as $scanned_entry ) {
+			$estimated_bytes += $scanned_entry->size();
 		}
-		foreach ( $this->database_scanner->scan() as $scanned_chunk ) {
-			$plans[] = self::plan_for_scanned_db_chunk( $scanned_chunk );
+		foreach ( $db_items as $scanned_chunk ) {
+			$estimated_bytes += $scanned_chunk->byte_count();
 		}
 
-		return $plans;
+		// Each item becomes an EntryPlan only when the stream is pulled at write
+		// time, so the ~28k plans are never all in memory at once.
+		$factory = static function ( $item ): EntryPlan {
+			if ( $item instanceof ScannedEntry ) {
+				return self::plan_for_scanned_entry( $item );
+			}
+			if ( $item instanceof ScannedDbChunk ) {
+				return self::plan_for_scanned_db_chunk( $item );
+			}
+			throw new RuntimeException( 'ManifestBuilder: manifest item is neither a ScannedEntry nor a ScannedDbChunk.' );
+		};
+
+		return new ManifestStream( array_merge( $file_items, $db_items ), $factory, $estimated_bytes );
 	}
 
 	/**
-	 * Convert a ScannedEntry into an EntryPlan.
+	 * Refuse an assembled backup that captured no database.
 	 *
-	 * Files get an fopen() on their absolute path; directories and
-	 * symlinks get an empty in-memory stream because their meaningful
-	 * data lives entirely in the EntryHeader.
+	 * Every Pontifex backup contains the whole database, so a scan that produced no chunks
+	 * means the database was not captured — a silent, catastrophic data-loss risk on
+	 * restore. This is the assembly-boundary backstop to the adapter's own empty-table
+	 * guard: independent guards at two layers, so no single future path or bug can produce
+	 * a backup with no database in it.
+	 *
+	 * @param ScannedDbChunk[] $db_items The database chunks the scan produced.
+	 * @return void
+	 * @throws RuntimeException If no database chunks were produced.
+	 */
+	private function refuse_when_no_database( array $db_items ): void {
+		if ( array() === $db_items ) {
+			throw new RuntimeException( 'ManifestBuilder: the database scan produced no chunks. Refusing to build a backup with no database in it.' );
+		}
+	}
+
+	/**
+	 * Convert a ScannedEntry into an EntryPlan with a deferred source.
+	 *
+	 * The plan's source factory opens the file — or an empty in-memory stream for
+	 * directories and symlinks, whose meaningful data lives in the EntryHeader —
+	 * only when the entry is written, so any open failure surfaces at write time
+	 * rather than here.
 	 *
 	 * @param ScannedEntry $entry The filesystem scan result.
 	 * @return EntryPlan A plan ready for ArchiveWriter.
-	 * @throws RuntimeException If the file's source stream cannot be opened.
+	 * @throws RuntimeException If the entry kind is unrecognised.
 	 */
 	private static function plan_for_scanned_entry( ScannedEntry $entry ): EntryPlan {
 		$header = self::header_for_scanned_entry( $entry );
-		$source = self::open_source_for_scanned_entry( $entry );
-		return new EntryPlan( $header, self::preferred_codec_id(), self::zero_nonce(), $source );
+		return new EntryPlan(
+			$header,
+			self::preferred_codec_id(),
+			self::zero_nonce(),
+			static function () use ( $entry ) {
+				return self::open_source_for_scanned_entry( $entry );
+			}
+		);
 	}
 
 	/**
@@ -209,8 +265,14 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 			$chunk->byte_count(),
 			0
 		);
-		$source = $chunk->open_sql_stream();
-		return new EntryPlan( $header, self::preferred_codec_id(), self::zero_nonce(), $source );
+		return new EntryPlan(
+			$header,
+			self::preferred_codec_id(),
+			self::zero_nonce(),
+			static function () use ( $chunk ) {
+				return $chunk->open_sql_stream();
+			}
+		);
 	}
 
 	/**
