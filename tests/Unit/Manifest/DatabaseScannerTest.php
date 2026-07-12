@@ -12,6 +12,7 @@ namespace Pontifex\Tests\Unit\Manifest;
 require_once __DIR__ . '/Fakes/FakeDbAdapter.php';
 
 use InvalidArgumentException;
+use RuntimeException;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Manifest\DatabaseScanner;
@@ -283,6 +284,49 @@ final class DatabaseScannerTest extends TestCase {
 	 */
 	public function test_default_chunk_size_constant(): void {
 		$this->assertSame( 4 * 1024 * 1024, DatabaseScanner::DEFAULT_CHUNK_SIZE_BYTES );
+	}
+
+	/**
+	 * A failed row count aborts the scan loudly — never a silent table skip.
+	 *
+	 * A backup quietly missing a table is the catastrophic-silent failure
+	 * class: the adapter throws on a database failure (a real $wpdb returns
+	 * false rather than throwing, and the adapter converts that), and the
+	 * scanner must let that abort the whole scan.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_row_count_aborts_the_scan_loudly(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 10, "CREATE TABLE `wp_options` (...);\n" );
+		$db->fail_next( 'row_count', 'simulated row-count failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated row-count failure' );
+
+		self::unfiltered_scanner( $db )->scan();
+	}
+
+	/**
+	 * A failed dump during lazy chunk realisation propagates at write time.
+	 *
+	 * Chunk SQL is generated lazily when the archive writer realises the
+	 * chunk's stream; a database failure at that point must surface as a
+	 * thrown export failure, not an empty or truncated chunk.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_dump_propagates_when_the_chunk_realises(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 10, "CREATE TABLE `wp_options` (...);\n" );
+
+		$chunks = self::unfiltered_scanner( $db )->scan();
+		$db->fail_next( 'dump_table_rows', 'simulated dump failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated dump failure' );
+
+		$chunks[0]->open_sql_stream();
 	}
 
 	/**
