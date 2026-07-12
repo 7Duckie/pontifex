@@ -134,6 +134,14 @@
 		if ( ok ) {
 			setBar( 1, 1 );
 			window.setTimeout( function () {
+				// Reloading while the browser reports itself offline would land on
+				// the browser's own error page and destroy this screen — and the
+				// verdict with it. Keep the message inline; the operator can reload
+				// once the connection is back to see the uploaded backup listed.
+				if ( false === navigator.onLine ) {
+					setControlsEnabled( true );
+					return;
+				}
 				window.location.reload();
 			}, 1200 );
 		} else {
@@ -176,7 +184,12 @@
 				credentials: 'same-origin',
 				body: body
 			} ).then( function ( response ) {
-				return response.json();
+				// Parse explicitly rather than response.json(): a PHP fatal answers
+				// with an HTML page, which must reject cleanly instead of surfacing
+				// as an opaque JSON syntax error.
+				return response.text().then( function ( text ) {
+					return JSON.parse( text );
+				} );
 			} ).then( function ( res ) {
 				if ( ! res || ! res.success ) {
 					var data = ( res && res.data ) ? res.data : {};

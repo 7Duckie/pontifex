@@ -107,6 +107,8 @@ final class BackupPageTest extends TestCase {
 		$this->assertStringContainsString( 'id="pontifex-create-backup"', $output );
 		$this->assertStringContainsString( 'id="pontifex-backup-track"', $output );
 		$this->assertStringContainsString( 'role="progressbar"', $output );
+		$this->assertStringContainsString( 'aria-label="Backup progress"', $output, 'The progressbar carries an accessible name.' );
+		$this->assertStringContainsString( 'aria-describedby="pontifex-backup-progress"', $output, 'The status line is associated with the bar.' );
 		$this->assertStringContainsString( 'pontifex-backup-20260101T000000Z.wpmig', $output );
 		$this->assertStringContainsString( 'Download', $output );
 		$this->assertStringContainsString( 'pontifex-delete-backup', $output );

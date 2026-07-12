@@ -39,7 +39,12 @@
 			credentials: 'same-origin',
 			body: body
 		} ).then( function ( response ) {
-			return response.json();
+			// Parse explicitly rather than response.json(): a PHP fatal answers
+			// with an HTML page, which must reject cleanly instead of surfacing
+			// as an opaque JSON syntax error.
+			return response.text().then( function ( text ) {
+				return JSON.parse( text );
+			} );
 		} );
 	}
 
@@ -139,6 +144,11 @@
 	/**
 	 * Select one backup row, outline it, and clear the others.
 	 *
+	 * Also maintains the radiogroup's roving tabindex: the selected row is the
+	 * group's single Tab stop, so Tab lands on the choice and the arrow keys
+	 * (below) move within the group — the ARIA radio-group keyboard contract
+	 * the role attributes promise.
+	 *
 	 * @param {Element} chosen The row button to select.
 	 */
 	function selectRow( chosen ) {
@@ -148,8 +158,33 @@
 				var on = row === chosen;
 				row.classList.toggle( 'is-selected', on );
 				row.setAttribute( 'aria-checked', on ? 'true' : 'false' );
+				row.setAttribute( 'tabindex', on ? '0' : '-1' );
 			}
 		);
+	}
+
+	/**
+	 * Move the radio selection with the arrow keys, wrapping at the ends.
+	 *
+	 * Per the ARIA radio-group pattern, selection follows focus: pressing an
+	 * arrow both focuses and selects the next row.
+	 *
+	 * @param {KeyboardEvent} event The keydown event on a row.
+	 * @param {Element}       row   The row the event fired on.
+	 */
+	function handleRowKey( event, row ) {
+		var forward = 'ArrowDown' === event.key || 'ArrowRight' === event.key;
+		var backward = 'ArrowUp' === event.key || 'ArrowLeft' === event.key;
+		if ( ( ! forward && ! backward ) || row.disabled ) {
+			return;
+		}
+		event.preventDefault();
+		var rows = Array.prototype.slice.call( document.querySelectorAll( '.pontifex-restore-row' ) );
+		var index = rows.indexOf( row );
+		var next = rows[ ( index + ( forward ? 1 : rows.length - 1 ) ) % rows.length ];
+		selectRow( next );
+		next.focus();
+		updateRunButton();
 	}
 
 	/**
@@ -256,6 +291,9 @@
 						selectRow( row );
 						updateRunButton();
 					}
+				} );
+				row.addEventListener( 'keydown', function ( event ) {
+					handleRowKey( event, row );
 				} );
 			}
 		);

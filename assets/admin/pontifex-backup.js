@@ -38,7 +38,12 @@
 			credentials: 'same-origin',
 			body: body
 		} ).then( function ( response ) {
-			return response.json();
+			// Parse explicitly rather than response.json(): a PHP fatal answers
+			// with an HTML page, which must reject cleanly instead of surfacing
+			// as an opaque JSON syntax error.
+			return response.text().then( function ( text ) {
+				return JSON.parse( text );
+			} );
 		} );
 	}
 
@@ -119,6 +124,12 @@
 		var track = document.getElementById( 'pontifex-backup-track' );
 		if ( track ) {
 			track.classList.toggle( 'is-indeterminate', on );
+			// An indeterminate progressbar carries NO aria-valuenow; leaving the
+			// last percentage in place reads as "stuck at N%" to a screen reader.
+			// setBar restores the value once the phase turns determinate again.
+			if ( on ) {
+				track.removeAttribute( 'aria-valuenow' );
+			}
 		}
 	}
 
@@ -296,13 +307,21 @@
 			if ( res && res.success ) {
 				setIndeterminate( false );
 				setBar( 1, 1 );
+				var created = cfg.strings.createdPlain;
 				if ( res.data && res.data.bytes && res.data.source_bytes ) {
-					storeNotice(
-						cfg.strings.created
-							.replace( '%1$s', formatBytes( res.data.bytes ) )
-							.replace( '%2$s', formatBytes( res.data.source_bytes ) )
-					);
+					created = cfg.strings.created
+						.replace( '%1$s', formatBytes( res.data.bytes ) )
+						.replace( '%2$s', formatBytes( res.data.source_bytes ) );
 				}
+				// Reloading while the browser reports itself offline would land on
+				// the browser's own error page and destroy this screen — and the
+				// notice with it. Show the verdict inline instead; the operator can
+				// reload once the connection is back to see the new backup listed.
+				if ( false === navigator.onLine ) {
+					resetIdle( created );
+					return;
+				}
+				storeNotice( created );
 				window.location.reload();
 				return;
 			}

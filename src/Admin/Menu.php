@@ -311,6 +311,7 @@ final class Menu {
 					'timing'        => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
 					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
 					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
+					'createdPlain'  => __( 'Backup created.', 'pontifex' ),
 					'cancel'        => __( 'Cancel backup', 'pontifex' ),
 					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
 					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
@@ -398,6 +399,8 @@ final class Menu {
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'        => __( 'Time elapsed - %s', 'pontifex' ),
 					'failed'         => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'failedUnknown'  => __( 'The connection was lost, so the result is unknown — the operation may have completed or may still be running. Wait a moment, then reload this page to check; if the site looks wrong, run a rollback. Check the Pontifex log for details.', 'pontifex' ),
+					'sessionUnknown' => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
 					'signedOutTitle' => __( 'Restore complete', 'pontifex' ),
 					'signedOut'      => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
 					'loginLink'      => __( 'Log in', 'pontifex' ),

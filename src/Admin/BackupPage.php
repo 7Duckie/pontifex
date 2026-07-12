@@ -133,7 +133,10 @@ final class BackupPage {
 			esc_html__( 'Create backup', 'pontifex' ),
 			esc_html__( 'Cancel backup', 'pontifex' )
 		);
-		echo '<div class="pontifex-progress-track" id="pontifex-backup-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-backup-bar"></span></div>';
+		printf(
+			'<div class="pontifex-progress-track" id="pontifex-backup-track" role="progressbar" aria-label="%s" aria-describedby="pontifex-backup-progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-backup-bar"></span></div>',
+			esc_attr__( 'Backup progress', 'pontifex' )
+		);
 		echo '<p class="pontifex-progress" id="pontifex-backup-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-timing" id="pontifex-backup-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-backup-result" aria-live="polite"></p>';
