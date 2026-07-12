@@ -353,6 +353,82 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Open a consistent snapshot on this adapter's connection.
+	 *
+	 * The mysqldump --single-transaction pattern (ADR 0011): REPEATABLE READ
+	 * isolation, then a transaction opened WITH CONSISTENT SNAPSHOT, so every
+	 * later read on this connection — the table list, row counts, schemas, and
+	 * each chunk's row window — sees the database as it stood at this instant,
+	 * without blocking any writes. Call it only on a connection dedicated to
+	 * the dump: on the global connection, mid-export writes would join the
+	 * transaction and stay invisible to other requests until commit.
+	 *
+	 * Never throws: a false return means the snapshot could not be opened and
+	 * the caller should dump without one (today's behaviour) rather than not
+	 * back up at all. Only InnoDB tables are snapshot-consistent — MyISAM
+	 * tables keep their fuzziness, mysqldump's own documented limitation.
+	 *
+	 * @return bool True when the snapshot is open on this connection.
+	 */
+	public function begin_consistent_snapshot(): bool {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- A static session-scoped statement with no inputs; transaction control has no caching or preparation dimension.
+		$isolation = $this->wpdb->query( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' );
+		if ( false === $isolation ) {
+			return false;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- A static transaction-control statement with no inputs; no caching or preparation dimension.
+		$begin = $this->wpdb->query( 'START TRANSACTION WITH CONSISTENT SNAPSHOT' );
+		if ( false === $begin ) {
+			return false;
+		}
+		$this->snapshot_open = true;
+		return true;
+	}
+
+	/**
+	 * Whether {@see self::begin_consistent_snapshot()} opened a snapshot on this connection.
+	 *
+	 * @var bool
+	 */
+	private bool $snapshot_open = false;
+
+	/**
+	 * End a snapshot this adapter opened; a no-op otherwise.
+	 *
+	 * An open snapshot holds shared metadata locks on every table it has read,
+	 * which block DDL — including Pontifex's own restore cut-over when the
+	 * pre-import safety archive dumped the same tables moments earlier in the
+	 * same request. Best-effort: the snapshot is read-only, so there is
+	 * nothing a failed COMMIT could lose.
+	 *
+	 * @return void
+	 */
+	public function end_consistent_snapshot(): void {
+		if ( ! $this->snapshot_open ) {
+			return;
+		}
+		$this->snapshot_open = false;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- A static transaction-control statement with no inputs; no caching or preparation dimension.
+		$this->wpdb->query( 'COMMIT' );
+	}
+
+	/**
+	 * End any open snapshot the moment the adapter goes out of scope.
+	 *
+	 * This is the deterministic release. The export orchestrators hold the
+	 * adapter only through locals (the builder and the chunk providers), so
+	 * when an export returns, the adapter is freed and this COMMIT releases
+	 * the snapshot's metadata locks — before, say, a restore's cut-over RENAME
+	 * runs in the same request. The release deliberately rides THIS object,
+	 * not the connection: WordPress retains hidden references to every wpdb
+	 * instance, so a destructor on the connection never fires mid-request
+	 * (found empirically); a plain adapter has no such hidden owners.
+	 */
+	public function __destruct() {
+		$this->end_consistent_snapshot();
+	}
+
+	/**
 	 * Build the ORDER BY clause that makes a table's row dumps deterministic.
 	 *
 	 * Resolved once per table and cached: the primary-key columns in key order,

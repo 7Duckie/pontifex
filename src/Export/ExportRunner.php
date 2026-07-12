@@ -103,9 +103,34 @@ final class ExportRunner {
 	 */
 	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
 		$file_scanner     = new FileScanner( $rules, $path_prefix );
-		$database_adapter = new WpdbAdapter( $wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $rules );
+		$database_scanner = new DatabaseScanner( self::snapshot_database_adapter( $wordpress_context ), $rules );
 		return new ManifestBuilder( $file_scanner, $database_scanner );
+	}
+
+	/**
+	 * Build the export's database adapter, inside a consistent snapshot where possible.
+	 *
+	 * ADR 0011: the dump runs on a dedicated connection holding a REPEATABLE
+	 * READ consistent snapshot, so every table and chunk is read from the same
+	 * instant of the database while the global connection stays live for
+	 * progress writes and locks. The chunk SQL providers capture this adapter,
+	 * so the snapshot spans the scan and every row window realised later
+	 * during the archive write. When the host refuses a second connection or
+	 * the snapshot cannot be opened, the export falls back to the global
+	 * connection without a snapshot — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @param WordPressContext $wordpress_context WordPress-specific facts and the database connections.
+	 * @return WpdbAdapter The adapter the scanner and chunk providers will read through.
+	 */
+	private static function snapshot_database_adapter( WordPressContext $wordpress_context ): WpdbAdapter {
+		$dedicated = $wordpress_context->dedicated_wpdb_connection();
+		if ( null !== $dedicated ) {
+			$adapter = new WpdbAdapter( $dedicated );
+			if ( $adapter->begin_consistent_snapshot() ) {
+				return $adapter;
+			}
+		}
+		return new WpdbAdapter( $wordpress_context->wpdb_instance() );
 	}
 
 	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
