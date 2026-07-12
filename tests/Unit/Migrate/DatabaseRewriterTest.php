@@ -205,6 +205,63 @@ final class DatabaseRewriterTest extends TestCase {
 	}
 
 	/**
+	 * A wide-row table is read a few rows at a time; narrow tables keep the ceiling.
+	 *
+	 * A batch is held in memory whole, so its size must be bounded by bytes:
+	 * a 1 MiB average row (doubled for overhead) under the 4 MiB budget gives
+	 * two rows per window, and the walk still covers every row across the
+	 * smaller windows. A table with no sizing answer keeps the configured
+	 * batch size as its ceiling.
+	 *
+	 * @return void
+	 */
+	public function test_batches_are_sized_per_table_from_the_real_row_width(): void {
+		$db   = new FakeMigrationDatabase();
+		$rows = array();
+		for ( $i = 1; $i <= 5; $i++ ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'body' => 'see https://old.test/page-' . $i,
+			);
+		}
+		$db->add_table( 'wp_wide', 'id', $rows );
+		$db->set_average_row_bytes( 'wp_wide', 1048576 );
+
+		$report = ( new DatabaseRewriter( $db, new SerialisedReplacer(), 1000 ) )->rewrite( 'old.test', 'new.example' );
+
+		$limits = array_map(
+			static fn ( array $read ): int => $read['limit'],
+			$db->reads()
+		);
+		$this->assertSame( array( 2, 2, 2 ), $limits, 'A 1 MiB average row under the 4 MiB budget must read two rows per window.' );
+		$this->assertSame( 5, $report->rows_scanned(), 'Every row must still be covered across the smaller windows.' );
+		$this->assertSame( 5, $report->rows_changed() );
+	}
+
+	/**
+	 * An unknown row width keeps the configured batch size as the ceiling.
+	 *
+	 * @return void
+	 */
+	public function test_unknown_row_width_keeps_the_configured_batch_ceiling(): void {
+		$db = new FakeMigrationDatabase();
+		$db->add_table(
+			'wp_narrow',
+			'id',
+			array(
+				array(
+					'id'   => '1',
+					'body' => 'no url',
+				),
+			)
+		);
+
+		( new DatabaseRewriter( $db, new SerialisedReplacer(), 7 ) )->rewrite( 'old.test', 'new.example' );
+
+		$this->assertSame( 7, $db->reads()[0]['limit'], 'With no sizing answer the configured batch size is the window.' );
+	}
+
+	/**
 	 * A guid column is never rewritten — WordPress treats it as permanent identity.
 	 *
 	 * Feed readers use the guid to decide whether a post is new, so it must

@@ -96,4 +96,20 @@ interface MigrationDatabase {
 	 * @throws RuntimeException If the update fails (including the `$wpdb`-returns-false path).
 	 */
 	public function update_row( string $table, string $primary_key, int|string $primary_key_value, array $columns ): void;
+
+	/**
+	 * The table's average stored row width, in bytes, or 0 when unknown.
+	 *
+	 * Used by {@see DatabaseRewriter} to size its row batches per table, so a
+	 * wide-row table is read a handful of rows at a time instead of a fixed
+	 * thousand of them — bounding the pass's memory the same way the export's
+	 * chunker bounds its own. A sizing hint, never a correctness input:
+	 * implementations report the storage engine's own estimate and return 0
+	 * when it cannot be read, in which case the rewriter falls back to its
+	 * fixed estimate.
+	 *
+	 * @param string $table Fully-prefixed table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table ): int;
 }

@@ -65,6 +65,36 @@ final class DatabaseRewriter {
 	private const SKIPPED_COLUMNS = array( 'guid' );
 
 	/**
+	 * Target byte budget for one row batch (4 MiB), before the overhead multiplier.
+	 *
+	 * A batch is held in memory whole while its rows rewrite, so its size must
+	 * be bounded by bytes, not by row count — a fixed thousand rows of
+	 * megabyte-wide page-builder content is gigabytes. Mirrors the export
+	 * chunker's per-table sizing.
+	 *
+	 * @var int
+	 */
+	private const BATCH_BYTE_BUDGET = 4194304;
+
+	/**
+	 * Assumed bytes per row when the storage engine's estimate is unknown or smaller.
+	 *
+	 * @var int
+	 */
+	private const AVG_ROW_FLOOR = 1024;
+
+	/**
+	 * Multiplier on the storage engine's average row width, for PHP-side overhead.
+	 *
+	 * A row in PHP (associative array of strings, plus the rewrite's working
+	 * copies) costs more than its stored bytes; erring large means fewer rows
+	 * per batch, the safe direction.
+	 *
+	 * @var int
+	 */
+	private const ROW_OVERHEAD_MULTIPLIER = 2;
+
+	/**
 	 * The live-database seam the pass reads and writes through.
 	 *
 	 * @var MigrationDatabase
@@ -168,9 +198,11 @@ final class DatabaseRewriter {
 
 			++$tables_scanned;
 
+			$batch_rows = $this->batch_rows_for( $table );
+
 			$offset = 0;
 			do {
-				$rows  = $this->db->read_rows( $table, $offset, $this->batch_size );
+				$rows  = $this->db->read_rows( $table, $offset, $batch_rows );
 				$count = count( $rows );
 
 				foreach ( $rows as $row ) {
@@ -190,10 +222,28 @@ final class DatabaseRewriter {
 				}
 
 				$offset += $count;
-			} while ( $count === $this->batch_size );
+			} while ( $count === $batch_rows );
 		}
 
 		return new RewriteReport( $tables_scanned, $skipped_tables, $rows_scanned, $rows_changed, $values_changed, $skipped_values );
+	}
+
+	/**
+	 * Size one table's row batches from its real average row width.
+	 *
+	 * The batch byte budget divided by the larger of the fixed floor and the
+	 * storage engine's average row width (doubled for PHP-side overhead),
+	 * clamped between one row — so a table of budget-dwarfing rows still makes
+	 * progress — and the configured batch size, which stays the ceiling for
+	 * narrow tables. Mirrors the export chunker's per-table sizing.
+	 *
+	 * @param string $table The table about to be walked.
+	 * @return int A positive row count for this table's batches.
+	 */
+	private function batch_rows_for( string $table ): int {
+		$per_row = max( self::AVG_ROW_FLOOR, $this->db->average_row_bytes( $table ) * self::ROW_OVERHEAD_MULTIPLIER );
+		$rows    = (int) floor( self::BATCH_BYTE_BUDGET / $per_row );
+		return max( 1, min( $this->batch_size, $rows ) );
 	}
 
 	/**
