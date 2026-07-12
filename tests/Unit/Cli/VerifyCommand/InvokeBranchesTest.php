@@ -147,7 +147,9 @@ final class InvokeBranchesTest extends TestCase {
 	 * @return void
 	 */
 	public function test_invoke_sound_archive_logs_info_and_does_not_halt(): void {
-		$environment       = Mockery::mock( Environment::class );
+		$environment = Mockery::mock( Environment::class );
+		// No pinned key by default; pin-specific tests build their own mock.
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
 		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
@@ -204,6 +206,42 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * An unsigned archive is reported BROKEN when a trusted key is supplied.
+	 *
+	 * ADR 0012: a stripped signature yields a well-formed unsigned archive, so
+	 * under a trusted key "unsigned" must be treated as tampering, not merely
+	 * warned about.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_unsigned_archive_broken_when_a_key_is_supplied(): void {
+		self::write_archive_to( $this->temp_archive_path, null );
+		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
+
+		$environment       = Mockery::mock( Environment::class );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->zeroOrMoreTimes();
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 )->andThrow( new RuntimeException( 'halt-1' ) );
+
+		$command = new VerifyCommand( $environment, $wordpress_context, $restore_runner, new NullLogger(), new NullProgressBar() );
+
+		$this->expectException( RuntimeException::class );
+
+		$command(
+			array( $this->temp_archive_path ),
+			array( 'public-key' => $this->temp_archive_path . '.pub' )
+		);
+	}
+
+	/**
 	 * A signed archive verified against the wrong public key is reported broken.
 	 *
 	 * @return void
@@ -242,7 +280,9 @@ final class InvokeBranchesTest extends TestCase {
 	 * @return void
 	 */
 	public function test_invoke_broken_archive_halts_nonzero_and_logs_error(): void {
-		$environment       = Mockery::mock( Environment::class );
+		$environment = Mockery::mock( Environment::class );
+		// No pinned key by default; pin-specific tests build their own mock.
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
 		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
@@ -284,7 +324,9 @@ final class InvokeBranchesTest extends TestCase {
 	 * @return void
 	 */
 	public function test_invoke_calls_verify_never_restore(): void {
-		$environment       = Mockery::mock( Environment::class );
+		$environment = Mockery::mock( Environment::class );
+		// No pinned key by default; pin-specific tests build their own mock.
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
 		$wordpress_context = Mockery::mock( WordPressContext::class );
 
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
