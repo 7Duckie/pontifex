@@ -32,7 +32,7 @@ Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin
 
 = Built for other people's live sites =
 
-Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks), fails closed on errors, takes a safety archive before every restore, and never does naive search-replace over serialised data.
+Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks, over-budget entries), restores the database atomically — a failed restore leaves your live tables untouched — takes a safety archive before every restore, and never does naive search-replace over serialised data.
 
 == Installation ==
 
