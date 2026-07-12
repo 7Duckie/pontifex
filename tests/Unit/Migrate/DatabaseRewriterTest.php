@@ -205,6 +205,37 @@ final class DatabaseRewriterTest extends TestCase {
 	}
 
 	/**
+	 * A guid column is never rewritten — WordPress treats it as permanent identity.
+	 *
+	 * Feed readers use the guid to decide whether a post is new, so it must
+	 * survive a URL migration unchanged even though it holds the old URL; the
+	 * report tallies it as deliberately skipped rather than silently ignored.
+	 *
+	 * @return void
+	 */
+	public function test_never_rewrites_a_guid_column(): void {
+		$db = new FakeMigrationDatabase();
+		$db->add_table(
+			'wp_posts',
+			'ID',
+			array(
+				array(
+					'ID'           => '1',
+					'guid'         => 'https://old.test/?p=1',
+					'post_content' => 'see https://old.test/page',
+				),
+			)
+		);
+
+		$report = ( new DatabaseRewriter( $db, new SerialisedReplacer() ) )->rewrite( 'https://old.test', 'https://new.example' );
+
+		$update = $db->updates()[0];
+		$this->assertArrayHasKey( 'post_content', $update['columns'], 'Ordinary columns must still rewrite.' );
+		$this->assertArrayNotHasKey( 'guid', $update['columns'], 'A guid is permanent identity and must never be rewritten.' );
+		$this->assertSame( 1, $report->skipped_values(), 'A guid holding the old URL must be tallied as deliberately skipped.' );
+	}
+
+	/**
 	 * The primary-key column is never rewritten and is used verbatim in the WHERE.
 	 *
 	 * Even when the key's own value contains the search term, it is left

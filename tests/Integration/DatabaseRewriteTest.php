@@ -158,6 +158,41 @@ final class DatabaseRewriteTest extends TestCase {
 	}
 
 	/**
+	 * A guid column survives a rewrite verbatim while its siblings change.
+	 *
+	 * WordPress treats a post's guid as permanent identity, so a URL migration
+	 * must leave it holding the OLD URL — the ecosystem's documented
+	 * search-replace convention — while ordinary content rewrites.
+	 *
+	 * @return void
+	 */
+	public function test_guid_column_survives_a_rewrite_verbatim(): void {
+		global $wpdb;
+		$posts_table = $this->scratch_table . '_posts';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: create a posts-shaped scratch table.
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (ID INT NOT NULL PRIMARY KEY, guid TEXT, post_content TEXT) DEFAULT CHARSET=utf8mb4', $posts_table ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: seed the post row.
+		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i VALUES (1, %s, %s)', $posts_table, 'https://old.test/?p=1', 'see https://old.test/page' ) );
+
+		try {
+			$rewriter = new DatabaseRewriter(
+				new WpdbMigrationDatabase( $wpdb, array( $posts_table ) ),
+				new SerialisedReplacer()
+			);
+			$report   = $rewriter->rewrite( 'old.test', 'new.example' );
+
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: read the row back.
+			$row = $wpdb->get_row( $wpdb->prepare( 'SELECT guid, post_content FROM %i WHERE ID = 1', $posts_table ), ARRAY_A );
+			$this->assertSame( 'https://old.test/?p=1', $row['guid'], 'The guid must keep the OLD URL — it is permanent identity.' );
+			$this->assertSame( 'see https://new.example/page', $row['post_content'], 'Ordinary content must still rewrite.' );
+			$this->assertSame( 1, $report->skipped_values(), 'The untouched guid must be tallied as deliberately skipped.' );
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop the scratch table.
+			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $posts_table ) );
+		}
+	}
+
+	/**
 	 * A scan reports what would change but writes nothing to the database.
 	 *
 	 * @return void
