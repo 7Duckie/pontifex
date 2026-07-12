@@ -17,6 +17,7 @@ use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ExportResult;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
@@ -358,14 +359,17 @@ final class ExportCommand {
 			);
 			$this->progress->finish();
 
+			$this->print_changed_file_warnings( $result );
+
 			$bytes_written = $result->bytes_written();
 
 			$this->logger->info(
 				'Export complete.',
 				array(
-					'output'  => $output_path,
-					'entries' => $result->entry_count(),
-					'bytes'   => $bytes_written,
+					'output'        => $output_path,
+					'entries'       => $result->entry_count(),
+					'bytes'         => $bytes_written,
+					'files_changed' => count( $result->changed_files() ),
 				)
 			);
 
@@ -373,6 +377,7 @@ final class ExportCommand {
 				array(
 					'succeeded'      => 1,
 					'bytes_exported' => $bytes_written,
+					'files_changed'  => count( $result->changed_files() ),
 				)
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
@@ -651,6 +656,7 @@ final class ExportCommand {
 				'succeeded'      => 0,
 				'failed'         => 0,
 				'bytes_exported' => 0,
+				'files_changed'  => 0,
 			)
 		);
 
@@ -659,7 +665,7 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Combine the stored counters with a delta into a clean four-key set.
+	 * Combine the stored counters with a delta into a clean five-key set.
 	 *
 	 * Pure function. Tolerant of a missing, partial, or corrupt stored
 	 * value: every counter coerces through counter_int, so a garbage
@@ -671,7 +677,7 @@ final class ExportCommand {
 	 */
 	private static function merge_counters( array $current, array $delta ): array {
 		$merged = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported' ) as $key ) {
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed' ) as $key ) {
 			$merged[ $key ] = self::counter_int( $current, $key ) + self::counter_int( $delta, $key );
 		}
 		return $merged;
@@ -729,6 +735,50 @@ final class ExportCommand {
 		foreach ( $patterns as $pattern ) {
 			WP_CLI::log( '  ' . $pattern );
 		}
+	}
+
+	/**
+	 * Warn about files whose content changed while the export was reading them.
+	 *
+	 * The archive records each such file's content at the byte count actually
+	 * captured — never the stale scan-time claim — so the backup is internally
+	 * consistent and restores exactly what was read. The warnings exist because
+	 * the user should know those files were moving while the backup ran and may
+	 * want to re-run the export at a quieter moment.
+	 *
+	 * @param ExportResult $result The completed export's result.
+	 * @return void
+	 */
+	private function print_changed_file_warnings( ExportResult $result ): void {
+		$changed_files = $result->changed_files();
+		if ( array() === $changed_files ) {
+			return;
+		}
+
+		foreach ( $changed_files as $changed_file ) {
+			WP_CLI::warning(
+				sprintf(
+					/* translators: 1: file path, 2: byte count recorded at scan time, 3: byte count actually captured */
+					__( '%1$s changed while it was being read (the scan recorded %2$d bytes; %3$d were captured). The archive records the captured content.', 'pontifex' ),
+					$changed_file['path'],
+					$changed_file['declared_size'],
+					$changed_file['actual_size']
+				)
+			);
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of files that changed during the export */
+				_n(
+					'%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file.',
+					'%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files.',
+					count( $changed_files ),
+					'pontifex'
+				),
+				count( $changed_files )
+			)
+		);
 	}
 
 	/**

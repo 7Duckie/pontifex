@@ -1017,4 +1017,50 @@ final class EntryHeaderTest extends TestCase {
 		$this->assertSame( 0, $directory->estimated_bytes() );
 		$this->assertSame( 4096, $db_chunk->estimated_bytes(), 'a db_chunk must contribute its byte_count, not zero' );
 	}
+
+	/**
+	 * The with_size method must return an updated copy and leave the original unchanged.
+	 *
+	 * The same immutable-update contract as with_size_compressed: the writer
+	 * uses it to record the byte count actually captured when a file changed
+	 * between scan and write.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_returns_updated_copy_and_preserves_original(): void {
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 1690000000, 'application/octet-stream', 0 );
+		$copy     = $original->with_size( 400 );
+
+		$this->assertNotSame( $original, $copy );
+		$this->assertSame( 400, $copy->size() );
+		$this->assertSame( 1000, $original->size() );
+		$this->assertSame( 'a.txt', $copy->path(), 'Every other field must be preserved on the copy.' );
+		$this->assertSame( 1690000000, $copy->mtime() );
+	}
+
+	/**
+	 * The with_size method must reject a non-file entry — size is a file-only field.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_rejects_a_non_file_entry(): void {
+		$db_chunk = EntryHeader::for_db_chunk( 0, 'wp_options', 5, 4096, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$db_chunk->with_size( 400 );
+	}
+
+	/**
+	 * The with_size method must reject a negative size.
+	 *
+	 * @return void
+	 */
+	public function test_with_size_rejects_a_negative_size(): void {
+		$file = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, 'application/octet-stream', 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$file->with_size( -1 );
+	}
 }

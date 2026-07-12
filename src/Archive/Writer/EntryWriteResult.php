@@ -64,14 +64,38 @@ final class EntryWriteResult {
 	private string $entry_hash;
 
 	/**
-	 * Construct an EntryWriteResult with the three reported values.
+	 * The size the header declared before the write, when the writer corrected it.
 	 *
-	 * @param int    $payload_length     Encoded payload byte count (non-negative).
-	 * @param int    $total_entry_length Total entry record byte count (non-negative).
-	 * @param string $entry_hash         SHA-256 of the entry record (exactly Sha256::DIGEST_SIZE bytes).
-	 * @throws InvalidArgumentException If any argument is out of range or the wrong length.
+	 * Null when the entry's content matched its declared size (the usual case)
+	 * or the entry kind carries no size. Non-null only when the source file
+	 * changed between scan and write, so the writer recorded the actual byte
+	 * count instead — this field preserves what the scan had claimed, so the
+	 * caller can tell the user exactly what changed.
+	 *
+	 * @var int|null
 	 */
-	public function __construct( int $payload_length, int $total_entry_length, string $entry_hash ) {
+	private ?int $declared_size;
+
+	/**
+	 * The byte count actually read and captured, when the writer corrected the size.
+	 *
+	 * Null exactly when $declared_size is null; the two travel together.
+	 *
+	 * @var int|null
+	 */
+	private ?int $actual_size;
+
+	/**
+	 * Construct an EntryWriteResult with the reported values.
+	 *
+	 * @param int      $payload_length     Encoded payload byte count (non-negative).
+	 * @param int      $total_entry_length Total entry record byte count (non-negative).
+	 * @param string   $entry_hash         SHA-256 of the entry record (exactly Sha256::DIGEST_SIZE bytes).
+	 * @param int|null $declared_size      The size the header declared before the writer corrected it, or null when no correction happened.
+	 * @param int|null $actual_size        The byte count actually captured, or null when no correction happened. Must be null exactly when $declared_size is null.
+	 * @throws InvalidArgumentException If any argument is out of range, the wrong length, or the two correction fields do not travel together.
+	 */
+	public function __construct( int $payload_length, int $total_entry_length, string $entry_hash, ?int $declared_size = null, ?int $actual_size = null ) {
 		if ( $payload_length < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf( 'EntryWriteResult: payload_length %d must be non-negative.', (int) $payload_length )
@@ -92,9 +116,18 @@ final class EntryWriteResult {
 			);
 		}
 
+		if ( ( null === $declared_size ) !== ( null === $actual_size ) ) {
+			throw new InvalidArgumentException( 'EntryWriteResult: declared_size and actual_size must both be null or both be set.' );
+		}
+		if ( null !== $declared_size && ( $declared_size < 0 || $actual_size < 0 ) ) {
+			throw new InvalidArgumentException( 'EntryWriteResult: declared_size and actual_size must be non-negative.' );
+		}
+
 		$this->payload_length     = $payload_length;
 		$this->total_entry_length = $total_entry_length;
 		$this->entry_hash         = $entry_hash;
+		$this->declared_size      = $declared_size;
+		$this->actual_size        = $actual_size;
 	}
 
 	/**
@@ -122,5 +155,36 @@ final class EntryWriteResult {
 	 */
 	public function entry_hash(): string {
 		return $this->entry_hash;
+	}
+
+	/**
+	 * Whether the writer corrected the entry's declared size at write time.
+	 *
+	 * True means the source file's content did not match the size its header
+	 * declared — it changed between scan and write — and the written header
+	 * records the actual captured byte count instead.
+	 *
+	 * @return bool True when a size correction happened.
+	 */
+	public function size_was_corrected(): bool {
+		return null !== $this->declared_size;
+	}
+
+	/**
+	 * Return the size the header declared before the correction.
+	 *
+	 * @return int|null The scan-time size claim, or null when no correction happened.
+	 */
+	public function declared_size(): ?int {
+		return $this->declared_size;
+	}
+
+	/**
+	 * Return the byte count actually read and captured.
+	 *
+	 * @return int|null The captured byte count, or null when no correction happened.
+	 */
+	public function actual_size(): ?int {
+		return $this->actual_size;
 	}
 }
