@@ -181,6 +181,13 @@ final class DatabaseWriter {
 	}
 
 	/**
+	 * Whether this restore switched the connection charset to the archive's.
+	 *
+	 * @var bool
+	 */
+	private bool $replay_charset_set = false;
+
+	/**
 	 * Reset for a new restore and sweep leftovers from a crashed earlier run.
 	 *
 	 * A restore that died without reaching commit or abort leaves
@@ -190,15 +197,47 @@ final class DatabaseWriter {
 	 * cannot be listed or dropped is left for a later run, never a reason to
 	 * refuse a restore.
 	 *
+	 * When the archive's character set is given, the connection is switched to
+	 * it for the replay's duration (and back on commit or abort), so the SQL's
+	 * bytes are interpreted as they were captured — without this, multibyte
+	 * content restored over a differently-configured connection is silently
+	 * transcoded to mojibake. The charset comes from the archive and is
+	 * untrusted, so a malformed one refuses the restore before any write.
+	 *
+	 * @param string $source_charset Optional. The archive's database character set (from provenance); '' skips the charset switch.
 	 * @return void
+	 * @throws RuntimeException If the charset is malformed, or the server refuses it.
 	 */
-	public function begin_staging(): void {
+	public function begin_staging( string $source_charset = '' ): void {
 		$this->staged_tables = array();
+		if ( '' !== $source_charset ) {
+			if ( 1 !== preg_match( '/^[A-Za-z0-9_]+$/', $source_charset ) ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $source_charset is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'DatabaseWriter: the archive declares a malformed database character set "%s"; refusing to restore it.', $source_charset )
+				);
+			}
+			$this->adapter->set_session_charset( $source_charset );
+			$this->replay_charset_set = true;
+		}
 		foreach ( array( self::STAGING_PREFIX, self::OLD_PREFIX ) as $prefix ) {
 			foreach ( $this->adapter->list_tables_by_prefix( $prefix ) as $leftover ) {
 				$this->drop_table_best_effort( $leftover );
 			}
 		}
+	}
+
+	/**
+	 * Hand the connection back its own charset once the replay is over.
+	 *
+	 * @return void
+	 */
+	private function restore_replay_charset(): void {
+		if ( ! $this->replay_charset_set ) {
+			return;
+		}
+		$this->replay_charset_set = false;
+		$this->adapter->restore_session_charset();
 	}
 
 	/**
@@ -295,6 +334,9 @@ final class DatabaseWriter {
 	 */
 	public function commit_staged_tables(): void {
 		if ( array() === $this->staged_tables ) {
+			// Nothing to cut over (a database-less archive), but a replay charset
+			// switched in begin_staging() must still be handed back.
+			$this->restore_replay_charset();
 			return;
 		}
 
@@ -322,6 +364,8 @@ final class DatabaseWriter {
 		foreach ( $old_tables as $old ) {
 			$this->drop_table_best_effort( $old );
 		}
+
+		$this->restore_replay_charset();
 	}
 
 	/**
@@ -339,6 +383,7 @@ final class DatabaseWriter {
 			$this->drop_table_best_effort( self::STAGING_PREFIX . $dest_table );
 		}
 		$this->staged_tables = array();
+		$this->restore_replay_charset();
 	}
 
 	/**

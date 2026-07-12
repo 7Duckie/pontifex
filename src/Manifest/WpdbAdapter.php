@@ -429,6 +429,54 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * The identifier shape a charset name must match before it may reach SQL.
+	 *
+	 * @var string
+	 */
+	private const CHARSET_PATTERN = '/^[A-Za-z0-9_]+$/';
+
+	/**
+	 * Set the connection's character set for a database replay.
+	 *
+	 * Re-validates the archive-supplied charset (defence in depth — the writer
+	 * validated it too) before interpolating it, then issues SET NAMES through
+	 * {@see self::execute_sql()}, which throws on failure — proceeding after a
+	 * failed charset change risks the mojibake this call exists to prevent.
+	 *
+	 * @param string $charset The archive's character set, e.g. "utf8mb4".
+	 * @return void
+	 * @throws RuntimeException If the charset is malformed or the server refuses it.
+	 */
+	public function set_session_charset( string $charset ): void {
+		if ( 1 !== preg_match( self::CHARSET_PATTERN, $charset ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $charset is reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'WpdbAdapter: refusing malformed character set "%s".', $charset ) );
+		}
+		$this->execute_sql( "SET NAMES '" . $charset . "'" );
+	}
+
+	/**
+	 * Restore the connection's own configured character set after a replay.
+	 *
+	 * Best-effort by contract: the replayed data is already committed, so a
+	 * failure here is swallowed — the connection then keeps the archive's
+	 * charset until the request ends, which cannot corrupt committed rows.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void {
+		$charset = (string) $this->wpdb->charset;
+		if ( '' === $charset || 1 !== preg_match( self::CHARSET_PATTERN, $charset ) ) {
+			return;
+		}
+		try {
+			$this->execute_sql( "SET NAMES '" . $charset . "'" );
+		} catch ( RuntimeException $ignored ) {
+			unset( $ignored ); // Best-effort: the restored data is already committed.
+		}
+	}
+
+	/**
 	 * Build the ORDER BY clause that makes a table's row dumps deterministic.
 	 *
 	 * Resolved once per table and cached: the primary-key columns in key order,

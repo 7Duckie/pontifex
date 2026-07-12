@@ -180,4 +180,34 @@ interface DatabaseAdapter {
 	 * @return int Average bytes per row; 0 when unknown.
 	 */
 	public function average_row_bytes( string $table_name ): int;
+
+	/**
+	 * Set the connection's character set for a database replay.
+	 *
+	 * The connection charset governs how the server interprets the bytes of
+	 * every statement sent over it. A restore replays SQL captured under the
+	 * archive's charset, so the connection must speak that charset for the
+	 * replay's duration or multibyte content is silently transcoded to
+	 * mojibake — the reason standalone dump tools emit SET NAMES in every
+	 * dump. Implementations must fail loudly: proceeding after a failed
+	 * charset change risks exactly the corruption this call prevents.
+	 *
+	 * @param string $charset The archive's character set, e.g. "utf8mb4". Callers validate it; implementations must re-validate before interpolating.
+	 * @return void
+	 * @throws RuntimeException If the charset is malformed or the server refuses it.
+	 */
+	public function set_session_charset( string $charset ): void;
+
+	/**
+	 * Restore the connection's own configured character set after a replay.
+	 *
+	 * The counterpart to {@see self::set_session_charset()}: the replay is
+	 * over, so the connection goes back to the destination site's configured
+	 * charset before any later query runs on it. Best-effort — the replayed
+	 * data is already committed, so a failure here must not undo a completed
+	 * restore.
+	 *
+	 * @return void
+	 */
+	public function restore_session_charset(): void;
 }

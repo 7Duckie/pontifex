@@ -986,6 +986,21 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * The archive's charset from provenance must wrap the whole replay.
+	 *
+	 * @return void
+	 */
+	public function test_restore_flows_the_archive_charset_through_the_replay(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( array( 'utf8mb4', 'RESTORE' ), $db->charset_calls(), 'The provenance charset must be set before the replay and handed back after it.' );
+	}
+
+	/**
 	 * A restore that fails mid-replay must abort staging and never cut over.
 	 *
 	 * The atomicity contract (ADR 0009): a database failure during the replay

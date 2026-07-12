@@ -639,6 +639,67 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * Switching the session charset must issue SET NAMES with the given charset.
+	 *
+	 * @return void
+	 */
+	public function test_set_session_charset_issues_set_names(): void {
+		$wpdb    = $this->mock_wpdb();
+		$queries = array();
+		$wpdb->method( 'query' )->willReturnCallback(
+			static function ( string $sql ) use ( &$queries ) {
+				$queries[] = $sql;
+				return 1;
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->set_session_charset( 'utf8mb4' );
+
+		$this->assertSame( array( "SET NAMES 'utf8mb4'" ), $queries );
+	}
+
+	/**
+	 * A malformed charset must be refused before it can reach SQL.
+	 *
+	 * Defence in depth: the writer validated it too, but this adapter is the
+	 * last gate before interpolation.
+	 *
+	 * @return void
+	 */
+	public function test_set_session_charset_refuses_a_malformed_charset(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->expects( $this->never() )->method( 'query' );
+
+		$this->expectException( RuntimeException::class );
+
+		( new WpdbAdapter( $wpdb ) )->set_session_charset( "utf8'; --" );
+	}
+
+	/**
+	 * Restoring the session charset must hand back the connection's own charset.
+	 *
+	 * And it is best-effort: a failed SET NAMES is swallowed, because the
+	 * restored data is already committed and must not be masked by cleanup.
+	 *
+	 * @return void
+	 */
+	public function test_restore_session_charset_hands_back_wpdb_charset_best_effort(): void {
+		$wpdb          = $this->mock_wpdb();
+		$wpdb->charset = 'utf8mb4';
+		$queries       = array();
+		$wpdb->method( 'query' )->willReturnCallback(
+			static function ( string $sql ) use ( &$queries ) {
+				$queries[] = $sql;
+				return false;
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->restore_session_charset();
+
+		$this->assertSame( array( "SET NAMES 'utf8mb4'" ), $queries, 'The failed hand-back must be attempted once and swallowed.' );
+	}
+
+	/**
 	 * The average row width must come from SHOW TABLE STATUS's Avg_row_length.
 	 *
 	 * @return void

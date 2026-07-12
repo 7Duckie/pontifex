@@ -167,8 +167,13 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		// Reset the writer's staging state and sweep leftovers a crashed earlier
-		// run may have abandoned (ADR 0009).
-		$this->database_writer->begin_staging();
+		// run may have abandoned (ADR 0009). The archive's database character set
+		// rides along from provenance: the replayed SQL's bytes were captured
+		// under it, so the connection must speak it for the replay's duration or
+		// multibyte content is silently transcoded. Provenance is validated by
+		// the reader; the charset string itself is validated by the writer.
+		$provenance = ( new ArchiveReader( $archive_source ) )->provenance();
+		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
 		try {
 			$this->walk(
