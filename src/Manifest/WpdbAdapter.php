@@ -60,6 +60,16 @@ final class WpdbAdapter implements DatabaseAdapter {
 	private wpdb $wpdb;
 
 	/**
+	 * Ordering columns per table, resolved once and cached for the adapter's life.
+	 *
+	 * The primary-key columns in key order, or every column for a table without
+	 * a primary key. Feeds the ORDER BY that makes row-dump pagination stable.
+	 *
+	 * @var array<string, string[]>
+	 */
+	private array $order_columns = array();
+
+	/**
 	 * Construct a WpdbAdapter around an existing wpdb instance.
 	 *
 	 * @param wpdb $wpdb The WordPress database object, typically the global $wpdb.
@@ -148,7 +158,14 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
 		$this->assert_prefixed_table( $table_name );
-		$sql = $this->wpdb->prepare( 'SELECT * FROM %i LIMIT %d OFFSET %d', $table_name, $limit, $offset );
+		// Without an ORDER BY, MySQL guarantees no row order at all, so consecutive
+		// OFFSET windows can overlap or leave gaps — a silently corrupt backup, and
+		// the root of a real live-site incident. Ordering by the primary key (or
+		// every column when a table has none) makes the pagination a stable total
+		// order over the table.
+		$order_clause = $this->order_by_clause( $table_name );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $order_clause is built by order_by_clause() from SHOW KEYS/SHOW COLUMNS results, with every identifier backtick-escaped; the table and value placeholders still go through prepare().
+		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $order_clause . ' LIMIT %d OFFSET %d', $table_name, $limit, $offset );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
 
@@ -333,6 +350,71 @@ final class WpdbAdapter implements DatabaseAdapter {
 			return 0;
 		}
 		return max( 0, (int) $status['Avg_row_length'] );
+	}
+
+	/**
+	 * Build the ORDER BY clause that makes a table's row dumps deterministic.
+	 *
+	 * Resolved once per table and cached: the primary-key columns in key order,
+	 * or — for the rare table without a primary key — every column, the only
+	 * deterministic option left. An empty resolution (a query error) yields no
+	 * ORDER BY, degrading to the old behaviour; the dump query itself surfaces
+	 * any real database problem.
+	 *
+	 * @param string $table_name Fully-prefixed table name.
+	 * @return string A leading-space ' ORDER BY `a`, `b`' clause, or '' when no columns resolved.
+	 */
+	private function order_by_clause( string $table_name ): string {
+		if ( ! isset( $this->order_columns[ $table_name ] ) ) {
+			$this->order_columns[ $table_name ] = $this->resolve_order_columns( $table_name );
+		}
+		$columns = $this->order_columns[ $table_name ];
+		if ( array() === $columns ) {
+			return '';
+		}
+		$escaped = array_map( array( self::class, 'escape_identifier' ), $columns );
+		return ' ORDER BY `' . implode( '`, `', $escaped ) . '`';
+	}
+
+	/**
+	 * Resolve the columns a table's row dumps are ordered by.
+	 *
+	 * SHOW KEYS gives the primary key's columns with their position in the key
+	 * (Seq_in_index), so composite keys order correctly. A table with no
+	 * primary key falls back to SHOW COLUMNS — ordering by every column.
+	 *
+	 * @param string $table_name Fully-prefixed table name.
+	 * @return string[] Ordering column names; empty when none could be resolved.
+	 */
+	private function resolve_order_columns( string $table_name ): array {
+		$sql = $this->wpdb->prepare( 'SHOW KEYS FROM %i WHERE Key_name = %s', $table_name, 'PRIMARY' );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a schema read for deterministic dump ordering has no caching benefit.
+		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
+
+		$columns = array();
+		if ( is_array( $rows ) ) {
+			foreach ( $rows as $row ) {
+				if ( isset( $row['Column_name'], $row['Seq_in_index'] ) && is_string( $row['Column_name'] ) ) {
+					$columns[ (int) $row['Seq_in_index'] ] = $row['Column_name'];
+				}
+			}
+		}
+		if ( array() !== $columns ) {
+			ksort( $columns );
+			return array_values( $columns );
+		}
+
+		// No primary key: every column, in table order, is the only deterministic sort left.
+		$fields_sql = $this->wpdb->prepare( 'SHOW COLUMNS FROM %i', $table_name );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $fields_sql is the direct return value of $wpdb->prepare() on the line above; a schema read for deterministic dump ordering has no caching benefit.
+		$fields = $this->wpdb->get_col( $fields_sql );
+		$names  = array();
+		foreach ( $fields as $field ) {
+			if ( is_string( $field ) && '' !== $field ) {
+				$names[] = $field;
+			}
+		}
+		return $names;
 	}
 
 	/**
