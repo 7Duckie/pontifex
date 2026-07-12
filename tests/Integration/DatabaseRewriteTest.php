@@ -158,6 +158,55 @@ final class DatabaseRewriteTest extends TestCase {
 	}
 
 	/**
+	 * A rewrite across many small ordered windows covers every row exactly once.
+	 *
+	 * The window ordering and per-table sizing are the same fixes the export
+	 * dump received: without a stable order, OFFSET windows over a fragmented
+	 * table can skip a row (a URL that silently survives the migration) or
+	 * process one twice. Thirty fragmented rows through two-row windows must
+	 * come out with every URL rewritten exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_windowed_rewrite_covers_every_row_exactly_once(): void {
+		global $wpdb;
+		$table = $this->scratch_table . '_windowed';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: create the scratch table.
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (id INT NOT NULL PRIMARY KEY, body TEXT) DEFAULT CHARSET=utf8mb4', $table ) );
+
+		$ids = range( 1, 30 );
+		shuffle( $ids );
+		foreach ( $ids as $id ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: seed a shuffled row.
+			$wpdb->query( $wpdb->prepare( 'INSERT INTO %i VALUES (%d, %s)', $table, $id, 'see https://old.test/page-' . $id ) );
+		}
+		foreach ( array( 11, 4, 26 ) as $id ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: fragment the physical layout.
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE id = %d', $table, $id ) );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: fragment the physical layout.
+			$wpdb->query( $wpdb->prepare( 'INSERT INTO %i VALUES (%d, %s)', $table, $id, 'see https://old.test/page-' . $id ) );
+		}
+
+		try {
+			$rewriter = new DatabaseRewriter(
+				new WpdbMigrationDatabase( $wpdb, array( $table ) ),
+				new SerialisedReplacer(),
+				2
+			);
+			$report   = $rewriter->rewrite( 'old.test', 'new.example' );
+
+			$this->assertSame( 30, $report->rows_scanned(), 'Every row must be visited exactly once across the windows.' );
+			$this->assertSame( 30, $report->rows_changed() );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: count any rows the windows missed.
+			$missed = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE body LIKE %s', $table, '%old.test%' ) );
+			$this->assertSame( 0, $missed, 'No row may silently keep the old URL.' );
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop the scratch table.
+			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
+		}
+	}
+
+	/**
 	 * A guid column survives a rewrite verbatim while its siblings change.
 	 *
 	 * WordPress treats a post's guid as permanent identity, so a URL migration
