@@ -116,7 +116,9 @@ final class VerifyPageTest extends TestCase {
 		$this->assertStringContainsString( 'class="pontifex-restore-row"', $html, 'Each backup is a selectable row.' );
 		$this->assertStringContainsString( 'data-file="' . $name . '"', $html, 'The row carries its filename for selection.' );
 		$this->assertStringContainsString( 'role="radiogroup"', $html, 'The chooser is an accessible radio group.' );
+		$this->assertStringContainsString( 'tabindex="0"', $html, 'The first row is the radio group\'s single Tab stop (roving tabindex).' );
 		$this->assertStringNotContainsString( 'type="radio"', $html, 'There are no radio inputs — the selected row is outlined instead.' );
+		$this->assertStringContainsString( 'aria-label="Verification progress"', $html, 'The progressbar carries an accessible name.' );
 		$this->assertStringContainsString( 'id="pontifex-verify-run"', $html, 'A single Verify button drives the selected backup.' );
 		$this->assertStringContainsString( 'pontifex-verify-timing', $html );
 	}
