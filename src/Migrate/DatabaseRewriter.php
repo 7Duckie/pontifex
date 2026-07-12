@@ -50,6 +50,21 @@ final class DatabaseRewriter {
 	public const DEFAULT_BATCH_SIZE = 1000;
 
 	/**
+	 * Columns the rewrite never touches, by name, on every table.
+	 *
+	 * WordPress treats a post's guid as a PERMANENT globally-unique identity —
+	 * feed readers use it to decide whether a post is new — so it must survive
+	 * a URL migration unchanged even though it usually contains the old URL.
+	 * Skipping by column name across all tables matches the wider ecosystem's
+	 * documented convention for search-replace tooling. A skipped column that
+	 * does hold the search term is tallied in the report's skipped-value
+	 * count, so the operator sees it was deliberately left alone.
+	 *
+	 * @var string[]
+	 */
+	private const SKIPPED_COLUMNS = array( 'guid' );
+
+	/**
 	 * The live-database seam the pass reads and writes through.
 	 *
 	 * @var MigrationDatabase
@@ -203,6 +218,15 @@ final class DatabaseRewriter {
 
 		foreach ( $row as $column => $value ) {
 			if ( $column === $primary_key || ! is_string( $value ) ) {
+				continue;
+			}
+
+			// A guid is permanent identity, never a link: leave it unchanged, and
+			// count it as skipped when it does hold the term so the report is honest.
+			if ( in_array( $column, self::SKIPPED_COLUMNS, true ) ) {
+				if ( str_contains( $value, $search ) ) {
+					++$skipped;
+				}
 				continue;
 			}
 
