@@ -56,6 +56,7 @@ abstract class TestCase extends PHPUnitTestCase {
 				'esc_html__',
 				'esc_attr',
 				'esc_attr__',
+				'esc_textarea',
 				'_n' => static function ( string $single, string $plural, int $number ): string {
 					return 1 === $number ? $single : $plural;
 				},

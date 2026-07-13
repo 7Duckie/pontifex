@@ -75,18 +75,39 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	private DatabaseScanner $database_scanner;
 
 	/**
+	 * Whether the file half is captured (false for a db-only backup).
+	 *
+	 * @var bool
+	 */
+	private bool $include_files;
+
+	/**
+	 * Whether the database half is captured (false for a files-only backup).
+	 *
+	 * @var bool
+	 */
+	private bool $include_database;
+
+	/**
 	 * Construct a ManifestBuilder with the two scanner dependencies.
 	 *
 	 * Exclusion rules are baked into the scanners themselves at their
 	 * own construction time; ManifestBuilder does not see them
-	 * separately.
+	 * separately. The two include flags select which halves a backup
+	 * captures: both true is an ordinary content or whole-site backup;
+	 * one false is a deliberately partial (files-only or db-only) backup
+	 * (ADR 0016). They must not both be false — an archive of nothing.
 	 *
 	 * @param FileScanner     $file_scanner     Walker for the filesystem.
 	 * @param DatabaseScanner $database_scanner Walker for the database.
+	 * @param bool            $include_files    Whether to capture the file half.
+	 * @param bool            $include_database Whether to capture the database half.
 	 */
-	public function __construct( FileScanner $file_scanner, DatabaseScanner $database_scanner ) {
+	public function __construct( FileScanner $file_scanner, DatabaseScanner $database_scanner, bool $include_files = true, bool $include_database = true ) {
 		$this->file_scanner     = $file_scanner;
 		$this->database_scanner = $database_scanner;
+		$this->include_files    = $include_files;
+		$this->include_database = $include_database;
 	}
 
 	/**
@@ -111,14 +132,24 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 		// sorted; we preserve that order (files first, then database chunks). The
 		// scan results are lightweight value objects — paths, sizes, deferred
 		// sources — never file contents, so holding the two lists costs little.
-		$file_items = $this->file_scanner->scan( $wordpress_root, $on_scan_progress );
-		$db_items   = $this->database_scanner->scan();
+		$file_items = $this->include_files ? $this->file_scanner->scan( $wordpress_root, $on_scan_progress ) : array();
+		$db_items   = $this->include_database ? $this->database_scanner->scan() : array();
 
-		// Every Pontifex backup contains the whole database, so a backup with no database
-		// chunks means the database was not captured — a silent, catastrophic data-loss risk
-		// on restore. Refuse it here, at the assembly boundary, independently of the
-		// adapter's own empty-table guard.
-		$this->refuse_when_no_database( $db_items );
+		// A backup that means to carry the database but produced no chunks lost it —
+		// a silent, catastrophic data-loss risk on restore. Refuse it here, at the
+		// assembly boundary, independently of the adapter's own empty-table guard.
+		// A files-only backup (include_database false) legitimately has no chunks and
+		// is not caught by this guard.
+		if ( $this->include_database ) {
+			$this->refuse_when_no_database( $db_items );
+		}
+
+		// Symmetric backstop for the file half: a backup that captured nothing at
+		// all — no files and no database — is a silent no-op that would verify
+		// "sound" yet restore nothing. This catches a files-only run whose scan is
+		// empty or fully excluded, the file-side counterpart to the no-database
+		// guard above; a normal backup always has database chunks and never trips it.
+		$this->refuse_when_empty( $file_items, $db_items );
 
 		// Sum the estimated original sizes once, for the safety-archive disk
 		// preflight: file sizes from the scan, database sizes from each chunk's
@@ -163,6 +194,26 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	private function refuse_when_no_database( array $db_items ): void {
 		if ( array() === $db_items ) {
 			throw new RuntimeException( 'ManifestBuilder: the database scan produced no chunks. Refusing to build a backup with no database in it.' );
+		}
+	}
+
+	/**
+	 * Refuse an assembled backup that captured nothing at all.
+	 *
+	 * The file-side counterpart to {@see self::refuse_when_no_database()}: a
+	 * files-only backup skips the no-database guard, so a scan that produced no
+	 * files and no database chunks would otherwise assemble a silent, empty
+	 * archive that verifies sound yet restores nothing. A normal backup always
+	 * has database chunks and never reaches this.
+	 *
+	 * @param \Pontifex\Manifest\ScannedEntry[]   $file_items The file scan results.
+	 * @param \Pontifex\Manifest\ScannedDbChunk[] $db_items   The database chunks.
+	 * @return void
+	 * @throws RuntimeException If both are empty — the backup captured nothing.
+	 */
+	private function refuse_when_empty( array $file_items, array $db_items ): void {
+		if ( array() === $file_items && array() === $db_items ) {
+			throw new RuntimeException( 'ManifestBuilder: the scan captured no files and no database. Refusing to build an empty backup.' );
 		}
 	}
 

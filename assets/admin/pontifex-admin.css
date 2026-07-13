@@ -403,6 +403,30 @@
 	outline-offset: 1px;
 }
 
+/*
+ * A textarea reuses the action-input surface but holds patterns, which are
+ * code — so it takes a monospace face and grows only vertically.
+ */
+.pontifex-admin textarea.pontifex-action-input {
+	width: 100%;
+	max-width: 60ch;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 13px;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+/*
+ * The always-left-out defaults, shown before a backup runs: a plain, tight
+ * list of monospace patterns, muted so it reads as reference not action.
+ */
+.pontifex-admin .pontifex-list {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	padding-left: calc(var(--pontifex-step) * 2.5);
+	color: var(--pontifex-muted);
+	font-size: 13px;
+}
+
 /* Upload file field --------------------------------------------------------- */
 
 /*

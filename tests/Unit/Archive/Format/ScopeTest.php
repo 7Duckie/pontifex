@@ -195,4 +195,122 @@ final class ScopeTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 		Scope::from_array( $data );
 	}
+
+	// -------------------------------------------------------------------------
+	// Partial scopes (files-only / db-only), ADR 0016.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A files-only scope stays content-only but records the database absent.
+	 *
+	 * @return void
+	 */
+	public function test_files_only_factory(): void {
+		$scope = Scope::files_only( array( '*.log' ) );
+
+		$this->assertTrue( $scope->is_content_only(), 'A files-only backup is still a content archive.' );
+		$this->assertFalse( $scope->includes_database(), 'A files-only backup omits the database.' );
+		$this->assertTrue( $scope->includes_files(), 'A files-only backup carries files.' );
+		$this->assertSame( 'wp-content', $scope->content_root() );
+	}
+
+	/**
+	 * A db-only scope stays content-only but records the files absent.
+	 *
+	 * @return void
+	 */
+	public function test_db_only_factory(): void {
+		$scope = Scope::db_only( array() );
+
+		$this->assertTrue( $scope->is_content_only() );
+		$this->assertTrue( $scope->includes_database(), 'A db-only backup carries the database.' );
+		$this->assertFalse( $scope->includes_files(), 'A db-only backup omits files.' );
+	}
+
+	/**
+	 * The includes_files field is serialised only when false, so ordinary archives stay byte-identical.
+	 *
+	 * This is the byte-stability contract: content-only, whole-site, and
+	 * files-only archives (all includes_files=true) must NOT carry the new key,
+	 * so their JSON — and the golden conformance archive — are unchanged. Only a
+	 * db-only archive carries it.
+	 *
+	 * @return void
+	 */
+	public function test_includes_files_is_emitted_only_when_false(): void {
+		$this->assertArrayNotHasKey( 'includes_files', Scope::content_only( array() )->to_array(), 'A content archive does not carry the new key.' );
+		$this->assertArrayNotHasKey( 'includes_files', Scope::whole_site( array() )->to_array(), 'A whole-site archive does not carry the new key.' );
+		$this->assertArrayNotHasKey( 'includes_files', Scope::files_only( array() )->to_array(), 'A files-only archive (files present) does not carry the new key.' );
+
+		$db_only = Scope::db_only( array() )->to_array();
+		$this->assertArrayHasKey( 'includes_files', $db_only, 'A db-only archive carries the new key.' );
+		$this->assertFalse( $db_only['includes_files'] );
+	}
+
+	/**
+	 * Reading a scope with no includes_files key defaults it to true (back-compat).
+	 *
+	 * Every archive shipped before this field existed has no includes_files key,
+	 * and must decode as carrying files.
+	 *
+	 * @return void
+	 */
+	public function test_from_array_defaults_includes_files_true_when_absent(): void {
+		$data = Scope::content_only( array() )->to_array();
+		$this->assertArrayNotHasKey( 'includes_files', $data );
+
+		$this->assertTrue( Scope::from_array( $data )->includes_files(), 'An absent key decodes as files present.' );
+	}
+
+	/**
+	 * A db-only scope round-trips through to_array and from_array.
+	 *
+	 * @return void
+	 */
+	public function test_db_only_round_trips(): void {
+		$scope    = Scope::db_only( array( 'wp_actionscheduler_logs' ) );
+		$restored = Scope::from_array( $scope->to_array() );
+
+		$this->assertFalse( $restored->includes_files() );
+		$this->assertTrue( $restored->includes_database() );
+		$this->assertSame( array( 'wp_actionscheduler_logs' ), $restored->excluded_paths() );
+	}
+
+	/**
+	 * Reading a non-boolean includes_files is rejected.
+	 *
+	 * @return void
+	 */
+	public function test_from_array_rejects_non_boolean_includes_files(): void {
+		$data                   = Scope::content_only( array() )->to_array();
+		$data['includes_files'] = 'yes';
+
+		$this->expectException( InvalidArgumentException::class );
+		Scope::from_array( $data );
+	}
+
+	/**
+	 * A scope with neither files nor the database is refused — an archive of nothing.
+	 *
+	 * @return void
+	 */
+	public function test_a_scope_of_nothing_is_refused(): void {
+		$this->expectException( InvalidArgumentException::class );
+		new Scope( true, 'wp-content', false, false, false, array(), false );
+	}
+
+	/**
+	 * The content_summary_key classifies each of the four shapes distinctly.
+	 *
+	 * The single source of truth for the verify verdict's wording, so the branch
+	 * order is pinned here rather than re-derived in each surface.
+	 *
+	 * @return void
+	 */
+	public function test_content_summary_key_classifies_each_shape(): void {
+		$this->assertSame( Scope::SUMMARY_CONTENT, Scope::content_only( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_WHOLE_SITE, Scope::whole_site( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_FILES_ONLY, Scope::files_only( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_DB_ONLY, Scope::db_only( array() )->content_summary_key() );
+	}
 }

@@ -68,6 +68,17 @@ use Pontifex\WordPress\WordPressContext;
  *   content-only archive is the right choice for an existing
  *   WordPress install.
  *
+ * [--files-only]
+ * : Capture only the files (wp-content), leaving the database out — a
+ *   quick file backup that skips the whole database dump. Its restore is
+ *   partial: it writes only files and never touches the database. Cannot
+ *   be combined with --db-only or --whole-site.
+ *
+ * [--db-only]
+ * : Capture only the database, with no files. Its restore is partial: it
+ *   writes only the database and never touches any file. Cannot be
+ *   combined with --files-only or --whole-site.
+ *
  * [--exclude-file=<path>]
  * : Path to a file containing additional exclusion patterns, one per
  *   line. Blank lines and lines starting with `#` are ignored.
@@ -75,10 +86,24 @@ use Pontifex\WordPress\WordPressContext;
  *   (delimited with `/`), directory tree (`path/**`), glob (`*.log`),
  *   or exact string.
  *
+ * [--exclude=<patterns>]
+ * : Additional exclusion patterns for this run, without a file. One or
+ *   more comma-separated patterns, same syntax as `--exclude-file`.
+ *   Convenience for a quick one-off; `--exclude-file` remains the route
+ *   for a long or reusable list.
+ *
+ * [--exclude-table=<patterns>]
+ * : Database tables to leave out of the backup. One or more
+ *   comma-separated patterns matched against the bare table name
+ *   (exact, e.g. `wp_actionscheduler_logs`, or glob, e.g.
+ *   `wp_actionscheduler_*`). The whole matched table is omitted —
+ *   its restore is then a partial one, so exclude only tables the
+ *   destination can rebuild.
+ *
  * [--no-defaults]
  * : Skip the curated default exclusion list (Pontifex's working dir
  *   and wp-content/cache). Use only patterns from `--exclude-file`,
- *   if any.
+ *   `--exclude`, and `--exclude-table`, if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
@@ -274,6 +299,15 @@ final class ExportCommand {
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
 		$use_defaults      = self::should_use_defaults( $associative_args );
 		$whole_site        = isset( $associative_args['whole-site'] ) && false !== $associative_args['whole-site'];
+		$files_only        = isset( $associative_args['files-only'] ) && false !== $associative_args['files-only'];
+		$db_only           = isset( $associative_args['db-only'] ) && false !== $associative_args['db-only'];
+
+		// The scope selectors are mutually exclusive: an archive is one of
+		// whole-site, content (the default), files-only, or db-only — never a
+		// contradictory mixture (ADR 0016).
+		if ( ( $files_only && $db_only ) || ( $whole_site && ( $files_only || $db_only ) ) ) {
+			WP_CLI::error( __( 'Choose at most one of --whole-site, --files-only, or --db-only.', 'pontifex' ) );
+		}
 		$skip_confirmation = isset( $associative_args['yes'] ) && false !== $associative_args['yes'];
 		$passphrase_stdin  = isset( $associative_args['passphrase-stdin'] ) && false !== $associative_args['passphrase-stdin'];
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
@@ -296,16 +330,24 @@ final class ExportCommand {
 			);
 		}
 
-		// 2. Build the exclusion rules.
+		// 2. Build the exclusion rules. File patterns come from --exclude-file, then
+		// inline --exclude; table patterns from --exclude-table are appended to the
+		// same list — the pattern engine matches a bare table name the same way it
+		// matches a path, so one uniform list drives both scanners.
 		$user_patterns = '' !== $exclude_file_path
 			? $this->load_exclude_file( $exclude_file_path )
 			: array();
+		$user_patterns = array_merge(
+			$user_patterns,
+			self::split_patterns( $associative_args['exclude'] ?? null ),
+			self::split_patterns( $associative_args['exclude-table'] ?? null )
+		);
 
 		$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
 
 		// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
 		if ( ! $skip_confirmation && ! $resume ) {
-			$this->print_scope_summary( $whole_site );
+			$this->print_scope_summary( $whole_site, $files_only, $db_only );
 			$this->print_exclusion_summary( $exclusion_rules );
 			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
 		}
@@ -368,21 +410,30 @@ final class ExportCommand {
 		// stay WordPress-root-relative; --whole-site scans the whole WordPress root
 		// with no prefix. The scope facts are recorded in provenance so a destination
 		// can tell what the archive holds before unpacking it (ADR 0008).
-		$scan_root   = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
-		$path_prefix = $whole_site ? '' : 'wp-content';
-		$scope       = $whole_site
-			? Scope::whole_site( $exclusion_rules->patterns() )
-			: Scope::content_only( $exclusion_rules->patterns() );
+		$scan_root        = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
+		$path_prefix      = $whole_site ? '' : 'wp-content';
+		$include_files    = ! $db_only;
+		$include_database = ! $files_only;
+		if ( $whole_site ) {
+			$scope = Scope::whole_site( $exclusion_rules->patterns() );
+		} elseif ( $files_only ) {
+			$scope = Scope::files_only( $exclusion_rules->patterns() );
+		} elseif ( $db_only ) {
+			$scope = Scope::db_only( $exclusion_rules->patterns() );
+		} else {
+			$scope = Scope::content_only( $exclusion_rules->patterns() );
+		}
 
 		// 4a. A resumable export (or its resumption) takes the step-machine path
-		// (ADR 0014/0015) instead of the one-shot engine, and returns from there.
+		// (ADR 0014/0015) instead of the one-shot engine, and returns from there. The
+		// step runner reads which halves to capture from the recorded scope.
 		if ( $resumable || $resume ) {
 			$this->run_resumable( $resume, $output_path, $signing, $encryption_disabled_reason, $scan_root, $path_prefix, $exclusion_rules, $scope );
 			return;
 		}
 
-		// 5. Build the entry list (every file plus every database table to archive).
-		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix );
+		// 5. Build the entry list — the files, the database, or both, per the scope.
+		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix, $include_files, $include_database );
 
 		// 6. Write the archive through the shared export engine.
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
@@ -734,6 +785,30 @@ final class ExportCommand {
 		return ExclusionRules::from_array( $merged_patterns );
 	}
 
+	/**
+	 * Split a comma-separated flag value into a trimmed, non-empty pattern list.
+	 *
+	 * WP-CLI keeps only the last value of a repeated same-name flag, so a
+	 * repeatable exclusion is expressed as one comma-separated value. A missing
+	 * flag (null) or a bare boolean flag yields no patterns.
+	 *
+	 * @param string|bool|null $value The raw flag value from the associative args.
+	 * @return string[] The individual patterns, trimmed, with blanks dropped.
+	 */
+	private static function split_patterns( $value ): array {
+		if ( ! is_string( $value ) || '' === $value ) {
+			return array();
+		}
+		$patterns = array();
+		foreach ( explode( ',', $value ) as $pattern ) {
+			$pattern = trim( $pattern );
+			if ( '' !== $pattern ) {
+				$patterns[] = $pattern;
+			}
+		}
+		return $patterns;
+	}
+
 	// -------------------------------------------------------------------------
 	// Per-run wiring.
 	// -------------------------------------------------------------------------
@@ -910,12 +985,22 @@ final class ExportCommand {
 	 * also the cue that points a user wanting the old full-site behaviour at
 	 * --whole-site.
 	 *
-	 * @param bool $whole_site True for a whole-site export, false for content-only.
+	 * @param bool $whole_site True for a whole-site export.
+	 * @param bool $files_only  True for a files-only export (wp-content, no database).
+	 * @param bool $db_only     True for a database-only export (no files).
 	 * @return void
 	 */
-	private function print_scope_summary( bool $whole_site ): void {
+	private function print_scope_summary( bool $whole_site, bool $files_only = false, bool $db_only = false ): void {
 		if ( $whole_site ) {
 			WP_CLI::log( __( 'Scope: whole-site (the entire WordPress root, including core and wp-config.php).', 'pontifex' ) );
+			return;
+		}
+		if ( $files_only ) {
+			WP_CLI::log( __( 'Scope: files-only (wp-content, no database). Its restore writes only files.', 'pontifex' ) );
+			return;
+		}
+		if ( $db_only ) {
+			WP_CLI::log( __( 'Scope: database-only (the full database, no files). Its restore writes only the database.', 'pontifex' ) );
 			return;
 		}
 		WP_CLI::log( __( 'Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone.', 'pontifex' ) );

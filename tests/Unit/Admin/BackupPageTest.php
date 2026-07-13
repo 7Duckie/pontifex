@@ -115,6 +115,40 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
+	 * The create section shows the effective scope, the default exclusions, and an exclusions field.
+	 *
+	 * The admin surface must honour the "defaults are visible before acting" rule
+	 * the CLI already does, and offer the operator a way to add exclusions.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_scope_summary_and_exclusions_field(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage( $this->context_mock(), $store );
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'everything in wp-content', $output, 'The effective scope is shown before acting.' );
+		$this->assertStringContainsString( 'Always left out:', $output, 'The always-applied defaults are shown.' );
+		$this->assertStringContainsString( '<code>wp-content/pontifex/**</code>', $output, 'The curated default patterns are listed.' );
+		$this->assertStringContainsString( 'id="pontifex-backup-exclusions"', $output, 'An exclusions field is offered.' );
+	}
+
+	/**
 	 * Renders the Scheduled backups section pre-filled from the stored schedule.
 	 *
 	 * @return void
@@ -159,6 +193,46 @@ final class BackupPageTest extends TestCase {
 		$this->assertStringContainsString( 'id="pontifex-schedule-save"', $output );
 		$this->assertStringContainsString( 'Time (UTC)', $output, 'The hour is labelled as UTC, never site time.' );
 		$this->assertStringContainsString( 'Next automatic backup: 2023-11-14 22:13 UTC.', $output, 'An enabled, healthy schedule shows its real next run time from the pending cron event.' );
+	}
+
+	/**
+	 * The schedule form pre-fills the operator's stored exclusion patterns.
+	 *
+	 * @return void
+	 */
+	public function test_render_schedule_prefills_exclusions(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		Functions\when( 'wp_next_scheduled' )->justReturn( 1_700_000_000 );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage(
+			$this->context_mock(
+				array(
+					'enabled'    => true,
+					'frequency'  => 'daily',
+					'hour'       => 3,
+					'retention'  => 3,
+					'exclusions' => array( 'wp-content/cache/**', 'wp_actionscheduler_logs' ),
+				)
+			),
+			$store
+		);
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'id="pontifex-schedule-exclusions"', $output, 'The schedule form offers an exclusions field.' );
+		$this->assertStringContainsString( "wp-content/cache/**\nwp_actionscheduler_logs", $output, 'The stored patterns pre-fill the field, one per line.' );
 	}
 
 	/**

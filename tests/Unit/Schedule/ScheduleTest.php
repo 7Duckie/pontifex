@@ -103,6 +103,38 @@ final class ScheduleTest extends TestCase {
 	}
 
 	/**
+	 * Exclusion patterns round-trip through to_array and from_stored, filtered.
+	 *
+	 * @return void
+	 */
+	public function test_exclusions_round_trip_and_are_filtered(): void {
+		$schedule = new Schedule( true, Schedule::FREQUENCY_DAILY, 3, 3, array( 'wp-content/cache/**', '', 'wp_actionscheduler_*' ) );
+
+		$this->assertSame( array( 'wp-content/cache/**', 'wp_actionscheduler_*' ), $schedule->exclusions(), 'Blank patterns are dropped.' );
+
+		$restored = Schedule::from_stored( $schedule->to_array() );
+		$this->assertSame( $schedule->exclusions(), $restored->exclusions(), 'Exclusions survive the option round trip.' );
+	}
+
+	/**
+	 * A stored schedule with no exclusions key degrades to an empty list, not a fatal.
+	 *
+	 * @return void
+	 */
+	public function test_absent_exclusions_default_to_empty(): void {
+		$restored = Schedule::from_stored(
+			array(
+				'enabled'   => true,
+				'frequency' => 'daily',
+				'hour'      => 3,
+				'retention' => 3,
+			)
+		);
+
+		$this->assertSame( array(), $restored->exclusions() );
+	}
+
+	/**
 	 * An unknown frequency is refused.
 	 *
 	 * @return void

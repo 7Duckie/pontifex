@@ -298,7 +298,9 @@
 			} ).catch( function () {} );
 		}, 1000 );
 
-		request( 'pontifex_create_backup' ).then( function ( res ) {
+		var exclusionsField = document.getElementById( 'pontifex-backup-exclusions' );
+		var extra = exclusionsField ? { exclusions: exclusionsField.value } : undefined;
+		request( 'pontifex_create_backup', extra ).then( function ( res ) {
 			window.clearInterval( poll );
 			if ( res && res.success && res.data && res.data.cancelled ) {
 				resetIdle( cfg.strings.cancelled );
@@ -391,13 +393,15 @@
 			var frequency = document.getElementById( 'pontifex-schedule-frequency' );
 			var hour = document.getElementById( 'pontifex-schedule-hour' );
 			var retention = document.getElementById( 'pontifex-schedule-retention' );
+			var exclusions = document.getElementById( 'pontifex-schedule-exclusions' );
 			button.disabled = true;
 			setText( 'pontifex-schedule-result', '' );
 			request( 'pontifex_save_schedule', {
 				enabled: enabled && enabled.checked ? '1' : '0',
 				frequency: frequency ? frequency.value : '',
 				hour: hour ? hour.value : '',
-				retention: retention ? retention.value : ''
+				retention: retention ? retention.value : '',
+				exclusions: exclusions ? exclusions.value : ''
 			} ).then( function ( res ) {
 				button.disabled = false;
 				if ( res && res.success && res.data ) {
