@@ -221,6 +221,8 @@ final class BackupPage {
 			esc_html__( 'Back up this site automatically on a schedule. Scheduled backups appear in the list above, and older ones are pruned so only the newest are kept. The time is in UTC, not your site\'s display timezone.', 'pontifex' )
 		);
 
+		$this->render_schedule_status( $schedule );
+
 		printf(
 			'<label class="pontifex-action-toggle" for="pontifex-schedule-enabled"><input type="checkbox" id="pontifex-schedule-enabled"%s> %s</label>',
 			$schedule->is_enabled() ? ' checked' : '',
@@ -267,6 +269,45 @@ final class BackupPage {
 		);
 		echo '<p class="pontifex-notice" id="pontifex-schedule-result" aria-live="polite"></p>';
 		echo '</section>';
+	}
+
+	/**
+	 * Render the live status of the saved schedule: next run, or a health warning.
+	 *
+	 * This describes the schedule WordPress will actually act on — the stored
+	 * settings and the real pending cron event — not the (possibly unsaved) form
+	 * below. It gives the admin-only operator the liveness check the CLI `show`
+	 * already provides: a schedule switched on whose cron event has been cleared
+	 * behind its back (a cron-cleaning plugin, a hand-edit) is a silently dead
+	 * schedule, and this is where that is caught. A disabled schedule shows
+	 * nothing here — the toggle already states it is off. Times are UTC, the
+	 * clock WP-Cron uses and the rest of the section presents.
+	 *
+	 * @param Schedule $schedule The stored schedule.
+	 * @return void
+	 */
+	private function render_schedule_status( Schedule $schedule ): void {
+		if ( ! $schedule->is_enabled() ) {
+			return;
+		}
+
+		$pending = wp_next_scheduled( ScheduleStore::CRON_HOOK );
+		if ( false === $pending ) {
+			printf(
+				'<p class="pontifex-notice pontifex-notice-warning">%s</p>',
+				esc_html__( 'This schedule is switched on, but WordPress has no pending event for it — the automatic backup will not run until you save the schedule again. A plugin that clears scheduled events, or a manual change, can cause this.', 'pontifex' )
+			);
+			return;
+		}
+
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			sprintf(
+				/* translators: %s: the next scheduled run time in UTC, e.g. "2026-07-14 03:00 UTC" */
+				esc_html__( 'Next automatic backup: %s.', 'pontifex' ),
+				esc_html( gmdate( 'Y-m-d H:i', (int) $pending ) . ' UTC' )
+			)
+		);
 	}
 
 	/**

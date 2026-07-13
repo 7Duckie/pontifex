@@ -129,6 +129,9 @@ final class BackupPageTest extends TestCase {
 				return $url . '?' . http_build_query( $args );
 			}
 		);
+		// The schedule is enabled and its cron event is pending, so the live-status
+		// line shows the next run rather than the dead-schedule warning.
+		Functions\when( 'wp_next_scheduled' )->justReturn( 1_700_000_000 );
 
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
@@ -155,6 +158,86 @@ final class BackupPageTest extends TestCase {
 		$this->assertStringContainsString( 'id="pontifex-schedule-retention" class="pontifex-action-input" min="1" step="1" value="4"', $output, 'The stored retention pre-fills the number field with the floor as its minimum.' );
 		$this->assertStringContainsString( 'id="pontifex-schedule-save"', $output );
 		$this->assertStringContainsString( 'Time (UTC)', $output, 'The hour is labelled as UTC, never site time.' );
+		$this->assertStringContainsString( 'Next automatic backup: 2023-11-14 22:13 UTC.', $output, 'An enabled, healthy schedule shows its real next run time from the pending cron event.' );
+	}
+
+	/**
+	 * An enabled schedule whose cron event has vanished shows a health warning.
+	 *
+	 * The silently-dead-schedule case the CLI `show` also catches: the settings
+	 * say on, but WordPress has no pending event, so nothing will fire until the
+	 * schedule is saved again. The admin-only operator must be told.
+	 *
+	 * @return void
+	 */
+	public function test_render_warns_when_an_enabled_schedule_has_no_pending_event(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		// The schedule is enabled but WordPress has no pending event for it.
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage(
+			$this->context_mock(
+				array(
+					'enabled'   => true,
+					'frequency' => 'daily',
+					'hour'      => 3,
+					'retention' => 3,
+				)
+			),
+			$store
+		);
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'pontifex-notice-warning', $output, 'The dead-schedule warning is rendered.' );
+		$this->assertStringContainsString( 'has no pending event', $output );
+		$this->assertStringNotContainsString( 'Next automatic backup:', $output, 'A dead schedule must not claim a next run.' );
+	}
+
+	/**
+	 * A disabled schedule shows neither a next-run line nor a health warning.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_no_status_line_when_the_schedule_is_off(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		// A disabled schedule never consults the scheduler; fail loudly if it does.
+		Functions\when( 'wp_next_scheduled' )->alias(
+			static function (): void {
+				throw new RuntimeException( 'wp_next_scheduled must not be called for a disabled schedule.' );
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage( $this->context_mock(), $store );
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringNotContainsString( 'Next automatic backup:', $output );
+		$this->assertStringNotContainsString( 'pontifex-notice-warning', $output );
 	}
 
 	/**
