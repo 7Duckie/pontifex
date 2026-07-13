@@ -229,6 +229,16 @@ final class ResumableExportRunner {
 		$stream  = $builder->build( (string) $payload['scan_root'] );
 		$total   = count( $stream );
 
+		// Persist the source-byte total the moment the scan knows it, so a
+		// progress surface reading the job mid-tick has its denominator from
+		// the first seconds of the first tick — the admin bar rides on it, and
+		// a scheduled job has no other writer for it.
+		if ( (int) ( $payload['total_bytes'] ?? 0 ) !== $stream->estimated_bytes() ) {
+			$payload['total_bytes'] = $stream->estimated_bytes();
+			$job->set_payload( $payload );
+			$this->job_store->save( $job );
+		}
+
 		// The log is the truth: every completed entry, in index order.
 		$completed_records = $log->read_all();
 

@@ -23,6 +23,7 @@ use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ScanProgressManifestBuilder;
 use Pontifex\Schedule\JobTicker;
 use Pontifex\Schedule\Schedule;
 use Pontifex\Schedule\ScheduleStore;
@@ -223,12 +224,17 @@ final class BackupController {
 	/**
 	 * Wall-clock budget per tick when this controller drives the job (seconds).
 	 *
-	 * Each tick persists its progress, so this is the most work a killed
-	 * request can lose (plus one torn entry, which resume heals).
+	 * Every tick pays the resume contract's fixed overhead — a fresh scan and
+	 * a progress-log replay (ADR 0015) — so short ticks multiply that cost
+	 * across the run; the browser gate measured a large backup paying the
+	 * scan roughly nine times. Sixty seconds keeps the overhead to a few
+	 * ticks per run, and costs nothing in safety: a killed request's work is
+	 * healed and continued by resume, so the budget bounds re-done work, not
+	 * lost data.
 	 *
 	 * @var float
 	 */
-	private const TICK_BUDGET_SECONDS = 20.0;
+	private const TICK_BUDGET_SECONDS = 60.0;
 
 	/**
 	 * The job the running backup persists through, while this request drives it.
@@ -324,14 +330,12 @@ final class BackupController {
 			// The admin backup is always content-only: it scans wp-content and records
 			// each file under a "wp-content" path prefix, with a content-only scope in
 			// provenance (ADR 0008). A whole-site clone stays a CLI-only operation.
-			// The pre-scan exists for the byte total the progress bar rides on; the
-			// job's own ticks re-scan as they go (ADR 0015).
-			$exclusions  = ExclusionRules::default_v010();
-			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, 'wp-content' );
-			$entry_plans = $builder->build( $this->resolve_content_root(), $this->scan_progress_callback() );
-			$total_bytes = $entry_plans->estimated_bytes();
-
-			$this->set_copy_progress( 0, $total_bytes );
+			// There is deliberately NO pre-scan here: each tick's own scan (ADR 0015)
+			// is the only walk, with the screen's scanning counter and mid-scan cancel
+			// carried into it by the decorated builder, and the byte total persisted
+			// onto the job by the runner as soon as the first scan knows it. The old
+			// duplicate pre-scan doubled the wait before the first byte was written.
+			$exclusions = ExclusionRules::default_v010();
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
@@ -340,11 +344,15 @@ final class BackupController {
 			// its progress, so a request the host kills mid-run leaves a continuable
 			// job on disk instead of nothing, and the page can re-attach to it.
 			$job_store = $this->jobs_store();
-			$factory   = null !== $this->manifest_builder
-				? fn (): ManifestBuilderInterface => $this->manifest_builder
-				: null;
-			$runner    = new ResumableExportRunner( $this->environment, $this->wordpress_context, $job_store, $factory );
-			$options   = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
+			// Whatever builder runs — injected double or the real scanner — it is
+			// decorated with the screen's scan callback: the scanning counter and,
+			// critically, mid-scan cancellation ride inside every tick's scan.
+			$factory = function ( ExclusionRules $rules, string $path_prefix ): ManifestBuilderInterface {
+				$inner = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $rules, $path_prefix );
+				return new ScanProgressManifestBuilder( $inner, $this->scan_progress_callback() );
+			};
+			$runner  = new ResumableExportRunner( $this->environment, $this->wordpress_context, $job_store, $factory );
+			$options = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
 
 			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->patterns(), time() );
 			$this->active_job = $job;
@@ -354,13 +362,12 @@ final class BackupController {
 			// unattended. A clean finish, cancel, or failure clears the event.
 			wp_schedule_single_event( time() + JobTicker::RESCHEDULE_DELAY_SECONDS, JobTicker::CRON_HOOK );
 
-			// Stash the byte total on the job so the progress endpoint can answer a
-			// re-attaching page from persisted state; the runner's own cursor keys
-			// survive alongside it.
-			$payload                = $job->payload();
-			$payload['total_bytes'] = $total_bytes;
-			$job->set_payload( $payload );
-			$job_store->save( $job );
+			// One byte callback for the WHOLE run, so the reported count accumulates
+			// across ticks. A per-tick callback restarted its tally from zero every
+			// tick; the browser's never-go-backwards clamp masked that as a bar that
+			// stalled at the highest tick's count.
+			$total_bytes = 0;
+			$byte_cb     = $this->accumulating_byte_callback( $job_store, $job->id(), $total_bytes );
 
 			$done = false;
 			while ( ! $done ) {
@@ -378,12 +385,14 @@ final class BackupController {
 				if ( null === $current ) {
 					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
 				}
-				$done = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $this->byte_progress_callback( $total_bytes ) );
+				$total_bytes = max( $total_bytes, $this->counter_int( $current->payload(), 'total_bytes' ) );
+				$done        = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
 			}
 
 			$finished      = $job_store->get( $job->id() );
 			$job_payload   = null !== $finished ? $finished->payload() : array();
 			$bytes_written = (int) ( $job_payload['bytes_written'] ?? 0 );
+			$total_bytes   = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
 			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
@@ -826,25 +835,36 @@ final class BackupController {
 	}
 
 	/**
-	 * Build the copy-phase byte-progress callback that writes the throttled transient.
+	 * Build the run-long byte-progress callback that writes the throttled transient.
 	 *
-	 * Handed to {@see ExportRunner::export()} as its byte callback: the export feeds
-	 * it each chunk's raw source byte count, which it accumulates and reports
-	 * against the total. Reporting bytes rather than entries keeps the bar advancing
-	 * smoothly through a single large file instead of freezing at its boundary. The
-	 * transient is refreshed at most once every {@see self::PROGRESS_THROTTLE_SECONDS}
-	 * to keep option writes bounded.
+	 * Handed to every tick of the run: the export feeds it each chunk's raw
+	 * source byte count, which it accumulates ACROSS ticks and reports against
+	 * the total. Reporting bytes rather than entries keeps the bar advancing
+	 * smoothly through a single large file instead of freezing at its boundary.
+	 * The denominator arrives lazily: the first tick's scan persists the byte
+	 * total onto the job, so until it is known the callback re-reads the job at
+	 * the throttle cadence — a bounded handful of small file reads, never one
+	 * per chunk. The transient is refreshed at most once every
+	 * {@see self::PROGRESS_THROTTLE_SECONDS} to keep option writes bounded.
 	 *
-	 * @param int $total_bytes The estimated total source bytes — the progress denominator.
-	 * @return callable(int): void The byte callback to hand to {@see ExportRunner::export()}.
+	 * @param JobStore $job_store   The job store the total is read from.
+	 * @param string   $job_id      The running job's id.
+	 * @param int      $total_bytes Reference to the caller's running total estimate.
+	 * @return callable(int): void The byte callback to hand to every tick.
 	 */
-	private function byte_progress_callback( int $total_bytes ): callable {
+	private function accumulating_byte_callback( JobStore $job_store, string $job_id, int &$total_bytes ): callable {
 		$last       = 0.0;
 		$bytes_done = 0;
-		return function ( int $bytes ) use ( &$last, &$bytes_done, $total_bytes ): void {
+		return function ( int $bytes ) use ( &$last, &$bytes_done, &$total_bytes, $job_store, $job_id ): void {
 			$bytes_done += $bytes;
 			$now         = microtime( true );
 			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
+				if ( 0 === $total_bytes ) {
+					$job = $job_store->get( $job_id );
+					if ( null !== $job ) {
+						$total_bytes = $this->counter_int( $job->payload(), 'total_bytes' );
+					}
+				}
 				$this->set_copy_progress( $bytes_done, $total_bytes );
 				$last = $now;
 				$this->throw_if_cancelled();

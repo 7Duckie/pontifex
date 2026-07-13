@@ -245,6 +245,14 @@ final class ResumableExportRunnerTest extends TestCase {
 		$after_one = (int) ( $store->get( $job->id() )->payload()['source_bytes_done'] ?? 0 );
 		$this->assertSame( strlen( $this->specs[0][2] ), $after_one, 'The first tick records its one entry\'s raw source bytes.' );
 
+		// The denominator too: the first tick's scan persists the estimated
+		// source total, so progress surfaces need no pre-scan of their own.
+		$expected_total = 0;
+		foreach ( $this->specs as $spec ) {
+			$expected_total += strlen( $spec[2] );
+		}
+		$this->assertSame( $expected_total, (int) ( $store->get( $job->id() )->payload()['total_bytes'] ?? 0 ), 'The first tick persists the source-byte total.' );
+
 		$runner->tick( $store->get( $job->id() ), 0.0 );
 		$after_two = (int) ( $store->get( $job->id() )->payload()['source_bytes_done'] ?? 0 );
 		$this->assertSame( $after_one + strlen( $this->specs[1][2] ), $after_two, 'The cursor accumulates across ticks rather than restarting.' );
