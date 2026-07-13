@@ -19,7 +19,7 @@ use ReflectionMethod;
 /**
  * Tests for the third batch of DoctorCommand check methods plus the summary aggregation.
  *
- * Covers check_wp_cron_status (DISABLE_WP_CRON probe),
+ * Covers check_wp_cron (DISABLE_WP_CRON probe),
  * check_action_scheduler_presence (bundled-dependency detection for the
  * future Phase 1 Action Scheduler integration), and compute_status_counts
  * (the pure aggregation logic that print_summary delegates to).
@@ -77,7 +77,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
-	// check_wp_cron_status
+	// check_wp_cron
 	// -------------------------------------------------------------------------
 
 	/**
@@ -95,10 +95,10 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 
 		$row = (array) $this->invoke_private(
 			$this->build_command( $environment, $wordpress_context ),
-			'check_wp_cron_status'
+			'check_wp_cron'
 		);
 
-		$this->assertSame( 'WordPress config', $row['category'] );
+		$this->assertSame( 'WordPress', $row['category'] );
 		$this->assertSame( 'WP-Cron', $row['name'] );
 		$this->assertSame( 'enabled', $row['value'] );
 		$this->assertSame( 'OK', $row['status'] );
@@ -122,12 +122,12 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 
 		$row = (array) $this->invoke_private(
 			$this->build_command( $environment, $wordpress_context ),
-			'check_wp_cron_status'
+			'check_wp_cron'
 		);
 
 		$this->assertStringContainsString( 'disabled', $row['value'] );
 		$this->assertSame( 'WARN', $row['status'] );
-		$this->assertStringContainsString( 'system cron', $row['note'] );
+		$this->assertStringContainsString( 'wp-cron.php', $row['note'] );
 	}
 
 	/**
@@ -152,7 +152,7 @@ final class WpConfigAndSummaryChecksTest extends TestCase {
 
 		$row = (array) $this->invoke_private(
 			$this->build_command( $environment, $wordpress_context ),
-			'check_wp_cron_status'
+			'check_wp_cron'
 		);
 
 		$this->assertSame( 'enabled', $row['value'] );

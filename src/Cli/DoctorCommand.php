@@ -191,7 +191,6 @@ final class DoctorCommand {
 		$check_rows[] = $this->check_uploads_dir_writable();
 
 		// WordPress configuration.
-		$check_rows[] = $this->check_wp_cron_status();
 		$check_rows[] = $this->check_action_scheduler_presence();
 
 		return $check_rows;
@@ -512,35 +511,6 @@ final class DoctorCommand {
 			$uploads_basedir,
 			$is_writable ? self::STATUS_OK : self::STATUS_FAIL,
 			$is_writable ? '' : 'Uploads directory is not writable by PHP. Restores will fail.'
-		);
-	}
-
-	/**
-	 * Check whether WP-Cron is enabled.
-	 *
-	 * @return array<string, string>
-	 */
-	private function check_wp_cron_status(): array {
-
-		$is_wp_cron_disabled = $this->environment->is_constant_defined( 'DISABLE_WP_CRON' )
-			&& (bool) $this->environment->constant_value( 'DISABLE_WP_CRON' );
-
-		if ( ! $is_wp_cron_disabled ) {
-			return $this->build_row(
-				'WordPress config',
-				'WP-Cron',
-				'enabled',
-				self::STATUS_OK,
-				''
-			);
-		}
-
-		return $this->build_row(
-			'WordPress config',
-			'WP-Cron',
-			'disabled (DISABLE_WP_CRON = true)',
-			self::STATUS_WARN,
-			'Background jobs require a system cron pinging wp-cron.php, otherwise migrations stall when the browser closes.'
 		);
 	}
 
