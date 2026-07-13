@@ -173,6 +173,7 @@ final class DoctorCommand {
 		// PHP configuration that bites migrations.
 		$check_rows[] = $this->check_memory_limit();
 		$check_rows[] = $this->check_max_execution_time();
+		$check_rows[] = $this->check_wp_cron();
 		$check_rows[] = $this->check_upload_max_filesize();
 		$check_rows[] = $this->check_open_basedir();
 
@@ -190,7 +191,6 @@ final class DoctorCommand {
 		$check_rows[] = $this->check_uploads_dir_writable();
 
 		// WordPress configuration.
-		$check_rows[] = $this->check_wp_cron_status();
 		$check_rows[] = $this->check_action_scheduler_presence();
 
 		return $check_rows;
@@ -323,6 +323,40 @@ final class DoctorCommand {
 			$is_sufficient
 				? ''
 				: 'Short timeouts cause more pause-and-resume cycles. 120s+ recommended.'
+		);
+	}
+
+	/**
+	 * Report whether WP-Cron can fire — the trigger scheduled backups ride on.
+	 *
+	 * WP-Cron is a pseudo-scheduler that runs on page loads (ADR 0014), so a
+	 * site with DISABLE_WP_CRON set — usually because a real cron entry was
+	 * meant to replace it — fires nothing unless that entry actually exists.
+	 * The check cannot see the host's crontab, so it warns and names the
+	 * expectation rather than guessing.
+	 *
+	 * @return array<string, string>
+	 */
+	private function check_wp_cron(): array {
+		$disabled = $this->environment->is_constant_defined( 'DISABLE_WP_CRON' )
+			&& (bool) $this->environment->constant_value( 'DISABLE_WP_CRON' );
+
+		if ( $disabled ) {
+			return $this->build_row(
+				'WordPress',
+				'WP-Cron',
+				'disabled (DISABLE_WP_CRON)',
+				self::STATUS_WARN,
+				'Scheduled backups and background continuation need a real cron entry hitting wp-cron.php when DISABLE_WP_CRON is set.'
+			);
+		}
+
+		return $this->build_row(
+			'WordPress',
+			'WP-Cron',
+			'enabled',
+			self::STATUS_OK,
+			'Fires on page loads; a real cron entry makes schedules reliable on quiet sites.'
 		);
 	}
 
@@ -477,35 +511,6 @@ final class DoctorCommand {
 			$uploads_basedir,
 			$is_writable ? self::STATUS_OK : self::STATUS_FAIL,
 			$is_writable ? '' : 'Uploads directory is not writable by PHP. Restores will fail.'
-		);
-	}
-
-	/**
-	 * Check whether WP-Cron is enabled.
-	 *
-	 * @return array<string, string>
-	 */
-	private function check_wp_cron_status(): array {
-
-		$is_wp_cron_disabled = $this->environment->is_constant_defined( 'DISABLE_WP_CRON' )
-			&& (bool) $this->environment->constant_value( 'DISABLE_WP_CRON' );
-
-		if ( ! $is_wp_cron_disabled ) {
-			return $this->build_row(
-				'WordPress config',
-				'WP-Cron',
-				'enabled',
-				self::STATUS_OK,
-				''
-			);
-		}
-
-		return $this->build_row(
-			'WordPress config',
-			'WP-Cron',
-			'disabled (DISABLE_WP_CRON = true)',
-			self::STATUS_WARN,
-			'Background jobs require a system cron pinging wp-cron.php, otherwise migrations stall when the browser closes.'
 		);
 	}
 
