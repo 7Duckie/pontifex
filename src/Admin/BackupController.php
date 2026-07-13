@@ -117,6 +117,20 @@ final class BackupController {
 	private const PHASE_IDLE = 'idle';
 
 	/**
+	 * Age, in seconds, past which a progress transient is distrusted while a job is live.
+	 *
+	 * The transient is refreshed several times a second by the request driving
+	 * the backup, so one older than this while an active job exists on disk
+	 * means that request died — its last write must not be served as live
+	 * progress (the "stuck bar" failure), and the job's persisted cursors
+	 * answer instead. Generous against slow ticks: the runner also refreshes
+	 * the job payload every few seconds of work.
+	 *
+	 * @var int
+	 */
+	private const PROGRESS_STALE_SECONDS = 10;
+
+	/**
 	 * Minimum interval, in seconds, between progress transient writes.
 	 *
 	 * Progress is refreshed at most this often rather than once per entry, which
@@ -555,33 +569,52 @@ final class BackupController {
 
 		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
 
-		// The transient only lives while a request is actively writing it. When it
-		// is idle but a backup JOB is live on disk — this page was reloaded, or the
-		// writing request died and a later ticker will continue — answer from the
-		// job's persisted cursors so the page can re-attach to the running backup.
-		if ( self::PHASE_IDLE === $phase ) {
-			$job = ( $this->jobs_store() )->active_job();
-			if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
-				$payload = $job->payload();
-				wp_send_json_success(
-					array(
-						'phase'       => self::PHASE_COPYING,
-						'done'        => 0,
-						'bytes_done'  => $this->counter_int( $payload, 'bytes_written' ),
-						'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
-					)
-				);
-			}
+		$job = ( $this->jobs_store() )->active_job();
+		if ( null !== $job && Job::KIND_EXPORT !== $job->kind() ) {
+			$job = null;
 		}
 
-		wp_send_json_success(
-			array(
+		// The transient only lives honestly while a request is actively rewriting
+		// it. Two situations mean the job's persisted cursors must answer instead:
+		// no transient at all (this page was reloaded after the writer finished
+		// its TTL, or never saw one), or a transient that has stopped being
+		// refreshed while a job is still live on disk — the writing request died,
+		// and serving its last value would freeze the bar at a lie for the rest
+		// of the transient's TTL.
+		$transient_stale = self::PHASE_IDLE !== $phase
+			&& ( time() - $this->counter_int( $progress, 'at' ) ) > self::PROGRESS_STALE_SECONDS;
+
+		// One response, one send: the answer is decided first and sent once, so
+		// the endpoint's behaviour never depends on wp_send_json_success halting.
+		if ( null !== $job && ( self::PHASE_IDLE === $phase || $transient_stale ) ) {
+			$payload = $job->payload();
+			// Source bytes so the bar speaks the same units as the live byte
+			// callback; older in-flight jobs without the cursor degrade to the
+			// compressed count rather than to zero.
+			$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
+			if ( 0 === $bytes_done ) {
+				$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+			}
+			$response = array(
+				'phase'       => self::PHASE_COPYING,
+				'done'        => 0,
+				'bytes_done'  => $bytes_done,
+				'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+			);
+		} else {
+			$response = array(
 				'phase'       => $phase,
 				'done'        => $this->counter_int( $progress, 'done' ),
 				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
 				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
-			)
-		);
+			);
+		}
+		if ( null !== $job ) {
+			// Whatever answered, a live job's start time rides along so a page
+			// that re-attached mid-run can show elapsed time.
+			$response['started_at'] = $job->created_at();
+		}
+		wp_send_json_success( $response );
 	}
 
 	/**
@@ -899,6 +932,7 @@ final class BackupController {
 			array(
 				'phase' => self::PHASE_SCANNING,
 				'done'  => $scanned,
+				'at'    => time(),
 			),
 			self::PROGRESS_TTL
 		);
@@ -922,6 +956,7 @@ final class BackupController {
 				'phase'       => self::PHASE_COPYING,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $bytes_total,
+				'at'          => time(),
 			),
 			self::PROGRESS_TTL
 		);

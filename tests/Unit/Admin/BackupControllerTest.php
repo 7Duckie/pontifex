@@ -601,6 +601,78 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// Progress honesty around a live job.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A transient that stopped refreshing while a job is live is not served.
+	 *
+	 * The stuck-bar failure from the browser gate: the request writing the
+	 * transient died, and its last value would otherwise be reported as live
+	 * progress for the rest of the transient's TTL. With an active job on
+	 * disk, the job's persisted source-byte cursors must answer instead, in
+	 * the same units as the live bar, with the job's start time attached.
+	 *
+	 * @return void
+	 */
+	public function test_progress_ignores_a_stale_transient_when_a_job_is_live(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 441279062,
+				'bytes_total' => 941568495,
+				'at'          => time() - 60,
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$job  = $jobs->create(
+			\Pontifex\Job\Job::KIND_EXPORT,
+			array(
+				'source_bytes_done' => 500000000,
+				'total_bytes'       => 941568495,
+			),
+			time() - 120
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 500000000, $this->json['data']['bytes_done'], 'The job cursor answers, not the dead request\'s last transient.' );
+		$this->assertSame( 941568495, $this->json['data']['bytes_total'] );
+		$this->assertSame( $job->created_at(), $this->json['data']['started_at'], 'The job start time rides along for the elapsed timer.' );
+	}
+
+	/**
+	 * A freshly-refreshed transient is served as-is, with the start time attached.
+	 *
+	 * @return void
+	 */
+	public function test_progress_serves_a_fresh_transient_with_the_job_start_time(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 5,
+				'bytes_total' => 10,
+				'at'          => time(),
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$job  = $jobs->create( \Pontifex\Job\Job::KIND_EXPORT, array(), time() - 30 );
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 5, $this->json['data']['bytes_done'], 'A live transient is trusted while it is being refreshed.' );
+		$this->assertSame( $job->created_at(), $this->json['data']['started_at'] );
+	}
+
+	// -------------------------------------------------------------------------
 	// Schedule saving.
 	// -------------------------------------------------------------------------
 
