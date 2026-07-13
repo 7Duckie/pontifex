@@ -297,6 +297,32 @@ final class ResumableExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A job killed mid-tick (left marked running on disk) must still tick onward.
+	 *
+	 * A SIGKILL gives the runner no chance to mark the job back to pending, so
+	 * the next tick meets a running job — re-entering running is a no-op, not a
+	 * state-machine transition. Found by the real kill drill, not the healthy
+	 * path.
+	 *
+	 * @return void
+	 */
+	public function test_a_job_killed_while_running_resumes_on_the_next_tick(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		// Simulate the kill: the persisted status is running, nobody marked it back.
+		$stuck = $store->get( $job->id() );
+		$stuck->mark( Job::STATUS_RUNNING, 1700000100 );
+		$store->save( $stuck );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$this->assert_archive_sound();
+		$this->assertSame( Job::STATUS_DONE, $store->get( $job->id() )->status() );
+	}
+
+	/**
 	 * A source tree that changed shape mid-export is refused, and the job fails.
 	 *
 	 * @return void
