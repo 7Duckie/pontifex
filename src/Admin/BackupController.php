@@ -746,9 +746,11 @@ final class BackupController {
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
 		$frequency = isset( $_POST['frequency'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['frequency'] ) ) : '';
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
-		$hour = isset( $_POST['hour'] ) && is_numeric( wp_unslash( (string) $_POST['hour'] ) ) ? (int) wp_unslash( (string) $_POST['hour'] ) : -1;
+		$hour_input = isset( $_POST['hour'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['hour'] ) ) : '';
+		$hour       = is_numeric( $hour_input ) ? (int) $hour_input : -1;
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
-		$retention = isset( $_POST['retention'] ) && is_numeric( wp_unslash( (string) $_POST['retention'] ) ) ? (int) wp_unslash( (string) $_POST['retention'] ) : 0;
+		$retention_input = isset( $_POST['retention'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['retention'] ) ) : '';
+		$retention       = is_numeric( $retention_input ) ? (int) $retention_input : 0;
 
 		// The scheduled backup carries the same exclusion patterns as a manual one,
 		// validated at this boundary so a malformed regex is refused at save rather
