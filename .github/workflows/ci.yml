@@ -223,13 +223,21 @@ jobs:
         run: composer install --no-dev --no-interaction --prefer-dist --no-progress
 
       - name: Build the distributable package
+        env:
+          # Authenticate the Composer install that `wp package install` shells out
+          # to, via COMPOSER_AUTH — which Composer reads natively — rather than
+          # GITHUB_TOKEN/GH_TOKEN, which WP-CLI's own installer rejects for the
+          # modern token format. An anonymous install is rate-limited to 60
+          # requests/hour per runner IP and fails intermittently under shared-IP
+          # load (it blocked a v0.6.0 release promotion); an authenticated Composer
+          # lifts that ceiling and makes the build deterministic.
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
         run: |
           set -euo pipefail
-          # WP-CLI's package installer rejects the modern GitHub token format
-          # (the ghs_/github_pat_ prefixes contain characters its validator
-          # disallows, so passing a token fails with "github oauth token ...
-          # contains invalid characters"). dist-archive is a public repository,
-          # so clear every token source and install it anonymously.
+          # Keep WP-CLI's own token env unset so its installer never sees the modern
+          # token format it chokes on ("github oauth token ... contains invalid
+          # characters"); the underlying Composer authenticates via COMPOSER_AUTH
+          # above, which its validator accepts.
           composer config --global --unset github-oauth.github.com 2>/dev/null || true
           unset GITHUB_TOKEN GH_TOKEN 2>/dev/null || true
           wp package install wp-cli/dist-archive-command:^2.0
