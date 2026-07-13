@@ -75,10 +75,24 @@ use Pontifex\WordPress\WordPressContext;
  *   (delimited with `/`), directory tree (`path/**`), glob (`*.log`),
  *   or exact string.
  *
+ * [--exclude=<patterns>]
+ * : Additional exclusion patterns for this run, without a file. One or
+ *   more comma-separated patterns, same syntax as `--exclude-file`.
+ *   Convenience for a quick one-off; `--exclude-file` remains the route
+ *   for a long or reusable list.
+ *
+ * [--exclude-table=<patterns>]
+ * : Database tables to leave out of the backup. One or more
+ *   comma-separated patterns matched against the bare table name
+ *   (exact, e.g. `wp_actionscheduler_logs`, or glob, e.g.
+ *   `wp_actionscheduler_*`). The whole matched table is omitted —
+ *   its restore is then a partial one, so exclude only tables the
+ *   destination can rebuild.
+ *
  * [--no-defaults]
  * : Skip the curated default exclusion list (Pontifex's working dir
  *   and wp-content/cache). Use only patterns from `--exclude-file`,
- *   if any.
+ *   `--exclude`, and `--exclude-table`, if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
@@ -296,10 +310,18 @@ final class ExportCommand {
 			);
 		}
 
-		// 2. Build the exclusion rules.
+		// 2. Build the exclusion rules. File patterns come from --exclude-file, then
+		// inline --exclude; table patterns from --exclude-table are appended to the
+		// same list — the pattern engine matches a bare table name the same way it
+		// matches a path, so one uniform list drives both scanners.
 		$user_patterns = '' !== $exclude_file_path
 			? $this->load_exclude_file( $exclude_file_path )
 			: array();
+		$user_patterns = array_merge(
+			$user_patterns,
+			self::split_patterns( $associative_args['exclude'] ?? null ),
+			self::split_patterns( $associative_args['exclude-table'] ?? null )
+		);
 
 		$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
 
@@ -732,6 +754,30 @@ final class ExportCommand {
 			: array();
 		$merged_patterns  = array_merge( $default_patterns, $user_patterns );
 		return ExclusionRules::from_array( $merged_patterns );
+	}
+
+	/**
+	 * Split a comma-separated flag value into a trimmed, non-empty pattern list.
+	 *
+	 * WP-CLI keeps only the last value of a repeated same-name flag, so a
+	 * repeatable exclusion is expressed as one comma-separated value. A missing
+	 * flag (null) or a bare boolean flag yields no patterns.
+	 *
+	 * @param string|bool|null $value The raw flag value from the associative args.
+	 * @return string[] The individual patterns, trimmed, with blanks dropped.
+	 */
+	private static function split_patterns( $value ): array {
+		if ( ! is_string( $value ) || '' === $value ) {
+			return array();
+		}
+		$patterns = array();
+		foreach ( explode( ',', $value ) as $pattern ) {
+			$pattern = trim( $pattern );
+			if ( '' !== $pattern ) {
+				$patterns[] = $pattern;
+			}
+		}
+		return $patterns;
 	}
 
 	// -------------------------------------------------------------------------

@@ -298,7 +298,9 @@
 			} ).catch( function () {} );
 		}, 1000 );
 
-		request( 'pontifex_create_backup' ).then( function ( res ) {
+		var exclusionsField = document.getElementById( 'pontifex-backup-exclusions' );
+		var extra = exclusionsField ? { exclusions: exclusionsField.value } : undefined;
+		request( 'pontifex_create_backup', extra ).then( function ( res ) {
 			window.clearInterval( poll );
 			if ( res && res.success && res.data && res.data.cancelled ) {
 				resetIdle( cfg.strings.cancelled );

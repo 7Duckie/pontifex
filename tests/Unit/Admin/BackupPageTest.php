@@ -115,6 +115,40 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
+	 * The create section shows the effective scope, the default exclusions, and an exclusions field.
+	 *
+	 * The admin surface must honour the "defaults are visible before acting" rule
+	 * the CLI already does, and offer the operator a way to add exclusions.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_scope_summary_and_exclusions_field(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage( $this->context_mock(), $store );
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'everything in wp-content', $output, 'The effective scope is shown before acting.' );
+		$this->assertStringContainsString( 'Always left out:', $output, 'The always-applied defaults are shown.' );
+		$this->assertStringContainsString( '<code>wp-content/pontifex/**</code>', $output, 'The curated default patterns are listed.' );
+		$this->assertStringContainsString( 'id="pontifex-backup-exclusions"', $output, 'An exclusions field is offered.' );
+	}
+
+	/**
 	 * Renders the Scheduled backups section pre-filled from the stored schedule.
 	 *
 	 * @return void
