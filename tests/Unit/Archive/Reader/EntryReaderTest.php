@@ -12,9 +12,13 @@ namespace Pontifex\Tests\Unit\Archive\Reader;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Crypto\Cipher;
+use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Integrity\Sha256;
@@ -133,7 +137,10 @@ final class EntryReaderTest extends TestCase {
 		$this->assertInstanceOf( EntryReadResult::class, $result );
 		$this->assertSame( EntryHeader::KIND_FILE, $result->header()->kind() );
 		$this->assertSame( 'test.txt', $result->header()->path() );
-		$this->assertSame( $contents, $result->payload() );
+		// A plain file entry's payload arrives as a stream (ADR 0010).
+		$this->assertTrue( $result->is_streamed() );
+		$this->assertSame( strlen( $contents ), $result->decoded_size() );
+		$this->assertSame( $contents, stream_get_contents( $result->payload_stream() ) );
 	}
 
 	/**
@@ -148,7 +155,9 @@ final class EntryReaderTest extends TestCase {
 
 		$result = self::make_reader()->read_entry( $fixture[0], $fixture[1] );
 
-		$this->assertSame( $contents, $result->payload() );
+		$this->assertTrue( $result->is_streamed() );
+		$this->assertSame( $contents, stream_get_contents( $result->payload_stream() ) );
+		$this->assertSame( strlen( $contents ), $result->decoded_size(), 'decoded_size() must report the decompressed byte count.' );
 		$this->assertSame( 'compressible.txt', $result->header()->path() );
 	}
 
@@ -403,5 +412,103 @@ final class EntryReaderTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 
 		self::make_reader()->read_entry( $fixture[0], $fixture[1], 100 );
+	}
+
+	/**
+	 * Hand-compose an entry record whose header declares a size its payload does not have.
+	 *
+	 * A conforming writer always records the byte count it actually captured,
+	 * so a size/content mismatch can only be forged by composing the record
+	 * manually — which is exactly what an archive from a pre-correction writer
+	 * that hit the scan-to-write race looks like. The record's hashes are
+	 * valid; only the size claim lies.
+	 *
+	 * @param string $payload       The raw payload bytes the record actually holds.
+	 * @param int    $declared_size The (untrue) size the header claims.
+	 * @return array{0: resource, 1: ManifestEntry} The archive stream and matching manifest entry.
+	 */
+	private static function forge_lying_file_entry( string $payload, int $declared_size ): array {
+		$header_bytes = EntryHeader::for_file( 'lying.txt', $declared_size, 0644, 1690000000, 'application/octet-stream', strlen( $payload ) )->to_bytes();
+		$record       = $header_bytes . ByteOrder::pack_uint16( RawCodec::ID ) . self::zero_nonce() . $payload;
+		$hash         = hash( 'sha256', $record, true );
+		$record      .= $hash;
+
+		$manifest_entry = ManifestEntry::for_file( 0, 0, strlen( $record ), 'lying.txt', RawCodec::ID, $hash );
+
+		return array( self::memory_stream( $record ), $manifest_entry );
+	}
+
+	/**
+	 * A file entry whose decoded size contradicts its declared size must be refused.
+	 *
+	 * The read-side half of the changed-during-backup defence: such an entry
+	 * can only come from a writer that hit the scan-to-write race without
+	 * correcting for it, so the archive does not hold the content it claims.
+	 * Restoring it would silently write a wrong-sized file; the reader must
+	 * fail closed instead.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_a_file_entry_whose_decoded_size_contradicts_its_header(): void {
+		$fixture = self::forge_lying_file_entry( 'only forty bytes of content, not 5000...', 5000 );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'declares 5000 bytes' );
+
+		self::make_reader()->read_entry( $fixture[0], $fixture[1] );
+	}
+
+	/**
+	 * The size-mismatch refusal must also cover the buffered (encrypted) decode path.
+	 *
+	 * An encrypted file entry decodes to a string rather than a stream
+	 * (ADR 0010), so the reconciliation runs on a different branch; forge the
+	 * same lie under encryption and prove that branch refuses too.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_an_encrypted_file_entry_whose_decoded_size_contradicts_its_header(): void {
+		$payload  = 'a short secret';
+		$key      = str_repeat( 'k', Cipher::KEY_SIZE );
+		$cipher   = new OpensslAesGcmCipher();
+		$codec_id = CodecId::with_aes_gcm( RawCodec::ID );
+
+		$header_bytes = EntryHeader::for_file( 'lying.enc', 9000, 0644, 1690000000, 'application/octet-stream', strlen( $payload ) )->to_bytes();
+		$sealed       = $cipher->encrypt( $payload, self::zero_nonce(), $header_bytes, $key );
+		$record       = $header_bytes . ByteOrder::pack_uint16( $codec_id ) . self::zero_nonce() . $sealed;
+		$hash         = hash( 'sha256', $record, true );
+		$record      .= $hash;
+
+		$manifest_entry = ManifestEntry::for_file( 0, 0, strlen( $record ), 'lying.enc', $codec_id, $hash );
+		$reader         = new EntryReader( CodecRegistry::with_defaults(), $cipher, $key );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'declares 9000 bytes' );
+
+		$reader->read_entry( self::memory_stream( $record ), $manifest_entry );
+	}
+
+	/**
+	 * A db_chunk whose byte_count drifted from its payload must still read.
+	 *
+	 * A db_chunk's byte_count is a sizing estimate, not a content claim; the
+	 * size reconciliation applies to file entries only, so a drifting chunk
+	 * must decode normally rather than being refused.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_accepts_a_db_chunk_whose_byte_count_drifted(): void {
+		$sql    = "INSERT INTO `wp_options` VALUES (1);\n";
+		$dest   = self::memory_stream();
+		$source = self::memory_stream( $sql );
+		// byte_count deliberately overstates the payload.
+		$header = EntryHeader::for_db_chunk( 0, 'wp_options', 1, 5000, 0 );
+		$result = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		$read_result = self::make_reader()->read_entry( $dest, $manifest_entry );
+
+		$this->assertSame( $sql, $read_result->payload() );
 	}
 }

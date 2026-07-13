@@ -25,6 +25,13 @@
 	/**
 	 * POST an admin-ajax action with the nonce and optional extra fields.
 	 *
+	 * A rejected promise carries a `pontifexReason` telling the two failure
+	 * shapes apart, which matters on this screen: 'server' means WordPress
+	 * answered but not with JSON (a PHP fatal's HTML page, or admin-ajax's bare
+	 * "0"/"-1" rejection of a dead session), while 'network' means no response
+	 * arrived at all (a severed connection). A plain response.json() would
+	 * collapse both into one indistinguishable rejection.
+	 *
 	 * @param {string} action The wp_ajax action name.
 	 * @param {Object} extra  Optional extra form fields.
 	 * @return {Promise<Object>} The decoded JSON response.
@@ -42,9 +49,24 @@
 			method: 'POST',
 			credentials: 'same-origin',
 			body: body
-		} ).then( function ( response ) {
-			return response.json();
-		} );
+		} ).then(
+			function ( response ) {
+				return response.text().then( function ( text ) {
+					try {
+						return JSON.parse( text );
+					} catch ( e ) {
+						var serverError = new Error( 'pontifex: non-JSON response' );
+						serverError.pontifexReason = 'server';
+						throw serverError;
+					}
+				} );
+			},
+			function () {
+				var networkError = new Error( 'pontifex: no response' );
+				networkError.pontifexReason = 'network';
+				throw networkError;
+			}
+		);
 	}
 
 	/**
@@ -82,6 +104,12 @@
 		var fill = document.getElementById( 'pontifex-restore-bar' );
 		if ( track ) {
 			track.classList.toggle( 'is-indeterminate', on );
+			// An indeterminate progressbar carries NO aria-valuenow; leaving the
+			// last percentage in place reads as "stuck at N%" to a screen reader.
+			// setBar restores the value once the phase turns determinate again.
+			if ( on ) {
+				track.removeAttribute( 'aria-valuenow' );
+			}
 		}
 		// Clear any inline width so the CSS sliding animation (width: 40%) shows;
 		// an inline width: 0% left by setBar would otherwise leave the bar blank.
@@ -229,6 +257,11 @@
 	/**
 	 * Select one backup row, outline it, and clear the others.
 	 *
+	 * Also maintains the radiogroup's roving tabindex: the selected row is the
+	 * group's single Tab stop, so Tab lands on the choice and the arrow keys
+	 * (below) move within the group — the ARIA radio-group keyboard contract
+	 * the role attributes promise.
+	 *
 	 * @param {Element} chosen The row button to select.
 	 */
 	function selectRow( chosen ) {
@@ -238,8 +271,33 @@
 				var on = row === chosen;
 				row.classList.toggle( 'is-selected', on );
 				row.setAttribute( 'aria-checked', on ? 'true' : 'false' );
+				row.setAttribute( 'tabindex', on ? '0' : '-1' );
 			}
 		);
+	}
+
+	/**
+	 * Move the radio selection with the arrow keys, wrapping at the ends.
+	 *
+	 * Per the ARIA radio-group pattern, selection follows focus: pressing an
+	 * arrow both focuses and selects the next row.
+	 *
+	 * @param {KeyboardEvent} event The keydown event on a row.
+	 * @param {Element}       row   The row the event fired on.
+	 */
+	function handleRowKey( event, row ) {
+		var forward = 'ArrowDown' === event.key || 'ArrowRight' === event.key;
+		var backward = 'ArrowUp' === event.key || 'ArrowLeft' === event.key;
+		if ( ( ! forward && ! backward ) || row.disabled ) {
+			return;
+		}
+		event.preventDefault();
+		var rows = Array.prototype.slice.call( document.querySelectorAll( '.pontifex-restore-row' ) );
+		var index = rows.indexOf( row );
+		var next = rows[ ( index + ( forward ? 1 : rows.length - 1 ) ) % rows.length ];
+		selectRow( next );
+		next.focus();
+		updateRunButton();
 	}
 
 	/**
@@ -323,13 +381,18 @@
 			// users table — so this session may have been signed out. Check before
 			// deciding whether to show the sign-out notice.
 			if ( res && res.success && ( data.restored || data.rolled_back ) ) {
-				finishAfterSessionCheck( message );
+				finishAfterSessionCheck( message, 0 );
 			} else {
 				finishRun( message );
 			}
 		} ).catch( function () {
 			window.clearInterval( poll );
-			finishRun( cfg.strings.failed );
+			// The request was dispatched but no verdict came back — a severed
+			// connection or a fatal on the server. On a destructive action a flat
+			// "failed" here would be a lie: the operation may have completed, or may
+			// still be running server-side. Say exactly that, and point at Rollback
+			// rather than inviting a blind retry.
+			finishRun( cfg.strings.failedUnknown );
 		} );
 	}
 
@@ -356,17 +419,35 @@
 	 * operator may have been signed out; an authenticated ping that comes back
 	 * unauthenticated means it is so, and only then is the sign-out notice shown.
 	 *
+	 * The signals are told apart so a transient network blip cannot raise the
+	 * blocking sign-out modal over a restore that succeeded: WordPress answering
+	 * without a JSON envelope (admin-ajax's bare "0"/"-1") is the authoritative
+	 * signed-out signal; a network-level failure is retried twice, and if the
+	 * session state still cannot be determined the verdict is shown with a soft
+	 * caveat instead of the modal — fail toward not blocking the operator.
+	 *
 	 * @param {string} message The verdict the server phrased.
+	 * @param {number} attempt How many checks have already failed at network level.
 	 */
-	function finishAfterSessionCheck( message ) {
+	function finishAfterSessionCheck( message, attempt ) {
 		request( 'pontifex_restore_progress' ).then( function ( res ) {
 			if ( res && res.success ) {
 				finishRun( message );
 			} else {
 				finishSignedOut();
 			}
-		} ).catch( function () {
-			finishSignedOut();
+		} ).catch( function ( err ) {
+			if ( err && 'server' === err.pontifexReason ) {
+				finishSignedOut();
+				return;
+			}
+			if ( attempt < 2 ) {
+				window.setTimeout( function () {
+					finishAfterSessionCheck( message, attempt + 1 );
+				}, 1500 );
+				return;
+			}
+			finishRun( message + ' ' + cfg.strings.sessionUnknown );
 		} );
 	}
 
@@ -431,17 +512,64 @@
 	}
 
 	/**
+	 * Re-attach to a restore or rollback already running server-side.
+	 *
+	 * A reloaded page finds the operation's live progress instead of an idle
+	 * screen. The final verdict was addressed to the request that started the
+	 * operation, so on completion this can only say it finished and point at
+	 * where the outcome is recorded.
+	 */
+	function reattachIfRunning() {
+		request( 'pontifex_restore_progress' ).then( function ( res ) {
+			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+				return;
+			}
+			setControlsEnabled( false );
+			showBar( true );
+			setText( 'pontifex-restore-result', '' );
+			setText( 'pontifex-restore-progress', phaseLabel( res.data.phase ) );
+
+			var poll = window.setInterval( function () {
+				request( 'pontifex_restore_progress' ).then( function ( r ) {
+					if ( ! r || ! r.success || ! r.data ) {
+						return;
+					}
+					if ( 'idle' === r.data.phase ) {
+						window.clearInterval( poll );
+						finishRun( cfg.strings.reattachedFinished );
+						return;
+					}
+					var label = phaseLabel( r.data.phase );
+					if ( r.data.bytes_total > 0 ) {
+						setIndeterminate( false );
+						setBar( r.data.bytes_done, r.data.bytes_total );
+						setText(
+							'pontifex-restore-progress',
+							label + ' ' + cfg.strings.progress.replace( '%1$s', formatBytes( r.data.bytes_done ) ).replace( '%2$s', formatBytes( r.data.bytes_total ) )
+						);
+					} else {
+						setIndeterminate( true );
+						setText( 'pontifex-restore-progress', label );
+					}
+				} ).catch( function () {} );
+			}, 1000 );
+		} ).catch( function () {} );
+	}
+
+	/**
 	 * Wire the action input, the backup row buttons, and the Run button.
 	 */
 	function init() {
+		reattachIfRunning();
 		var input = document.getElementById( 'pontifex-restore-action' );
 		if ( input ) {
 			input.addEventListener( 'input', updateRunButton );
 		}
 
 		// Each backup row is a button; clicking it (or pressing Enter/Space while it
-		// is focused) selects that backup. The row carries the filename in data-file —
-		// there is no radio or checkbox.
+		// is focused) selects that backup, and the arrow keys move the selection
+		// within the group. The row carries the filename in data-file — there is no
+		// radio or checkbox.
 		Array.prototype.forEach.call(
 			document.querySelectorAll( '.pontifex-restore-row' ),
 			function ( row ) {
@@ -450,6 +578,9 @@
 						selectRow( row );
 						updateRunButton();
 					}
+				} );
+				row.addEventListener( 'keydown', function ( event ) {
+					handleRowKey( event, row );
 				} );
 			}
 		);

@@ -882,19 +882,19 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
-	 * Restoring must refuse an entry whose declared size exceeds the memory budget.
+	 * Restoring must refuse a buffered entry whose declared size exceeds the memory budget.
 	 *
 	 * A 40-byte memory limit gives a 10-byte per-entry budget (a quarter); an 11-byte
-	 * file is refused before it is decoded or dispatched, so a legitimately large
-	 * chunk fails closed on a memory-constrained web request rather than OOM-fatalling
-	 * mid-restore. The destination is left untouched.
+	 * db_chunk — a shape the reader must buffer whole — is refused before it is decoded
+	 * or dispatched, so a legitimately large chunk fails closed on a memory-constrained
+	 * web request rather than OOM-fatalling mid-restore. The destination is untouched.
 	 *
 	 * @return void
 	 */
-	public function test_restore_refuses_an_entry_over_the_memory_budget(): void {
+	public function test_restore_refuses_a_buffered_entry_over_the_memory_budget(): void {
 		$db     = new FakeDbAdapter();
 		$runner = $this->make_runner_with_memory_limit( 40, $db );
-		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) );
 
 		$this->assert_refused(
 			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
@@ -903,18 +903,53 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
-	 * Verifying must refuse an over-budget entry too, so the pre-write preview gate
-	 * rejects a backup the real restore would refuse — before any restore begins.
+	 * A file entry over the memory budget must restore anyway — it streams.
+	 *
+	 * The memory budget exists to stop payload-sized allocations; a plain file
+	 * entry never makes one (it spools and streams to disk, ADR 0010), so the
+	 * same 11-byte file a 10-byte budget refused before now restores intact.
 	 *
 	 * @return void
 	 */
-	public function test_verify_refuses_an_entry_over_the_memory_budget(): void {
+	public function test_restore_streams_a_file_entry_over_the_memory_budget(): void {
 		$runner = $this->make_runner_with_memory_limit( 40 );
 		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$path = $this->fixture_root . '/note.txt';
+		$this->assertTrue( file_exists( $path ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'hello world', file_get_contents( $path ) );
+	}
+
+	/**
+	 * Verifying must refuse an over-budget buffered entry too, so the pre-write preview
+	 * gate rejects a backup the real restore would refuse — before any restore begins.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_a_buffered_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ) );
 
 		$this->expectException( RuntimeException::class );
 
 		$runner->verify( self::build_archive_stream( $plans ) );
+	}
+
+	/**
+	 * Verifying must NOT refuse a file entry over the memory budget — it streams on restore.
+	 *
+	 * @return void
+	 */
+	public function test_verify_permits_a_file_entry_over_the_memory_budget(): void {
+		$runner = $this->make_runner_with_memory_limit( 40 );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+
+		$this->addToAssertionCount( 1 );
 	}
 
 	/**
@@ -948,6 +983,21 @@ final class RestoreRunnerTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$this->assertTrue( file_exists( $this->fixture_root . '/note.txt' ) );
+	}
+
+	/**
+	 * The archive's charset from provenance must wrap the whole replay.
+	 *
+	 * @return void
+	 */
+	public function test_restore_flows_the_archive_charset_through_the_replay(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( array( 'utf8mb4', 'RESTORE' ), $db->charset_calls(), 'The provenance charset must be set before the replay and handed back after it.' );
 	}
 
 	/**

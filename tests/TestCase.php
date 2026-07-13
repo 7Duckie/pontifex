@@ -47,7 +47,8 @@ abstract class TestCase extends PHPUnitTestCase {
 		// The presentation layers wrap user-facing strings in __() and escape
 		// output with the esc_*() helpers. No WordPress runtime is loaded here,
 		// so stub them to return their first argument — the untranslated,
-		// unescaped string the output assertions expect.
+		// unescaped string the output assertions expect. _n() keeps its real
+		// singular/plural selection so count-sensitive output stays testable.
 		Monkey\Functions\stubs(
 			array(
 				'__',
@@ -55,6 +56,9 @@ abstract class TestCase extends PHPUnitTestCase {
 				'esc_html__',
 				'esc_attr',
 				'esc_attr__',
+				'_n' => static function ( string $single, string $plural, int $number ): string {
+					return 1 === $number ? $single : $plural;
+				},
 			)
 		);
 	}

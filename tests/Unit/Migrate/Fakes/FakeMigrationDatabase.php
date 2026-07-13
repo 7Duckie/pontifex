@@ -86,6 +86,7 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @return string[]
 	 */
 	public function list_tables(): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
@@ -99,6 +100,7 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the table was not registered.
 	 */
 	public function primary_key( string $table ): ?string {
+		$this->maybe_fail( __FUNCTION__ );
 		$this->require_table( $table );
 		return $this->tables[ $table ]['primary_key'];
 	}
@@ -113,8 +115,30 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the table was not registered.
 	 */
 	public function read_rows( string $table, int $offset, int $limit ): array {
+		$this->maybe_fail( __FUNCTION__ );
 		$this->require_table( $table );
+		$this->reads[] = array(
+			'table'  => $table,
+			'offset' => $offset,
+			'limit'  => $limit,
+		);
 		return array_values( array_slice( $this->tables[ $table ]['rows'], $offset, $limit ) );
+	}
+
+	/**
+	 * Every read_rows call, in order, so a test can assert the batch windows.
+	 *
+	 * @var array<int, array{table: string, offset: int, limit: int}>
+	 */
+	private array $reads = array();
+
+	/**
+	 * Return the recorded read_rows calls, in order.
+	 *
+	 * @return array<int, array{table: string, offset: int, limit: int}> The recorded windows.
+	 */
+	public function reads(): array {
+		return $this->reads;
 	}
 
 	/**
@@ -159,6 +183,44 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 	}
 
 	/**
+	 * Failure messages queued per method name; consumed on the next call.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $queued_failures = array();
+
+	/**
+	 * Queue the next call to the named method to throw a RuntimeException.
+	 *
+	 * Mirrors the real adapter's contract — every read throws on a $wpdb
+	 * failure — so orchestration can be unit-tested against a failing
+	 * database without WordPress mocking.
+	 *
+	 * @param string $method  The method name, e.g. "row_count".
+	 * @param string $message The error message the simulated failure carries.
+	 * @return void
+	 */
+	public function fail_next( string $method, string $message ): void {
+		$this->queued_failures[ $method ] = $message;
+	}
+
+	/**
+	 * Throw the queued failure for the method, if one is armed.
+	 *
+	 * @param string $method The method name being invoked.
+	 * @return void
+	 * @throws RuntimeException When a failure was queued for the method.
+	 */
+	private function maybe_fail( string $method ): void {
+		if ( isset( $this->queued_failures[ $method ] ) ) {
+			$message = $this->queued_failures[ $method ];
+			unset( $this->queued_failures[ $method ] );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is test-controlled simulated-failure text; exception path, not HTML output.
+			throw new RuntimeException( $message );
+		}
+	}
+
+	/**
 	 * Assert a table was registered before it is queried.
 	 *
 	 * @param string $table The table name to check.
@@ -172,5 +234,36 @@ final class FakeMigrationDatabase implements MigrationDatabase {
 				sprintf( 'FakeMigrationDatabase: table "%s" was not registered with add_table().', $table )
 			);
 		}
+	}
+
+	/**
+	 * Canned average row widths, keyed by table name.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $average_row_bytes = array();
+
+	/**
+	 * Register a canned average row width for a table.
+	 *
+	 * @param string $table Table name.
+	 * @param int    $bytes Average bytes per row to report.
+	 * @return void
+	 */
+	public function set_average_row_bytes( string $table, int $bytes ): void {
+		$this->average_row_bytes[ $table ] = $bytes;
+	}
+
+	/**
+	 * Return the canned average row width, or 0 when none was registered.
+	 *
+	 * Mirrors the real adapter's unknown-answer contract: 0 sends the rewriter
+	 * to its fixed estimate.
+	 *
+	 * @param string $table Table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table ): int {
+		return $this->average_row_bytes[ $table ] ?? 0;
 	}
 }

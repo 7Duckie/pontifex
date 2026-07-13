@@ -445,6 +445,83 @@ final class DatabaseWriterTest extends TestCase {
 	}
 
 	/**
+	 * The replay charset is switched on begin and handed back on commit.
+	 *
+	 * The replayed SQL's bytes were captured under the archive's charset, so
+	 * the connection speaks it for the replay's duration and no longer.
+	 *
+	 * @return void
+	 */
+	public function test_replay_charset_is_set_on_begin_and_restored_on_commit(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		$writer->begin_staging( 'utf8mb4' );
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 1, "CREATE TABLE `wp_posts` (id INT);\n" ) );
+		$writer->commit_staged_tables();
+
+		$this->assertSame( array( 'utf8mb4', 'RESTORE' ), $adapter->charset_calls() );
+	}
+
+	/**
+	 * The replay charset is handed back on abort, and on a database-less commit.
+	 *
+	 * @return void
+	 */
+	public function test_replay_charset_is_restored_on_abort_and_on_an_empty_commit(): void {
+		$aborted = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $aborted );
+		$writer->begin_staging( 'utf8mb4' );
+		$writer->abort_staging();
+		$this->assertSame( array( 'utf8mb4', 'RESTORE' ), $aborted->charset_calls() );
+
+		$empty  = new FakeDbAdapter();
+		$writer = new DatabaseWriter( $empty );
+		$writer->begin_staging( 'latin1' );
+		$writer->commit_staged_tables();
+		$this->assertSame( array( 'latin1', 'RESTORE' ), $empty->charset_calls(), 'A database-less archive must still hand the charset back.' );
+	}
+
+	/**
+	 * A malformed archive charset refuses the restore before any write.
+	 *
+	 * The charset comes from the archive and is untrusted; junk means a
+	 * corrupt or hostile provenance, and proceeding would interpolate it
+	 * into SQL.
+	 *
+	 * @return void
+	 */
+	public function test_malformed_replay_charset_is_refused_before_any_write(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		try {
+			$writer->begin_staging( "utf8'; DROP TABLE x --" );
+			$this->fail( 'begin_staging() should refuse a malformed charset.' );
+		} catch ( RuntimeException $refusal ) {
+			$this->assertStringContainsString( 'character set', $refusal->getMessage() );
+		}
+
+		$this->assertSame( array(), $adapter->charset_calls(), 'The malformed charset must never reach the adapter.' );
+		$this->assertSame( array(), $adapter->executed_statements(), 'The refusal must land before any statement executes.' );
+	}
+
+	/**
+	 * An empty charset skips the switch entirely.
+	 *
+	 * @return void
+	 */
+	public function test_empty_replay_charset_skips_the_switch(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		$writer->begin_staging();
+		$writer->commit_staged_tables();
+
+		$this->assertSame( array(), $adapter->charset_calls() );
+	}
+
+	/**
 	 * A table whose staged name would exceed MySQL's 64-character limit is refused.
 	 *
 	 * Refused before any statement executes, with the table named — rather than

@@ -885,7 +885,7 @@ final class RestoreController {
 	 */
 	private function extend_time_limit(): void {
 		if ( function_exists( 'set_time_limit' ) ) {
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- set_time_limit can be disabled by the host; the call is best-effort and its failure must not abort the restore.
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- A long restore must outlive the host's web timeout, the accepted pattern for backup tooling; set_time_limit can be disabled by the host, so the call is best-effort and its failure must not abort the restore.
 			@set_time_limit( 0 );
 		}
 	}
