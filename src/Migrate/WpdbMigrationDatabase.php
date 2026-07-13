@@ -149,7 +149,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		$order_clause = $this->order_by_clause( $table );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $order_clause is built by order_by_clause() from SHOW KEYS results, with the identifier backtick-escaped; the table and value placeholders still go through prepare().
 		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $order_clause . ' LIMIT %d OFFSET %d', $table, $limit, $offset );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped ORDER BY identifier) across the assignment.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
 
 		if ( '' !== $this->wpdb->last_error ) {
