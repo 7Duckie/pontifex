@@ -56,9 +56,14 @@ final class JobTicker {
 	/**
 	 * Wall-clock budget per runner tick (seconds).
 	 *
+	 * Sixty rather than twenty for the same reason as the admin controller:
+	 * every tick pays the resume contract's fresh scan and log replay, so
+	 * short ticks multiply that fixed overhead. Two ticks fit one invocation
+	 * budget.
+	 *
 	 * @var float
 	 */
-	private const TICK_BUDGET_SECONDS = 20.0;
+	private const TICK_BUDGET_SECONDS = 60.0;
 
 	/**
 	 * Total budget for one cron invocation before rescheduling (seconds).

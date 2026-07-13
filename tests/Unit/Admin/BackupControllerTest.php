@@ -600,6 +600,34 @@ final class BackupControllerTest extends TestCase {
 		$this->assertFileExists( $this->base . '/secret.txt', 'The outside file must be untouched.' );
 	}
 
+	/**
+	 * A files-only backup scans exactly once: the tick's own scan, no pre-scan.
+	 *
+	 * The browser gate measured a large backup paying the filesystem walk
+	 * roughly nine times — one duplicate pre-scan for the progress total plus
+	 * one per short tick. The total now comes from the first tick's scan via
+	 * the job payload, so a second walk before the first byte is a regression.
+	 *
+	 * @return void
+	 */
+	public function test_create_scans_exactly_once_for_a_single_tick_backup(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$plans   = array(
+			$this->file_plan( 'wp-content/a.txt', "alpha\n" ),
+			$this->file_plan( 'wp-content/b.txt', "beta\n" ),
+		);
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( $plans ) );
+
+		$this->controller( $builder )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertGreaterThan( 0, $this->json['data']['source_bytes'], 'The source total must survive the pre-scan removal, fed from the tick\'s own scan.' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Progress honesty around a live job.
 	// -------------------------------------------------------------------------
