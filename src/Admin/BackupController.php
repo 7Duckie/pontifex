@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Admin;
 
 use DateTimeImmutable;
+use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Format\Scope;
@@ -23,6 +24,8 @@ use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Schedule\JobTicker;
+use Pontifex\Schedule\Schedule;
+use Pontifex\Schedule\ScheduleStore;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 
@@ -652,6 +655,63 @@ final class BackupController {
 		$this->store->ensure_directory();
 		$this->store->request_cancel();
 		wp_send_json_success();
+	}
+
+	/**
+	 * Save the periodic-backup schedule from the Backup screen's form.
+	 *
+	 * The `wp_ajax_pontifex_save_schedule` handler. Refuses without capability
+	 * and nonce, validates the submitted fields through the {@see Schedule}
+	 * value object (an out-of-range hour or unknown frequency is refused, and
+	 * retention is clamped up to its floor), then persists through
+	 * {@see ScheduleStore::save()} — the same store the CLI uses, and the single
+	 * choke point that keeps the recurring cron event in step with the stored
+	 * settings. Responds with the next run time so the page can confirm it.
+	 *
+	 * @return void
+	 */
+	public function save_schedule(): void {
+		if ( ! $this->is_authorised() ) {
+			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above; these only read the schedule fields to validate.
+		$enabled = isset( $_POST['enabled'] ) && '1' === sanitize_text_field( wp_unslash( (string) $_POST['enabled'] ) );
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$frequency = isset( $_POST['frequency'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['frequency'] ) ) : '';
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$hour = isset( $_POST['hour'] ) && is_numeric( wp_unslash( (string) $_POST['hour'] ) ) ? (int) wp_unslash( (string) $_POST['hour'] ) : -1;
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$retention = isset( $_POST['retention'] ) && is_numeric( wp_unslash( (string) $_POST['retention'] ) ) ? (int) wp_unslash( (string) $_POST['retention'] ) : 0;
+
+		try {
+			$schedule = new Schedule( $enabled, $frequency, $hour, $retention );
+		} catch ( InvalidArgumentException $invalid ) {
+			wp_send_json_error( array( 'message' => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ) ), 400 );
+		}
+
+		$now = time();
+		$this->schedules()->save( $schedule, $now );
+
+		wp_send_json_success(
+			array(
+				'enabled'  => $schedule->is_enabled(),
+				'next_run' => $schedule->is_enabled() ? gmdate( 'Y-m-d H:i', ScheduleStore::next_occurrence( $schedule, $now ) ) . ' UTC' : '',
+			)
+		);
+	}
+
+	/**
+	 * The schedule store over this controller's context.
+	 *
+	 * Constructed inline (the {@see self::jobs_store()} pattern) so the
+	 * controller's constructor stays stable; the store is deterministic over
+	 * the injected context, so tests control it through the same seam.
+	 *
+	 * @return ScheduleStore The schedule store.
+	 */
+	private function schedules(): ScheduleStore {
+		return new ScheduleStore( $this->wordpress_context );
 	}
 
 	// -------------------------------------------------------------------------

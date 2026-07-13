@@ -321,6 +321,10 @@ final class Menu {
 					'confirmCancel'     => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
 					'failed'            => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'confirmDelete'     => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+					/* translators: %s: the next scheduled run time, e.g. "2026-07-14 03:00 UTC" */
+					'scheduleSaved'     => __( 'Schedule saved. Next backup at %s.', 'pontifex' ),
+					'scheduleSavedOff'  => __( 'Schedule saved. Scheduled backups are off.', 'pontifex' ),
+					'scheduleFailed'    => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ),
 				),
 			)
 		);
