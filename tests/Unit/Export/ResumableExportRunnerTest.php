@@ -228,6 +228,29 @@ final class ResumableExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * Ticks persist a source-byte cursor so progress surfaces speak source units.
+	 *
+	 * The re-attach bar's denominator is the estimated SOURCE total, so its
+	 * numerator must be source bytes too — the compressed bytes_written count
+	 * made a re-attached bar jump backwards. The cursor must grow across
+	 * ticks and survive on the payload between them.
+	 *
+	 * @return void
+	 */
+	public function test_ticks_persist_the_source_byte_cursor(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$after_one = (int) ( $store->get( $job->id() )->payload()['source_bytes_done'] ?? 0 );
+		$this->assertSame( strlen( $this->specs[0][2] ), $after_one, 'The first tick records its one entry\'s raw source bytes.' );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$after_two = (int) ( $store->get( $job->id() )->payload()['source_bytes_done'] ?? 0 );
+		$this->assertSame( $after_one + strlen( $this->specs[1][2] ), $after_two, 'The cursor accumulates across ticks rather than restarting.' );
+	}
+
+	/**
 	 * A zero budget forces one file entry per tick; the export still completes and verifies.
 	 *
 	 * Also proves the database phase deliberately defers to its own fresh tick

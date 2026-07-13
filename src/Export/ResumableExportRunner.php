@@ -256,6 +256,19 @@ final class ResumableExportRunner {
 			$finished      = false;
 			$saw_db        = false;
 
+			// Tally raw source bytes alongside the caller's own byte callback. The
+			// tally is persisted on the payload so a progress surface answering
+			// from the job speaks the same units as a live byte-driven bar
+			// (source bytes done against the source-byte total), never the
+			// smaller compressed count.
+			$source_done = (int) ( $payload['source_bytes_done'] ?? 0 );
+			$tally_bytes = static function ( int $bytes ) use ( &$source_done, $on_bytes ): void {
+				$source_done += $bytes;
+				if ( null !== $on_bytes ) {
+					$on_bytes( $bytes );
+				}
+			};
+
 			foreach ( $stream as $plan ) {
 				if ( $index < $done ) {
 					// Already captured: the scan must still agree on what sits at
@@ -283,7 +296,7 @@ final class ResumableExportRunner {
 
 				$manifest_entry = $writer->append_entry(
 					$plan,
-					$on_bytes,
+					$tally_bytes,
 					// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- The closure must match the on_file_changed callback contract; only the tally is needed here.
 					static function ( string $path, int $declared, int $actual ) use ( &$files_changed ): void {
 						++$files_changed;
@@ -296,6 +309,7 @@ final class ResumableExportRunner {
 					$on_entry( $writer->next_index(), $total );
 				}
 				if ( 0 === $writer->next_index() % self::JOB_SAVE_CADENCE ) {
+					$payload['source_bytes_done'] = $source_done;
 					$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, (int) $clock() );
 				}
 				// File phase honours the budget; the database phase, once begun,
@@ -310,6 +324,7 @@ final class ResumableExportRunner {
 				$finished = true;
 			}
 
+			$payload['source_bytes_done'] = $source_done;
 			$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, (int) $clock() );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp archive stream between ticks; not a WP_Filesystem operation.

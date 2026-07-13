@@ -436,6 +436,17 @@
 			setText( 'pontifex-backup-result', '' );
 			setText( 'pontifex-backup-progress', cfg.strings.reattached );
 
+			// The server reports when the running job started, so the timing line
+			// survives a reload: elapsed is computed from the job's own start,
+			// not from when this page happened to re-attach.
+			var startedAt = res.data.started_at > 0 ? res.data.started_at : 0;
+			function showElapsed() {
+				if ( startedAt > 0 ) {
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( ( Date.now() / 1000 ) - startedAt ) ) );
+				}
+			}
+			showElapsed();
+
 			var poll = window.setInterval( function () {
 				request( 'pontifex_backup_progress' ).then( function ( r ) {
 					if ( ! r || ! r.success || ! r.data ) {
@@ -451,6 +462,10 @@
 						window.location.reload();
 						return;
 					}
+					if ( r.data.started_at > 0 ) {
+						startedAt = r.data.started_at;
+					}
+					showElapsed();
 					if ( r.data.bytes_total > 0 ) {
 						setIndeterminate( false );
 						setBar( r.data.bytes_done, r.data.bytes_total );
