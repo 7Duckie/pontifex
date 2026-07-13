@@ -29,7 +29,9 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 * `export --passphrase` — optional AES-256-GCM encryption with an Argon2id-derived key.
 * `import --url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
 * `wp pontifex stats`, `diagnostics`, and `doctor` — observability and a sanitised, never-uploaded diagnostics bundle.
-* The admin screens — create, verify, restore, and roll back backups from the dashboard, with live progress, a pre-restore safety archive, and chunked upload of a backup taken on another site.
+* `export --resumable` and `export --resume` — an export that survives timeouts, lost connections, and killed processes, continued from where it stopped.
+* `wp pontifex schedule` — automatic backups on a daily or weekly schedule (at an hour given in UTC), with old scheduled backups pruned to a retention count. Also configurable from the Backup screen.
+* The admin screens — create, verify, restore, and roll back backups from the dashboard, with live progress, a pre-restore safety archive, and chunked upload of a backup taken on another site. A backup runs as a persisted job, so reloading the page re-attaches to its progress instead of losing it.
 
 = Built for other people's live sites =
 
@@ -66,6 +68,14 @@ Yes, with `wp pontifex import --url=…`, which rewrites the database safely (in
 = Are backups encrypted? =
 
 Optionally. Pass `export --passphrase` for AES-256-GCM encryption with an Argon2id-derived key. Archives can also be signed with Ed25519 keys.
+
+= Can backups run automatically on a schedule? =
+
+Yes. Set a daily or weekly schedule — from the Backup screen or with `wp pontifex schedule set` — and Pontifex runs a content-only backup unattended at the chosen hour (UTC), pruning old scheduled backups down to the retention count you set.
+
+= What happens if a backup is interrupted? =
+
+A backup started from the admin screen runs as a persisted job: if the page is closed or the request dies, reloading the screen re-attaches to the running backup, and a background tick continues a job whose request was killed. On the CLI, `wp pontifex export --resumable` makes the export continuable with `wp pontifex export --resume` after any interruption, and the finished archive is byte-identical to an uninterrupted one.
 
 == Changelog ==
 

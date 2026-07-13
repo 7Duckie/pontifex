@@ -189,24 +189,70 @@ The admin UI and the longer-running operational features move to v0.5.0 and
 beyond (below) — v0.4.0 ships on the CLI observability surface alone, mirroring
 the v0.3.0 boundary.
 
-## v0.5.0 and beyond — Admin UI and operational maturity
+## v0.5.0 — Admin UI and the content-only default
 
-Once the CLI is solid, the admin UI work begins. This is also where
-the longer-running operational features land.
+Once the CLI was solid, the admin UI work began.
 
-### What ships, in roughly this order
+### What ships
 
 - **Content-only by default** — a backup captures `wp-content` plus the
   whole database, the everyday working-WordPress-to-working-WordPress
   default; `--whole-site` opts into the entire installation (WordPress
   core and `wp-config.php`) for cloning onto a bare server (ADR 0008).
-- **Admin UI** for non-CLI users, following the Swiss-design language
-  documented in [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md#design-language).
-  Promotion of design-language guidance to a dedicated
-  `design-language.md` once enough vocabulary exists to populate it.
-- **Resumable exports** (idea-bank Idea 006), backed by Action
-  Scheduler so exports survive PHP timeouts and lost SSH sessions.
-- **Scheduled exports** — periodic backups via Action Scheduler.
+- **Admin UI** for non-CLI users — Overview, Backup (with live progress
+  and cancel), Verify, and Restore/Rollback screens, plus chunked upload
+  of a backup taken on another site — following the Swiss-design
+  language documented in
+  [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md#design-language).
+
+## v0.6.0 — Resumable and scheduled exports
+
+The two operational features that stop a backup depending on one
+uninterrupted request: an export that survives being killed, and an
+export that runs unattended on a schedule. Both are built on the same
+foundation — a persisted job with an append-only progress log — decided
+in [ADR 0014](./adr/0014-background-execution-model.md) (WP-Cron plus a
+self-continuing step runner behind a seam; no job-queue library) and
+[ADR 0015](./adr/0015-resumable-export-mechanics.md) (the resume
+contract: the progress log is the truth, every tick steps back to the
+provably-good prefix, scan drift is refused, the database is dumped
+whole in one snapshot tick, and encrypted exports refuse resumable mode
+because the derived key is never persisted).
+
+### What ships
+
+- **Resumable exports** (idea-bank Idea 006) — `wp pontifex export
+  --resumable`, continued after any interruption with `--resume`; the
+  archive is built incrementally across as many processes as it takes
+  and is byte-identical to a one-shot export.
+- **Admin backups as jobs** — the Backup screen runs its export as a
+  persisted job, so a reloaded (or closed and reopened) page re-attaches
+  to the running backup instead of losing it, and an unattended cron
+  tick continues a job whose driving request died.
+- **Scheduled exports** — a recurring content-only backup (daily or
+  weekly, at an hour given in UTC), with old scheduled backups pruned
+  to a retention count floored at one so pruning can never delete the
+  last backup.
+- **The schedule surfaces** — `wp pontifex schedule set/show/off` and a
+  Scheduled backups section on the Backup screen, both over one stored
+  schedule whose save keeps the WP-Cron event in step; plus a WP-Cron
+  reliability check in `wp pontifex doctor`.
+- **Atomic file restores** — every restored file is written to a
+  temporary sibling and atomically renamed into place, so a read-only
+  destination file no longer aborts a restore partway.
+
+### What is deliberately deferred
+
+- **Push/pull transports**, **selective content**, and **multisite
+  support** → below, unchanged in scope.
+- **The PHP-floor raise** — revisit when PHP 8.2 reaches end of life
+  (end of 2026).
+
+## Beyond v0.6.0 — operational maturity
+
+The longer-running operational features, not yet committed to a
+numbered release:
+
 - **Push/pull transports** — direct host-to-host transfer without
   needing an intermediate file on either side.
 - **Selective content** — export-without-database, single-table
