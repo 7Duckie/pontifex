@@ -231,11 +231,11 @@ final class IncrementalArchiveWriter {
 		}
 
 		$stat = fstat( $destination );
-		if ( false === $stat || ! isset( $stat['size'] ) || (int) $stat['size'] !== $bytes_written ) {
+		if ( false === $stat || (int) $stat['size'] !== $bytes_written ) {
 			throw new RuntimeException(
 				sprintf(
 					'IncrementalArchiveWriter: the partial archive is %d bytes but %d were claimed; refusing to append to an unverified file.',
-					false !== $stat && isset( $stat['size'] ) ? (int) $stat['size'] : -1,
+					false !== $stat ? (int) $stat['size'] : -1,
 					(int) $bytes_written
 				)
 			);
