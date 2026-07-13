@@ -196,6 +196,46 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
+	 * The schedule form pre-fills the operator's stored exclusion patterns.
+	 *
+	 * @return void
+	 */
+	public function test_render_schedule_prefills_exclusions(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		Functions\when( 'wp_next_scheduled' )->justReturn( 1_700_000_000 );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage(
+			$this->context_mock(
+				array(
+					'enabled'    => true,
+					'frequency'  => 'daily',
+					'hour'       => 3,
+					'retention'  => 3,
+					'exclusions' => array( 'wp-content/cache/**', 'wp_actionscheduler_logs' ),
+				)
+			),
+			$store
+		);
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'id="pontifex-schedule-exclusions"', $output, 'The schedule form offers an exclusions field.' );
+		$this->assertStringContainsString( "wp-content/cache/**\nwp_actionscheduler_logs", $output, 'The stored patterns pre-fill the field, one per line.' );
+	}
+
+	/**
 	 * An enabled schedule whose cron event has vanished shows a health warning.
 	 *
 	 * The silently-dead-schedule case the CLI `show` also catches: the settings

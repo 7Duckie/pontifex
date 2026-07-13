@@ -54,9 +54,16 @@ use Pontifex\WordPress\WordPressContext;
  * : How many scheduled backups to keep; older ones are pruned after each
  * success. Minimum 1. Defaults to the stored schedule's retention.
  *
+ * [--exclude=<patterns>]
+ * : Exclusion patterns the scheduled backup applies on top of the curated
+ * defaults; comma-separated, same syntax as `export --exclude` (paths,
+ * globs, or bare table names). Defaults to the stored schedule's patterns;
+ * pass an empty value to clear them.
+ *
  * ## EXAMPLES
  *
  *     wp pontifex schedule set --frequency=daily --hour=3 --retention=3
+ *     wp pontifex schedule set --frequency=weekly --hour=2 --exclude='wp-content/cache/**,wp_actionscheduler_*'
  *     wp pontifex schedule show
  *     wp pontifex schedule off
  *
@@ -150,8 +157,23 @@ final class ScheduleCommand {
 			}
 		}
 
+		$exclusions = $stored->exclusions();
+		if ( array_key_exists( 'exclude', $associative_args ) ) {
+			$exclusions = self::split_patterns( $associative_args['exclude'] );
+			$invalid    = self::first_uncompilable_pattern( $exclusions );
+			if ( null !== $invalid ) {
+				WP_CLI::error(
+					sprintf(
+						/* translators: %s: the exclusion pattern that could not be understood */
+						__( 'That exclusion pattern is not valid: %s. A scheduled backup would fail on it every run.', 'pontifex' ),
+						$invalid
+					)
+				);
+			}
+		}
+
 		try {
-			$schedule = new Schedule( true, (string) $associative_args['frequency'], (int) $associative_args['hour'], $retention );
+			$schedule = new Schedule( true, (string) $associative_args['frequency'], (int) $associative_args['hour'], $retention, $exclusions );
 		} catch ( InvalidArgumentException $invalid ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( $invalid->getMessage() );
@@ -238,7 +260,7 @@ final class ScheduleCommand {
 		$store  = $this->store();
 		$stored = $store->load();
 
-		$store->save( new Schedule( false, $stored->frequency(), $stored->hour(), $stored->retention() ), time() );
+		$store->save( new Schedule( false, $stored->frequency(), $stored->hour(), $stored->retention(), $stored->exclusions() ), time() );
 
 		WP_CLI::log( __( 'Scheduled backups turned off. The settings are kept; `wp pontifex schedule set` turns them back on.', 'pontifex' ) );
 	}
@@ -270,5 +292,51 @@ final class ScheduleCommand {
 	 */
 	private static function stamp( int $timestamp ): string {
 		return gmdate( 'Y-m-d H:i', $timestamp ) . ' UTC';
+	}
+
+	/**
+	 * Split a comma-separated flag value into a trimmed, non-empty pattern list.
+	 *
+	 * An empty value clears the patterns; a bare boolean flag or non-string
+	 * yields no patterns.
+	 *
+	 * @param string|bool|null $value The raw --exclude value.
+	 * @return string[] The individual patterns, trimmed, blanks dropped.
+	 */
+	private static function split_patterns( $value ): array {
+		if ( ! is_string( $value ) || '' === $value ) {
+			return array();
+		}
+		$patterns = array();
+		foreach ( explode( ',', $value ) as $pattern ) {
+			$pattern = trim( $pattern );
+			if ( '' !== $pattern ) {
+				$patterns[] = $pattern;
+			}
+		}
+		return $patterns;
+	}
+
+	/**
+	 * Return the first regex pattern that will not compile, or null.
+	 *
+	 * A scheduled backup runs unattended, so a malformed regex must be caught
+	 * when the schedule is set — otherwise it throws mid-scan on every run with
+	 * no one watching. Only a regex-shaped pattern (delimited with `/`) can fail
+	 * to parse; a glob or exact pattern is always usable.
+	 *
+	 * @param string[] $patterns The patterns to check.
+	 * @return string|null The first uncompilable pattern, or null when all parse.
+	 */
+	private static function first_uncompilable_pattern( array $patterns ): ?string {
+		foreach ( $patterns as $pattern ) {
+			if ( strlen( $pattern ) >= 2 && '/' === $pattern[0] && '/' === $pattern[ strlen( $pattern ) - 1 ] ) {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A malformed pattern makes preg_match warn and return false; the @ turns that into the boolean this validates on.
+				if ( false === @preg_match( $pattern, '' ) ) {
+					return $pattern;
+				}
+			}
+		}
+		return null;
 	}
 }

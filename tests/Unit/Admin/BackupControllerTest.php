@@ -830,10 +830,11 @@ final class BackupControllerTest extends TestCase {
 			->with(
 				\Pontifex\Schedule\ScheduleStore::OPTION,
 				array(
-					'enabled'   => true,
-					'frequency' => 'daily',
-					'hour'      => 3,
-					'retention' => 2,
+					'enabled'    => true,
+					'frequency'  => 'daily',
+					'hour'       => 3,
+					'retention'  => 2,
+					'exclusions' => array(),
 				)
 			);
 		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );

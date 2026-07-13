@@ -78,15 +78,23 @@ final class Schedule {
 	private int $retention;
 
 	/**
+	 * Extra exclusion patterns a scheduled backup applies on top of the defaults.
+	 *
+	 * @var string[]
+	 */
+	private array $exclusions;
+
+	/**
 	 * Construct a Schedule with every field validated.
 	 *
-	 * @param bool   $enabled   Whether the schedule is on.
-	 * @param string $frequency One of the FREQUENCY_* constants.
-	 * @param int    $hour      Hour of day, 0–23.
-	 * @param int    $retention How many backups to keep; clamped up to MIN_RETENTION.
+	 * @param bool     $enabled    Whether the schedule is on.
+	 * @param string   $frequency  One of the FREQUENCY_* constants.
+	 * @param int      $hour       Hour of day, 0–23.
+	 * @param int      $retention  How many backups to keep; clamped up to MIN_RETENTION.
+	 * @param string[] $exclusions Extra exclusion patterns a scheduled backup applies on top of the curated defaults.
 	 * @throws InvalidArgumentException If the frequency or hour is out of range.
 	 */
-	public function __construct( bool $enabled, string $frequency, int $hour, int $retention ) {
+	public function __construct( bool $enabled, string $frequency, int $hour, int $retention, array $exclusions = array() ) {
 		if ( ! in_array( $frequency, self::ALL_FREQUENCIES, true ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $frequency is reported verbatim for diagnostic context; exception path, not HTML output.
 			throw new InvalidArgumentException( sprintf( 'Schedule: unknown frequency "%s".', $frequency ) );
@@ -95,10 +103,18 @@ final class Schedule {
 			throw new InvalidArgumentException( sprintf( 'Schedule: hour %d must be between 0 and 23.', (int) $hour ) );
 		}
 
-		$this->enabled   = $enabled;
-		$this->frequency = $frequency;
-		$this->hour      = $hour;
-		$this->retention = max( self::MIN_RETENTION, $retention );
+		$this->enabled    = $enabled;
+		$this->frequency  = $frequency;
+		$this->hour       = $hour;
+		$this->retention  = max( self::MIN_RETENTION, $retention );
+		$this->exclusions = array_values(
+			array_filter(
+				$exclusions,
+				static function ( $pattern ): bool {
+					return is_string( $pattern ) && '' !== $pattern;
+				}
+			)
+		);
 	}
 
 	/**
@@ -147,16 +163,26 @@ final class Schedule {
 	}
 
 	/**
+	 * Return the extra exclusion patterns a scheduled backup applies.
+	 *
+	 * @return string[] The patterns, on top of the curated defaults.
+	 */
+	public function exclusions(): array {
+		return $this->exclusions;
+	}
+
+	/**
 	 * Serialise for the options table.
 	 *
 	 * @return array<string, mixed> A JSON-encodable array.
 	 */
 	public function to_array(): array {
 		return array(
-			'enabled'   => $this->enabled,
-			'frequency' => $this->frequency,
-			'hour'      => $this->hour,
-			'retention' => $this->retention,
+			'enabled'    => $this->enabled,
+			'frequency'  => $this->frequency,
+			'hour'       => $this->hour,
+			'retention'  => $this->retention,
+			'exclusions' => $this->exclusions,
 		);
 	}
 
@@ -178,7 +204,8 @@ final class Schedule {
 				(bool) ( $data['enabled'] ?? false ),
 				is_string( $data['frequency'] ?? null ) ? $data['frequency'] : self::FREQUENCY_DAILY,
 				is_numeric( $data['hour'] ?? null ) ? (int) $data['hour'] : 3,
-				is_numeric( $data['retention'] ?? null ) ? (int) $data['retention'] : 3
+				is_numeric( $data['retention'] ?? null ) ? (int) $data['retention'] : 3,
+				is_array( $data['exclusions'] ?? null ) ? array_map( 'strval', $data['exclusions'] ) : array()
 			);
 		} catch ( InvalidArgumentException $e ) {
 			return self::disabled();
