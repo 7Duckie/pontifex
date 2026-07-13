@@ -47,7 +47,7 @@ trait HardenedTableListing {
 		$prefix  = (string) $wpdb->prefix;
 		$pattern = $wpdb->esc_like( $prefix ) . '%';
 		$sql     = $wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the sniffs do not track preparation across the assignment.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above (the sniffs do not track preparation across the assignment), and enumerating live schema for a backup is inherently a direct, uncacheable read.
 		$rows = $wpdb->get_col( $sql );
 
 		if ( '' !== $wpdb->last_error ) {
@@ -64,7 +64,7 @@ trait HardenedTableListing {
 			// suppress_errors), never a legitimate empty database. Probe for the options table
 			// to sharpen the message, then refuse: a backup must never be produced with no
 			// database in it.
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- The argument is a $wpdb->prepare() call; the confirming probe reads a single table name.
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- The argument is a $wpdb->prepare() call, and the confirming probe reads live schema state for a single table name, so caching does not apply.
 			$options = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . 'options' ) );
 			$reason  = ( null === $options || '' === $options )
 				? ', and the core options table is absent, so the database may be unavailable'

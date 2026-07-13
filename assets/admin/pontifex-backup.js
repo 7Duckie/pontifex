@@ -376,10 +376,115 @@
 	}
 
 	/**
+	 * Bind the schedule Save button to persist the periodic-backup settings.
+	 *
+	 * Reads the form's four fields, posts them to the save-schedule action, and
+	 * shows the verdict — the next run time when the schedule is on, a plain
+	 * confirmation when it is off — in the section's own notice line. The server
+	 * re-validates every field; this only reflects its answer.
+	 *
+	 * @param {HTMLButtonElement} button The schedule Save button.
+	 */
+	function bindScheduleSave( button ) {
+		button.addEventListener( 'click', function () {
+			var enabled = document.getElementById( 'pontifex-schedule-enabled' );
+			var frequency = document.getElementById( 'pontifex-schedule-frequency' );
+			var hour = document.getElementById( 'pontifex-schedule-hour' );
+			var retention = document.getElementById( 'pontifex-schedule-retention' );
+			button.disabled = true;
+			setText( 'pontifex-schedule-result', '' );
+			request( 'pontifex_save_schedule', {
+				enabled: enabled && enabled.checked ? '1' : '0',
+				frequency: frequency ? frequency.value : '',
+				hour: hour ? hour.value : '',
+				retention: retention ? retention.value : ''
+			} ).then( function ( res ) {
+				button.disabled = false;
+				if ( res && res.success && res.data ) {
+					if ( res.data.enabled && res.data.next_run ) {
+						setText( 'pontifex-schedule-result', cfg.strings.scheduleSaved.replace( '%s', res.data.next_run ) );
+					} else {
+						setText( 'pontifex-schedule-result', cfg.strings.scheduleSavedOff );
+					}
+					return;
+				}
+				setText( 'pontifex-schedule-result', ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.scheduleFailed );
+			} ).catch( function () {
+				button.disabled = false;
+				setText( 'pontifex-schedule-result', cfg.strings.scheduleFailed );
+			} );
+		} );
+	}
+
+	/**
+	 * Re-attach to a backup already running server-side.
+	 *
+	 * The job a backup runs as is persisted (ADR 0014), so a reloaded page —
+	 * or one opened after the starting tab was closed — can ask the progress
+	 * endpoint, discover the live backup, and re-enter the running state
+	 * instead of showing an idle screen while work continues underneath.
+	 */
+	function reattachIfRunning() {
+		request( 'pontifex_backup_progress' ).then( function ( res ) {
+			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+				return;
+			}
+			swapRunning( true );
+			setDeleteEnabled( false );
+			showBar( true );
+			setIndeterminate( 'copying' !== res.data.phase );
+			setText( 'pontifex-backup-result', '' );
+			setText( 'pontifex-backup-progress', cfg.strings.reattached );
+
+			// The server reports when the running job started, so the timing line
+			// survives a reload: elapsed is computed from the job's own start,
+			// not from when this page happened to re-attach.
+			var startedAt = res.data.started_at > 0 ? res.data.started_at : 0;
+			function showElapsed() {
+				if ( startedAt > 0 ) {
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( ( Date.now() / 1000 ) - startedAt ) ) );
+				}
+			}
+			showElapsed();
+
+			var poll = window.setInterval( function () {
+				request( 'pontifex_backup_progress' ).then( function ( r ) {
+					if ( ! r || ! r.success || ! r.data ) {
+						return;
+					}
+					if ( 'idle' === r.data.phase ) {
+						window.clearInterval( poll );
+						storeNotice( cfg.strings.finishedElsewhere );
+						if ( false === navigator.onLine ) {
+							resetIdle( cfg.strings.finishedElsewhere );
+							return;
+						}
+						window.location.reload();
+						return;
+					}
+					if ( r.data.started_at > 0 ) {
+						startedAt = r.data.started_at;
+					}
+					showElapsed();
+					if ( r.data.bytes_total > 0 ) {
+						setIndeterminate( false );
+						setBar( r.data.bytes_done, r.data.bytes_total );
+						setText(
+							'pontifex-backup-progress',
+							cfg.strings.progress.replace( '%1$s', formatBytes( r.data.bytes_done ) ).replace( '%2$s', formatBytes( r.data.bytes_total ) )
+						);
+					}
+				} ).catch( function () {} );
+			}, 1000 );
+		} ).catch( function () {} );
+	}
+
+	/**
 	 * Wire the create, cancel, and delete buttons present on the page.
 	 */
 	function init() {
 		showStoredNotice();
+		reattachIfRunning();
 		var create = document.getElementById( 'pontifex-create-backup' );
 		if ( create ) {
 			create.addEventListener( 'click', function () {
@@ -389,6 +494,10 @@
 		var cancel = document.getElementById( 'pontifex-cancel-backup' );
 		if ( cancel ) {
 			bindCancel( cancel );
+		}
+		var scheduleSave = document.getElementById( 'pontifex-schedule-save' );
+		if ( scheduleSave ) {
+			bindScheduleSave( scheduleSave );
 		}
 		Array.prototype.forEach.call(
 			document.querySelectorAll( '.pontifex-delete-backup' ),

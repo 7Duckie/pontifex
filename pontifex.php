@@ -3,7 +3,7 @@
  * Plugin Name:       Pontifex
  * Plugin URI:        https://github.com/7Duckie/pontifex
  * Description:       A free, open-source WordPress migration and backup plugin with a documented archive format.
- * Version:           0.5.0
+ * Version:           0.6.0
  * Requires at least: 6.5
  * Requires PHP:      8.2
  * Author:            7Duckie
@@ -114,7 +114,7 @@ define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
  * formalises this with a CI guard that fails the workflow on tag
  * push if the values disagree with the tag.
  */
-define( 'PONTIFEX_VERSION', '0.5.0' );
+define( 'PONTIFEX_VERSION', '0.6.0' );
 
 // -----------------------------------------------------------------------------
 // Autoloader
@@ -164,6 +164,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex rollback', \Pontifex\Cli\RollbackCommand::class );
 	\WP_CLI::add_command( 'pontifex keygen', \Pontifex\Cli\KeygenCommand::class );
 	\WP_CLI::add_command( 'pontifex stats', \Pontifex\Cli\StatsCommand::class );
+	\WP_CLI::add_command( 'pontifex schedule', \Pontifex\Cli\ScheduleCommand::class );
 	\WP_CLI::add_command( 'pontifex diagnostics', \Pontifex\Cli\DiagnosticsCommand::class );
 }
 
@@ -179,3 +180,37 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 if ( is_admin() ) {
 	\Pontifex\Admin\AdminBootstrap::create()->register();
 }
+
+// -----------------------------------------------------------------------------
+// Background work (ADR 0014)
+//
+// Registered unconditionally: WP-Cron fires these outside both admin and CLI
+// contexts. `pontifex_scheduled_export` is the recurring periodic backup the
+// ScheduleStore registers when a schedule is enabled; `pontifex_tick_jobs`
+// continues an export job whose driving request died. Both handlers construct
+// their collaborators lazily, so a request that never fires them pays nothing.
+// Deactivation clears both events; the stored schedule survives for
+// reactivation, at which point saving it re-registers the recurring event.
+// -----------------------------------------------------------------------------
+
+add_action(
+	\Pontifex\Schedule\ScheduleStore::CRON_HOOK,
+	static function (): void {
+		\Pontifex\Schedule\ScheduleBootstrap::scheduled_exporter()->run();
+	}
+);
+
+add_action(
+	\Pontifex\Schedule\JobTicker::CRON_HOOK,
+	static function (): void {
+		\Pontifex\Schedule\ScheduleBootstrap::job_ticker()->run();
+	}
+);
+
+register_deactivation_hook(
+	__FILE__,
+	static function (): void {
+		wp_clear_scheduled_hook( \Pontifex\Schedule\ScheduleStore::CRON_HOOK );
+		wp_clear_scheduled_hook( \Pontifex\Schedule\JobTicker::CRON_HOOK );
+	}
+);

@@ -5,7 +5,7 @@
 	"description": "Development tooling for the Pontifex plugin: wp-env provides the WordPress + database environment the integration tests run against. Not part of the shipped plugin (see .distignore); the plugin itself has no JavaScript build.",
 	"license": "GPL-2.0-or-later",
 	"devDependencies": {
-		"@wordpress/env": "^11.9.0"
+		"@wordpress/env": "^11.10.0"
 	},
 	"overrides": {
 		"js-yaml": "^4.2.0"

@@ -14,9 +14,78 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.6.0 — the longer-running operational features
-(resumable and scheduled exports, transports, selective content, multisite) —
+Nothing yet. Work toward v0.7.0 — the next operational increment
+(transports, selective content, multisite are the roadmap candidates) —
 begins after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.6.0] — 2026-07-13 — Resumable and scheduled exports
+
+The release that stops a backup depending on one uninterrupted request: an
+export that survives being killed and continues where it stopped, and an
+export that runs unattended on a schedule. Both are built on one foundation —
+a persisted job with an append-only progress log — decided in
+[ADR 0014](docs/adr/0014-background-execution-model.md) (WP-Cron plus a
+self-continuing step runner; no job-queue library) and
+[ADR 0015](docs/adr/0015-resumable-export-mechanics.md) (the resume contract:
+the progress log is the truth, every tick steps back to the provably-good
+prefix, scan drift is refused, and the database is dumped whole in one
+snapshot tick). No breaking changes this release.
+
+### Added
+
+- **Resumable exports.** `wp pontifex export --resumable` writes an export that
+  survives a timeout, a lost connection, or a killed process; `wp pontifex
+  export --resume` continues it from where it stopped. The archive is built
+  incrementally across as many processes as it takes and is byte-identical to
+  an uninterrupted one. Encrypted exports deliberately refuse resumable mode —
+  the derived key exists for one request and is never persisted.
+- **Scheduled exports.** A recurring content-only backup, daily or weekly at an
+  hour given in UTC, runs unattended and prunes old scheduled backups down to a
+  retention count that can never fall below one. An unattended cron ticker
+  continues a job whose driving request died, with a dead-man's switch: it
+  lifts the time limit, schedules its successor before working, and fails a
+  job loudly rather than looping forever if every attempt dies mid-tick.
+- **`wp pontifex schedule`** — `set`, `show`, and `off`. `show` reports the next
+  run and cross-checks WordPress's own pending event, so a schedule silently
+  killed behind its back (a cron-cleaning plugin, a hand-edit) is surfaced
+  rather than assumed live.
+- **A Scheduled backups section on the admin Backup screen** — the same
+  settings over the same store as the CLI, plus a live-status line: the next
+  run time when the event is pending, or a warning when an enabled schedule has
+  no pending event, so a shell-less operator gets the liveness check the CLI
+  has.
+- **Admin backups run as persisted jobs.** Reloading the Backup screen — or
+  reopening it after the starting tab was closed — re-attaches to a running
+  backup and its progress, with an elapsed timer that survives the reload,
+  instead of showing an idle screen while work continues underneath.
+- **A WP-Cron reliability check in `wp pontifex doctor`**, since scheduled
+  backups and background continuation depend on it.
+
+### Changed
+
+- **Every restored file is written to a temporary sibling and atomically
+  renamed into place**, so a read-only destination file no longer aborts a
+  restore partway (it also closed the per-file restore-atomicity audit item).
+
+### Fixed
+
+- **The unattended cron ticker could strand a backup forever.** A host's web
+  timeout killed the ticker mid-tick — a fatal that runs neither cleanup path —
+  leaving a job marked running that nothing would continue. The ticker now
+  survives its own death (see Added).
+- **A reloaded Backup screen could show frozen, misleading progress.** The
+  page preferred a progress value the dead request had left behind for up to
+  fifteen minutes, and its fallback mixed compressed bytes into a source-byte
+  bar so it could jump backwards. Progress is now distrusted once it stops
+  being refreshed while a job is live, and the job's own source-byte cursor
+  answers in the bar's units.
+- **Job-backed admin backups were slower than the one-shot export they
+  replaced.** A duplicate pre-scan and short per-tick budgets made a large
+  backup re-walk the filesystem many times; the pre-scan is removed and the
+  budgets raised, cutting the scan overhead without risking data (a killed
+  request's work is healed and continued).
+- **`wp pontifex doctor` printed the WP-Cron status twice.** Collapsed to one
+  row.
 
 ## [0.5.0] — 2026-07-13 — The admin interface
 
@@ -622,7 +691,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/7Duckie/pontifex/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/7Duckie/pontifex/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/7Duckie/pontifex/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/7Duckie/pontifex/compare/v0.4.4...v0.4.5

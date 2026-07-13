@@ -111,6 +111,10 @@ What follows from this choice — positive, negative, and neutral?
   A supplied or pinned trusted public key makes the signature mandatory.
 - [ADR 0013](./0013-truthful-capture-of-files-changing-mid-backup.md) —
   Files changing mid-backup: record what was read, warn, refuse the lie on restore.
+- [ADR 0014](./0014-background-execution-model.md) —
+  Background work: WP-Cron plus a self-continuing step runner, no job-queue library.
+- [ADR 0015](./0015-resumable-export-mechanics.md) —
+  Resumable exports: the progress log is the truth; drift refused; DB in one snapshot tick.
 
 ## Further reading
 
