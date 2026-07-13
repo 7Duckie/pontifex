@@ -376,6 +376,47 @@
 	}
 
 	/**
+	 * Bind the schedule Save button to persist the periodic-backup settings.
+	 *
+	 * Reads the form's four fields, posts them to the save-schedule action, and
+	 * shows the verdict — the next run time when the schedule is on, a plain
+	 * confirmation when it is off — in the section's own notice line. The server
+	 * re-validates every field; this only reflects its answer.
+	 *
+	 * @param {HTMLButtonElement} button The schedule Save button.
+	 */
+	function bindScheduleSave( button ) {
+		button.addEventListener( 'click', function () {
+			var enabled = document.getElementById( 'pontifex-schedule-enabled' );
+			var frequency = document.getElementById( 'pontifex-schedule-frequency' );
+			var hour = document.getElementById( 'pontifex-schedule-hour' );
+			var retention = document.getElementById( 'pontifex-schedule-retention' );
+			button.disabled = true;
+			setText( 'pontifex-schedule-result', '' );
+			request( 'pontifex_save_schedule', {
+				enabled: enabled && enabled.checked ? '1' : '0',
+				frequency: frequency ? frequency.value : '',
+				hour: hour ? hour.value : '',
+				retention: retention ? retention.value : ''
+			} ).then( function ( res ) {
+				button.disabled = false;
+				if ( res && res.success && res.data ) {
+					if ( res.data.enabled && res.data.next_run ) {
+						setText( 'pontifex-schedule-result', cfg.strings.scheduleSaved.replace( '%s', res.data.next_run ) );
+					} else {
+						setText( 'pontifex-schedule-result', cfg.strings.scheduleSavedOff );
+					}
+					return;
+				}
+				setText( 'pontifex-schedule-result', ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.scheduleFailed );
+			} ).catch( function () {
+				button.disabled = false;
+				setText( 'pontifex-schedule-result', cfg.strings.scheduleFailed );
+			} );
+		} );
+	}
+
+	/**
 	 * Re-attach to a backup already running server-side.
 	 *
 	 * The job a backup runs as is persisted (ADR 0014), so a reloaded page —
@@ -438,6 +479,10 @@
 		var cancel = document.getElementById( 'pontifex-cancel-backup' );
 		if ( cancel ) {
 			bindCancel( cancel );
+		}
+		var scheduleSave = document.getElementById( 'pontifex-schedule-save' );
+		if ( scheduleSave ) {
+			bindScheduleSave( scheduleSave );
 		}
 		Array.prototype.forEach.call(
 			document.querySelectorAll( '.pontifex-delete-backup' ),

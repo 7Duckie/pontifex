@@ -11,6 +11,8 @@ namespace Pontifex\Admin;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Pontifex\Schedule\Schedule;
+use Pontifex\Schedule\ScheduleStore;
 use Pontifex\WordPress\WordPressContext;
 
 /**
@@ -90,6 +92,7 @@ final class BackupPage {
 
 		$this->render_create();
 		$this->render_backups( $this->backup_rows() );
+		$this->render_schedule( ( new ScheduleStore( $this->context ) )->load() );
 
 		echo '</div>';
 	}
@@ -193,6 +196,76 @@ final class BackupPage {
 			);
 		}
 		echo '</tbody></table>';
+		echo '</section>';
+	}
+
+	/**
+	 * Render the "Scheduled backups" section: the periodic-backup settings form.
+	 *
+	 * A static form pre-filled from the stored schedule; the save happens over
+	 * admin-ajax in {@see BackupController::save_schedule()}, driven by the
+	 * screen's script. The hour is presented and interpreted in UTC — the clock
+	 * WP-Cron timestamps use — and the copy says so rather than implying site
+	 * time. The controls reuse the action-form vocabulary the Restore screen
+	 * established (label, input, toggle), so the design language stays one
+	 * system across screens.
+	 *
+	 * @param Schedule $schedule The stored schedule the form starts from.
+	 * @return void
+	 */
+	private function render_schedule( Schedule $schedule ): void {
+		echo '<section class="pontifex-section">';
+		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Scheduled backups', 'pontifex' ) );
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'Back up this site automatically on a schedule. Scheduled backups appear in the list above, and older ones are pruned so only the newest are kept. The time is in UTC, not your site\'s display timezone.', 'pontifex' )
+		);
+
+		printf(
+			'<label class="pontifex-action-toggle" for="pontifex-schedule-enabled"><input type="checkbox" id="pontifex-schedule-enabled"%s> %s</label>',
+			$schedule->is_enabled() ? ' checked' : '',
+			esc_html__( 'Back up automatically', 'pontifex' )
+		);
+
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-frequency">%s</label>', esc_html__( 'Frequency', 'pontifex' ) );
+		echo '<select id="pontifex-schedule-frequency" class="pontifex-action-input">';
+		foreach ( array(
+			Schedule::FREQUENCY_DAILY  => __( 'Daily', 'pontifex' ),
+			Schedule::FREQUENCY_WEEKLY => __( 'Weekly', 'pontifex' ),
+		) as $value => $label ) {
+			printf(
+				'<option value="%s"%s>%s</option>',
+				esc_attr( $value ),
+				$schedule->frequency() === $value ? ' selected' : '',
+				esc_html( $label )
+			);
+		}
+		echo '</select>';
+
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-hour">%s</label>', esc_html__( 'Time (UTC)', 'pontifex' ) );
+		echo '<select id="pontifex-schedule-hour" class="pontifex-action-input">';
+		for ( $hour = 0; $hour < 24; $hour++ ) {
+			printf(
+				'<option value="%d"%s>%s</option>',
+				(int) $hour,
+				$schedule->hour() === $hour ? ' selected' : '',
+				esc_html( sprintf( '%02d:00', $hour ) )
+			);
+		}
+		echo '</select>';
+
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-retention">%s</label>', esc_html__( 'Backups to keep', 'pontifex' ) );
+		printf(
+			'<input type="number" id="pontifex-schedule-retention" class="pontifex-action-input" min="%d" step="1" value="%d">',
+			(int) Schedule::MIN_RETENTION,
+			(int) $schedule->retention()
+		);
+
+		printf(
+			'<p><button type="button" class="pontifex-button" id="pontifex-schedule-save">%s</button></p>',
+			esc_html__( 'Save schedule', 'pontifex' )
+		);
+		echo '<p class="pontifex-notice" id="pontifex-schedule-result" aria-live="polite"></p>';
 		echo '</section>';
 	}
 

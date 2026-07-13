@@ -115,6 +115,49 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
+	 * Renders the Scheduled backups section pre-filled from the stored schedule.
+	 *
+	 * @return void
+	 */
+	public function test_render_prefills_the_schedule_section(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$page = new BackupPage(
+			$this->context_mock(
+				array(
+					'enabled'   => true,
+					'frequency' => 'weekly',
+					'hour'      => 5,
+					'retention' => 4,
+				)
+			),
+			$store
+		);
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'Scheduled backups', $output );
+		$this->assertStringContainsString( 'id="pontifex-schedule-enabled" checked', $output, 'The enabled box reflects the stored schedule.' );
+		$this->assertStringContainsString( '<option value="weekly" selected>', $output, 'The stored frequency is pre-selected.' );
+		$this->assertStringContainsString( '<option value="5" selected>05:00</option>', $output, 'The stored hour is pre-selected and shown as UTC-style time.' );
+		$this->assertStringContainsString( 'id="pontifex-schedule-retention" class="pontifex-action-input" min="1" step="1" value="4"', $output, 'The stored retention pre-fills the number field with the floor as its minimum.' );
+		$this->assertStringContainsString( 'id="pontifex-schedule-save"', $output );
+		$this->assertStringContainsString( 'Time (UTC)', $output, 'The hour is labelled as UTC, never site time.' );
+	}
+
+	/**
 	 * Lists backups newest-first, with the time parsed from the name and the size formatted.
 	 *
 	 * @return void
@@ -139,15 +182,21 @@ final class BackupPageTest extends TestCase {
 	/**
 	 * A WordPressContext mock with a simple byte-count size formatter.
 	 *
+	 * The stored-schedule read is stubbed too: render() loads the schedule for
+	 * the Scheduled backups section, and an empty option reads as the disabled
+	 * default.
+	 *
+	 * @param array<string, mixed> $schedule Optional stored schedule option data.
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
-	private function context_mock() {
+	private function context_mock( array $schedule = array() ) {
 		$context = Mockery::mock( WordPressContext::class );
 		$context->shouldReceive( 'format_size' )->andReturnUsing(
 			static function ( int $bytes ): string {
 				return $bytes . ' B';
 			}
 		);
+		$context->shouldReceive( 'option_value' )->andReturn( $schedule );
 		return $context;
 	}
 
