@@ -169,11 +169,12 @@ final class ResumableExportRunner {
 	 * @param SigningContext|null $signing        Signing inputs, re-supplied by the caller when the job was started signed; must be null otherwise.
 	 * @param callable|null       $clock          Monotonic-ish clock returning float seconds; defaults to microtime(true). Injectable for tests.
 	 * @param callable|null       $on_entry       Optional per-entry progress callback, `( int $done, int $total ): void`.
+	 * @param callable|null       $on_bytes       Optional byte-progress callback forwarded to each entry's codec, `( int $bytes ): void`, for byte-faithful progress bars.
 	 * @return bool True when the export finished and the archive was renamed into place.
 	 * @throws RuntimeException If the job is not an active export or the signing inputs contradict the job.
 	 * @throws Throwable        Whatever the tick body raised (drift refusal, verification or write failure), re-thrown after the job is marked failed.
 	 */
-	public function tick( Job $job, float $budget_seconds, ?SigningContext $signing = null, ?callable $clock = null, ?callable $on_entry = null ): bool {
+	public function tick( Job $job, float $budget_seconds, ?SigningContext $signing = null, ?callable $clock = null, ?callable $on_entry = null, ?callable $on_bytes = null ): bool {
 		$clock = $clock ?? static function (): float {
 			return microtime( true );
 		};
@@ -195,7 +196,7 @@ final class ResumableExportRunner {
 		}
 
 		try {
-			return $this->run_tick( $job, $budget_seconds, $signing, $clock, $on_entry );
+			return $this->run_tick( $job, $budget_seconds, $signing, $clock, $on_entry, $on_bytes );
 		} catch ( Throwable $error ) {
 			$job->mark( Job::STATUS_FAILED, (int) $clock() );
 			$this->job_store->save( $job );
@@ -211,10 +212,11 @@ final class ResumableExportRunner {
 	 * @param SigningContext|null $signing        Signing inputs or null.
 	 * @param callable            $clock          The tick's clock.
 	 * @param callable|null       $on_entry       Optional per-entry progress callback.
+	 * @param callable|null       $on_bytes       Optional byte-progress callback forwarded to each entry's codec.
 	 * @return bool True when the archive completed.
 	 * @throws RuntimeException On drift, verification failure, or write failure.
 	 */
-	private function run_tick( Job $job, float $budget_seconds, ?SigningContext $signing, callable $clock, ?callable $on_entry ): bool {
+	private function run_tick( Job $job, float $budget_seconds, ?SigningContext $signing, callable $clock, ?callable $on_entry, ?callable $on_bytes = null ): bool {
 		$payload = $job->payload();
 		$log     = $this->job_store->progress_log( $job->id() );
 
@@ -281,7 +283,7 @@ final class ResumableExportRunner {
 
 				$manifest_entry = $writer->append_entry(
 					$plan,
-					null,
+					$on_bytes,
 					// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- The closure must match the on_file_changed callback contract; only the tally is needed here.
 					static function ( string $path, int $declared, int $actual ) use ( &$files_changed ): void {
 						++$files_changed;

@@ -300,24 +300,27 @@ final class Menu {
 				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
 				'nonce'   => wp_create_nonce( BackupController::NONCE_ACTION ),
 				'strings' => array(
-					'starting'      => __( 'Starting backup…', 'pontifex' ),
+					'starting'          => __( 'Starting backup…', 'pontifex' ),
 					/* translators: %s: number of files found so far */
-					'scanning'      => __( 'Scanning files… %s', 'pontifex' ),
+					'scanning'          => __( 'Scanning files… %s', 'pontifex' ),
 					/* translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes */
-					'progress'      => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'          => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'       => __( 'Time elapsed - %s', 'pontifex' ),
+					'elapsed'           => __( 'Time elapsed - %s', 'pontifex' ),
 					/* translators: 1: elapsed time, 2: estimated time remaining */
-					'timing'        => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
+					'timing'            => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
 					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
-					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
-					'createdPlain'  => __( 'Backup created.', 'pontifex' ),
-					'cancel'        => __( 'Cancel backup', 'pontifex' ),
-					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
-					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
-					'confirmCancel' => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
-					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
-					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+					'created'           => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
+					'createdPlain'      => __( 'Backup created.', 'pontifex' ),
+					'reattached'        => __( 'A backup is running — re-attached to its progress.', 'pontifex' ),
+					/* translators: shown after re-attaching to a backup that then finished */
+					'finishedElsewhere' => __( 'The running backup finished.', 'pontifex' ),
+					'cancel'            => __( 'Cancel backup', 'pontifex' ),
+					'cancelling'        => __( 'Cancelling…', 'pontifex' ),
+					'cancelled'         => __( 'Backup cancelled.', 'pontifex' ),
+					'confirmCancel'     => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
+					'failed'            => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'confirmDelete'     => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
 				),
 			)
 		);
@@ -389,21 +392,23 @@ final class Menu {
 				'nonce'    => wp_create_nonce( RestoreController::NONCE_ACTION ),
 				'loginUrl' => wp_login_url(),
 				'strings'  => array(
-					'starting'       => __( 'Starting…', 'pontifex' ),
-					'verifying'      => __( 'Verifying the backup…', 'pontifex' ),
-					'backingUp'      => __( 'Backing up your content…', 'pontifex' ),
-					'restoring'      => __( 'Restoring…', 'pontifex' ),
-					'rollingBack'    => __( 'Rolling back…', 'pontifex' ),
+					'starting'           => __( 'Starting…', 'pontifex' ),
+					'verifying'          => __( 'Verifying the backup…', 'pontifex' ),
+					'backingUp'          => __( 'Backing up your content…', 'pontifex' ),
+					'restoring'          => __( 'Restoring…', 'pontifex' ),
+					'rollingBack'        => __( 'Rolling back…', 'pontifex' ),
 					/* translators: 1: bytes done so far, 2: total bytes, both as human-readable sizes */
-					'progress'       => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'           => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'        => __( 'Time elapsed - %s', 'pontifex' ),
-					'failed'         => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
-					'failedUnknown'  => __( 'The connection was lost, so the result is unknown — the operation may have completed or may still be running. Wait a moment, then reload this page to check; if the site looks wrong, run a rollback. Check the Pontifex log for details.', 'pontifex' ),
-					'sessionUnknown' => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
-					'signedOutTitle' => __( 'Restore complete', 'pontifex' ),
-					'signedOut'      => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
-					'loginLink'      => __( 'Log in', 'pontifex' ),
+					'elapsed'            => __( 'Time elapsed - %s', 'pontifex' ),
+					'failed'             => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'failedUnknown'      => __( 'The connection was lost, so the result is unknown — the operation may have completed or may still be running. Wait a moment, then reload this page to check; if the site looks wrong, run a rollback. Check the Pontifex log for details.', 'pontifex' ),
+					'sessionUnknown'     => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
+					/* translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it */
+					'reattachedFinished' => __( 'The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome.', 'pontifex' ),
+					'signedOutTitle'     => __( 'Restore complete', 'pontifex' ),
+					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
+					'loginLink'          => __( 'Log in', 'pontifex' ),
 				),
 			)
 		);
