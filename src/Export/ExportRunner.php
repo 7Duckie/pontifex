@@ -99,12 +99,14 @@ final class ExportRunner {
 	 * @param WordPressContext $wordpress_context Supplies the $wpdb instance for the database scan.
 	 * @param ExclusionRules   $rules             Rules applied to both the file and database scans.
 	 * @param string           $path_prefix       Prefix prepended to every scanned file path, so a scan rooted below the WordPress root still records WordPress-root-relative paths. Pass '' for a whole-site scan rooted at the WordPress root, or 'wp-content' for a content-only scan rooted at WP_CONTENT_DIR.
+	 * @param bool             $include_files     Whether to capture the file half; false for a db-only backup (ADR 0016).
+	 * @param bool             $include_database  Whether to capture the database half; false for a files-only backup (ADR 0016).
 	 * @return ManifestBuilder A scanner-backed manifest builder.
 	 */
-	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
+	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '', bool $include_files = true, bool $include_database = true ): ManifestBuilder {
 		$file_scanner     = new FileScanner( $rules, $path_prefix );
 		$database_scanner = new DatabaseScanner( self::snapshot_database_adapter( $wordpress_context ), $rules );
-		return new ManifestBuilder( $file_scanner, $database_scanner );
+		return new ManifestBuilder( $file_scanner, $database_scanner, $include_files, $include_database );
 	}
 
 	/**
