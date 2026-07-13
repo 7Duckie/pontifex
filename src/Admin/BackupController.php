@@ -17,6 +17,9 @@ use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Job\Job;
+use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\WordPress\WordPressContext;
@@ -200,6 +203,27 @@ final class BackupController {
 	private ?string $active_backup_path = null;
 
 	/**
+	 * Wall-clock budget per tick when this controller drives the job (seconds).
+	 *
+	 * Each tick persists its progress, so this is the most work a killed
+	 * request can lose (plus one torn entry, which resume heals).
+	 *
+	 * @var float
+	 */
+	private const TICK_BUDGET_SECONDS = 20.0;
+
+	/**
+	 * The job the running backup persists through, while this request drives it.
+	 *
+	 * Null outside create(). Lets the shutdown handler mark the job failed on a
+	 * fatal (so the single-active-job slot never wedges) and the cleanup helper
+	 * find the job's temp archive.
+	 *
+	 * @var Job|null
+	 */
+	private ?Job $active_job = null;
+
+	/**
 	 * Whether this request holds the single-runner backup lock.
 	 *
 	 * Set when create() acquires the lock and cleared when it releases it, so the
@@ -243,6 +267,10 @@ final class BackupController {
 	 * Overview screen reflects the backup.
 	 *
 	 * @return void
+	 * @throws RuntimeException Caught by this method's own handler; raised when the
+	 *                          job record disappears mid-run (the tick loop's guard).
+	 * @throws BackupCancelled  Caught by this method's own handler; raised at a tick
+	 *                          boundary when the operator requested cancellation.
 	 */
 	public function create(): void {
 		if ( ! $this->is_authorised() ) {
@@ -278,6 +306,8 @@ final class BackupController {
 			// The admin backup is always content-only: it scans wp-content and records
 			// each file under a "wp-content" path prefix, with a content-only scope in
 			// provenance (ADR 0008). A whole-site clone stays a CLI-only operation.
+			// The pre-scan exists for the byte total the progress bar rides on; the
+			// job's own ticks re-scan as they go (ADR 0015).
 			$exclusions  = ExclusionRules::default_v010();
 			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, 'wp-content' );
 			$entry_plans = $builder->build( $this->resolve_content_root(), $this->scan_progress_callback() );
@@ -287,9 +317,53 @@ final class BackupController {
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
-			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
-			$options                  = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
-			$result                   = $runner->export( $options, $entry_plans, null, $this->byte_progress_callback( $total_bytes ) );
+
+			// The backup runs as a persisted job (ADR 0014/0015): every tick saves
+			// its progress, so a request the host kills mid-run leaves a continuable
+			// job on disk instead of nothing, and the page can re-attach to it.
+			$job_store = new JobStore( $this->resolve_content_root() );
+			$factory   = null !== $this->manifest_builder
+				? fn (): ManifestBuilderInterface => $this->manifest_builder
+				: null;
+			$runner    = new ResumableExportRunner( $this->environment, $this->wordpress_context, $job_store, $factory );
+			$options   = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
+
+			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->patterns(), time() );
+			$this->active_job = $job;
+
+			// Stash the byte total on the job so the progress endpoint can answer a
+			// re-attaching page from persisted state; the runner's own cursor keys
+			// survive alongside it.
+			$payload                = $job->payload();
+			$payload['total_bytes'] = $total_bytes;
+			$job->set_payload( $payload );
+			$job_store->save( $job );
+
+			$done = false;
+			while ( ! $done ) {
+				// The cancel sentinel is honoured at tick boundaries: the job is
+				// terminal-marked before cleanup so the active slot frees correctly.
+				if ( $this->store->is_cancel_requested() ) {
+					$current = $job_store->get( $job->id() );
+					if ( null !== $current && $current->is_active() ) {
+						$current->mark( Job::STATUS_CANCELLED, time() );
+						$job_store->save( $current );
+					}
+					throw new BackupCancelled();
+				}
+				$current = $job_store->get( $job->id() );
+				if ( null === $current ) {
+					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
+				}
+				$done = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $this->byte_progress_callback( $total_bytes ) );
+			}
+
+			$finished      = $job_store->get( $job->id() );
+			$job_payload   = null !== $finished ? $finished->payload() : array();
+			$bytes_written = (int) ( $job_payload['bytes_written'] ?? 0 );
+			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
+			$job_store->delete( $job->id() );
+			$this->active_job = null;
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -300,24 +374,25 @@ final class BackupController {
 			$this->bump_counters(
 				array(
 					'succeeded'      => 1,
-					'bytes_exported' => $result->bytes_written(),
+					'bytes_exported' => $bytes_written,
 				)
 			);
-			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $result->bytes_written(), gmdate( 'c' ) );
+			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
 			wp_send_json_success(
 				array(
 					'filename'     => basename( $path ),
-					'entries'      => $result->entry_count(),
-					'bytes'        => $result->bytes_written(),
-					'size'         => $this->wordpress_context->format_size( $result->bytes_written() ),
+					'entries'      => $entry_count,
+					'bytes'        => $bytes_written,
+					'size'         => $this->wordpress_context->format_size( $bytes_written ),
 					'source_bytes' => $total_bytes,
 				)
 			);
 		} catch ( BackupCancelled $cancelled ) {
-			// Cancellation is not a failure: remove the partial archive, release the
-			// lock, and report it as cancelled. The attempted counter stays bumped,
-			// but neither succeeded nor failed is recorded and nothing is logged.
+			// Cancellation is not a failure: remove the partial archive and the job,
+			// release the lock, and report it as cancelled. The attempted counter
+			// stays bumped, but neither succeeded nor failed is recorded.
+			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
 			$this->release_lock();
@@ -326,6 +401,7 @@ final class BackupController {
 			wp_send_json_success( array( 'cancelled' => true ) );
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
+			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
 			$this->release_lock();
@@ -335,6 +411,37 @@ final class BackupController {
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
 		}
+	}
+
+	/**
+	 * Remove the active job's temp archive and records after a cancel or failure.
+	 *
+	 * Best-effort by design: cleanup must never mask the outcome being reported.
+	 * The job is already terminal (the runner marks failed on a throwing tick;
+	 * the cancel path marks cancelled), so deleting the records simply keeps the
+	 * jobs directory tidy — a skipped deletion would be swept by the store's TTL
+	 * cleanup anyway.
+	 *
+	 * @return void
+	 */
+	private function cleanup_job_artefacts(): void {
+		if ( null === $this->active_job ) {
+			return;
+		}
+		try {
+			$job_store = new JobStore( $this->resolve_content_root() );
+			$current   = $job_store->get( $this->active_job->id() );
+			$payload   = null !== $current ? $current->payload() : $this->active_job->payload();
+			$temp      = isset( $payload['temp'] ) ? (string) $payload['temp'] : '';
+			if ( '' !== $temp && is_file( $temp ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the job's partial archive; a failure must not mask the outcome being reported.
+				@unlink( $temp );
+			}
+			$job_store->delete( $this->active_job->id() );
+		} catch ( Throwable $cleanup_error ) {
+			$this->logger->error( 'Backup job cleanup failed.', array( 'exception' => $cleanup_error ) );
+		}
+		$this->active_job = null;
 	}
 
 	/**
@@ -365,6 +472,23 @@ final class BackupController {
 			'Admin backup ended on a fatal error; cleaning up the partial archive.',
 			array( 'error' => $last_error['message'] )
 		);
+		// Mark the job failed so the single-active-job slot frees immediately
+		// instead of waiting for the store's abandonment sweep; the job's temp
+		// stays on disk deliberately — it is what a future resume could adopt,
+		// and the store's TTL cleanup removes it with the failed record.
+		if ( null !== $this->active_job ) {
+			try {
+				$job_store = new JobStore( $this->resolve_content_root() );
+				$current   = $job_store->get( $this->active_job->id() );
+				if ( null !== $current && $current->is_active() ) {
+					$current->mark( Job::STATUS_FAILED, time() );
+					$job_store->save( $current );
+				}
+			} catch ( Throwable $cleanup_error ) {
+				$this->logger->error( 'Backup job shutdown cleanup failed.', array( 'exception' => $cleanup_error ) );
+			}
+			$this->active_job = null;
+		}
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
 		$this->release_lock();
@@ -406,6 +530,25 @@ final class BackupController {
 		$progress = is_array( $progress ) ? $progress : array();
 
 		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
+
+		// The transient only lives while a request is actively writing it. When it
+		// is idle but a backup JOB is live on disk — this page was reloaded, or the
+		// writing request died and a later ticker will continue — answer from the
+		// job's persisted cursors so the page can re-attach to the running backup.
+		if ( self::PHASE_IDLE === $phase ) {
+			$job = ( new JobStore( $this->resolve_content_root() ) )->active_job();
+			if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
+				$payload = $job->payload();
+				wp_send_json_success(
+					array(
+						'phase'       => self::PHASE_COPYING,
+						'done'        => 0,
+						'bytes_done'  => $this->counter_int( $payload, 'bytes_written' ),
+						'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+					)
+				);
+			}
+		}
 
 		wp_send_json_success(
 			array(

@@ -376,10 +376,59 @@
 	}
 
 	/**
+	 * Re-attach to a backup already running server-side.
+	 *
+	 * The job a backup runs as is persisted (ADR 0014), so a reloaded page —
+	 * or one opened after the starting tab was closed — can ask the progress
+	 * endpoint, discover the live backup, and re-enter the running state
+	 * instead of showing an idle screen while work continues underneath.
+	 */
+	function reattachIfRunning() {
+		request( 'pontifex_backup_progress' ).then( function ( res ) {
+			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+				return;
+			}
+			swapRunning( true );
+			setDeleteEnabled( false );
+			showBar( true );
+			setIndeterminate( 'copying' !== res.data.phase );
+			setText( 'pontifex-backup-result', '' );
+			setText( 'pontifex-backup-progress', cfg.strings.reattached );
+
+			var poll = window.setInterval( function () {
+				request( 'pontifex_backup_progress' ).then( function ( r ) {
+					if ( ! r || ! r.success || ! r.data ) {
+						return;
+					}
+					if ( 'idle' === r.data.phase ) {
+						window.clearInterval( poll );
+						storeNotice( cfg.strings.finishedElsewhere );
+						if ( false === navigator.onLine ) {
+							resetIdle( cfg.strings.finishedElsewhere );
+							return;
+						}
+						window.location.reload();
+						return;
+					}
+					if ( r.data.bytes_total > 0 ) {
+						setIndeterminate( false );
+						setBar( r.data.bytes_done, r.data.bytes_total );
+						setText(
+							'pontifex-backup-progress',
+							cfg.strings.progress.replace( '%1$s', formatBytes( r.data.bytes_done ) ).replace( '%2$s', formatBytes( r.data.bytes_total ) )
+						);
+					}
+				} ).catch( function () {} );
+			}, 1000 );
+		} ).catch( function () {} );
+	}
+
+	/**
 	 * Wire the create, cancel, and delete buttons present on the page.
 	 */
 	function init() {
 		showStoredNotice();
+		reattachIfRunning();
 		var create = document.getElementById( 'pontifex-create-backup' );
 		if ( create ) {
 			create.addEventListener( 'click', function () {

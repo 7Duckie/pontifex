@@ -512,9 +512,55 @@
 	}
 
 	/**
+	 * Re-attach to a restore or rollback already running server-side.
+	 *
+	 * A reloaded page finds the operation's live progress instead of an idle
+	 * screen. The final verdict was addressed to the request that started the
+	 * operation, so on completion this can only say it finished and point at
+	 * where the outcome is recorded.
+	 */
+	function reattachIfRunning() {
+		request( 'pontifex_restore_progress' ).then( function ( res ) {
+			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+				return;
+			}
+			setControlsEnabled( false );
+			showBar( true );
+			setText( 'pontifex-restore-result', '' );
+			setText( 'pontifex-restore-progress', phaseLabel( res.data.phase ) );
+
+			var poll = window.setInterval( function () {
+				request( 'pontifex_restore_progress' ).then( function ( r ) {
+					if ( ! r || ! r.success || ! r.data ) {
+						return;
+					}
+					if ( 'idle' === r.data.phase ) {
+						window.clearInterval( poll );
+						finishRun( cfg.strings.reattachedFinished );
+						return;
+					}
+					var label = phaseLabel( r.data.phase );
+					if ( r.data.bytes_total > 0 ) {
+						setIndeterminate( false );
+						setBar( r.data.bytes_done, r.data.bytes_total );
+						setText(
+							'pontifex-restore-progress',
+							label + ' ' + cfg.strings.progress.replace( '%1$s', formatBytes( r.data.bytes_done ) ).replace( '%2$s', formatBytes( r.data.bytes_total ) )
+						);
+					} else {
+						setIndeterminate( true );
+						setText( 'pontifex-restore-progress', label );
+					}
+				} ).catch( function () {} );
+			}, 1000 );
+		} ).catch( function () {} );
+	}
+
+	/**
 	 * Wire the action input, the backup row buttons, and the Run button.
 	 */
 	function init() {
+		reattachIfRunning();
 		var input = document.getElementById( 'pontifex-restore-action' );
 		if ( input ) {
 			input.addEventListener( 'input', updateRunButton );
