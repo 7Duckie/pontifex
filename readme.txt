@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.5.0
+Stable tag: 0.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -80,6 +80,9 @@ A backup started from the admin screen runs as a persisted job: if the page is c
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.6.0 =
+* Resumable and scheduled exports. `export --resumable`/`--resume` survives timeouts, lost connections, and killed processes and continues where it stopped, byte-identical to an uninterrupted export. Scheduled backups run daily or weekly at a UTC hour, unattended, pruning to a retention count, with a self-healing cron ticker. New `wp pontifex schedule` command and a Scheduled backups section on the Backup screen, both with a next-run/liveness readout. Admin backups now run as persisted jobs, so reloading the page re-attaches to a running backup. No breaking changes.
 
 = 0.5.0 =
 * The admin interface: Overview, Backup (progress and cancel), Verify, Restore/Rollback with a pre-restore safety archive, and cross-server backup upload. Engine hardening throughout: atomic staged-table restores, snapshot-consistent exports, streaming restores within web memory limits, and changed-file detection on export. Breaking: supplying or pinning a trusted public key now makes the archive signature mandatory. Backups now default to content-only (wp-content plus the whole database); use --whole-site for full clones.
