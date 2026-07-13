@@ -115,6 +115,8 @@ What follows from this choice — positive, negative, and neutral?
   Background work: WP-Cron plus a self-continuing step runner, no job-queue library.
 - [ADR 0015](./0015-resumable-export-mechanics.md) —
   Resumable exports: the progress log is the truth; drift refused; DB in one snapshot tick.
+- [ADR 0016](./0016-partial-scope-backups.md) —
+  Files-only and db-only backups: two booleans, includes_files emit-only-when-false, restore fails closed on a self-contradicting archive.
 
 ## Further reading
 

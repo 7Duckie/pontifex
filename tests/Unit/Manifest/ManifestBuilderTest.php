@@ -145,6 +145,52 @@ final class ManifestBuilderTest extends TestCase {
 	}
 
 	/**
+	 * A files-only build (no database) with an empty file scan is refused, not silently empty.
+	 *
+	 * The file-side counterpart to the no-database guard (ADR 0016): a files-only
+	 * backup skips the database, so if its file scan is empty or fully excluded the
+	 * archive would carry nothing yet verify sound — a silent no-op backup. The
+	 * builder refuses it.
+	 *
+	 * @return void
+	 */
+	public function test_files_only_build_refuses_an_empty_file_scan(): void {
+		$empty_root = $this->fixture_root . '/empty-subtree';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating an empty fixture directory to scan.
+		mkdir( $empty_root, 0o755, true );
+
+		$file_scanner     = new FileScanner( ExclusionRules::none() );
+		$database_scanner = new DatabaseScanner( new FakeDbAdapter(), ExclusionRules::none() );
+		// include_files true, include_database false: a files-only backup.
+		$builder = new ManifestBuilder( $file_scanner, $database_scanner, true, false );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessageMatches( '/no files and no database/' );
+
+		$builder->build( $empty_root );
+	}
+
+	/**
+	 * A files-only build with real files does NOT trip the no-database guard.
+	 *
+	 * A files-only backup legitimately carries no database, so the no-database
+	 * data-loss guard must not fire for it — only the empty-everything guard.
+	 *
+	 * @return void
+	 */
+	public function test_files_only_build_with_files_is_allowed_without_a_database(): void {
+		$this->write_file( 'a.txt', 'alpha' );
+
+		$file_scanner     = new FileScanner( ExclusionRules::none() );
+		$database_scanner = new DatabaseScanner( new FakeDbAdapter(), ExclusionRules::none() );
+		$builder          = new ManifestBuilder( $file_scanner, $database_scanner, true, false );
+
+		$stream = $builder->build( $this->fixture_root );
+
+		$this->assertGreaterThan( 0, count( $stream ), 'A files-only backup with files builds without a database.' );
+	}
+
+	/**
 	 * Every produced EntryPlan must use the preferred codec: zstd when ext-zstd is available, else gzip.
 	 *
 	 * @return void
