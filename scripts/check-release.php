@@ -14,7 +14,8 @@
  *   2. the PONTIFEX_VERSION constant is present
  *   3. those two agree with each other
  *   4. CHANGELOG.md has a matching "## [x.y.z]" section and link line
- *   5. (optionally) that they match a version you pass in
+ *   5. readme.txt's "Stable tag:" agrees with the version
+ *   6. (optionally) that they match a version you pass in
  *
  * Read-only — it changes nothing, so run it any time, anywhere. It is
  * not a commit, so a terminal or PhpStorm is fine.
@@ -27,6 +28,7 @@
 $root           = __DIR__ . '/..';
 $plugin_file    = $root . '/pontifex.php';
 $changelog_file = $root . '/CHANGELOG.md';
+$readme_file    = $root . '/readme.txt';
 
 $expected = $argv[1] ?? null;
 $failures = 0;
@@ -74,6 +76,16 @@ if (!is_file($changelog_file)) {
     $has_link    = (bool) preg_match('/^\[' . preg_quote($version, '/') . '\]:\s+https?:\/\//m', $cl);
     $check("CHANGELOG has a [{$version}] section", $has_section);
     $check("CHANGELOG has a [{$version}] link", $has_link);
+}
+
+if (!is_file($readme_file)) {
+    $check('readme.txt present', false, 'not found');
+} elseif ($version !== null) {
+    $stable = null;
+    if (preg_match('/^Stable tag:\s*(\S+)/mi', file_get_contents($readme_file), $m)) {
+        $stable = $m[1];
+    }
+    $check('readme.txt Stable tag agrees', $stable === $version, 'stable=' . ($stable ?? 'not found') . ", version={$version}");
 }
 
 if ($expected !== null) {

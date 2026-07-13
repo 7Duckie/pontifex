@@ -92,9 +92,14 @@ use Pontifex\WordPress\WordPressContext;
  *
  * [--public-key=<path>]
  * : Verify the archive's Ed25519 signature against this public-key file (from
- *   `wp pontifex keygen`) BEFORE restoring. A signed archive whose signature
- *   fails is refused and nothing is written. Without it, a signed archive is
- *   restored with a warning that its signature was not verified.
+ *   `wp pontifex keygen`) BEFORE restoring. Supplying a trusted key makes the
+ *   signature MANDATORY (ADR 0012): an archive that is unsigned — including
+ *   one whose signature was stripped — is refused, and a signature that fails
+ *   is refused; nothing is written either way. Define PONTIFEX_PUBLIC_KEY (the
+ *   key file's path) in wp-config.php to pin the key once and enforce this on
+ *   every run; an explicit --public-key overrides the pin. Without any key,
+ *   a signed archive is restored with a warning that its signature was not
+ *   verified — plain integrity hashes detect corruption, not tampering.
  *
  * [--allow-unsafe-symlinks]
  * : Allow restoring symlink entries whose target points outside the site root
@@ -345,6 +350,10 @@ final class ImportCommand {
 			$this->progress->advance();
 		};
 
+		// The safety archive's path, once taken — the undo the failure handler replays to
+		// recover the site if the restore then fails part-written. Null until it is taken.
+		$safety_path = null;
+
 		try {
 			// Wire the restore engine. For an encrypted archive this reads the salt and
 			// collects the passphrase, so it sits inside the try where a failure is logged.
@@ -384,7 +393,7 @@ final class ImportCommand {
 				$this->bump_counters( array( 'attempted' => 1 ) );
 
 				if ( ! $no_rollback ) {
-					$this->take_safety_archive( $whole_site );
+					$safety_path = $this->take_safety_archive( $whole_site );
 				}
 
 				$restore_runner->restore( $source, $on_entry );
@@ -428,6 +437,18 @@ final class ImportCommand {
 				$this->bump_counters( array( 'failed' => 1 ) );
 				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
 			}
+
+			// If the safety archive was taken, the restore may have written part of the
+			// database, so replay it to return the site to its pre-import state before the
+			// command exits with the failure. When it was not taken the site was not changed.
+			if ( null !== $safety_path ) {
+				if ( $this->recover_from_safety_archive( $safety_path, $allow_unsafe ) ) {
+					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
+				} else {
+					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
+				}
+			}
+
 			throw $error;
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
@@ -567,7 +588,13 @@ final class ImportCommand {
 
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
-		return new RestoreRunner( $entry_reader, $file_writer, $database_writer );
+		return new RestoreRunner(
+			$entry_reader,
+			$file_writer,
+			$database_writer,
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+		);
 	}
 
 	/**
@@ -614,9 +641,10 @@ final class ImportCommand {
 	 * whole-site for a --whole-site restore (ADR 0008).
 	 *
 	 * @param bool $whole_site True for a whole-site restore; false for a content-only restore.
-	 * @return void
+	 * @return string The absolute path of the safety archive written — the undo the import
+	 *                automatically replays if the restore then fails.
 	 */
-	private function take_safety_archive( bool $whole_site ): void {
+	private function take_safety_archive( bool $whole_site ): string {
 		$safety_archiver = $this->safety_archiver ?? $this->build_default_safety_archiver( ! $whole_site );
 
 		$on_entry = function ( int $done, int $total ): void {
@@ -632,6 +660,55 @@ final class ImportCommand {
 
 		$this->logger->info( 'Safety archive written.', array( 'safety_archive' => $path ) );
 		WP_CLI::log( sprintf( 'Safety archive written: %s (undo this import with: wp pontifex rollback)', PathRedactor::from_environment()->redact( $path ) ) );
+
+		return $path;
+	}
+
+	/**
+	 * Replay a safety archive to recover the site after a failed import.
+	 *
+	 * Called only from the import failure handler, once the safety archive has been taken
+	 * and the restore has then failed — so the database may be part-written. It opens the
+	 * safety archive (a plain archive of the site's prior state), verifies it, and replays
+	 * it unrestricted, returning the site to its pre-import state. Wrapped so it can never
+	 * throw out of the failure handler: a recovery that itself fails is reported by
+	 * returning false, not escalated over the original import error.
+	 *
+	 * @param string $safety_path           The absolute path of the safety archive to replay.
+	 * @param bool   $allow_unsafe_symlinks Whether to allow escaping symlink targets (mirrors the import).
+	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 */
+	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks ): bool {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the plugin-owned safety archive for recovery; an unopenable file is reported below, not raised as a WP-CLI halt.
+		$recovery_source = @fopen( $safety_path, 'rb' );
+		if ( false === $recovery_source ) {
+			$this->logger->error( 'Import auto-recovery failed: could not open the safety archive.', array( 'safety_archive' => $safety_path ) );
+			return false;
+		}
+
+		try {
+			// A safety archive is a plain archive of the site's own prior state, so its
+			// replay needs no passphrase and no required prefix — unrestricted, like a
+			// rollback. Verify it first, so a corrupt safety archive is not written back.
+			$runner = $this->restore_runner ?? $this->build_default_restore_runner( $recovery_source, false, $allow_unsafe_symlinks, null );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the verify walk re-reads it; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$runner->verify( $recovery_source );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$runner->restore( $recovery_source );
+
+			return true;
+		} catch ( Throwable $recovery_error ) {
+			$this->logger->error( 'Import auto-recovery failed.', array( 'exception' => $recovery_error ) );
+			return false;
+		} finally {
+			if ( is_resource( $recovery_source ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the recovery stream opened above; not a WP_Filesystem operation.
+				fclose( $recovery_source );
+			}
+		}
 	}
 
 	/**
@@ -650,7 +727,7 @@ final class ImportCommand {
 			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
 			: sys_get_temp_dir();
 
-		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ), null, 1, $content_only );
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, new RollbackStore( $content_dir ), null, 2, $content_only );
 	}
 
 	/**
@@ -803,22 +880,32 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Resolve the --public-key option to a loaded public key, or null when absent.
+	 * Resolve the trusted public key from the flag or the site's pin, or null when neither exists.
 	 *
-	 * A bad or unreadable key file is the operator's mistake, so it exits via
-	 * WP_CLI::error rather than being treated as a restore failure.
+	 * The --public-key flag names a key for this run; when it is absent, the
+	 * PONTIFEX_PUBLIC_KEY constant (defined once in wp-config.php) supplies the
+	 * site's pinned key, so signature enforcement does not rest on a human
+	 * remembering a flag every time (ADR 0012). An explicit flag overrides the
+	 * pin. A bad or unreadable key file is the operator's mistake, so it exits
+	 * via WP_CLI::error rather than being treated as a restore failure.
 	 *
 	 * @param array<string, string|bool> $associative_args The CLI's associative args.
-	 * @return string|null The 32-byte public key, or null when --public-key was not supplied.
+	 * @return string|null The 32-byte public key, or null when no flag was supplied and no pin is defined.
 	 */
 	private function resolve_public_key( array $associative_args ): ?string {
-		if ( ! isset( $associative_args['public-key'] ) || '' === $associative_args['public-key'] || true === $associative_args['public-key'] ) {
+		$path = null;
+		if ( isset( $associative_args['public-key'] ) && '' !== $associative_args['public-key'] && true !== $associative_args['public-key'] ) {
+			$path = (string) $associative_args['public-key'];
+		} elseif ( $this->environment->is_constant_defined( 'PONTIFEX_PUBLIC_KEY' ) ) {
+			$path = (string) $this->environment->constant_value( 'PONTIFEX_PUBLIC_KEY' );
+		}
+		if ( null === $path || '' === $path ) {
 			return null;
 		}
 
 		$key = '';
 		try {
-			$key = SigningKeys::load_public_key( (string) $associative_args['public-key'] );
+			$key = SigningKeys::load_public_key( $path );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
@@ -829,14 +916,17 @@ final class ImportCommand {
 	/**
 	 * Verify the archive's signature before restoring, refusing a bad one.
 	 *
-	 * Runs before any write. Unsigned archive: nothing to check (a stray
-	 * --public-key earns a warning). Signed with no key: warn that the signature
-	 * is unverified and proceed. Signed with a key: a failed signature aborts the
-	 * import via WP_CLI::error so nothing is written; a good one logs that it
-	 * verified.
+	 * Runs before any write. A supplied or pinned trusted key makes the
+	 * signature MANDATORY (ADR 0012): an unsigned archive — including one whose
+	 * signature was stripped, which yields a well-formed unsigned archive — is
+	 * refused, because the unkeyed integrity hashes detect corruption, not
+	 * tampering, and the signature is the only tamper defence. Signed with no
+	 * key: warn that the signature is unverified and proceed. Signed with a
+	 * key: a failed signature aborts the import via WP_CLI::error so nothing
+	 * is written; a good one logs that it verified.
 	 *
 	 * @param resource    $source     The open archive stream.
-	 * @param string|null $public_key The trusted public key, or null when none was supplied.
+	 * @param string|null $public_key The trusted public key, or null when none was supplied or pinned.
 	 * @return void
 	 */
 	private function verify_signature_gate( $source, ?string $public_key ): void {
@@ -844,7 +934,7 @@ final class ImportCommand {
 
 		if ( null === $reader->signature() ) {
 			if ( null !== $public_key ) {
-				WP_CLI::warning( __( 'A public key was supplied with --public-key, but this archive is not signed.', 'pontifex' ) );
+				WP_CLI::error( __( 'A trusted public key was supplied, but this archive is NOT signed — and a stripped signature looks exactly like this. The signature is the only tamper defence (integrity hashes detect corruption, not tampering), so this restore is refused. If you trust this archive, re-run without --public-key (and without a PONTIFEX_PUBLIC_KEY pin); to make backups verifiable, sign exports with --sign.', 'pontifex' ) );
 			}
 			return;
 		}

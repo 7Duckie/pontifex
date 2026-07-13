@@ -114,6 +114,12 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 		$file_items = $this->file_scanner->scan( $wordpress_root, $on_scan_progress );
 		$db_items   = $this->database_scanner->scan();
 
+		// Every Pontifex backup contains the whole database, so a backup with no database
+		// chunks means the database was not captured — a silent, catastrophic data-loss risk
+		// on restore. Refuse it here, at the assembly boundary, independently of the
+		// adapter's own empty-table guard.
+		$this->refuse_when_no_database( $db_items );
+
 		// Sum the estimated original sizes once, for the safety-archive disk
 		// preflight: file sizes from the scan, database sizes from each chunk's
 		// byte_count(). This equals the previous per-plan sum of
@@ -139,6 +145,25 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 		};
 
 		return new ManifestStream( array_merge( $file_items, $db_items ), $factory, $estimated_bytes );
+	}
+
+	/**
+	 * Refuse an assembled backup that captured no database.
+	 *
+	 * Every Pontifex backup contains the whole database, so a scan that produced no chunks
+	 * means the database was not captured — a silent, catastrophic data-loss risk on
+	 * restore. This is the assembly-boundary backstop to the adapter's own empty-table
+	 * guard: independent guards at two layers, so no single future path or bug can produce
+	 * a backup with no database in it.
+	 *
+	 * @param ScannedDbChunk[] $db_items The database chunks the scan produced.
+	 * @return void
+	 * @throws RuntimeException If no database chunks were produced.
+	 */
+	private function refuse_when_no_database( array $db_items ): void {
+		if ( array() === $db_items ) {
+			throw new RuntimeException( 'ManifestBuilder: the database scan produced no chunks. Refusing to build a backup with no database in it.' );
+		}
 	}
 
 	/**

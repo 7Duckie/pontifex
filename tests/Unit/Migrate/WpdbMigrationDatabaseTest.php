@@ -88,6 +88,27 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 	}
 
 	/**
+	 * The list_tables method refuses an empty result even with no error signalled.
+	 *
+	 * A silently-failed SHOW TABLES returns [] with an empty last_error under
+	 * suppress_errors; a real install always has {prefix}options, so the migration must
+	 * refuse rather than rewrite zero tables and report a hollow success.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_refuses_an_empty_result_without_error(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'get_var' )->willReturn( null );
+
+		$this->expectException( RuntimeException::class );
+
+		( new WpdbMigrationDatabase( $wpdb ) )->list_tables();
+	}
+
+	/**
 	 * A single-column primary key returns that column's name.
 	 *
 	 * @return void
@@ -145,6 +166,64 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 
 		( new WpdbMigrationDatabase( $wpdb ) )->primary_key( 'wp_missing' );
+	}
+
+	/**
+	 * Row windows must be ordered by the primary key, resolved once per table.
+	 *
+	 * Without an ORDER BY, consecutive OFFSET windows can overlap or leave
+	 * gaps — a row that silently never gets its URLs rewritten.
+	 *
+	 * @return void
+	 */
+	public function test_read_rows_orders_by_the_primary_key(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		$db = new WpdbMigrationDatabase( $wpdb );
+		$db->read_rows( 'wp_posts', 0, 10 );
+		$db->read_rows( 'wp_posts', 10, 10 );
+
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d OFFSET %d', $prepared, 'Row windows must be ordered by the primary key so pagination is stable.' );
+		$this->assertSame( 1, count( array_filter( $prepared, static fn ( string $q ): bool => str_contains( $q, 'SHOW KEYS' ) ) ), 'The ordering key must be resolved once per table, not once per window.' );
+	}
+
+	/**
+	 * The sizing read mirrors the export adapter: Avg_row_length, or 0 when unknown.
+	 *
+	 * @return void
+	 */
+	public function test_average_row_bytes_reads_avg_row_length_or_zero(): void {
+		$known = $this->mock_wpdb();
+		$known->method( 'esc_like' )->willReturnArgument( 0 );
+		$known->method( 'prepare' )->willReturn( 'SHOW TABLE STATUS prepared' );
+		$known->method( 'get_row' )->willReturn( array( 'Avg_row_length' => '2048' ) );
+		$this->assertSame( 2048, ( new WpdbMigrationDatabase( $known ) )->average_row_bytes( 'wp_posts' ) );
+
+		$unknown = $this->mock_wpdb();
+		$unknown->method( 'esc_like' )->willReturnArgument( 0 );
+		$unknown->method( 'prepare' )->willReturn( 'SHOW TABLE STATUS prepared' );
+		$unknown->method( 'get_row' )->willReturn( null );
+		$this->assertSame( 0, ( new WpdbMigrationDatabase( $unknown ) )->average_row_bytes( 'wp_posts' ), 'An unreadable status must report the unknown answer, 0.' );
 	}
 
 	/**

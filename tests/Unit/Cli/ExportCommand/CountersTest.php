@@ -43,11 +43,11 @@ final class CountersTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Empty current and empty delta yield all four counters at zero.
+	 * Empty current and empty delta yield all five counters at zero.
 	 *
 	 * @return void
 	 */
-	public function test_merge_empty_yields_four_zeroes(): void {
+	public function test_merge_empty_yields_five_zeroes(): void {
 		$merged = $this->invoke_static( 'merge_counters', array(), array() );
 
 		$this->assertSame(
@@ -56,6 +56,7 @@ final class CountersTest extends TestCase {
 				'succeeded'      => 0,
 				'failed'         => 0,
 				'bytes_exported' => 0,
+				'files_changed'  => 0,
 			),
 			$merged
 		);
@@ -86,10 +87,12 @@ final class CountersTest extends TestCase {
 			'succeeded'      => 2,
 			'failed'         => 1,
 			'bytes_exported' => 100,
+			'files_changed'  => 3,
 		);
 		$delta   = array(
 			'succeeded'      => 1,
 			'bytes_exported' => 50,
+			'files_changed'  => 2,
 		);
 
 		$merged = $this->invoke_static( 'merge_counters', $current, $delta );
@@ -100,6 +103,7 @@ final class CountersTest extends TestCase {
 				'succeeded'      => 3,
 				'failed'         => 1,
 				'bytes_exported' => 150,
+				'files_changed'  => 5,
 			),
 			$merged
 		);
@@ -126,13 +130,14 @@ final class CountersTest extends TestCase {
 				'succeeded'      => 0,
 				'failed'         => 2,
 				'bytes_exported' => 7,
+				'files_changed'  => 0,
 			),
 			$merged
 		);
 	}
 
 	/**
-	 * Only the four known keys are returned; stray keys are dropped.
+	 * Only the five known keys are returned; stray keys are dropped.
 	 *
 	 * @return void
 	 */
@@ -147,7 +152,7 @@ final class CountersTest extends TestCase {
 		);
 
 		$this->assertArrayNotHasKey( 'mystery', $merged );
-		$this->assertCount( 4, $merged );
+		$this->assertCount( 5, $merged );
 	}
 
 	// -------------------------------------------------------------------------

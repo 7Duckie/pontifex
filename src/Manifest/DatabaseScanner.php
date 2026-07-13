@@ -35,11 +35,16 @@ use Pontifex\Archive\Format\EntryHeader;
  *    IF EXISTS + CREATE TABLE) plus the first batch of rows.
  *  - Subsequent chunks carry only rows.
  *  - Chunk size is approximate. The scanner estimates rows-per-chunk
- *    by dividing the configured byte budget by an assumed average
- *    INSERT statement size; the actual byte count is verified
- *    lazily at write time. Empty tables produce one schema-only
- *    chunk so that the archive's import path always recreates the
- *    table even if it had no rows.
+ *    per table, dividing the configured byte budget by the table's
+ *    real average row width (read from the storage engine, doubled
+ *    for SQL-literal escaping overhead) or, when that is unknown or
+ *    smaller, by an assumed average INSERT statement size; the
+ *    actual byte count is verified lazily at write time. Sizing by
+ *    the real row width keeps a wide-row table's chunks near the
+ *    byte budget, so the archive stays restorable under a
+ *    memory-budgeted web request. Empty tables produce one
+ *    schema-only chunk so that the archive's import path always
+ *    recreates the table even if it had no rows.
  *
  * Exclusions:
  *
@@ -73,11 +78,26 @@ final class DatabaseScanner {
 	 * kilobytes). Using ~1 KiB as the average means the scanner
 	 * tends to produce slightly larger chunks than the byte budget
 	 * for posts-heavy tables and slightly smaller chunks for
-	 * options-heavy tables. Both are acceptable.
+	 * options-heavy tables. Both are acceptable — and the floor: when
+	 * the table's real average row width is larger, the real width
+	 * takes over (see {@see self::compute_rows_per_chunk()}).
 	 *
 	 * @var int
 	 */
 	private const AVG_BYTES_PER_STATEMENT_ESTIMATE = 1024;
+
+	/**
+	 * Multiplier applied to the storage engine's average row width.
+	 *
+	 * A row's SQL-literal form is larger than its stored form — string
+	 * escaping, quoting, numeric-to-text conversion — so the on-disk
+	 * average is doubled before it divides the chunk budget. Erring
+	 * large is the safe direction: it means fewer rows per chunk, so a
+	 * chunk's real bytes land under the budget rather than over it.
+	 *
+	 * @var int
+	 */
+	private const SQL_OVERHEAD_MULTIPLIER = 2;
 
 	/**
 	 * Database adapter used to query tables.
@@ -145,7 +165,8 @@ final class DatabaseScanner {
 			}
 
 			$row_count      = $this->db->row_count( $table_name );
-			$rows_per_chunk = $this->compute_rows_per_chunk();
+			$row_bytes      = $this->estimated_statement_bytes( $table_name );
+			$rows_per_chunk = $this->compute_rows_per_chunk( $row_bytes );
 			$is_empty_table = 0 === $row_count;
 
 			// Empty tables get a single schema-only chunk.
@@ -156,7 +177,7 @@ final class DatabaseScanner {
 				$offset = $i * $rows_per_chunk;
 				$limit  = min( $rows_per_chunk, max( 0, $row_count - $offset ) );
 
-				$chunks[] = $this->build_chunk( $table_name, $i, $offset, $limit );
+				$chunks[] = $this->build_chunk( $table_name, $i, $offset, $limit, $row_bytes );
 			}
 		}
 
@@ -164,16 +185,33 @@ final class DatabaseScanner {
 	}
 
 	/**
+	 * Estimate the SQL bytes one of this table's rows contributes to a chunk.
+	 *
+	 * The table's real average row width (from the adapter, doubled for
+	 * SQL-literal escaping overhead) when it is known and wider than the fixed
+	 * fallback; otherwise the fixed ~1 KiB estimate. Taking the larger of the
+	 * two means a wide-row table gets proportionally fewer rows per chunk while
+	 * narrow tables keep today's chunking exactly.
+	 *
+	 * @param string $table_name The table being sized.
+	 * @return int A positive per-row byte estimate.
+	 */
+	private function estimated_statement_bytes( string $table_name ): int {
+		$average = $this->db->average_row_bytes( $table_name );
+		return max( self::AVG_BYTES_PER_STATEMENT_ESTIMATE, $average * self::SQL_OVERHEAD_MULTIPLIER );
+	}
+
+	/**
 	 * Compute how many rows fit in a single chunk given the configured byte budget.
 	 *
-	 * Uses a conservative average bytes-per-statement estimate. The
-	 * result is always at least 1 to guarantee progress on tables
-	 * with wide rows.
+	 * The result is always at least 1 to guarantee progress on tables whose
+	 * single row exceeds the whole budget.
 	 *
+	 * @param int $row_bytes The per-row byte estimate for the table being chunked.
 	 * @return int A positive integer count of rows per chunk.
 	 */
-	private function compute_rows_per_chunk(): int {
-		$estimated = (int) floor( $this->chunk_size_bytes / self::AVG_BYTES_PER_STATEMENT_ESTIMATE );
+	private function compute_rows_per_chunk( int $row_bytes ): int {
+		$estimated = (int) floor( $this->chunk_size_bytes / $row_bytes );
 		return max( 1, $estimated );
 	}
 
@@ -189,9 +227,10 @@ final class DatabaseScanner {
 	 * @param int    $chunk_index The 0-based ordinal of this chunk.
 	 * @param int    $offset      The first row offset this chunk covers.
 	 * @param int    $limit       The maximum row count this chunk covers.
+	 * @param int    $row_bytes   The per-row byte estimate used to size this table's chunks.
 	 * @return ScannedDbChunk A fully-populated chunk metadata object.
 	 */
-	private function build_chunk( string $table_name, int $chunk_index, int $offset, int $limit ): ScannedDbChunk {
+	private function build_chunk( string $table_name, int $chunk_index, int $offset, int $limit, int $row_bytes ): ScannedDbChunk {
 		$db       = $this->db;
 		$is_first = 0 === $chunk_index;
 
@@ -210,7 +249,7 @@ final class DatabaseScanner {
 		// replay a chunk whose parsed statement count disagrees with this header value.
 		// Byte count is the rows-per-chunk estimate plus an allowance for the schema if applicable.
 		$statement_count = ( $is_first ? 2 : 0 ) + ( $limit > 0 ? 1 : 0 );
-		$byte_count      = ( $limit * self::AVG_BYTES_PER_STATEMENT_ESTIMATE ) + ( $is_first ? 2048 : 0 );
+		$byte_count      = ( $limit * $row_bytes ) + ( $is_first ? 2048 : 0 );
 
 		return new ScannedDbChunk( $table_name, $chunk_index, $statement_count, $byte_count, $sql_provider );
 	}

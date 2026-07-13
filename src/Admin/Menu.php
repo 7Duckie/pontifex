@@ -222,6 +222,7 @@ final class Menu {
 
 		if ( '' !== $this->restore_hook && $hook_suffix === $this->restore_hook ) {
 			$this->enqueue_restore_script( $base, $version );
+			$this->enqueue_upload_script( $base, $version );
 		}
 	}
 
@@ -248,6 +249,7 @@ final class Menu {
 				'assets/admin/pontifex-backup.js',
 				'assets/admin/pontifex-verify.js',
 				'assets/admin/pontifex-restore.js',
+				'assets/admin/pontifex-upload.js',
 			);
 			foreach ( $files as $relative_path ) {
 				$path = $dir . $relative_path;
@@ -298,23 +300,31 @@ final class Menu {
 				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
 				'nonce'   => wp_create_nonce( BackupController::NONCE_ACTION ),
 				'strings' => array(
-					'starting'      => __( 'Starting backup…', 'pontifex' ),
+					'starting'          => __( 'Starting backup…', 'pontifex' ),
 					/* translators: %s: number of files found so far */
-					'scanning'      => __( 'Scanning files… %s', 'pontifex' ),
+					'scanning'          => __( 'Scanning files… %s', 'pontifex' ),
 					/* translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes */
-					'progress'      => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'          => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'       => __( 'Time elapsed - %s', 'pontifex' ),
+					'elapsed'           => __( 'Time elapsed - %s', 'pontifex' ),
 					/* translators: 1: elapsed time, 2: estimated time remaining */
-					'timing'        => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
+					'timing'            => __( 'Time elapsed - %1$s with about %2$s left', 'pontifex' ),
 					/* translators: 1: the finished backup's size, 2: the source data size it was compressed from */
-					'created'       => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
-					'cancel'        => __( 'Cancel backup', 'pontifex' ),
-					'cancelling'    => __( 'Cancelling…', 'pontifex' ),
-					'cancelled'     => __( 'Backup cancelled.', 'pontifex' ),
-					'confirmCancel' => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
-					'failed'        => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
-					'confirmDelete' => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+					'created'           => __( 'Backup created — %1$s (compressed from %2$s)', 'pontifex' ),
+					'createdPlain'      => __( 'Backup created.', 'pontifex' ),
+					'reattached'        => __( 'A backup is running — re-attached to its progress.', 'pontifex' ),
+					/* translators: shown after re-attaching to a backup that then finished */
+					'finishedElsewhere' => __( 'The running backup finished.', 'pontifex' ),
+					'cancel'            => __( 'Cancel backup', 'pontifex' ),
+					'cancelling'        => __( 'Cancelling…', 'pontifex' ),
+					'cancelled'         => __( 'Backup cancelled.', 'pontifex' ),
+					'confirmCancel'     => __( 'Cancel this backup? The progress so far will be lost.', 'pontifex' ),
+					'failed'            => __( 'The backup could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'confirmDelete'     => __( 'Delete this backup? This cannot be undone.', 'pontifex' ),
+					/* translators: %s: the next scheduled run time, e.g. "2026-07-14 03:00 UTC" */
+					'scheduleSaved'     => __( 'Schedule saved. Next backup at %s.', 'pontifex' ),
+					'scheduleSavedOff'  => __( 'Schedule saved. Scheduled backups are off.', 'pontifex' ),
+					'scheduleFailed'    => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ),
 				),
 			)
 		);
@@ -386,19 +396,72 @@ final class Menu {
 				'nonce'    => wp_create_nonce( RestoreController::NONCE_ACTION ),
 				'loginUrl' => wp_login_url(),
 				'strings'  => array(
-					'starting'       => __( 'Starting…', 'pontifex' ),
-					'verifying'      => __( 'Verifying the backup…', 'pontifex' ),
-					'backingUp'      => __( 'Backing up your content…', 'pontifex' ),
-					'restoring'      => __( 'Restoring…', 'pontifex' ),
-					'rollingBack'    => __( 'Rolling back…', 'pontifex' ),
+					'starting'           => __( 'Starting…', 'pontifex' ),
+					'verifying'          => __( 'Verifying the backup…', 'pontifex' ),
+					'backingUp'          => __( 'Backing up your content…', 'pontifex' ),
+					'restoring'          => __( 'Restoring…', 'pontifex' ),
+					'rollingBack'        => __( 'Rolling back…', 'pontifex' ),
 					/* translators: 1: bytes done so far, 2: total bytes, both as human-readable sizes */
-					'progress'       => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'           => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'        => __( 'Time elapsed - %s', 'pontifex' ),
-					'failed'         => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
-					'signedOutTitle' => __( 'Restore complete', 'pontifex' ),
-					'signedOut'      => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
-					'loginLink'      => __( 'Log in', 'pontifex' ),
+					'elapsed'            => __( 'Time elapsed - %s', 'pontifex' ),
+					'failed'             => __( 'The restore could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'failedUnknown'      => __( 'The connection was lost, so the result is unknown — the operation may have completed or may still be running. Wait a moment, then reload this page to check; if the site looks wrong, run a rollback. Check the Pontifex log for details.', 'pontifex' ),
+					'sessionUnknown'     => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
+					/* translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it */
+					'reattachedFinished' => __( 'The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome.', 'pontifex' ),
+					'signedOutTitle'     => __( 'Restore complete', 'pontifex' ),
+					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
+					'loginLink'          => __( 'Log in', 'pontifex' ),
+				),
+			)
+		);
+	}
+
+	/**
+	 * Enqueue and configure the foreign-backup upload script.
+	 *
+	 * Loaded alongside the Restore screen's own script, since uploading a backup
+	 * taken on another server is how a foreign archive joins this site's restore
+	 * list. Localised with the ajax URL, a `pontifex_upload` nonce, a chunk size
+	 * derived from the site's upload ceiling (with headroom for the request's other
+	 * fields), and the translated strings it shows; the server re-checks the
+	 * capability and the nonce on every chunk.
+	 *
+	 * @param string       $base    The plugin's base URL.
+	 * @param string|false $version The asset version, or false when undefined.
+	 * @return void
+	 */
+	private function enqueue_upload_script( string $base, string|false $version ): void {
+		wp_enqueue_script(
+			'pontifex-upload',
+			$base . 'assets/admin/pontifex-upload.js',
+			array(),
+			$version,
+			true
+		);
+
+		// The whole request body is the chunk plus a handful of small fields (the nonce,
+		// the id, the offset, the total, the name), so the chunk is kept below the upload
+		// ceiling by a margin large enough for those fields.
+		$ceiling    = (int) wp_max_upload_size();
+		$headroom   = 32 * 1024;
+		$chunk_size = $ceiling > $headroom ? $ceiling - $headroom : $ceiling;
+
+		wp_localize_script(
+			'pontifex-upload',
+			'pontifexUpload',
+			array(
+				'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
+				'nonce'     => wp_create_nonce( UploadController::NONCE_ACTION ),
+				'chunkSize' => $chunk_size,
+				'strings'   => array(
+					'starting' => __( 'Uploading…', 'pontifex' ),
+					/* translators: 1: bytes uploaded so far, 2: total bytes, both as human-readable sizes */
+					'progress' => __( '%1$s of %2$s', 'pontifex' ),
+					'done'     => __( 'Upload complete.', 'pontifex' ),
+					'failed'   => __( 'The upload could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'noFile'   => __( 'No file chosen', 'pontifex' ),
 				),
 			)
 		);

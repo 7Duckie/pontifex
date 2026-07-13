@@ -18,6 +18,8 @@ use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Manifest\WpdbAdapter;
+use Pontifex\Migrate\UrlMigrator;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -79,8 +81,11 @@ final class RestoreController {
 	/**
 	 * The transient key marking that a restore or rollback is currently running.
 	 *
-	 * A single-runner lock; carries a TTL so a crash that skips the shutdown
-	 * handler still self-heals.
+	 * The secondary single-runner guard: the primary is an atomic named
+	 * database lock (this constant doubles as its logical name), and this
+	 * transient is checked only while that lock is held — see
+	 * {@see self::acquire_lock()}. Carries a TTL so a crash that skips the
+	 * shutdown handler still self-heals.
 	 *
 	 * @var string
 	 */
@@ -220,6 +225,16 @@ final class RestoreController {
 	private ?SafetyArchiverInterface $safety_archiver;
 
 	/**
+	 * The cross-URL migrator used when a new URL is supplied with a restore.
+	 *
+	 * Optional: when null and a URL is given, a UrlMigrator over the live $wpdb is
+	 * wired (matching ImportCommand). Tests inject a fake fulfilling the interface.
+	 *
+	 * @var UrlMigratorInterface|null
+	 */
+	private ?UrlMigratorInterface $url_migrator;
+
+	/**
 	 * Whether this request holds the single-runner lock.
 	 *
 	 * @var bool
@@ -236,6 +251,7 @@ final class RestoreController {
 	 * @param LoggerInterface              $logger            Records a failure's real cause.
 	 * @param RestoreRunnerInterface|null  $restore_runner    Optional. When null, a default live-site engine is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a default archiver is used.
+	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and a URL is given, a UrlMigrator over the live $wpdb is wired.
 	 */
 	public function __construct(
 		Environment $environment,
@@ -244,7 +260,8 @@ final class RestoreController {
 		RollbackStoreInterface $rollback_store,
 		LoggerInterface $logger,
 		?RestoreRunnerInterface $restore_runner = null,
-		?SafetyArchiverInterface $safety_archiver = null
+		?SafetyArchiverInterface $safety_archiver = null,
+		?UrlMigratorInterface $url_migrator = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
@@ -253,6 +270,7 @@ final class RestoreController {
 		$this->logger            = $logger;
 		$this->restore_runner    = $restore_runner;
 		$this->safety_archiver   = $safety_archiver;
+		$this->url_migrator      = $url_migrator;
 	}
 
 	/**
@@ -278,6 +296,11 @@ final class RestoreController {
 			wp_send_json_error( array( 'message' => __( 'That backup could not be found.', 'pontifex' ) ), 404 );
 		}
 
+		// The opt-in "relink to this site" box turns this into a cross-URL migration run
+		// after the restore, rewriting the backup's own URL to this destination's. Read
+		// before any side effect; the target is always this site, never a typed address.
+		$migrate = $this->migrate_requested();
+
 		if ( ! $this->acquire_lock() ) {
 			wp_send_json_error( array( 'message' => __( 'A restore is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
 		}
@@ -287,6 +310,10 @@ final class RestoreController {
 
 		$size   = $this->archive_size( (string) $path );
 		$source = null;
+		// The safety archive's path, once taken — the undo the failure handler replays to
+		// recover the site if the restore then fails part-written. Null until it is taken,
+		// so a failure before that point knows the site was not yet changed.
+		$safety_path = null;
 		try {
 			$source = $this->open_source( (string) $path );
 
@@ -335,8 +362,19 @@ final class RestoreController {
 					)
 				);
 			} else {
+				// For a relink restore, read the backup's own source URL before the
+				// restore consumes the stream; the rewrite runs on the restored database
+				// afterwards.
+				$migrator   = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
+				$source_url = '';
+				if ( null !== $migrator ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream so source_url can re-read its provenance; not a WP_Filesystem operation.
+					rewind( $source );
+					$source_url = $migrator->source_url( $source );
+				}
+
 				// Phase 2: the pre-import safety archive (the undo), then phase 3: restore.
-				$this->take_safety_archive();
+				$safety_path = $this->take_safety_archive();
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size );
@@ -347,6 +385,15 @@ final class RestoreController {
 				// silently lost (a stale "exists" cache makes update_option run an UPDATE
 				// that matches zero rows in the just-replaced wp_options).
 				$this->wordpress_context->flush_cache();
+
+				// Phase 4 (relink only): rewrite the backup's own URL to this site's across
+				// the restored database, serialised-safe (ADR 0006). The target is always
+				// this destination — never a typed address — so a relinked site can only
+				// ever point at the address the operator is already looking at, and the
+				// site does not move, so no new login URL is needed.
+				$migration = null !== $migrator
+					? $migrator->migrate( $source_url, $this->wordpress_context->site_url() )
+					: null;
 
 				$this->finish( $source );
 				// The pre-restore `attempted` bump was wiped when the replay replaced
@@ -365,22 +412,77 @@ final class RestoreController {
 					array(
 						'restored' => true,
 						'entries'  => $entries,
-						'message'  => sprintf(
-							/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: the backup filename */
-							__( 'Restored — %1$d entries (%2$s) written from %3$s. Your site now matches that backup.', 'pontifex' ),
-							$entries,
-							$this->wordpress_context->format_size( $size ),
-							basename( (string) $path )
-						),
+						'message'  => null !== $migration
+							? sprintf(
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten */
+								__( 'Restored and relinked — %1$d entries (%2$s) written, then the backup\'s links were rewritten to this site across %3$d database rows.', 'pontifex' ),
+								$entries,
+								$this->wordpress_context->format_size( $size ),
+								$migration->rows_changed()
+							)
+							: sprintf(
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: the backup filename */
+								__( 'Restored — %1$d entries (%2$s) written from %3$s. Your site now matches that backup.', 'pontifex' ),
+								$entries,
+								$this->wordpress_context->format_size( $size ),
+								basename( (string) $path )
+							),
 					)
 				);
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin restore failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+
+			// If the safety archive was taken, the restore may have written part of the
+			// database, so replay it to return the site to its pre-restore state. When it was
+			// not taken (the failure preceded it), the site was not changed and nothing is
+			// replayed. Recovery never throws — it reports whether the site was restored.
+			$recovered = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path ) : null;
+
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovered ) ), 500 );
+		}
+	}
+
+	/**
+	 * Replay a safety archive to recover the site after a failed restore.
+	 *
+	 * Called only from the restore failure handler, once the safety archive has been
+	 * taken and the restore has then failed — so the database may be part-written. It
+	 * opens the safety archive, verifies it, and replays it unrestricted (like a
+	 * rollback), returning the site to its pre-restore state. It is wrapped so it can
+	 * never throw out of the failure handler: a recovery that itself fails is reported
+	 * as such, not escalated.
+	 *
+	 * @param string $path The absolute path of the safety archive to replay.
+	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 */
+	private function recover_from_safety_archive( string $path ): bool {
+		$source = null;
+		try {
+			$size   = $this->archive_size( $path );
+			$source = $this->open_source( $path );
+			// A safety archive is the site's own undo, so its replay is unrestricted — no
+			// required prefix, matching a rollback.
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+
+			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+				$this->finish( $source );
+				return false;
+			}
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the recovery walk re-reads it; not a WP_Filesystem operation.
+			rewind( $source );
+			$this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
+			$this->wordpress_context->flush_cache();
+			$this->finish( $source );
+			return true;
+		} catch ( Throwable $recovery_error ) {
+			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+			return false;
 		}
 	}
 
@@ -489,8 +591,21 @@ final class RestoreController {
 				self::ROLLBACK_STATS_OPTION,
 				'bytes_rolled_back'
 			);
-			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->rollback_failure_message() ), 500 );
 		}
+	}
+
+	/**
+	 * The message returned when a rollback itself fails.
+	 *
+	 * Distinct from {@see self::failure_message()}: a rollback has no undo of its own, so
+	 * a failure part-way may leave the site partially rolled back, and the only recovery
+	 * is to restore a backup.
+	 *
+	 * @return string A human-readable rollback-failure message.
+	 */
+	private function rollback_failure_message(): string {
+		return __( 'The rollback could not be completed. Your site may be partially rolled back — restore a backup to recover. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	/**
@@ -610,9 +725,10 @@ final class RestoreController {
 	 * a determinate byte bar that fills as the content is copied — the same progress
 	 * the Backup screen shows, so the experience is consistent across the two.
 	 *
-	 * @return void
+	 * @return string The absolute path of the safety archive written — the undo the
+	 *                restore automatically replays if the restore then fails.
 	 */
-	private function take_safety_archive(): void {
+	private function take_safety_archive(): string {
 		$archiver = $this->safety_archiver ?? $this->default_safety_archiver();
 
 		$this->set_progress( self::PHASE_BACKING_UP, 0, 0 );
@@ -632,7 +748,7 @@ final class RestoreController {
 			}
 		};
 
-		$this->safety_archiver_create( $archiver, $on_bytes, $on_total );
+		return $this->safety_archiver_create( $archiver, $on_bytes, $on_total );
 	}
 
 	/**
@@ -644,10 +760,10 @@ final class RestoreController {
 	 * @param SafetyArchiverInterface $archiver The archiver to run.
 	 * @param callable                $on_bytes The byte-progress callback.
 	 * @param callable                $on_total The estimated-total callback, for a determinate bar.
-	 * @return void
+	 * @return string The absolute path of the safety archive just written.
 	 */
-	private function safety_archiver_create( SafetyArchiverInterface $archiver, callable $on_bytes, callable $on_total ): void {
-		$archiver->create( $this->resolve_content_root(), null, $on_bytes, $on_total );
+	private function safety_archiver_create( SafetyArchiverInterface $archiver, callable $on_bytes, callable $on_total ): string {
+		return $archiver->create( $this->resolve_content_root(), null, $on_bytes, $on_total );
 	}
 
 	// -------------------------------------------------------------------------
@@ -671,7 +787,9 @@ final class RestoreController {
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
 			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) )
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) ),
+			null,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);
 	}
 
@@ -685,7 +803,7 @@ final class RestoreController {
 	 * @return SafetyArchiver An archiver ready to write a content-only pre-import safety archive.
 	 */
 	private function default_safety_archiver(): SafetyArchiver {
-		return new SafetyArchiver( $this->environment, $this->wordpress_context, $this->rollback_store, null, 1, true );
+		return new SafetyArchiver( $this->environment, $this->wordpress_context, $this->rollback_store, null, 2, true );
 	}
 
 	/**
@@ -767,7 +885,7 @@ final class RestoreController {
 	 */
 	private function extend_time_limit(): void {
 		if ( function_exists( 'set_time_limit' ) ) {
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- set_time_limit can be disabled by the host; the call is best-effort and its failure must not abort the restore.
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- A long restore must outlive the host's web timeout, the accepted pattern for backup tooling; set_time_limit can be disabled by the host, so the call is best-effort and its failure must not abort the restore.
 			@set_time_limit( 0 );
 		}
 	}
@@ -816,17 +934,28 @@ final class RestoreController {
 	}
 
 	/**
-	 * The message returned when a restore or rollback fails.
+	 * The message returned when a restore fails.
 	 *
 	 * The underlying error is recorded in the log; the operator sees a plain
-	 * sentence rather than an exception string.
+	 * sentence rather than an exception string, and is told whether the site was
+	 * automatically rolled back.
 	 *
-	 * @param Throwable $error The failure (kept to keep the signature honest; not echoed).
+	 * @param Throwable $error     The failure (kept to keep the signature honest; not echoed).
+	 * @param bool|null $recovered Recovery outcome: true if the site was auto-rolled back to
+	 *                             its pre-restore state, false if that recovery also failed,
+	 *                             or null when no recovery was attempted (the site was not
+	 *                             changed, or this is a rollback failure).
 	 * @return string A human-readable failure message.
 	 */
-	private function failure_message( Throwable $error ): string {
+	private function failure_message( Throwable $error, ?bool $recovered = null ): string {
 		unset( $error );
-		return __( 'The restore could not be completed. Your site may be partially restored — roll back to recover. Check the Pontifex log for details.', 'pontifex' );
+		if ( true === $recovered ) {
+			return __( 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.', 'pontifex' );
+		}
+		if ( false === $recovered ) {
+			return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
+		}
+		return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	// -------------------------------------------------------------------------
@@ -887,12 +1016,29 @@ final class RestoreController {
 	}
 
 	/**
-	 * Acquire the single-runner lock, or report that it is already held.
+	 * Acquire the single-runner lock, or report that an operation is already running.
+	 *
+	 * Two independent guards, and both must pass. The primary is a named
+	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
+	 * server grants it atomically, so two simultaneous requests can never
+	 * both acquire — closing the check-then-set race a transient alone
+	 * cannot — and it vanishes with the connection if the request crashes.
+	 * The transient stays as a second, independent guard behind it: checked
+	 * only while the named lock is held, its old race is gone, and it still
+	 * refuses a run in the rare case a runner's named lock is silently lost
+	 * mid-operation (on old MySQL, other code taking its own named lock on
+	 * the same connection releases ours).
 	 *
 	 * @return bool True if the lock was acquired; false if an operation is already running.
 	 */
 	private function acquire_lock(): bool {
+		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
+			return false;
+		}
 		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
+			// A concurrent runner, or a crashed run's transient still inside its
+			// TTL: refuse, and hand back the named lock just taken.
+			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 			return false;
 		}
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
@@ -907,12 +1053,28 @@ final class RestoreController {
 	 */
 	private function release_lock(): void {
 		delete_transient( self::LOCK_TRANSIENT );
+		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 		$this->lock_held = false;
 	}
 
 	// -------------------------------------------------------------------------
 	// Counters.
 	// -------------------------------------------------------------------------
+
+	/**
+	 * Whether the operator ticked "relink this backup to this site".
+	 *
+	 * The nonce is already verified by {@see self::is_authorised()}. A checkbox, so
+	 * the target is never a typed address: when set, the restore rewrites the
+	 * backup's own URL to this destination's site_url() afterwards. Absent (the box
+	 * unticked) means an ordinary same-URL restore.
+	 *
+	 * @return bool True when the relink box is ticked.
+	 */
+	private function migrate_requested(): bool {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() before this method runs.
+		return isset( $_POST['migrate'] ) && '' !== sanitize_text_field( wp_unslash( (string) $_POST['migrate'] ) );
+	}
 
 	/**
 	 * Read-modify-write a stored counters option by a delta.

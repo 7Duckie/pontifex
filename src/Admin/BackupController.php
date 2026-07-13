@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Admin;
 
 use DateTimeImmutable;
+use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Format\Scope;
@@ -17,8 +18,15 @@ use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Job\Job;
+use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ScanProgressManifestBuilder;
+use Pontifex\Schedule\JobTicker;
+use Pontifex\Schedule\Schedule;
+use Pontifex\Schedule\ScheduleStore;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 
@@ -66,9 +74,13 @@ final class BackupController {
 	/**
 	 * The transient key marking that a backup is currently running.
 	 *
-	 * A single-runner lock: create() refuses a second backup while this is set, so
-	 * two concurrent exports can never fight over the progress transient. Carries a
-	 * TTL so a crash that skips the shutdown handler still self-heals.
+	 * The secondary single-runner guard: the primary is an atomic named
+	 * database lock (this constant doubles as its logical name), and this
+	 * transient is checked only while that lock is held — see
+	 * {@see self::acquire_lock()}. create() refuses a second backup while
+	 * either guard is engaged, so two concurrent exports can never fight
+	 * over the progress transient. Carries a TTL so a crash that skips the
+	 * shutdown handler still self-heals.
 	 *
 	 * @var string
 	 */
@@ -104,6 +116,20 @@ final class BackupController {
 	 * @var string
 	 */
 	private const PHASE_IDLE = 'idle';
+
+	/**
+	 * Age, in seconds, past which a progress transient is distrusted while a job is live.
+	 *
+	 * The transient is refreshed several times a second by the request driving
+	 * the backup, so one older than this while an active job exists on disk
+	 * means that request died — its last write must not be served as live
+	 * progress (the "stuck bar" failure), and the job's persisted cursors
+	 * answer instead. Generous against slow ticks: the runner also refreshes
+	 * the job payload every few seconds of work.
+	 *
+	 * @var int
+	 */
+	private const PROGRESS_STALE_SECONDS = 10;
 
 	/**
 	 * Minimum interval, in seconds, between progress transient writes.
@@ -196,6 +222,32 @@ final class BackupController {
 	private ?string $active_backup_path = null;
 
 	/**
+	 * Wall-clock budget per tick when this controller drives the job (seconds).
+	 *
+	 * Every tick pays the resume contract's fixed overhead — a fresh scan and
+	 * a progress-log replay (ADR 0015) — so short ticks multiply that cost
+	 * across the run; the browser gate measured a large backup paying the
+	 * scan roughly nine times. Sixty seconds keeps the overhead to a few
+	 * ticks per run, and costs nothing in safety: a killed request's work is
+	 * healed and continued by resume, so the budget bounds re-done work, not
+	 * lost data.
+	 *
+	 * @var float
+	 */
+	private const TICK_BUDGET_SECONDS = 60.0;
+
+	/**
+	 * The job the running backup persists through, while this request drives it.
+	 *
+	 * Null outside create(). Lets the shutdown handler mark the job failed on a
+	 * fatal (so the single-active-job slot never wedges) and the cleanup helper
+	 * find the job's temp archive.
+	 *
+	 * @var Job|null
+	 */
+	private ?Job $active_job = null;
+
+	/**
 	 * Whether this request holds the single-runner backup lock.
 	 *
 	 * Set when create() acquires the lock and cleared when it releases it, so the
@@ -239,6 +291,10 @@ final class BackupController {
 	 * Overview screen reflects the backup.
 	 *
 	 * @return void
+	 * @throws RuntimeException Caught by this method's own handler; raised when the
+	 *                          job record disappears mid-run (the tick loop's guard).
+	 * @throws BackupCancelled  Caught by this method's own handler; raised at a tick
+	 *                          boundary when the operator requested cancellation.
 	 */
 	public function create(): void {
 		if ( ! $this->is_authorised() ) {
@@ -274,18 +330,73 @@ final class BackupController {
 			// The admin backup is always content-only: it scans wp-content and records
 			// each file under a "wp-content" path prefix, with a content-only scope in
 			// provenance (ADR 0008). A whole-site clone stays a CLI-only operation.
-			$exclusions  = ExclusionRules::default_v010();
-			$builder     = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusions, 'wp-content' );
-			$entry_plans = $builder->build( $this->resolve_content_root(), $this->scan_progress_callback() );
-			$total_bytes = $entry_plans->estimated_bytes();
-
-			$this->set_copy_progress( 0, $total_bytes );
+			// There is deliberately NO pre-scan here: each tick's own scan (ADR 0015)
+			// is the only walk, with the screen's scanning counter and mid-scan cancel
+			// carried into it by the decorated builder, and the byte total persisted
+			// onto the job by the runner as soon as the first scan knows it. The old
+			// duplicate pre-scan doubled the wait before the first byte was written.
+			$exclusions = ExclusionRules::default_v010();
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
-			$runner                   = new ExportRunner( $this->environment, $this->wordpress_context );
-			$options                  = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
-			$result                   = $runner->export( $options, $entry_plans, null, $this->byte_progress_callback( $total_bytes ) );
+
+			// The backup runs as a persisted job (ADR 0014/0015): every tick saves
+			// its progress, so a request the host kills mid-run leaves a continuable
+			// job on disk instead of nothing, and the page can re-attach to it.
+			$job_store = $this->jobs_store();
+			// Whatever builder runs — injected double or the real scanner — it is
+			// decorated with the screen's scan callback: the scanning counter and,
+			// critically, mid-scan cancellation ride inside every tick's scan.
+			$factory = function ( ExclusionRules $rules, string $path_prefix ): ManifestBuilderInterface {
+				$inner = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $rules, $path_prefix );
+				return new ScanProgressManifestBuilder( $inner, $this->scan_progress_callback() );
+			};
+			$runner  = new ResumableExportRunner( $this->environment, $this->wordpress_context, $job_store, $factory );
+			$options = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
+
+			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->patterns(), time() );
+			$this->active_job = $job;
+
+			// Insurance for a request the host kills outright (no shutdown handler
+			// runs): a cron tick will find the still-active job and continue it
+			// unattended. A clean finish, cancel, or failure clears the event.
+			wp_schedule_single_event( time() + JobTicker::RESCHEDULE_DELAY_SECONDS, JobTicker::CRON_HOOK );
+
+			// One byte callback for the WHOLE run, so the reported count accumulates
+			// across ticks. A per-tick callback restarted its tally from zero every
+			// tick; the browser's never-go-backwards clamp masked that as a bar that
+			// stalled at the highest tick's count.
+			$total_bytes = 0;
+			$byte_cb     = $this->accumulating_byte_callback( $job_store, $job->id(), $total_bytes );
+
+			$done = false;
+			while ( ! $done ) {
+				// The cancel sentinel is honoured at tick boundaries: the job is
+				// terminal-marked before cleanup so the active slot frees correctly.
+				if ( $this->store->is_cancel_requested() ) {
+					$current = $job_store->get( $job->id() );
+					if ( null !== $current && $current->is_active() ) {
+						$current->mark( Job::STATUS_CANCELLED, time() );
+						$job_store->save( $current );
+					}
+					throw new BackupCancelled();
+				}
+				$current = $job_store->get( $job->id() );
+				if ( null === $current ) {
+					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
+				}
+				$total_bytes = max( $total_bytes, $this->counter_int( $current->payload(), 'total_bytes' ) );
+				$done        = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
+			}
+
+			$finished      = $job_store->get( $job->id() );
+			$job_payload   = null !== $finished ? $finished->payload() : array();
+			$bytes_written = (int) ( $job_payload['bytes_written'] ?? 0 );
+			$total_bytes   = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
+			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
+			$job_store->delete( $job->id() );
+			$this->active_job = null;
+			wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -296,24 +407,25 @@ final class BackupController {
 			$this->bump_counters(
 				array(
 					'succeeded'      => 1,
-					'bytes_exported' => $result->bytes_written(),
+					'bytes_exported' => $bytes_written,
 				)
 			);
-			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $result->bytes_written(), gmdate( 'c' ) );
+			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
 			wp_send_json_success(
 				array(
 					'filename'     => basename( $path ),
-					'entries'      => $result->entry_count(),
-					'bytes'        => $result->bytes_written(),
-					'size'         => $this->wordpress_context->format_size( $result->bytes_written() ),
+					'entries'      => $entry_count,
+					'bytes'        => $bytes_written,
+					'size'         => $this->wordpress_context->format_size( $bytes_written ),
 					'source_bytes' => $total_bytes,
 				)
 			);
 		} catch ( BackupCancelled $cancelled ) {
-			// Cancellation is not a failure: remove the partial archive, release the
-			// lock, and report it as cancelled. The attempted counter stays bumped,
-			// but neither succeeded nor failed is recorded and nothing is logged.
+			// Cancellation is not a failure: remove the partial archive and the job,
+			// release the lock, and report it as cancelled. The attempted counter
+			// stays bumped, but neither succeeded nor failed is recorded.
+			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
 			$this->release_lock();
@@ -322,6 +434,7 @@ final class BackupController {
 			wp_send_json_success( array( 'cancelled' => true ) );
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
+			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
 			$this->release_lock();
@@ -331,6 +444,51 @@ final class BackupController {
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			wp_send_json_error( array( 'message' => $this->failure_message( $error ) ), 500 );
 		}
+	}
+
+	/**
+	 * The job store, rooted at the same content directory as the backup store.
+	 *
+	 * Derived from the injected store rather than re-resolving WP_CONTENT_DIR,
+	 * so the two stores can never diverge — in production they are identical,
+	 * and in tests both live under the test's own fixture root.
+	 *
+	 * @return JobStore The job store.
+	 */
+	private function jobs_store(): JobStore {
+		return new JobStore( dirname( $this->store->directory(), 2 ) );
+	}
+
+	/**
+	 * Remove the active job's temp archive and records after a cancel or failure.
+	 *
+	 * Best-effort by design: cleanup must never mask the outcome being reported.
+	 * The job is already terminal (the runner marks failed on a throwing tick;
+	 * the cancel path marks cancelled), so deleting the records simply keeps the
+	 * jobs directory tidy — a skipped deletion would be swept by the store's TTL
+	 * cleanup anyway.
+	 *
+	 * @return void
+	 */
+	private function cleanup_job_artefacts(): void {
+		if ( null === $this->active_job ) {
+			return;
+		}
+		wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
+		try {
+			$job_store = $this->jobs_store();
+			$current   = $job_store->get( $this->active_job->id() );
+			$payload   = null !== $current ? $current->payload() : $this->active_job->payload();
+			$temp      = isset( $payload['temp'] ) ? (string) $payload['temp'] : '';
+			if ( '' !== $temp && is_file( $temp ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the job's partial archive; a failure must not mask the outcome being reported.
+				@unlink( $temp );
+			}
+			$job_store->delete( $this->active_job->id() );
+		} catch ( Throwable $cleanup_error ) {
+			$this->logger->error( 'Backup job cleanup failed.', array( 'exception' => $cleanup_error ) );
+		}
+		$this->active_job = null;
 	}
 
 	/**
@@ -361,6 +519,23 @@ final class BackupController {
 			'Admin backup ended on a fatal error; cleaning up the partial archive.',
 			array( 'error' => $last_error['message'] )
 		);
+		// Mark the job failed so the single-active-job slot frees immediately
+		// instead of waiting for the store's abandonment sweep; the job's temp
+		// stays on disk deliberately — it is what a future resume could adopt,
+		// and the store's TTL cleanup removes it with the failed record.
+		if ( null !== $this->active_job ) {
+			try {
+				$job_store = $this->jobs_store();
+				$current   = $job_store->get( $this->active_job->id() );
+				if ( null !== $current && $current->is_active() ) {
+					$current->mark( Job::STATUS_FAILED, time() );
+					$job_store->save( $current );
+				}
+			} catch ( Throwable $cleanup_error ) {
+				$this->logger->error( 'Backup job shutdown cleanup failed.', array( 'exception' => $cleanup_error ) );
+			}
+			$this->active_job = null;
+		}
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
 		$this->release_lock();
@@ -403,14 +578,52 @@ final class BackupController {
 
 		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
 
-		wp_send_json_success(
-			array(
+		$job = ( $this->jobs_store() )->active_job();
+		if ( null !== $job && Job::KIND_EXPORT !== $job->kind() ) {
+			$job = null;
+		}
+
+		// The transient only lives honestly while a request is actively rewriting
+		// it. Two situations mean the job's persisted cursors must answer instead:
+		// no transient at all (this page was reloaded after the writer finished
+		// its TTL, or never saw one), or a transient that has stopped being
+		// refreshed while a job is still live on disk — the writing request died,
+		// and serving its last value would freeze the bar at a lie for the rest
+		// of the transient's TTL.
+		$transient_stale = self::PHASE_IDLE !== $phase
+			&& ( time() - $this->counter_int( $progress, 'at' ) ) > self::PROGRESS_STALE_SECONDS;
+
+		// One response, one send: the answer is decided first and sent once, so
+		// the endpoint's behaviour never depends on wp_send_json_success halting.
+		if ( null !== $job && ( self::PHASE_IDLE === $phase || $transient_stale ) ) {
+			$payload = $job->payload();
+			// Source bytes so the bar speaks the same units as the live byte
+			// callback; older in-flight jobs without the cursor degrade to the
+			// compressed count rather than to zero.
+			$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
+			if ( 0 === $bytes_done ) {
+				$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+			}
+			$response = array(
+				'phase'       => self::PHASE_COPYING,
+				'done'        => 0,
+				'bytes_done'  => $bytes_done,
+				'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+			);
+		} else {
+			$response = array(
 				'phase'       => $phase,
 				'done'        => $this->counter_int( $progress, 'done' ),
 				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
 				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
-			)
-		);
+			);
+		}
+		if ( null !== $job ) {
+			// Whatever answered, a live job's start time rides along so a page
+			// that re-attached mid-run can show elapsed time.
+			$response['started_at'] = $job->created_at();
+		}
+		wp_send_json_success( $response );
 	}
 
 	/**
@@ -484,6 +697,63 @@ final class BackupController {
 		$this->store->ensure_directory();
 		$this->store->request_cancel();
 		wp_send_json_success();
+	}
+
+	/**
+	 * Save the periodic-backup schedule from the Backup screen's form.
+	 *
+	 * The `wp_ajax_pontifex_save_schedule` handler. Refuses without capability
+	 * and nonce, validates the submitted fields through the {@see Schedule}
+	 * value object (an out-of-range hour or unknown frequency is refused, and
+	 * retention is clamped up to its floor), then persists through
+	 * {@see ScheduleStore::save()} — the same store the CLI uses, and the single
+	 * choke point that keeps the recurring cron event in step with the stored
+	 * settings. Responds with the next run time so the page can confirm it.
+	 *
+	 * @return void
+	 */
+	public function save_schedule(): void {
+		if ( ! $this->is_authorised() ) {
+			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above; these only read the schedule fields to validate.
+		$enabled = isset( $_POST['enabled'] ) && '1' === sanitize_text_field( wp_unslash( (string) $_POST['enabled'] ) );
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$frequency = isset( $_POST['frequency'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['frequency'] ) ) : '';
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$hour = isset( $_POST['hour'] ) && is_numeric( wp_unslash( (string) $_POST['hour'] ) ) ? (int) wp_unslash( (string) $_POST['hour'] ) : -1;
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
+		$retention = isset( $_POST['retention'] ) && is_numeric( wp_unslash( (string) $_POST['retention'] ) ) ? (int) wp_unslash( (string) $_POST['retention'] ) : 0;
+
+		try {
+			$schedule = new Schedule( $enabled, $frequency, $hour, $retention );
+		} catch ( InvalidArgumentException $invalid ) {
+			wp_send_json_error( array( 'message' => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ) ), 400 );
+		}
+
+		$now = time();
+		$this->schedules()->save( $schedule, $now );
+
+		wp_send_json_success(
+			array(
+				'enabled'  => $schedule->is_enabled(),
+				'next_run' => $schedule->is_enabled() ? gmdate( 'Y-m-d H:i', ScheduleStore::next_occurrence( $schedule, $now ) ) . ' UTC' : '',
+			)
+		);
+	}
+
+	/**
+	 * The schedule store over this controller's context.
+	 *
+	 * Constructed inline (the {@see self::jobs_store()} pattern) so the
+	 * controller's constructor stays stable; the store is deterministic over
+	 * the injected context, so tests control it through the same seam.
+	 *
+	 * @return ScheduleStore The schedule store.
+	 */
+	private function schedules(): ScheduleStore {
+		return new ScheduleStore( $this->wordpress_context );
 	}
 
 	// -------------------------------------------------------------------------
@@ -565,25 +835,36 @@ final class BackupController {
 	}
 
 	/**
-	 * Build the copy-phase byte-progress callback that writes the throttled transient.
+	 * Build the run-long byte-progress callback that writes the throttled transient.
 	 *
-	 * Handed to {@see ExportRunner::export()} as its byte callback: the export feeds
-	 * it each chunk's raw source byte count, which it accumulates and reports
-	 * against the total. Reporting bytes rather than entries keeps the bar advancing
-	 * smoothly through a single large file instead of freezing at its boundary. The
-	 * transient is refreshed at most once every {@see self::PROGRESS_THROTTLE_SECONDS}
-	 * to keep option writes bounded.
+	 * Handed to every tick of the run: the export feeds it each chunk's raw
+	 * source byte count, which it accumulates ACROSS ticks and reports against
+	 * the total. Reporting bytes rather than entries keeps the bar advancing
+	 * smoothly through a single large file instead of freezing at its boundary.
+	 * The denominator arrives lazily: the first tick's scan persists the byte
+	 * total onto the job, so until it is known the callback re-reads the job at
+	 * the throttle cadence — a bounded handful of small file reads, never one
+	 * per chunk. The transient is refreshed at most once every
+	 * {@see self::PROGRESS_THROTTLE_SECONDS} to keep option writes bounded.
 	 *
-	 * @param int $total_bytes The estimated total source bytes — the progress denominator.
-	 * @return callable(int): void The byte callback to hand to {@see ExportRunner::export()}.
+	 * @param JobStore $job_store   The job store the total is read from.
+	 * @param string   $job_id      The running job's id.
+	 * @param int      $total_bytes Reference to the caller's running total estimate.
+	 * @return callable(int): void The byte callback to hand to every tick.
 	 */
-	private function byte_progress_callback( int $total_bytes ): callable {
+	private function accumulating_byte_callback( JobStore $job_store, string $job_id, int &$total_bytes ): callable {
 		$last       = 0.0;
 		$bytes_done = 0;
-		return function ( int $bytes ) use ( &$last, &$bytes_done, $total_bytes ): void {
+		return function ( int $bytes ) use ( &$last, &$bytes_done, &$total_bytes, $job_store, $job_id ): void {
 			$bytes_done += $bytes;
 			$now         = microtime( true );
 			if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
+				if ( 0 === $total_bytes ) {
+					$job = $job_store->get( $job_id );
+					if ( null !== $job ) {
+						$total_bytes = $this->counter_int( $job->payload(), 'total_bytes' );
+					}
+				}
 				$this->set_copy_progress( $bytes_done, $total_bytes );
 				$last = $now;
 				$this->throw_if_cancelled();
@@ -647,7 +928,7 @@ final class BackupController {
 	 */
 	private function extend_time_limit(): void {
 		if ( function_exists( 'set_time_limit' ) ) {
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- set_time_limit can be disabled by the host; the call is best-effort and its failure must not abort the backup.
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- A long backup must outlive the host's web timeout, the accepted pattern for backup tooling; set_time_limit can be disabled by the host, so the call is best-effort and its failure must not abort the backup.
 			@set_time_limit( 0 );
 		}
 	}
@@ -671,6 +952,7 @@ final class BackupController {
 			array(
 				'phase' => self::PHASE_SCANNING,
 				'done'  => $scanned,
+				'at'    => time(),
 			),
 			self::PROGRESS_TTL
 		);
@@ -694,6 +976,7 @@ final class BackupController {
 				'phase'       => self::PHASE_COPYING,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $bytes_total,
+				'at'          => time(),
 			),
 			self::PROGRESS_TTL
 		);
@@ -709,12 +992,29 @@ final class BackupController {
 	}
 
 	/**
-	 * Acquire the single-runner backup lock, or report that it is already held.
+	 * Acquire the single-runner backup lock, or report that a backup is already running.
+	 *
+	 * Two independent guards, and both must pass. The primary is a named
+	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
+	 * server grants it atomically, so two simultaneous requests can never
+	 * both acquire — closing the check-then-set race a transient alone
+	 * cannot — and it vanishes with the connection if the request crashes.
+	 * The transient stays as a second, independent guard behind it: checked
+	 * only while the named lock is held, its old race is gone, and it still
+	 * refuses a run in the rare case a runner's named lock is silently lost
+	 * mid-operation (on old MySQL, other code taking its own named lock on
+	 * the same connection releases ours).
 	 *
 	 * @return bool True if the lock was acquired; false if a backup is already running.
 	 */
 	private function acquire_lock(): bool {
+		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
+			return false;
+		}
 		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
+			// A concurrent runner, or a crashed run's transient still inside its
+			// TTL: refuse, and hand back the named lock just taken.
+			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 			return false;
 		}
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
@@ -729,6 +1029,7 @@ final class BackupController {
 	 */
 	private function release_lock(): void {
 		delete_transient( self::LOCK_TRANSIENT );
+		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
 		$this->lock_held = false;
 	}
 

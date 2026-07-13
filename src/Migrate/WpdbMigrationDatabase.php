@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Migrate;
 
 use InvalidArgumentException;
+use Pontifex\Database\HardenedTableListing;
 use RuntimeException;
 use wpdb;
 
@@ -37,6 +38,8 @@ use wpdb;
  * database.
  */
 final class WpdbMigrationDatabase implements MigrationDatabase {
+
+	use HardenedTableListing;
 
 	/**
 	 * The wpdb instance this adapter wraps.
@@ -93,20 +96,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 			return $this->tables;
 		}
 
-		$pattern = $this->wpdb->esc_like( $this->wpdb->prefix ) . '%';
-		$sql     = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; Plugin Check does not track the preparation across the assignment.
-		$rows = $this->wpdb->get_col( $sql );
-
-		if ( '' !== $this->wpdb->last_error ) {
-			$last_error = (string) $this->wpdb->last_error;
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbMigrationDatabase: list_tables query failed: %s', $last_error ) );
-		}
-
-		$tables = array_values( array_map( 'strval', $rows ) );
-		sort( $tables, SORT_STRING );
-		return $tables;
+		return $this->list_prefixed_tables( $this->wpdb, 'WpdbMigrationDatabase' );
 	}
 
 	/**
@@ -151,8 +141,15 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the SELECT fails.
 	 */
 	public function read_rows( string $table, int $offset, int $limit ): array {
-		$sql = $this->wpdb->prepare( 'SELECT * FROM %i LIMIT %d OFFSET %d', $table, $limit, $offset );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above.
+		// Without an ORDER BY, MySQL guarantees no row order, so consecutive
+		// OFFSET windows can overlap or leave gaps — a row that silently never
+		// gets its URLs rewritten. Mirrors the export dump's ordering fix; the
+		// rewrite never touches primary keys, so the order stays stable while
+		// rows are being updated between windows.
+		$order_clause = $this->order_by_clause( $table );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $order_clause is built by order_by_clause() from SHOW KEYS results, with the identifier backtick-escaped; the table and value placeholders still go through prepare().
+		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $order_clause . ' LIMIT %d OFFSET %d', $table, $limit, $offset );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped ORDER BY identifier) across the assignment.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
 
 		if ( '' !== $this->wpdb->last_error ) {
@@ -162,6 +159,57 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		}
 
 		return is_array( $rows ) ? array_values( $rows ) : array();
+	}
+
+	/**
+	 * Ordering clauses per table, resolved once and cached for the adapter's life.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $order_clauses = array();
+
+	/**
+	 * Build the ORDER BY clause that makes a table's row windows deterministic.
+	 *
+	 * The rewrite pass only ever reads tables whose {@see self::primary_key()}
+	 * is a usable single column (the walk skips the rest), so ordering by that
+	 * column is a stable total order. Resolved once per table and cached; a
+	 * table without a usable key yields no ORDER BY, degrading to the old
+	 * behaviour for a read the walk would not perform anyway.
+	 *
+	 * @param string $table Fully-prefixed table name.
+	 * @return string A leading-space ' ORDER BY `col`' clause, or '' when no key resolved.
+	 */
+	private function order_by_clause( string $table ): string {
+		if ( ! isset( $this->order_clauses[ $table ] ) ) {
+			$key                           = $this->primary_key( $table );
+			$this->order_clauses[ $table ] = null === $key
+				? ''
+				: ' ORDER BY `' . str_replace( '`', '``', $key ) . '`';
+		}
+		return $this->order_clauses[ $table ];
+	}
+
+	/**
+	 * The table's average stored row width from SHOW TABLE STATUS, or 0 when unknown.
+	 *
+	 * Mirrors the export adapter's sizing read: the storage engine's own
+	 * `Avg_row_length` estimate — the right order of magnitude, which is all
+	 * batch sizing needs. Any failure reports 0 and the rewriter falls back to
+	 * its fixed estimate; the figure is a sizing hint, never a correctness
+	 * input.
+	 *
+	 * @param string $table Fully-prefixed table name.
+	 * @return int Average bytes per row; 0 when unknown.
+	 */
+	public function average_row_bytes( string $table ): int {
+		$sql = $this->wpdb->prepare( 'SHOW TABLE STATUS LIKE %s', $this->wpdb->esc_like( $table ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a live sizing read has no caching benefit.
+		$status = $this->wpdb->get_row( $sql, ARRAY_A );
+		if ( ! is_array( $status ) || ! isset( $status['Avg_row_length'] ) || ! is_numeric( $status['Avg_row_length'] ) ) {
+			return 0;
+		}
+		return max( 0, (int) $status['Avg_row_length'] );
 	}
 
 	/**

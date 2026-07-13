@@ -10,15 +10,20 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Export;
 
 use Mockery;
+use wpdb;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
+use RuntimeException;
+use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Manifest\ExclusionRules;
+use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 
@@ -90,6 +95,41 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A failed export must not clobber a prior good archive at the output path.
+	 *
+	 * The archive is written to a sibling temp file and moved into place only on success,
+	 * so a write that fails part-way (here, an entry whose source throws) leaves any prior
+	 * archive at the output path untouched — and no temp file behind.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_export_does_not_clobber_a_prior_archive(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a prior good archive at the output path.
+		file_put_contents( $this->temp_output_path, 'PRIOR-GOOD-ARCHIVE' );
+
+		$plans  = array(
+			$this->file_plan( 'index.php', "<?php\n" ),
+			$this->failing_plan( 'wp-content/broken.bin' ),
+		);
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$threw = false;
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+		} catch ( Throwable $error ) {
+			unset( $error );
+			$threw = true;
+		}
+
+		$this->assertTrue( $threw, 'A failing entry source must abort the export.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the output path to confirm the prior archive survived.
+		$this->assertSame( 'PRIOR-GOOD-ARCHIVE', file_get_contents( $this->temp_output_path ), 'A failed export must not clobber the prior archive.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'The temp export file is cleaned up on failure.' );
+	}
+
+	/**
 	 * The export() method invokes the progress callback once per entry with a running count.
 	 *
 	 * @return void
@@ -150,6 +190,54 @@ final class ExportRunnerTest extends TestCase {
 		);
 
 		$this->assertSame( $expected, $reported, 'The byte callback should see every source byte across all entries.' );
+	}
+
+	/**
+	 * A file that changed between scan and write must ride the result as a changed-file report.
+	 *
+	 * The scan-to-write race: the plan's header carries the scan-time size but
+	 * the source holds different bytes by write time. The archive records the
+	 * truth (EntryWriter corrects the header); the runner must collect the
+	 * discrepancy so callers can warn the user which files were moving.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_files_that_changed_between_scan_and_write(): void {
+		// Declared 1000 bytes at scan time; only 400 remain at write time.
+		$lying_header = EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 );
+		$plans        = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			new EntryPlan( $lying_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( str_repeat( 'B', 400 ) ) ),
+		);
+
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame(
+			array(
+				array(
+					'path'          => 'wp-content/moving.log',
+					'declared_size' => 1000,
+					'actual_size'   => 400,
+				),
+			),
+			$result->changed_files(),
+			'The changed file must be reported with its declared and actual sizes.'
+		);
+	}
+
+	/**
+	 * An export where every file matched its scanned size reports no changed files.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_no_changed_files_when_none_changed(): void {
+		$plans  = array( $this->file_plan( 'index.php', "<?php\n// fixture\n" ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( array(), $result->changed_files() );
 	}
 
 	/**
@@ -245,6 +333,74 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// default_manifest_builder(): the snapshot connection and its fallbacks.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The default builder must dump on a dedicated connection inside a snapshot.
+	 *
+	 * ADR 0011: when the context supplies a dedicated connection, the builder
+	 * opens REPEATABLE READ + a consistent snapshot on it and never touches the
+	 * global connection — the property that keeps progress writes visible.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_opens_a_snapshot_on_a_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( 1 );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'START TRANSACTION WITH CONSISTENT SNAPSHOT' )->andReturn( 1 );
+		// The adapter's destructor commits the snapshot when the builder is released.
+		$dedicated->shouldReceive( 'query' )->with( 'COMMIT' )->andReturn( 1 );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldNotReceive( 'wpdb_instance' );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * With no dedicated connection available, the builder must fall back to the global one.
+	 *
+	 * A host capping connections per user refuses the second connection; the
+	 * export must still happen — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_no_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( null );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * A snapshot that cannot open must also fall back to the global connection.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_the_snapshot_cannot_open(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( false );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	// -------------------------------------------------------------------------
 	// Archive helpers.
 	// -------------------------------------------------------------------------
 
@@ -258,6 +414,27 @@ final class ExportRunnerTest extends TestCase {
 	private function file_plan( string $path, string $contents ): EntryPlan {
 		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
 		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build an EntryPlan whose deferred source throws when the writer opens it.
+	 *
+	 * Used to fail an export mid-write without a real I/O error, so the atomic-write
+	 * guarantee can be exercised.
+	 *
+	 * @param string $path Relative archive path for the entry.
+	 * @return EntryPlan A plan whose source raises when pulled.
+	 */
+	private function failing_plan( string $path ): EntryPlan {
+		$header = EntryHeader::for_file( $path, 10, 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan(
+			$header,
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			static function () {
+				throw new RuntimeException( 'simulated entry source failure' );
+			}
+		);
 	}
 
 	/**

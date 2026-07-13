@@ -11,6 +11,7 @@ namespace Pontifex\Export;
 
 use DateTimeImmutable;
 use RuntimeException;
+use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
@@ -102,9 +103,34 @@ final class ExportRunner {
 	 */
 	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
 		$file_scanner     = new FileScanner( $rules, $path_prefix );
-		$database_adapter = new WpdbAdapter( $wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $rules );
+		$database_scanner = new DatabaseScanner( self::snapshot_database_adapter( $wordpress_context ), $rules );
 		return new ManifestBuilder( $file_scanner, $database_scanner );
+	}
+
+	/**
+	 * Build the export's database adapter, inside a consistent snapshot where possible.
+	 *
+	 * ADR 0011: the dump runs on a dedicated connection holding a REPEATABLE
+	 * READ consistent snapshot, so every table and chunk is read from the same
+	 * instant of the database while the global connection stays live for
+	 * progress writes and locks. The chunk SQL providers capture this adapter,
+	 * so the snapshot spans the scan and every row window realised later
+	 * during the archive write. When the host refuses a second connection or
+	 * the snapshot cannot be opened, the export falls back to the global
+	 * connection without a snapshot — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @param WordPressContext $wordpress_context WordPress-specific facts and the database connections.
+	 * @return WpdbAdapter The adapter the scanner and chunk providers will read through.
+	 */
+	private static function snapshot_database_adapter( WordPressContext $wordpress_context ): WpdbAdapter {
+		$dedicated = $wordpress_context->dedicated_wpdb_connection();
+		if ( null !== $dedicated ) {
+			$adapter = new WpdbAdapter( $dedicated );
+			if ( $adapter->begin_consistent_snapshot() ) {
+				return $adapter;
+			}
+		}
+		return new WpdbAdapter( $wordpress_context->wpdb_instance() );
 	}
 
 	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
@@ -114,14 +140,17 @@ final class ExportRunner {
 	 * Builds the provenance block from the current runtime, opens the destination
 	 * for writing (read+write, so a signed export can re-read its own bytes), and
 	 * writes the header, provenance, every entry, the manifest, and the footer via
-	 * {@see ArchiveWriter}. The destination is always closed, success or failure.
+	 * {@see ArchiveWriter}. The archive is written to a sibling temp file and moved
+	 * onto the output path only once complete, so a prior good archive there is never
+	 * truncated by a write that then fails. The destination is always closed, success
+	 * or failure.
 	 *
 	 * @param ExportOptions                                     $options     Where to write, plus optional encryption, signing, and the unencrypted-archive reason.
 	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
-	 * @return ExportResult The bytes written and the entry count.
-	 * @throws RuntimeException If the destination cannot be opened, or the archive cannot be written.
+	 * @return ExportResult The bytes written, the entry count, and any files that changed while being read.
+	 * @throws Throwable If the temp destination cannot be opened (RuntimeException), writing an entry fails (whatever the archive writer raised, re-thrown), or the completed archive cannot be moved into place (RuntimeException). In every failure the temp file is discarded and any prior archive at the output path is left untouched.
 	 */
 	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
@@ -131,7 +160,28 @@ final class ExportRunner {
 		$entry_count = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
 
 		$provenance  = $this->build_provenance( $options );
-		$destination = $this->open_destination( $options->output_path() );
+		$output_path = $options->output_path();
+
+		// Write to a sibling temp file, never straight to the output path: opening the
+		// output "w+b" would truncate a prior good archive there immediately, so a write
+		// that then fails (an unreadable entry, disk full, a cancelled backup) would leave
+		// the operator with neither the new archive nor the one they had.
+		$temp_path   = $this->temp_destination_path( $output_path );
+		$destination = $this->open_destination( $temp_path );
+
+		// Collect the files the archive writer reports as changed between the scan
+		// and the write (shrunk or grown mid-export). Each entry was written with
+		// the byte count actually captured, so the archive itself is truthful; the
+		// list rides the result so callers can warn the user which files were
+		// moving while the backup ran.
+		$changed_files   = array();
+		$on_file_changed = static function ( string $path, int $declared_size, int $actual_size ) use ( &$changed_files ): void {
+			$changed_files[] = array(
+				'path'          => $path,
+				'declared_size' => $declared_size,
+				'actual_size'   => $actual_size,
+			);
+		};
 
 		try {
 			$bytes_written = self::build_archive_writer()->write_archive(
@@ -141,14 +191,26 @@ final class ExportRunner {
 				$on_entry,
 				$options->encryption(),
 				$options->signing(),
-				$on_bytes
+				$on_bytes,
+				$on_file_changed
 			);
-		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the completed temp archive before moving it into place; not a WP_Filesystem operation.
 			fclose( $destination );
+		} catch ( Throwable $error ) {
+			if ( is_resource( $destination ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp archive stream after a failed write; not a WP_Filesystem operation.
+				fclose( $destination );
+			}
+			$this->discard_temp( $temp_path );
+			throw $error;
 		}
 
-		return new ExportResult( $bytes_written, $entry_count );
+		// The archive is complete on the temp file; move it onto the output path in one
+		// atomic same-directory rename, so a prior archive there is only ever replaced by a
+		// complete one.
+		$this->move_into_place( $temp_path, $output_path );
+
+		return new ExportResult( $bytes_written, $entry_count, $changed_files );
 	}
 
 	/**
@@ -205,6 +267,60 @@ final class ExportRunner {
 			);
 		}
 		return $destination;
+	}
+
+	/**
+	 * Build the temp file path the archive is written to before it is moved into place.
+	 *
+	 * A sibling of the output path (same directory), so the final {@see self::move_into_place()}
+	 * is an atomic same-filesystem rename. A unique suffix keeps two exports writing to the
+	 * same output path (a user's mistake) from colliding on one temp file.
+	 *
+	 * @param string $output_path The final archive path the export was asked to write.
+	 * @return string The temp file path to write the archive to first.
+	 */
+	private function temp_destination_path( string $output_path ): string {
+		return $output_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+	}
+
+	/**
+	 * Move the completed temp archive onto the output path atomically.
+	 *
+	 * A single rename within one directory is atomic on the underlying filesystem, so the
+	 * output path is only ever the prior archive or the complete new one — never a
+	 * half-written file. A failed rename discards the temp and raises, leaving any prior
+	 * archive at the output path untouched.
+	 *
+	 * @param string $temp_path   The completed temp archive to move.
+	 * @param string $output_path The final path to move it onto.
+	 * @return void
+	 * @throws RuntimeException If the temp archive cannot be moved into place.
+	 */
+	private function move_into_place( string $temp_path, string $output_path ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- Atomically moving the completed archive into place (a same-directory move); WP_Filesystem is unavailable in CLI/ajax contexts.
+		if ( ! rename( $temp_path, $output_path ) ) {
+			$this->discard_temp( $temp_path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; not HTML output.
+				sprintf( 'ExportRunner: could not move the completed archive into place: %s', $output_path )
+			);
+		}
+	}
+
+	/**
+	 * Delete the temp archive, if it exists.
+	 *
+	 * Best-effort cleanup on a failed or aborted export, so a partial temp file is not left
+	 * behind; its own failure must not mask the export's outcome.
+	 *
+	 * @param string $temp_path The temp archive path to remove.
+	 * @return void
+	 */
+	private function discard_temp( string $temp_path ): void {
+		if ( is_file( $temp_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the temp export file; its failure must not mask the export outcome.
+			@unlink( $temp_path );
+		}
 	}
 
 	/**

@@ -107,6 +107,7 @@ final class RestorePage {
 
 		$this->render_explanation();
 		$this->render_backups( $this->backup_rows() );
+		$this->render_upload();
 		$this->render_rollback();
 		$this->render_action();
 
@@ -192,21 +193,76 @@ final class RestorePage {
 			esc_html__( 'Size', 'pontifex' )
 		);
 
+		// Roving tabindex (ARIA radio-group pattern): with nothing selected yet, the
+		// first row is the group's single Tab stop; the script moves the stop with
+		// the selection thereafter.
+		$row_index = 0;
 		foreach ( $rows as $row ) {
 			printf(
-				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" data-file="%1$s">'
-				. '<span class="pontifex-restore-name">%2$s</span>'
-				. '<span class="pontifex-restore-when">%3$s</span>'
-				. '<span class="pontifex-restore-size">%4$s</span>'
+				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" tabindex="%1$s" data-file="%2$s">'
+				. '<span class="pontifex-restore-name">%3$s</span>'
+				. '<span class="pontifex-restore-when">%4$s</span>'
+				. '<span class="pontifex-restore-size">%5$s</span>'
 				. '</button>',
+				0 === $row_index ? '0' : '-1',
 				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] )
 			);
+			++$row_index;
 		}
 
 		echo '</div>';
+		echo '</section>';
+	}
+
+	/**
+	 * Render the "upload a backup from another site" section.
+	 *
+	 * A file picker and Upload button drive the chunked upload (see the upload
+	 * script and {@see UploadController}). A completed, validated upload joins the
+	 * backups list above, ready to restore — the no-shell-access way to bring a
+	 * backup taken on another server onto this one.
+	 *
+	 * @return void
+	 */
+	private function render_upload(): void {
+		echo '<section class="pontifex-section pontifex-upload">';
+		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Upload a backup from another site', 'pontifex' ) );
+
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'Have a .wpmig backup made on another server? Upload it here and it joins the list above, ready to restore.', 'pontifex' )
+		);
+
+		// A custom picker: the native file input is visually hidden (but still the
+		// accessible control), a styled label triggers it, and the chosen filename is
+		// shown in the Swiss caption style rather than the browser's own rendering.
+		echo '<div class="pontifex-upload-field">';
+		echo '<input type="file" id="pontifex-upload-file" class="pontifex-upload-input" accept=".wpmig">';
+		printf(
+			'<label class="pontifex-upload-choose" for="pontifex-upload-file">%s</label>',
+			esc_html__( 'Choose backup file', 'pontifex' )
+		);
+		printf(
+			'<span class="pontifex-upload-name" id="pontifex-upload-name">%s</span>',
+			esc_html__( 'No file chosen', 'pontifex' )
+		);
+		echo '</div>';
+
+		printf(
+			'<button type="button" class="pontifex-button" id="pontifex-upload-run" disabled>%s</button>',
+			esc_html__( 'Upload', 'pontifex' )
+		);
+
+		printf(
+			'<div class="pontifex-progress-track" id="pontifex-upload-track" role="progressbar" aria-label="%s" aria-describedby="pontifex-upload-progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-upload-bar"></span></div>',
+			esc_attr__( 'Upload progress', 'pontifex' )
+		);
+		echo '<p class="pontifex-progress" id="pontifex-upload-progress" aria-live="polite"></p>';
+		echo '<p class="pontifex-notice" id="pontifex-upload-result" aria-live="polite"></p>';
+
 		echo '</section>';
 	}
 
@@ -217,6 +273,11 @@ final class RestorePage {
 	 */
 	private function render_action(): void {
 		echo '<section class="pontifex-section pontifex-restore-action">';
+
+		printf(
+			'<label class="pontifex-action-toggle" for="pontifex-restore-migrate"><input type="checkbox" id="pontifex-restore-migrate"> %s</label>',
+			esc_html__( 'This backup came from another site — rewrite its links to this site\'s address', 'pontifex' )
+		);
 
 		printf(
 			'<label class="pontifex-action-label" for="pontifex-restore-action">%s</label>',
@@ -231,7 +292,10 @@ final class RestorePage {
 			esc_html__( 'Run', 'pontifex' )
 		);
 
-		echo '<div class="pontifex-progress-track" id="pontifex-restore-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-restore-bar"></span></div>';
+		printf(
+			'<div class="pontifex-progress-track" id="pontifex-restore-track" role="progressbar" aria-label="%s" aria-describedby="pontifex-restore-progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-restore-bar"></span></div>',
+			esc_attr__( 'Restore progress', 'pontifex' )
+		);
 		echo '<p class="pontifex-progress" id="pontifex-restore-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-timing" id="pontifex-restore-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-restore-result" aria-live="polite"></p>';

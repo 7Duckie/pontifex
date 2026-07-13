@@ -61,6 +61,8 @@ final class BackupControllerTest extends TestCase {
 		parent::setUp();
 		$this->base = sys_get_temp_dir() . '/pontifex-backup-controller-' . uniqid( '', true );
 		$this->json = array();
+		\Brain\Monkey\Functions\when( 'wp_schedule_single_event' )->justReturn( true );
+		\Brain\Monkey\Functions\when( 'wp_clear_scheduled_hook' )->justReturn( 0 );
 	}
 
 	/**
@@ -298,6 +300,90 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A backup is refused when the named database lock is held elsewhere.
+	 *
+	 * The named lock is the primary single-runner guard: the database grants it
+	 * to exactly one connection, atomically, so two simultaneous create()
+	 * requests can never both pass — the check-then-set race the transient
+	 * guard alone cannot close. A request that failed to acquire must not
+	 * release the lock either, or it would free the running backup's lock.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_when_the_named_lock_is_held_elsewhere(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( false );
+		$context->shouldNotReceive( 'release_named_lock' );
+
+		$controller = new BackupController(
+			$this->environment_mock(),
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->create();
+			$this->fail( 'create() should refuse while the named lock is held elsewhere.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'A refused backup must write nothing.' );
+	}
+
+	/**
+	 * The named lock is handed back when the transient guard refuses a backup.
+	 *
+	 * The transient is the secondary guard, checked only while the named lock is
+	 * held. When it refuses — a crashed run's transient still inside its TTL —
+	 * the named lock just taken must be released again; under a persistent
+	 * database connection it would otherwise linger and block every later run.
+	 *
+	 * @return void
+	 */
+	public function test_create_hands_back_the_named_lock_when_the_transient_guard_refuses(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_backup_lock' === $key ? time() : false;
+			}
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once()->with( 'pontifex_backup_lock' );
+
+		$controller = new BackupController(
+			$this->environment_mock(),
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->create();
+			$this->fail( 'create() should refuse while the lock transient is set.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
 	 * Refuses a cancel request without the managing capability.
 	 *
 	 * @return void
@@ -514,6 +600,219 @@ final class BackupControllerTest extends TestCase {
 		$this->assertFileExists( $this->base . '/secret.txt', 'The outside file must be untouched.' );
 	}
 
+	/**
+	 * A files-only backup scans exactly once: the tick's own scan, no pre-scan.
+	 *
+	 * The browser gate measured a large backup paying the filesystem walk
+	 * roughly nine times — one duplicate pre-scan for the progress total plus
+	 * one per short tick. The total now comes from the first tick's scan via
+	 * the job payload, so a second walk before the first byte is a regression.
+	 *
+	 * @return void
+	 */
+	public function test_create_scans_exactly_once_for_a_single_tick_backup(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$plans   = array(
+			$this->file_plan( 'wp-content/a.txt', "alpha\n" ),
+			$this->file_plan( 'wp-content/b.txt', "beta\n" ),
+		);
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( $plans ) );
+
+		$this->controller( $builder )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertGreaterThan( 0, $this->json['data']['source_bytes'], 'The source total must survive the pre-scan removal, fed from the tick\'s own scan.' );
+	}
+
+	// -------------------------------------------------------------------------
+	// Progress honesty around a live job.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A transient that stopped refreshing while a job is live is not served.
+	 *
+	 * The stuck-bar failure from the browser gate: the request writing the
+	 * transient died, and its last value would otherwise be reported as live
+	 * progress for the rest of the transient's TTL. With an active job on
+	 * disk, the job's persisted source-byte cursors must answer instead, in
+	 * the same units as the live bar, with the job's start time attached.
+	 *
+	 * @return void
+	 */
+	public function test_progress_ignores_a_stale_transient_when_a_job_is_live(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 441279062,
+				'bytes_total' => 941568495,
+				'at'          => time() - 60,
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$job  = $jobs->create(
+			\Pontifex\Job\Job::KIND_EXPORT,
+			array(
+				'source_bytes_done' => 500000000,
+				'total_bytes'       => 941568495,
+			),
+			time() - 120
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 500000000, $this->json['data']['bytes_done'], 'The job cursor answers, not the dead request\'s last transient.' );
+		$this->assertSame( 941568495, $this->json['data']['bytes_total'] );
+		$this->assertSame( $job->created_at(), $this->json['data']['started_at'], 'The job start time rides along for the elapsed timer.' );
+	}
+
+	/**
+	 * A freshly-refreshed transient is served as-is, with the start time attached.
+	 *
+	 * @return void
+	 */
+	public function test_progress_serves_a_fresh_transient_with_the_job_start_time(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 5,
+				'bytes_total' => 10,
+				'at'          => time(),
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$job  = $jobs->create( \Pontifex\Job\Job::KIND_EXPORT, array(), time() - 30 );
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 5, $this->json['data']['bytes_done'], 'A live transient is trusted while it is being refreshed.' );
+		$this->assertSame( $job->created_at(), $this->json['data']['started_at'] );
+	}
+
+	// -------------------------------------------------------------------------
+	// Schedule saving.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Refuses to save the schedule without the managing capability.
+	 *
+	 * @return void
+	 */
+	public function test_save_schedule_refuses_without_capability(): void {
+		Functions\when( 'current_user_can' )->justReturn( false );
+		$this->stub_json();
+
+		try {
+			$this->controller()->save_schedule();
+			$this->fail( 'save_schedule() should refuse without the capability.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 403, $this->json['status'] );
+	}
+
+	/**
+	 * Saves a valid schedule through the store and reports the next run time.
+	 *
+	 * The saved option must carry exactly the submitted fields, and the store's
+	 * save is the choke point that re-registers the cron event — asserted here
+	 * through the stubbed cron functions carrying the schedule's frequency.
+	 *
+	 * @return void
+	 */
+	public function test_save_schedule_saves_and_reports_the_next_run(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_text_field' )->returnArg();
+		// wp_clear_scheduled_hook is already stubbed for the whole file in setUp
+		// (its catch-all would swallow an expect() here); the clear-then-register
+		// sync itself is pinned by ScheduleTest, so only the register is asserted.
+		Functions\expect( 'wp_schedule_event' )->once()->with( Mockery::type( 'int' ), 'daily', \Pontifex\Schedule\ScheduleStore::CRON_HOOK );
+
+		// A minimal context mock rather than the shared helper: the helper's
+		// catch-all save_option expectation would swallow the exact-arguments
+		// assertion this test exists to make.
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				\Pontifex\Schedule\ScheduleStore::OPTION,
+				array(
+					'enabled'   => true,
+					'frequency' => 'daily',
+					'hour'      => 3,
+					'retention' => 2,
+				)
+			);
+		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );
+
+		$_POST['enabled']   = '1';
+		$_POST['frequency'] = 'daily';
+		$_POST['hour']      = '3';
+		$_POST['retention'] = '2';
+
+		try {
+			$controller->save_schedule();
+		} finally {
+			unset( $_POST['enabled'], $_POST['frequency'], $_POST['hour'], $_POST['retention'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['enabled'] );
+		$this->assertStringEndsWith( ' UTC', $this->json['data']['next_run'], 'The next run is reported as a UTC readout.' );
+	}
+
+	/**
+	 * Refuses a crafted request carrying an unknown frequency, writing nothing.
+	 *
+	 * The screen's select can only submit daily or weekly, so an unknown value
+	 * is a forged request; the value object refuses it and the option and cron
+	 * event must be untouched.
+	 *
+	 * @return void
+	 */
+	public function test_save_schedule_refuses_an_invalid_frequency(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_text_field' )->returnArg();
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldNotReceive( 'save_option' );
+		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );
+
+		$_POST['enabled']   = '1';
+		$_POST['frequency'] = 'hourly';
+		$_POST['hour']      = '3';
+		$_POST['retention'] = '2';
+
+		try {
+			$controller->save_schedule();
+			$this->fail( 'save_schedule() should refuse an unknown frequency.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['enabled'], $_POST['frequency'], $_POST['hour'], $_POST['retention'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 400, $this->json['status'] );
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborator builders and stubs.
 	// -------------------------------------------------------------------------
@@ -635,6 +934,8 @@ final class BackupControllerTest extends TestCase {
 			}
 		);
 		$context->shouldReceive( 'save_option' );
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
 		return $context;
 	}
 
