@@ -159,6 +159,8 @@ final class VerifyControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertTrue( $this->json['data']['sound'] );
 		$this->assertSame( 3, $this->json['data']['entries'] );
+		$this->assertStringContainsString( 'It contains', $this->json['data']['message'], 'The verdict states what the backup contains.' );
+		$this->assertStringContainsString( 'whole site', $this->json['data']['message'], 'A scope-less fixture reads as a legacy whole-site archive.' );
 	}
 
 	/**

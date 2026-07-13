@@ -298,4 +298,19 @@ final class ScopeTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 		new Scope( true, 'wp-content', false, false, false, array(), false );
 	}
+
+	/**
+	 * The content_summary_key classifies each of the four shapes distinctly.
+	 *
+	 * The single source of truth for the verify verdict's wording, so the branch
+	 * order is pinned here rather than re-derived in each surface.
+	 *
+	 * @return void
+	 */
+	public function test_content_summary_key_classifies_each_shape(): void {
+		$this->assertSame( Scope::SUMMARY_CONTENT, Scope::content_only( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_WHOLE_SITE, Scope::whole_site( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_FILES_ONLY, Scope::files_only( array() )->content_summary_key() );
+		$this->assertSame( Scope::SUMMARY_DB_ONLY, Scope::db_only( array() )->content_summary_key() );
+	}
 }

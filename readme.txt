@@ -21,7 +21,7 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 
 = What it does =
 
-* `wp pontifex export` — pack your content (`wp-content`) and the database into one `.wpmig` file; `--whole-site` captures WordPress core too.
+* `wp pontifex export` — pack your content (`wp-content`) and the database into one `.wpmig` file; `--whole-site` captures WordPress core too, `--files-only` skips the database, `--db-only` captures just the database, and `--exclude`/`--exclude-table` leave out files or tables you name.
 * `wp pontifex import` — restore an archive onto WordPress, taking a safety archive automatically first.
 * `wp pontifex verify` — check an archive's integrity (and its signature, if signed) without restoring.
 * `wp pontifex rollback` — undo the most recent import from its safety archive.
