@@ -152,8 +152,10 @@ Field rules:
   - `content_root` (string) — the directory the file entries are relative to, given relative to the WordPress root: `wp-content` for a content-only archive, the empty string for a whole-site archive.
   - `includes_core` (boolean) — whether WordPress core (`wp-admin`, `wp-includes`, the root core PHP files) is in the archive.
   - `includes_wp_config` (boolean) — whether `wp-config.php` is in the archive.
-  - `includes_database` (boolean) — whether the database is in the archive.
+  - `includes_database` (boolean) — whether the database is in the archive. `false` for a files-only backup; `true` otherwise.
+  - `includes_files` (boolean, optional, added in v1.1) — whether file entries are in the archive. Serialised **only when `false`** (a database-only backup), so an archive that carries files is byte-identical to one written before the field existed; a reader treats an absent `includes_files` as `true`. See [ADR 0016](adr/0016-partial-scope-backups.md).
   - `excluded_paths` (string array) — the exclusion patterns that were applied.
+  - A backup carries at least one half: a scope with `includes_files` and `includes_database` both `false` is invalid, and a reader refuses an archive whose scope declares a half absent while the manifest actually carries it.
 - Unknown fields encountered by a reader must be preserved verbatim if the archive is re-emitted (e.g., by a converter); a reader must not strip future-version fields.
 
 The provenance block is deliberately the first thing after the header so that a reader can inspect it without having to decrypt or process anything else. Operators about to import an archive can be shown its provenance and prompted to confirm it before any destructive operation begins.

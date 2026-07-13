@@ -174,10 +174,11 @@ final class ScheduleCommandTest extends TestCase {
 			->with(
 				ScheduleStore::OPTION,
 				array(
-					'enabled'   => true,
-					'frequency' => Schedule::FREQUENCY_WEEKLY,
-					'hour'      => 4,
-					'retention' => 5,
+					'enabled'    => true,
+					'frequency'  => Schedule::FREQUENCY_WEEKLY,
+					'hour'       => 4,
+					'retention'  => 5,
+					'exclusions' => array(),
 				)
 			);
 
@@ -197,6 +198,84 @@ final class ScheduleCommandTest extends TestCase {
 		// Brain Monkey and Mockery verify the expectations in tearDown; this
 		// keeps the test PHPUnit-visible rather than flagged risky.
 		$this->assertTrue( true );
+	}
+
+	/**
+	 * `set --exclude` stores the comma-split patterns on the schedule.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_exclude_stores_the_patterns(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+
+		$context = $this->context_mock(
+			array(
+				'enabled'   => false,
+				'frequency' => 'daily',
+				'hour'      => 3,
+				'retention' => 3,
+			)
+		);
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				ScheduleStore::OPTION,
+				array(
+					'enabled'    => true,
+					'frequency'  => Schedule::FREQUENCY_DAILY,
+					'hour'       => 3,
+					'retention'  => 3,
+					'exclusions' => array( 'wp-content/cache/**', 'wp_actionscheduler_*' ),
+				)
+			);
+
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( ScheduleStore::CRON_HOOK );
+		Functions\expect( 'wp_schedule_event' )->once();
+
+		$command = new ScheduleCommand( $context );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency' => 'daily',
+				'hour'      => '3',
+				'exclude'   => 'wp-content/cache/**, wp_actionscheduler_*',
+			)
+		);
+
+		$this->assertTrue( true );
+	}
+
+	/**
+	 * `set --exclude` with a malformed regex is refused, so no unattended run fails on it.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_an_invalid_exclude_pattern_is_refused(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )
+			->once()
+			->with( Mockery::pattern( '/not valid/' ) )
+			->andThrow( new RuntimeException( 'halt' ) );
+
+		$context = $this->context_mock();
+		$context->shouldNotReceive( 'save_option' );
+
+		$command = new ScheduleCommand( $context );
+
+		$this->expectExceptionMessage( 'halt' );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency' => 'daily',
+				'hour'      => '3',
+				'exclude'   => '/[unterminated/',
+			)
+		);
 	}
 
 	/**
@@ -275,10 +354,11 @@ final class ScheduleCommandTest extends TestCase {
 			->with(
 				ScheduleStore::OPTION,
 				array(
-					'enabled'   => false,
-					'frequency' => Schedule::FREQUENCY_WEEKLY,
-					'hour'      => 5,
-					'retention' => 4,
+					'enabled'    => false,
+					'frequency'  => Schedule::FREQUENCY_WEEKLY,
+					'hour'       => 5,
+					'retention'  => 4,
+					'exclusions' => array(),
 				)
 			);
 

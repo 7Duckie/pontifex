@@ -11,6 +11,7 @@ namespace Pontifex\Admin;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Schedule\Schedule;
 use Pontifex\Schedule\ScheduleStore;
 use Pontifex\WordPress\WordPressContext;
@@ -130,6 +131,19 @@ final class BackupPage {
 			'<p class="pontifex-lead">%s</p>',
 			esc_html__( 'A backup packs every file and the whole database into one .wpmig archive, written to a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download.', 'pontifex' )
 		);
+
+		$this->render_scope_summary();
+
+		printf( '<label class="pontifex-action-label" for="pontifex-backup-exclusions">%s</label>', esc_html__( 'Also leave out (one pattern per line)', 'pontifex' ) );
+		printf(
+			'<textarea id="pontifex-backup-exclusions" class="pontifex-action-input" rows="3" spellcheck="false" placeholder="%s"></textarea>',
+			esc_attr__( "wp-content/uploads/large-video.mp4\nwp-content/backups/**\nwp_actionscheduler_logs", 'pontifex' )
+		);
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'A file pattern (exact path, glob like *.log, or a folder tree like path/**) leaves out files; a bare table name (exact or glob like wp_actionscheduler_*) leaves out that table. Leaving out a table makes its restore partial, so only exclude tables the destination can rebuild.', 'pontifex' )
+		);
+
 		printf(
 			'<p><button type="button" class="pontifex-button" id="pontifex-create-backup">%s</button>'
 			. '<button type="button" class="pontifex-button" id="pontifex-cancel-backup" hidden>%s</button></p>',
@@ -144,6 +158,35 @@ final class BackupPage {
 		echo '<p class="pontifex-timing" id="pontifex-backup-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-backup-result" aria-live="polite"></p>';
 		echo '</section>';
+	}
+
+	/**
+	 * Render the effective scope and the always-applied default exclusions.
+	 *
+	 * The admin backup is always content-only (ADR 0008), and Pontifex always
+	 * leaves out its own working directory and the ephemeral cache. Showing
+	 * both before the operator acts satisfies the "defaults are visible" rule
+	 * the CLI already honours; the admin surface did not, until now.
+	 *
+	 * @return void
+	 */
+	private function render_scope_summary(): void {
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'This backup covers your content — everything in wp-content — and the whole database. (Whole-site backups, including WordPress core, are a command-line operation.)', 'pontifex' )
+		);
+
+		$defaults = ExclusionRules::default_v010()->patterns();
+		if ( array() === $defaults ) {
+			return;
+		}
+
+		printf( '<p class="pontifex-lead">%s</p>', esc_html__( 'Always left out:', 'pontifex' ) );
+		echo '<ul class="pontifex-list">';
+		foreach ( $defaults as $pattern ) {
+			printf( '<li><code>%s</code></li>', esc_html( (string) $pattern ) );
+		}
+		echo '</ul>';
 	}
 
 	/**
@@ -261,6 +304,12 @@ final class BackupPage {
 			'<input type="number" id="pontifex-schedule-retention" class="pontifex-action-input" min="%d" step="1" value="%d">',
 			(int) Schedule::MIN_RETENTION,
 			(int) $schedule->retention()
+		);
+
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-exclusions">%s</label>', esc_html__( 'Also leave out (one pattern per line)', 'pontifex' ) );
+		printf(
+			'<textarea id="pontifex-schedule-exclusions" class="pontifex-action-input" rows="3" spellcheck="false">%s</textarea>',
+			esc_textarea( implode( "\n", $schedule->exclusions() ) )
 		);
 
 		printf(

@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.6.0
+Stable tag: 0.7.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,7 +21,7 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 
 = What it does =
 
-* `wp pontifex export` — pack your content (`wp-content`) and the database into one `.wpmig` file; `--whole-site` captures WordPress core too.
+* `wp pontifex export` — pack your content (`wp-content`) and the database into one `.wpmig` file; `--whole-site` captures WordPress core too, `--files-only` skips the database, `--db-only` captures just the database, and `--exclude`/`--exclude-table` leave out files or tables you name.
 * `wp pontifex import` — restore an archive onto WordPress, taking a safety archive automatically first.
 * `wp pontifex verify` — check an archive's integrity (and its signature, if signed) without restoring.
 * `wp pontifex rollback` — undo the most recent import from its safety archive.
@@ -80,6 +80,9 @@ A backup started from the admin screen runs as a persisted job: if the page is c
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.7.0 =
+* Selective content. `export --exclude`/`--exclude-table` drop named files and database tables from a backup; `--files-only` and `--db-only` capture just the files or just the database, each restorable on its own and leaving the other half of the live site untouched. Scheduled backups inherit the configured exclusions, and `verify` and the admin Verify screen now state what an archive contains. No breaking changes.
 
 = 0.6.0 =
 * Resumable and scheduled exports. `export --resumable`/`--resume` survives timeouts, lost connections, and killed processes and continues where it stopped, byte-identical to an uninterrupted export. Scheduled backups run daily or weekly at a UTC hour, unattended, pruning to a retention count, with a self-healing cron ticker. New `wp pontifex schedule` command and a Scheduled backups section on the Backup screen, both with a next-run/liveness readout. Admin backups now run as persisted jobs, so reloading the page re-attaches to a running backup. No breaking changes.

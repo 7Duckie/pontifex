@@ -264,6 +264,52 @@ final class HelperMethodsTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// split_patterns (the --exclude / --exclude-table comma splitting)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A comma-separated value splits into trimmed, blank-free patterns.
+	 *
+	 * @return void
+	 */
+	public function test_split_patterns_comma_separated(): void {
+		$patterns = (array) $this->invoke_static( 'split_patterns', '*.log, wp_actionscheduler_* , wp-content/cache/**' );
+
+		$this->assertSame( array( '*.log', 'wp_actionscheduler_*', 'wp-content/cache/**' ), $patterns );
+	}
+
+	/**
+	 * Blank segments (a stray comma) are dropped, not kept as empty patterns.
+	 *
+	 * @return void
+	 */
+	public function test_split_patterns_drops_blank_segments(): void {
+		$patterns = (array) $this->invoke_static( 'split_patterns', 'a,,b, ,c' );
+
+		$this->assertSame( array( 'a', 'b', 'c' ), $patterns );
+	}
+
+	/**
+	 * A missing flag (null) or a bare boolean flag yields no patterns.
+	 *
+	 * @return void
+	 */
+	public function test_split_patterns_absent_or_boolean_yields_empty(): void {
+		$this->assertSame( array(), (array) $this->invoke_static( 'split_patterns', null ) );
+		$this->assertSame( array(), (array) $this->invoke_static( 'split_patterns', true ) );
+		$this->assertSame( array(), (array) $this->invoke_static( 'split_patterns', '' ) );
+	}
+
+	/**
+	 * A single pattern with no comma round-trips unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_split_patterns_single_value(): void {
+		$this->assertSame( array( 'wp_options' ), (array) $this->invoke_static( 'split_patterns', 'wp_options' ) );
+	}
+
+	// -------------------------------------------------------------------------
 	// should_use_defaults (the --no-defaults parsing)
 	// -------------------------------------------------------------------------
 

@@ -629,6 +629,84 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// User exclusions.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The operator's extra patterns are applied and recorded in the archive scope.
+	 *
+	 * The submitted patterns are appended to the curated defaults and travel into
+	 * the content-only scope, so a destination reading the archive's provenance
+	 * can see exactly what the operator left out.
+	 *
+	 * @return void
+	 */
+	public function test_create_applies_user_exclusions(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_textarea_field' )->returnArg();
+
+		$_POST['exclusions'] = "custom-thing/**\n# a comment\nwp_myplugin_log";
+
+		try {
+			$this->controller( $this->manifest_builder_returning( array( $this->file_plan( 'wp-content/note.txt', "x\n" ) ) ) )->create();
+		} finally {
+			unset( $_POST['exclusions'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+
+		$backups = ( new BackupStore( $this->base ) )->backups();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the just-written backup's provenance back in a unit test.
+		$source = fopen( $backups[0], 'rb' );
+		try {
+			$scope = ( new ArchiveReader( $source ) )->provenance()->scope();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened above.
+			fclose( $source );
+		}
+
+		$this->assertNotNull( $scope );
+		$excluded = $scope->excluded_paths();
+		$this->assertContains( 'custom-thing/**', $excluded, 'The user file pattern is recorded in the scope.' );
+		$this->assertContains( 'wp_myplugin_log', $excluded, 'The user table pattern is recorded in the scope.' );
+		$this->assertContains( 'wp-content/pontifex/**', $excluded, 'The curated defaults still apply alongside the user patterns.' );
+		$this->assertNotContains( '# a comment', $excluded, 'Comment lines are dropped, not treated as patterns.' );
+	}
+
+	/**
+	 * A malformed regex pattern is refused at the submit boundary, before any work.
+	 *
+	 * A bad regex would otherwise only throw deep inside a tick's scan and fail the
+	 * backup partway; it must be caught at the click with nothing written.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_an_invalid_exclusion_pattern(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_textarea_field' )->returnArg();
+
+		$_POST['exclusions'] = '/[unclosed(class/';
+
+		try {
+			$this->controller( $this->manifest_builder_returning( array() ) )->create();
+			$this->fail( 'create() should refuse a malformed regex pattern.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['exclusions'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 400, $this->json['status'] );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'No backup may be written when a pattern is refused.' );
+	}
+
+	// -------------------------------------------------------------------------
 	// Progress honesty around a live job.
 	// -------------------------------------------------------------------------
 
@@ -752,10 +830,11 @@ final class BackupControllerTest extends TestCase {
 			->with(
 				\Pontifex\Schedule\ScheduleStore::OPTION,
 				array(
-					'enabled'   => true,
-					'frequency' => 'daily',
-					'hour'      => 3,
-					'retention' => 2,
+					'enabled'    => true,
+					'frequency'  => 'daily',
+					'hour'       => 3,
+					'retention'  => 2,
+					'exclusions' => array(),
 				)
 			);
 		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );

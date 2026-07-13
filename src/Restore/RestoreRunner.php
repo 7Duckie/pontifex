@@ -12,7 +12,9 @@ namespace Pontifex\Restore;
 use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
@@ -172,7 +174,16 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// under it, so the connection must speak it for the replay's duration or
 		// multibyte content is silently transcoded. Provenance is validated by
 		// the reader; the charset string itself is validated by the writer.
-		$provenance = ( new ArchiveReader( $archive_source ) )->provenance();
+		$reader     = new ArchiveReader( $archive_source );
+		$provenance = $reader->provenance();
+
+		// Fail closed on an archive that lies about its own scope: one whose
+		// recorded scope declares a half absent while the manifest actually
+		// carries it (ADR 0016). Pontifex's own exports never contradict their
+		// scope, so this only catches a corrupt or hand-forged archive — refuse
+		// it rather than restore contents the scope says are not there.
+		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $reader->manifest() );
+
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
 		try {
@@ -204,6 +215,46 @@ final class RestoreRunner implements RestoreRunnerInterface {
 				unset( $cleanup_failure );
 			}
 			throw $error;
+		}
+	}
+
+	/**
+	 * Refuse an archive whose recorded scope contradicts the entries it carries.
+	 *
+	 * A files-only archive must carry no database chunks; a db-only archive must
+	 * carry no file entries. If the scope declares a half absent but the manifest
+	 * has it, the archive is corrupt or forged — restoring it would write data the
+	 * scope claims is not there — so it is refused. A legacy archive with no scope
+	 * block imposes no such contract and passes.
+	 *
+	 * @param Scope|null      $scope    The recorded scope, or null for a legacy archive.
+	 * @param ArchiveManifest $manifest The archive's manifest.
+	 * @return void
+	 * @throws RuntimeException If the scope declares a half absent that the manifest carries.
+	 */
+	private function assert_scope_consistent_with_manifest( ?Scope $scope, ArchiveManifest $manifest ): void {
+		if ( null === $scope ) {
+			return;
+		}
+
+		$has_files = false;
+		$has_db    = false;
+		foreach ( $manifest->entries() as $entry ) {
+			if ( $entry->is_db_chunk() ) {
+				$has_db = true;
+			} else {
+				$has_files = true;
+			}
+			if ( $has_files && $has_db ) {
+				break;
+			}
+		}
+
+		if ( ! $scope->includes_database() && $has_db ) {
+			throw new RuntimeException( 'RestoreRunner: the archive records a files-only scope but carries database chunks. Refusing this inconsistent archive.' );
+		}
+		if ( ! $scope->includes_files() && $has_files ) {
+			throw new RuntimeException( 'RestoreRunner: the archive records a database-only scope but carries file entries. Refusing this inconsistent archive.' );
 		}
 	}
 

@@ -222,12 +222,17 @@ final class ResumableExportRunner {
 
 		// Rebuild the manifest plan exactly as start() saw it. The scan is
 		// deterministic (sorted), so an unchanged tree yields the same sequence.
-		$rules   = ExclusionRules::from_array( array_map( 'strval', (array) $payload['exclusions'] ) );
-		$builder = null !== $this->manifest_builder_factory
+		// Which halves to capture come from the recorded scope, so a files-only or
+		// db-only resume omits the same half on every tick (ADR 0016).
+		$rules            = ExclusionRules::from_array( array_map( 'strval', (array) $payload['exclusions'] ) );
+		$scope            = null !== ( $payload['scope'] ?? null ) ? Scope::from_array( (array) $payload['scope'] ) : null;
+		$include_files    = null === $scope || $scope->includes_files();
+		$include_database = null === $scope || $scope->includes_database();
+		$builder          = null !== $this->manifest_builder_factory
 			? ( $this->manifest_builder_factory )( $rules, (string) $payload['path_prefix'] )
-			: ExportRunner::default_manifest_builder( $this->wordpress_context, $rules, (string) $payload['path_prefix'] );
-		$stream  = $builder->build( (string) $payload['scan_root'] );
-		$total   = count( $stream );
+			: ExportRunner::default_manifest_builder( $this->wordpress_context, $rules, (string) $payload['path_prefix'], $include_files, $include_database );
+		$stream           = $builder->build( (string) $payload['scan_root'] );
+		$total            = count( $stream );
 
 		// Persist the source-byte total the moment the scan knows it, so a
 		// progress surface reading the job mid-tick has its denominator from
