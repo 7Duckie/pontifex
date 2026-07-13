@@ -2,21 +2,21 @@
 # This file is distributed under the GPL-2.0-or-later.
 msgid ""
 msgstr ""
-"Project-Id-Version: Pontifex 0.6.0\n"
+"Project-Id-Version: Pontifex 0.7.0\n"
 "Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/pontifex\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-07-13T12:52:48+00:00\n"
+"POT-Creation-Date: 2026-07-13T21:14:35+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
 
 #. Plugin Name of the plugin
 #: pontifex.php
-#: src/Admin/BackupPage.php:88
+#: src/Admin/BackupPage.php:89
 #: src/Admin/Menu.php:125
 #: src/Admin/Menu.php:126
 #: src/Admin/OverviewPage.php:119
@@ -55,150 +55,181 @@ msgstr ""
 msgid "Pontifex is missing its Composer dependencies. Run `composer install` from the plugin directory."
 msgstr ""
 
-#: src/Admin/BackupController.php:307
+#. translators: %s: the exclusion pattern that could not be understood
+#: src/Admin/BackupController.php:315
+#: src/Admin/BackupController.php:763
+#, php-format
+msgid "That exclusion pattern is not valid: %s. Fix or remove it and try again."
+msgstr ""
+
+#: src/Admin/BackupController.php:326
 msgid "A backup is already running. Please wait for it to finish."
 msgstr ""
 
-#: src/Admin/BackupController.php:677
+#: src/Admin/BackupController.php:701
 msgid "That backup could not be deleted."
 msgstr ""
 
-#: src/Admin/BackupController.php:732
+#: src/Admin/BackupController.php:774
 #: src/Admin/Menu.php:327
 msgid "The schedule could not be saved. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:785
+#: src/Admin/BackupController.php:883
 msgid "You do not have permission to download this backup."
 msgstr ""
 
-#: src/Admin/BackupController.php:794
+#: src/Admin/BackupController.php:892
 msgid "You do not have permission to manage backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:808
+#: src/Admin/BackupController.php:906
 #: src/Admin/Menu.php:322
 msgid "The backup could not be completed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/BackupPage.php:81
+#: src/Admin/BackupPage.php:82
 #: src/Admin/OverviewPage.php:112
 #: src/Admin/RestorePage.php:96
 #: src/Admin/VerifyPage.php:78
 msgid "You do not have permission to access Pontifex."
 msgstr ""
 
-#: src/Admin/BackupPage.php:89
-#: src/Admin/BackupPage.php:170
+#: src/Admin/BackupPage.php:90
+#: src/Admin/BackupPage.php:213
 #: src/Admin/Menu.php:146
 #: src/Admin/RestorePage.php:191
 #: src/Admin/VerifyPage.php:156
 msgid "Backup"
 msgstr ""
 
-#: src/Admin/BackupPage.php:90
+#: src/Admin/BackupPage.php:91
 msgid "Create a full backup of this site and download it."
 msgstr ""
 
-#: src/Admin/BackupPage.php:128
+#: src/Admin/BackupPage.php:129
 msgid "Create a backup"
 msgstr ""
 
-#: src/Admin/BackupPage.php:131
+#: src/Admin/BackupPage.php:132
 msgid "A backup packs every file and the whole database into one .wpmig archive, written to a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download."
 msgstr ""
 
-#: src/Admin/BackupPage.php:136
+#: src/Admin/BackupPage.php:137
+#: src/Admin/BackupPage.php:309
+msgid "Also leave out (one pattern per line)"
+msgstr ""
+
+#: src/Admin/BackupPage.php:140
+msgid ""
+"wp-content/uploads/large-video.mp4\n"
+"wp-content/backups/**\n"
+"wp_actionscheduler_logs"
+msgstr ""
+
+#: src/Admin/BackupPage.php:144
+msgid "A file pattern (exact path, glob like *.log, or a folder tree like path/**) leaves out files; a bare table name (exact or glob like wp_actionscheduler_*) leaves out that table. Leaving out a table makes its restore partial, so only exclude tables the destination can rebuild."
+msgstr ""
+
+#: src/Admin/BackupPage.php:150
 msgid "Create backup"
 msgstr ""
 
-#: src/Admin/BackupPage.php:137
+#: src/Admin/BackupPage.php:151
 #: src/Admin/Menu.php:318
 msgid "Cancel backup"
 msgstr ""
 
-#: src/Admin/BackupPage.php:141
+#: src/Admin/BackupPage.php:155
 msgid "Backup progress"
 msgstr ""
 
-#: src/Admin/BackupPage.php:157
+#: src/Admin/BackupPage.php:176
+msgid "This backup covers your content — everything in wp-content — and the whole database. (Whole-site backups, including WordPress core, are a command-line operation.)"
+msgstr ""
+
+#: src/Admin/BackupPage.php:184
+msgid "Always left out:"
+msgstr ""
+
+#: src/Admin/BackupPage.php:200
 #: src/Admin/RestorePage.php:176
 #: src/Admin/VerifyPage.php:141
 msgid "Your backups"
 msgstr ""
 
-#: src/Admin/BackupPage.php:160
+#: src/Admin/BackupPage.php:203
 msgid "No backups yet. Create one above and it will appear here to download."
 msgstr ""
 
-#: src/Admin/BackupPage.php:171
+#: src/Admin/BackupPage.php:214
 #: src/Admin/OverviewPage.php:304
 #: src/Admin/RestorePage.php:192
 #: src/Admin/VerifyPage.php:157
 msgid "Created"
 msgstr ""
 
-#: src/Admin/BackupPage.php:172
+#: src/Admin/BackupPage.php:215
 #: src/Admin/OverviewPage.php:276
 #: src/Admin/RestorePage.php:193
 #: src/Admin/VerifyPage.php:158
 msgid "Size"
 msgstr ""
 
-#: src/Admin/BackupPage.php:173
+#: src/Admin/BackupPage.php:216
 msgid "Actions"
 msgstr ""
 
-#: src/Admin/BackupPage.php:193
+#: src/Admin/BackupPage.php:236
 msgid "Download"
 msgstr ""
 
-#: src/Admin/BackupPage.php:195
+#: src/Admin/BackupPage.php:238
 msgid "Delete"
 msgstr ""
 
-#: src/Admin/BackupPage.php:218
+#: src/Admin/BackupPage.php:261
 msgid "Scheduled backups"
 msgstr ""
 
-#: src/Admin/BackupPage.php:221
+#: src/Admin/BackupPage.php:264
 msgid "Back up this site automatically on a schedule. Scheduled backups appear in the list above, and older ones are pruned so only the newest are kept. The time is in UTC, not your site's display timezone."
 msgstr ""
 
-#: src/Admin/BackupPage.php:229
+#: src/Admin/BackupPage.php:272
 msgid "Back up automatically"
 msgstr ""
 
-#: src/Admin/BackupPage.php:232
+#: src/Admin/BackupPage.php:275
 msgid "Frequency"
 msgstr ""
 
-#: src/Admin/BackupPage.php:235
+#: src/Admin/BackupPage.php:278
 msgid "Daily"
 msgstr ""
 
-#: src/Admin/BackupPage.php:236
+#: src/Admin/BackupPage.php:279
 msgid "Weekly"
 msgstr ""
 
-#: src/Admin/BackupPage.php:247
+#: src/Admin/BackupPage.php:290
 msgid "Time (UTC)"
 msgstr ""
 
-#: src/Admin/BackupPage.php:259
+#: src/Admin/BackupPage.php:302
 msgid "Backups to keep"
 msgstr ""
 
-#: src/Admin/BackupPage.php:268
+#: src/Admin/BackupPage.php:317
 msgid "Save schedule"
 msgstr ""
 
-#: src/Admin/BackupPage.php:298
+#: src/Admin/BackupPage.php:347
 msgid "This schedule is switched on, but WordPress has no pending event for it — the automatic backup will not run until you save the schedule again. A plugin that clears scheduled events, or a manual change, can cause this."
 msgstr ""
 
 #. translators: %s: the next scheduled run time in UTC, e.g. "2026-07-14 03:00 UTC"
-#: src/Admin/BackupPage.php:307
+#: src/Admin/BackupPage.php:356
 #, php-format
 msgid "Next automatic backup: %s."
 msgstr ""
@@ -465,7 +496,7 @@ msgid "Archive"
 msgstr ""
 
 #: src/Admin/RestoreController.php:296
-#: src/Admin/VerifyController.php:197
+#: src/Admin/VerifyController.php:198
 msgid "That backup could not be found."
 msgstr ""
 
@@ -654,25 +685,25 @@ msgstr ""
 msgid "You do not have permission to upload backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/VerifyController.php:203
+#: src/Admin/VerifyController.php:204
 msgid "A verification is already running. Please wait for it to finish."
 msgstr ""
 
-#: src/Admin/VerifyController.php:219
+#: src/Admin/VerifyController.php:220
 msgid "This backup is encrypted. Verify it with the WP-CLI command: wp pontifex verify."
 msgstr ""
 
-#. translators: 1: number of entries verified, 2: the archive's size, human-readable
-#: src/Admin/VerifyController.php:260
+#. translators: 1: number of entries verified, 2: the archive's size, human-readable, 3: what the backup contains
+#: src/Admin/VerifyController.php:263
 #, php-format
-msgid "Verified — this backup is intact. All %1$d entries (%2$s) were re-read and every hash matched."
+msgid "Verified — this backup is intact. All %1$d entries (%2$s) were re-read and every hash matched. It contains %3$s."
 msgstr ""
 
-#: src/Admin/VerifyController.php:272
+#: src/Admin/VerifyController.php:276
 msgid "Broken — this backup did not verify. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/VerifyController.php:425
+#: src/Admin/VerifyController.php:455
 msgid "You do not have permission to verify backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
@@ -698,6 +729,30 @@ msgstr ""
 
 #: src/Admin/VerifyPage.php:201
 msgid "Verification progress"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:35
+msgid "the whole site (a legacy archive with no recorded scope)"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:39
+msgid "the whole site — WordPress core, wp-config.php, wp-content, and the database"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:41
+msgid "the database only, with no files"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:43
+msgid "files only (wp-content), with no database"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:45
+msgid "your content — wp-content and the whole database"
+msgstr ""
+
+#: src/Archive/ScopeSummary.php:59
+msgid "contents that could not be read from the archive"
 msgstr ""
 
 #: src/Cli/DiagnosticsCommand.php:123
@@ -727,95 +782,107 @@ msgstr ""
 msgid "Summary: %1$d OK, %2$d warning(s), %3$d failure(s), %4$d informational."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:266
+#: src/Cli/ExportCommand.php:291
 msgid "Pass either --resumable (start a resumable export) or --resume (continue one), not both."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:284
+#: src/Cli/ExportCommand.php:309
+msgid "Choose at most one of --whole-site, --files-only, or --db-only."
+msgstr ""
+
+#: src/Cli/ExportCommand.php:318
 msgid "An encrypted export cannot be resumable: the derived key exists only for one run and is never stored. Drop --resumable/--resume, or export without encryption."
 msgstr ""
 
 #. translators: %s: the output file path
-#: src/Cli/ExportCommand.php:310
+#: src/Cli/ExportCommand.php:352
 #, php-format
 msgid "Export to %s?"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:320
+#: src/Cli/ExportCommand.php:362
 msgid "There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:338
+#: src/Cli/ExportCommand.php:380
 msgid "--sign requires --signing-key=<path> (the secret-key file from \"wp pontifex keygen\")."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:487
+#: src/Cli/ExportCommand.php:538
 msgid "No interrupted resumable export found to resume."
 msgstr ""
 
 #. translators: %s: the output path the interrupted export writes to
-#: src/Cli/ExportCommand.php:491
+#: src/Cli/ExportCommand.php:542
 #, php-format
 msgid "This resumable export writes to %s; --output cannot change on resume."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:496
+#: src/Cli/ExportCommand.php:547
 msgid "This resumable export was started with different signing settings; resume with the same --sign/--signing-key flags it began with."
 msgstr ""
 
 #. translators: %s: the output path
-#: src/Cli/ExportCommand.php:502
+#: src/Cli/ExportCommand.php:553
 #, php-format
 msgid "Resuming the interrupted export to %s."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:516
+#: src/Cli/ExportCommand.php:567
 msgid "This export is resumable: if it is interrupted, continue it with `wp pontifex export --resume`."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:536
+#: src/Cli/ExportCommand.php:587
 msgid "Writing archive"
 msgstr ""
 
 #. translators: %d: number of files that changed during the export
-#: src/Cli/ExportCommand.php:578
-#: src/Cli/ExportCommand.php:975
+#: src/Cli/ExportCommand.php:629
+#: src/Cli/ExportCommand.php:1060
 #, php-format
 msgid "%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file."
 msgid_plural "%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files."
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/Cli/ExportCommand.php:615
+#: src/Cli/ExportCommand.php:666
 msgid "--output=<path> is required."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:918
+#: src/Cli/ExportCommand.php:995
 msgid "Scope: whole-site (the entire WordPress root, including core and wp-config.php)."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:921
+#: src/Cli/ExportCommand.php:999
+msgid "Scope: files-only (wp-content, no database). Its restore writes only files."
+msgstr ""
+
+#: src/Cli/ExportCommand.php:1003
+msgid "Scope: database-only (the full database, no files). Its restore writes only the database."
+msgstr ""
+
+#: src/Cli/ExportCommand.php:1006
 msgid "Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:933
+#: src/Cli/ExportCommand.php:1018
 msgid "No exclusion patterns are active."
 msgstr ""
 
 #. translators: %d: number of active exclusion patterns
-#: src/Cli/ExportCommand.php:936
+#: src/Cli/ExportCommand.php:1021
 #, php-format
 msgid "Active exclusion patterns (%d):"
 msgstr ""
 
 #. translators: 1: file path, 2: byte count recorded at scan time, 3: byte count actually captured
-#: src/Cli/ExportCommand.php:964
+#: src/Cli/ExportCommand.php:1049
 #, php-format
 msgid "%1$s changed while it was being read (the scan recorded %2$d bytes; %3$d were captured). The archive records the captured content."
 msgstr ""
 
 #. translators: 1: number of entries, 2: human-readable size, 3: the output file path
-#: src/Cli/ExportCommand.php:998
+#: src/Cli/ExportCommand.php:1083
 #, php-format
 msgid "Exported %1$d entries (%2$s) to %3$s"
 msgstr ""
@@ -859,7 +926,7 @@ msgid "The Ed25519 signature did not verify against the supplied public key; ref
 msgstr ""
 
 #: src/Cli/ImportCommand.php:951
-#: src/Cli/VerifyCommand.php:487
+#: src/Cli/VerifyCommand.php:488
 msgid "Signature verified against the supplied public key."
 msgstr ""
 
@@ -956,61 +1023,67 @@ msgstr ""
 msgid "Dry run complete: %1$d entries verified in %2$s. No changes were made."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:111
+#: src/Cli/ScheduleCommand.php:118
 msgid "Unknown action. Usage: wp pontifex schedule <set|show|off>."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:128
+#: src/Cli/ScheduleCommand.php:135
 msgid "The --frequency flag is required: --frequency=daily or --frequency=weekly."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:131
+#: src/Cli/ScheduleCommand.php:138
 msgid "The --hour flag is required: an hour of day from 0 to 23, in UTC."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:139
+#: src/Cli/ScheduleCommand.php:146
 msgid "The --retention flag must be a whole number of at least 1."
 msgstr ""
 
 #. translators: %d: the minimum retention count
-#: src/Cli/ScheduleCommand.php:146
+#: src/Cli/ScheduleCommand.php:153
 #, php-format
 msgid "Retention must be at least %d: pruning may never delete the last backup."
 msgstr ""
 
+#. translators: %s: the exclusion pattern that could not be understood
+#: src/Cli/ScheduleCommand.php:168
+#, php-format
+msgid "That exclusion pattern is not valid: %s. A scheduled backup would fail on it every run."
+msgstr ""
+
 #. translators: %s: the schedule description, e.g. "daily at 03:00 UTC, keeping 3"
-#: src/Cli/ScheduleCommand.php:166
-#: src/Cli/ScheduleCommand.php:204
+#: src/Cli/ScheduleCommand.php:188
+#: src/Cli/ScheduleCommand.php:226
 #, php-format
 msgid "Scheduled backups: on — %s."
 msgstr ""
 
 #. translators: %s: a UTC timestamp, e.g. "2026-07-14 03:00 UTC"
-#: src/Cli/ScheduleCommand.php:173
-#: src/Cli/ScheduleCommand.php:211
+#: src/Cli/ScheduleCommand.php:195
+#: src/Cli/ScheduleCommand.php:233
 #, php-format
 msgid "Next run: %s."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:194
+#: src/Cli/ScheduleCommand.php:216
 msgid "Scheduled backups: off."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:196
+#: src/Cli/ScheduleCommand.php:218
 msgid "A scheduled-export cron event is still pending although the schedule is off. Run `wp pontifex schedule off` to clear it."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:217
+#: src/Cli/ScheduleCommand.php:239
 msgid "No pending WP-Cron event was found for the schedule. Run `wp pontifex schedule set` again to re-register it."
 msgstr ""
 
 #. translators: %s: a UTC timestamp, e.g. "2026-07-14 03:00 UTC"
-#: src/Cli/ScheduleCommand.php:222
+#: src/Cli/ScheduleCommand.php:244
 #, php-format
 msgid "WP-Cron event: pending at %s."
 msgstr ""
 
-#: src/Cli/ScheduleCommand.php:243
+#: src/Cli/ScheduleCommand.php:265
 msgid "Scheduled backups turned off. The settings are kept; `wp pontifex schedule set` turns them back on."
 msgstr ""
 
@@ -1022,22 +1095,28 @@ msgstr ""
 msgid "No transfers recorded yet. Run `wp pontifex export` or `wp pontifex import` to start the tally."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:291
+#: src/Cli/VerifyCommand.php:292
 msgid "An archive path is required: wp pontifex verify <archive>."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:479
+#: src/Cli/VerifyCommand.php:480
 msgid "This archive is signed, but its signature was NOT verified. Pass --public-key=<path> to verify it."
 msgstr ""
 
 #. translators: 1: number of entries verified, 2: the archive path
-#: src/Cli/VerifyCommand.php:553
+#: src/Cli/VerifyCommand.php:555
 #, php-format
 msgid "Archive is sound: %1$d entries verified, every hash checked. %2$s"
 msgstr ""
 
+#. translators: %s: what the archive contains, e.g. "files only (wp-content, no database)"
+#: src/Cli/VerifyCommand.php:563
+#, php-format
+msgid "This backup contains: %s."
+msgstr ""
+
 #. translators: 1: the failure message, 2: the archive path
-#: src/Cli/VerifyCommand.php:576
+#: src/Cli/VerifyCommand.php:612
 #, php-format
 msgid "Archive is BROKEN: %1$s (%2$s)"
 msgstr ""

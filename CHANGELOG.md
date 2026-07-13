@@ -14,9 +14,55 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.7.0 — the next operational increment
-(transports, selective content, multisite are the roadmap candidates) —
-begins after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+Nothing yet. Work toward v0.8.0 — the next operational increment — begins
+after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.7.0] — 2026-07-13 — Selective content
+
+The release that lets a backup carry less than everything, on purpose. A site
+can now leave out the parts that do not need backing up — caches, log tables,
+anything named — and can capture just its files or just its database, each half
+a complete archive restorable on its own. What an archive holds is no longer a
+guess: `verify` and the admin Verify screen state it in plain words. Two
+booleans on the archive's scope express all four shapes — content, whole-site,
+files-only, database-only — decided in
+[ADR 0016](docs/adr/0016-partial-scope-backups.md), and every archive already
+written stays byte-identical, so nothing on disk changes meaning. No breaking
+changes this release.
+
+### Added
+
+- **Inline exclusions.** `wp pontifex export --exclude=<glob,…>` drops matching
+  files from a backup and `--exclude-table=<name,…>` drops matching database
+  tables, on top of the built-in defaults. The admin Backup screen gains an
+  editable exclusions field and an effective-scope display, so a shell-less
+  operator sees exactly what the next backup will and will not contain.
+- **Files-only and database-only backups.** `wp pontifex export --files-only`
+  captures the content tree without the database; `--db-only` captures the whole
+  database without the files. Each is a complete, restorable archive of its
+  half, and restoring one leaves the other half of the live site untouched. The
+  two are mutually exclusive with each other and with `--whole-site`, and a
+  restore fails closed on an archive whose recorded scope and manifest
+  contradict each other rather than restoring contents the scope denies
+  ([ADR 0016](docs/adr/0016-partial-scope-backups.md)).
+- **A "This backup contains …" label.** `wp pontifex verify` and the admin
+  Verify screen now state in plain words what an archive holds — content and
+  database, files only, or database only — read from the archive's own recorded
+  scope rather than inferred. `docs/archive-format.md` documents the
+  `includes_files` field this reads.
+
+### Changed
+
+- **Scheduled backups inherit the configured exclusions.** A schedule set with
+  `wp pontifex schedule set --exclude=<glob,…>` applies those exclusions to
+  every unattended run, merged with the defaults; the pre-import safety archive
+  deliberately stays on full defaults.
+- **The archive scope carries two booleans.** `Scope` now records whether an
+  archive includes the database and whether it includes the files, which
+  together describe every backup shape. The files flag is serialised only when a
+  backup omits the files, so content-only, whole-site, and files-only archives
+  are byte-identical to a pre-v0.7.0 archive and every archive already written
+  keeps parsing (ADR 0016).
 
 ## [0.6.0] — 2026-07-13 — Resumable and scheduled exports
 
@@ -691,7 +737,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/7Duckie/pontifex/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/7Duckie/pontifex/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/7Duckie/pontifex/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/7Duckie/pontifex/compare/v0.4.5...v0.4.6
