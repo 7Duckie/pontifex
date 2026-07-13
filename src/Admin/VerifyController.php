@@ -13,6 +13,7 @@ use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Manifest\WpdbAdapter;
@@ -249,6 +250,8 @@ final class VerifyController {
 				}
 			);
 
+			// Read the scope label before finish() closes the stream.
+			$scope_label = $this->describe_archive_scope( $source );
 			$this->finish( $source );
 
 			wp_send_json_success(
@@ -256,10 +259,11 @@ final class VerifyController {
 					'sound'   => true,
 					'entries' => $entry_total,
 					'message' => sprintf(
-						/* translators: 1: number of entries verified, 2: the archive's size, human-readable */
-						__( 'Verified — this backup is intact. All %1$d entries (%2$s) were re-read and every hash matched.', 'pontifex' ),
+						/* translators: 1: number of entries verified, 2: the archive's size, human-readable, 3: what the backup contains */
+						__( 'Verified — this backup is intact. All %1$d entries (%2$s) were re-read and every hash matched. It contains %3$s.', 'pontifex' ),
 						$entry_total,
-						$this->wordpress_context->format_size( $bytes_total )
+						$this->wordpress_context->format_size( $bytes_total ),
+						$scope_label
 					),
 				)
 			);
@@ -383,6 +387,32 @@ final class VerifyController {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this request; not a WP_Filesystem operation.
 			fclose( $source );
 		}
+	}
+
+	/**
+	 * Describe, in one human clause, what an archive holds, from its recorded scope.
+	 *
+	 * Tells the operator what a sound backup actually contains — in particular
+	 * whether it is a deliberately partial (files-only or database-only) backup —
+	 * before they trust it. A legacy archive with no recorded scope is a
+	 * whole-site backup.
+	 *
+	 * @param resource $source The archive stream (already read for verification).
+	 * @return string The human-readable content description.
+	 */
+	private function describe_archive_scope( $source ): string {
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the archive stream to re-read its provenance for the label; not a filesystem path.
+			rewind( $source );
+			$scope = ( new ArchiveReader( $source ) )->provenance()->scope();
+		} catch ( Throwable $error ) {
+			// A label is presentation, not integrity: verify already checked every
+			// hash, so a provenance that cannot be re-read must not turn a sound
+			// archive into a failure — it just cannot be described.
+			unset( $error );
+			return ScopeSummary::unreadable();
+		}
+		return ScopeSummary::describe( $scope );
 	}
 
 	/**

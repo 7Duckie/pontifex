@@ -248,15 +248,45 @@ because the derived key is never persisted).
 - **The PHP-floor raise** — revisit when PHP 8.2 reaches end of life
   (end of 2026).
 
-## Beyond v0.6.0 — operational maturity
+## v0.7.0 — Selective content
+
+Letting a backup be scoped and trimmed, on top of the content-only
+default, with every partial archive honestly self-describing so the
+round-trip guarantee is never quietly weakened.
+
+### What ships
+
+- **User exclusions everywhere** — inline `wp pontifex export --exclude`
+  and `--exclude-table` beside the existing `--exclude-file`, and an
+  editable exclusions field on the admin Backup screen, which now also
+  shows the effective scope and the always-applied defaults before a
+  backup runs. Scheduled backups inherit the operator's exclusions.
+- **Files-only and database-only backups** — `export --files-only`
+  (`wp-content`, no database) and `export --db-only` (the database, no
+  files), each a partial content archive that restores as a merge and
+  leaves the absent half of the destination untouched
+  ([ADR 0016](./adr/0016-partial-scope-backups.md)). The `Scope` block
+  gains an `includes_files` field, serialised only when false so ordinary
+  archives stay byte-identical; a restore refuses an archive whose scope
+  contradicts its contents.
+- **Honest labelling** — `verify` (CLI and the admin Verify screen) reads
+  the recorded scope and states what a sound backup actually contains, so
+  a deliberately partial archive is never mistaken for a complete one.
+
+### What is deliberately deferred
+
+- **Push/pull transports**, **multisite support**, and single-table /
+  content-type database filtering stay out — see below. Row-level or
+  content-type pruning is refused for now because it risks a
+  referentially broken restore.
+
+## Beyond v0.7.0 — operational maturity
 
 The longer-running operational features, not yet committed to a
 numbered release:
 
 - **Push/pull transports** — direct host-to-host transfer without
   needing an intermediate file on either side.
-- **Selective content** — export-without-database, single-table
-  exports, content-type filters.
 - **Multisite support** — packaging strategy for WordPress multisite
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
