@@ -39,6 +39,13 @@ if ( ! class_exists( 'wpdb' ) ) {
 		public string $last_error = '';
 
 		/**
+		 * Mirror of the real wpdb->charset: the site's configured connection character set.
+		 *
+		 * @var string
+		 */
+		public string $charset = 'utf8mb4';
+
+		/**
 		 * Stub for the real wpdb::esc_like(). Replaced via PHPUnit mock in tests.
 		 *
 		 * @param string $text Raw text to LIKE-escape.

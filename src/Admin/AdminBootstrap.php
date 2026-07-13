@@ -149,6 +149,7 @@ final class AdminBootstrap {
 		add_action( 'wp_ajax_pontifex_cancel_backup', array( $this->backup_controller, 'cancel' ) );
 		add_action( 'wp_ajax_pontifex_download_backup', array( $this->backup_controller, 'download' ) );
 		add_action( 'wp_ajax_pontifex_delete_backup', array( $this->backup_controller, 'delete' ) );
+		add_action( 'wp_ajax_pontifex_save_schedule', array( $this->backup_controller, 'save_schedule' ) );
 
 		add_action( 'wp_ajax_pontifex_verify', array( $this->verify_controller, 'verify' ) );
 		add_action( 'wp_ajax_pontifex_verify_progress', array( $this->verify_controller, 'progress' ) );

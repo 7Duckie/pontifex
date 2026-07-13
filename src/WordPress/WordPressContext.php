@@ -279,4 +279,23 @@ interface WordPressContext {
 	 * @return void
 	 */
 	public function release_named_lock( string $name ): void;
+
+	/**
+	 * Open a dedicated second database connection, or report that the host refuses one.
+	 *
+	 * The consistent-snapshot export (ADR 0011) dumps the database inside a
+	 * REPEATABLE READ transaction. That transaction must not live on the global
+	 * `$wpdb` connection: mid-export writes (progress transients, counters)
+	 * would join it and stay invisible to other requests until commit — the
+	 * admin progress bar would freeze. A dedicated connection gives the dump
+	 * its own snapshot while the global connection stays live, which is how
+	 * standalone dump tools are architected.
+	 *
+	 * Null means the environment refused a second connection (e.g. a shared
+	 * host capping connections per user); callers must degrade gracefully —
+	 * the export falls back to the global connection without a snapshot.
+	 *
+	 * @return wpdb|null A connected second wpdb with the site's table prefix, or null when unavailable.
+	 */
+	public function dedicated_wpdb_connection(): ?wpdb;
 }

@@ -138,7 +138,11 @@ final class EntryWriter {
 	 *                                   encryption byte is set, unused otherwise.
 	 * @param callable|null $on_bytes_read Optional byte-progress callback forwarded to the codec, called as `( int $bytes ): void` with each chunk's raw source byte count as the payload streams.
 	 * @return EntryWriteResult Stored payload length, total entry record length, and the
-	 *                          SHA-256 hash that was written to disk.
+	 *                          SHA-256 hash that was written to disk. For a file entry whose
+	 *                          source yielded a different byte count than the header declared
+	 *                          (the file changed between the caller's scan and this write),
+	 *                          the header is written with the actual captured size and the
+	 *                          result reports the discrepancy.
 	 * @throws InvalidArgumentException If the encryption family is unknown, the compression
 	 *                                  codec is not registered, an encrypted codec is used
 	 *                                  without a cipher and key, the nonce is the wrong
@@ -203,7 +207,33 @@ final class EntryWriter {
 			// compressed byte count, which becomes size_compressed in the header — the
 			// compression output, NOT the post-encryption stored size (the 16-byte GCM
 			// tag is encryption framing, counted only in the stored payload and lengths).
-			$compressed_length = $codec->encode( $source, $temp, $on_bytes_read );
+			// The wrapper around the progress callback counts the raw source bytes the
+			// codec actually read, so a file that shrank or grew between the caller's
+			// scan and this write is caught below rather than silently recorded at its
+			// stale scan-time size.
+			$raw_bytes_read = 0;
+			$counting_read  = static function ( int $bytes ) use ( &$raw_bytes_read, $on_bytes_read ): void {
+				$raw_bytes_read += $bytes;
+				if ( null !== $on_bytes_read ) {
+					$on_bytes_read( $bytes );
+				}
+			};
+
+			$compressed_length = $codec->encode( $source, $temp, $counting_read );
+
+			// A file entry whose content no longer matches its declared size changed
+			// between scan and write. Record the truth: the header is corrected to the
+			// byte count actually captured, and the discrepancy is reported to the
+			// caller so it can warn the user. Without this, the archive would declare
+			// the stale size over different content — a backup that verifies clean
+			// while having silently lost data.
+			$declared_size = null;
+			$actual_size   = null;
+			if ( $header->is_file() && null !== $header->size() && $header->size() !== $raw_bytes_read ) {
+				$declared_size = $header->size();
+				$actual_size   = $raw_bytes_read;
+				$header        = $header->with_size( $raw_bytes_read );
+			}
 
 			// Build the corrected header now that the compressed byte count is known.
 			// Finalising it here also lets it serve as the AES-GCM additional
@@ -266,7 +296,7 @@ final class EntryWriter {
 				+ $payload_length
 				+ Sha256::DIGEST_SIZE;
 
-			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash );
+			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash, $declared_size, $actual_size );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the php://temp resource opened in this method; not a WP_Filesystem operation.
 			fclose( $temp );

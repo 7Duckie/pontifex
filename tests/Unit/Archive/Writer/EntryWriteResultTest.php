@@ -124,4 +124,63 @@ final class EntryWriteResultTest extends TestCase {
 		$this->assertSame( $hash, $result->entry_hash() );
 		$this->assertSame( Sha256::DIGEST_SIZE, strlen( $result->entry_hash() ) );
 	}
+
+	/**
+	 * Without correction arguments, the result must report no size correction.
+	 *
+	 * @return void
+	 */
+	public function test_correction_fields_default_to_no_correction(): void {
+		$result = new EntryWriteResult( 1, 1, self::placeholder_hash() );
+
+		$this->assertFalse( $result->size_was_corrected() );
+		$this->assertNull( $result->declared_size() );
+		$this->assertNull( $result->actual_size() );
+	}
+
+	/**
+	 * The correction fields must round-trip through the accessors.
+	 *
+	 * @return void
+	 */
+	public function test_correction_fields_round_trip(): void {
+		$result = new EntryWriteResult( 1, 1, self::placeholder_hash(), 1000, 400 );
+
+		$this->assertTrue( $result->size_was_corrected() );
+		$this->assertSame( 1000, $result->declared_size() );
+		$this->assertSame( 400, $result->actual_size() );
+	}
+
+	/**
+	 * The two correction fields must travel together: a lone declared_size is rejected.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_a_lone_declared_size(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new EntryWriteResult( 1, 1, self::placeholder_hash(), 1000, null );
+	}
+
+	/**
+	 * The two correction fields must travel together: a lone actual_size is rejected too.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_a_lone_actual_size(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new EntryWriteResult( 1, 1, self::placeholder_hash(), null, 400 );
+	}
+
+	/**
+	 * Negative correction values must be rejected.
+	 *
+	 * @return void
+	 */
+	public function test_constructor_rejects_negative_correction_sizes(): void {
+		$this->expectException( InvalidArgumentException::class );
+
+		new EntryWriteResult( 1, 1, self::placeholder_hash(), -1, 400 );
+	}
 }

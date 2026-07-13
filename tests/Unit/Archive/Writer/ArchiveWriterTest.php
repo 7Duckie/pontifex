@@ -772,4 +772,81 @@ final class ArchiveWriterTest extends TestCase {
 
 		$this->assertFalse( $called );
 	}
+
+	/**
+	 * A file whose source yields different bytes than its header declared must be reported.
+	 *
+	 * The scan-to-write race: the header carries the scan-time size but the
+	 * source has since shrunk. The writer records the truth in the entry (via
+	 * EntryWriter) and must surface the discrepancy through the
+	 * on_file_changed callback so the caller can warn the user.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_reports_a_changed_file_to_the_callback(): void {
+		$steady_payload = 'steady bytes';
+		$steady_plan    = new EntryPlan(
+			EntryHeader::for_file( 'steady.txt', strlen( $steady_payload ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( $steady_payload )
+		);
+
+		// Declared 1000 bytes at scan time; only 400 remain at write time.
+		$shrunk_plan = new EntryPlan(
+			EntryHeader::for_file( 'shrunk.log', 1000, 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( str_repeat( 'B', 400 ) )
+		);
+
+		$reports = array();
+		$dest    = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			array( $steady_plan, $shrunk_plan ),
+			$dest,
+			null,
+			null,
+			null,
+			null,
+			static function ( string $path, int $declared_size, int $actual_size ) use ( &$reports ): void {
+				$reports[] = array( $path, $declared_size, $actual_size );
+			}
+		);
+
+		$this->assertSame( array( array( 'shrunk.log', 1000, 400 ) ), $reports, 'Only the changed file must be reported, with its declared and actual sizes.' );
+	}
+
+	/**
+	 * The on_file_changed callback must stay silent when every file matches its declared size.
+	 *
+	 * @return void
+	 */
+	public function test_write_archive_does_not_report_changed_files_when_none_changed(): void {
+		$payload = 'unchanged payload';
+		$plan    = new EntryPlan(
+			EntryHeader::for_file( 'steady.txt', strlen( $payload ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			self::zero_nonce(),
+			self::memory_stream_with( $payload )
+		);
+
+		$called = false;
+		$dest   = self::memory_stream();
+		self::make_writer()->write_archive(
+			self::sample_provenance(),
+			array( $plan ),
+			$dest,
+			null,
+			null,
+			null,
+			null,
+			static function () use ( &$called ): void {
+				$called = true;
+			}
+		);
+
+		$this->assertFalse( $called );
+	}
 }

@@ -392,7 +392,7 @@ final class VerifyController {
 	 */
 	private function extend_time_limit(): void {
 		if ( function_exists( 'set_time_limit' ) ) {
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- set_time_limit can be disabled by the host; the call is best-effort and its failure must not abort the verification.
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- A long verification must outlive the host's web timeout, the accepted pattern for backup tooling; set_time_limit can be disabled by the host, so the call is best-effort and its failure must not abort the verification.
 			@set_time_limit( 0 );
 		}
 	}

@@ -193,18 +193,24 @@ final class RestorePage {
 			esc_html__( 'Size', 'pontifex' )
 		);
 
+		// Roving tabindex (ARIA radio-group pattern): with nothing selected yet, the
+		// first row is the group's single Tab stop; the script moves the stop with
+		// the selection thereafter.
+		$row_index = 0;
 		foreach ( $rows as $row ) {
 			printf(
-				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" data-file="%1$s">'
-				. '<span class="pontifex-restore-name">%2$s</span>'
-				. '<span class="pontifex-restore-when">%3$s</span>'
-				. '<span class="pontifex-restore-size">%4$s</span>'
+				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" tabindex="%1$s" data-file="%2$s">'
+				. '<span class="pontifex-restore-name">%3$s</span>'
+				. '<span class="pontifex-restore-when">%4$s</span>'
+				. '<span class="pontifex-restore-size">%5$s</span>'
 				. '</button>',
+				0 === $row_index ? '0' : '-1',
 				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] )
 			);
+			++$row_index;
 		}
 
 		echo '</div>';
@@ -250,7 +256,10 @@ final class RestorePage {
 			esc_html__( 'Upload', 'pontifex' )
 		);
 
-		echo '<div class="pontifex-progress-track" id="pontifex-upload-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-upload-bar"></span></div>';
+		printf(
+			'<div class="pontifex-progress-track" id="pontifex-upload-track" role="progressbar" aria-label="%s" aria-describedby="pontifex-upload-progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-upload-bar"></span></div>',
+			esc_attr__( 'Upload progress', 'pontifex' )
+		);
 		echo '<p class="pontifex-progress" id="pontifex-upload-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-upload-result" aria-live="polite"></p>';
 
@@ -283,7 +292,10 @@ final class RestorePage {
 			esc_html__( 'Run', 'pontifex' )
 		);
 
-		echo '<div class="pontifex-progress-track" id="pontifex-restore-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-restore-bar"></span></div>';
+		printf(
+			'<div class="pontifex-progress-track" id="pontifex-restore-track" role="progressbar" aria-label="%s" aria-describedby="pontifex-restore-progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="pontifex-progress-fill" id="pontifex-restore-bar"></span></div>',
+			esc_attr__( 'Restore progress', 'pontifex' )
+		);
 		echo '<p class="pontifex-progress" id="pontifex-restore-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-timing" id="pontifex-restore-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-restore-result" aria-live="polite"></p>';

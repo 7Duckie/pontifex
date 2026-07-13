@@ -173,19 +173,37 @@ Each entry has the structure:
 +--------+--------+--------+--------+----------+----------+
 ```
 
-The entry header is a JSON object (UTF-8) describing the entry:
+The entry header is a JSON object (UTF-8) describing the entry. The `kind`
+field always comes first, followed by the kind-specific fields in the fixed
+order shown — the order is part of the byte-identical-output contract. A
+`file` entry's header:
 
 ```json
 {
-  "path": "wp-content/themes/twentytwentyfour/style.css",
   "kind": "file",
-  "size_uncompressed": 8842,
-  "size_compressed": 2103,
-  "modified_at": "2026-05-01T09:12:33Z",
-  "mode": "0644",
-  "media_type": "text/css"
+  "path": "wp-content/themes/twentytwentyfour/style.css",
+  "size": 8842,
+  "mode": 420,
+  "mtime": 1767225600,
+  "media_type": "text/css",
+  "size_compressed": 2103
 }
 ```
+
+- **`size`** — the payload's uncompressed byte count, as an integer. Writers
+  MUST record the byte count actually read when the entry was written — never
+  a stale earlier stat — so a file that changes on disk while the archive is
+  being produced is still described truthfully. Readers MUST refuse a `file`
+  entry whose decoded payload length differs from `size`: with a conforming
+  writer the two always agree, so a mismatch means the archive does not hold
+  the content it claims and restoring the entry would silently write wrong
+  bytes.
+- **`mode`** — the POSIX mode bits as a plain integer (decimal in JSON; `420`
+  is `0644` octal). Readers must reject a non-integer.
+- **`mtime`** — the Unix modification timestamp as an integer. Readers must
+  reject a non-integer.
+- **`size_compressed`** — the stored payload's byte count after the codec ran;
+  `0` when written by a streaming writer that cannot know it in advance.
 
 Field rules:
 
@@ -197,12 +215,20 @@ Field rules:
 
 The `kind` field is one of:
 
-- `file` — a regular file.
-- `db_chunk` — a portion of the SQL dump. An additional `chunk_index` field (0-based) is present, and the chunks together form the complete dump when concatenated in `chunk_index` order.
-- `directory` — present only to record permissions on an otherwise-empty directory. Payload is zero-length.
-- `symlink` — payload contains the link target as UTF-8.
+- `file` — a regular file, with the fields shown above.
+- `db_chunk` — a portion of the SQL dump. Its header carries `chunk_index`
+  (0-based; chunks concatenated in `chunk_index` order form the table's
+  complete dump), `table_name` (the source table the chunk belongs to),
+  `statement_count` (the exact number of `;\n`-terminated statements in the
+  payload — readers must refuse a chunk whose parsed count disagrees), and
+  `byte_count` (the payload's uncompressed size), plus `size_compressed`.
+- `directory` — present only to record permissions on an otherwise-empty
+  directory: `path`, `mode` (integer), `size_compressed`. Payload is
+  zero-length.
+- `symlink` — the link target lives in the **header JSON** as a `target`
+  field (`path`, `target`, `size_compressed`); the payload is zero-length.
 
-The per-entry hash is the foundation of tamper detection: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing.
+The per-entry hash is the foundation of **corruption detection**: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing. These hashes are unkeyed, so they detect accidents (bit rot, truncation, a bad transfer), not attackers — anyone who can modify the file can recompute them. Tamper detection is the signature's job (section 12).
 
 ## 7. Compression codecs
 
@@ -310,25 +336,34 @@ The manifest JSON schema:
 
 ```json
 {
-  "format_version": 1,
-  "entry_count": 18341,
   "entries": [
     {
       "index": 0,
       "offset": 1289,
       "length": 2147,
-      "path": "wp-content/themes/twentytwentyfour/style.css",
       "kind": "file",
+      "path": "wp-content/themes/twentytwentyfour/style.css",
       "codec_id": 258,
       "hash": "a1b2c3..."
+    },
+    {
+      "index": 1,
+      "offset": 3436,
+      "length": 278,
+      "kind": "db_chunk",
+      "chunk_index": 0,
+      "codec_id": 258,
+      "hash": "d4e5f6..."
     }
-  ],
-  "totals": {
-    "uncompressed_bytes": 184729382,
-    "compressed_bytes": 38291928
-  }
+  ]
 }
 ```
+
+The top level is a single `entries` array — there is no version, count, or
+totals wrapper (the format version lives in the archive header; the count is
+the array's length). Per entry, `path` is present for `file`, `directory` and
+`symlink` kinds; `chunk_index` is present for `db_chunk`; `hash` is the
+per-entry SHA-256, hex-encoded.
 
 The manifest is the random-access index. Readers wishing to extract a single file scan the manifest, locate that entry's offset, seek there, and read.
 
@@ -365,22 +400,33 @@ When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25
 
 - **key id:** SHA-256 of the public key used.
 - **sig length:** uint32 big-endian; for Ed25519 always `0x00000040`.
-- **sig bytes:** Ed25519 signature over the **SHA-256 digest** of the bytes from offset 0 through the end of the footer — that is, `Ed25519( SHA-256( bytes[0 … end of footer] ) )`. The digest is computed by streaming those bytes, so neither signing nor verifying ever holds the whole archive in memory; this is what keeps signed archives within the streamable-in-both-directions goal (§2) and the writer's memory budget. Signing a digest rather than the raw bytes is the standard construction for messages too large to buffer — it is the standard construction for signing a message too large to buffer, the role RFC 8032's Ed25519ph fills — and is sound here because SHA-256 is collision-resistant and the signed bytes begin with the magic and version, so a signature cannot be transferred to another context. The digest covers everything but the signature block itself: the header (including the signed flag), the provenance, every entry, the manifest, and the footer.
+- **sig bytes:** Ed25519 signature over the **SHA-256 digest** of the bytes from offset 0 through the end of the footer — that is, `Ed25519( SHA-256( bytes[0 … end of footer] ) )`. This is **plain Ed25519** (libsodium's `crypto_sign_detached`) whose 32-byte *message* is the SHA-256 digest; it is **not** RFC 8032 Ed25519ph, and an implementation using a real Ed25519ph primitive will produce signatures that do not verify. The digest is computed by streaming those bytes, so neither signing nor verifying ever holds the whole archive in memory — the standard pre-hash construction for messages too large to buffer, sound here because SHA-256 is collision-resistant and the signed bytes begin with the magic and version, so a signature cannot be transferred to another context. The digest covers everything but the signature block itself: the header (including the signed flag), the provenance, every entry, the manifest, and the footer.
 
 **Verification:** an operator who trusts a particular public key can verify the signature — by recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key — to prove the archive was produced by the holder of the corresponding private key. This is independent of encryption: an archive can be signed without being encrypted, and vice versa.
 
-The signature is **detached and optional**. v1 archives are not required to carry one; readers are not required to verify one when present, though they should warn the operator if a signature is present and not verified.
+The signature is **detached and optional** for writers: v1 archives are not required to carry one. Reader obligations follow the trust model in section 12: a reader holding a trusted public key (supplied per run or pinned in configuration) MUST refuse an archive that is unsigned or whose signature does not verify — a stripped signature is indistinguishable from never-signed, and the unkeyed hashes cannot detect tampering. A reader with no trusted key should warn the operator when a signature is present and goes unverified.
 
 ## 12. Integrity and tamper detection
 
 `.wpmig` integrity rests on four mechanisms, each catching a different class of problem:
 
-| Mechanism                       | Detects                                                       |
-|---------------------------------|---------------------------------------------------------------|
-| Per-entry SHA-256 hash          | Modification of any single entry                              |
-| Manifest hash in footer         | Modification of the manifest itself                           |
-| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)          |
-| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key   |
+| Mechanism                       | Detects                                                                          |
+|---------------------------------|-----------------------------------------------------------------------------------|
+| Per-entry SHA-256 hash          | Accidental modification of any single entry (unkeyed — an attacker can recompute) |
+| Manifest hash in footer         | Accidental modification of the manifest itself (unkeyed, as above)                |
+| AES-GCM authentication tag      | Modification of ciphertext (encrypted archives only)                              |
+| Optional Ed25519 signature      | Modification by anyone except the holder of the signing key                       |
+
+The distinction in the first two rows matters. The plain SHA-256 hashes are
+**corruption** detection: they catch bit rot, truncation, and transfer errors.
+They are not a **tamper** defence, because anyone who can edit the file can
+recompute every hash so it still matches — and a signature can be *stripped*
+(signed flag cleared, trailing block removed), leaving a well-formed unsigned
+archive. The Ed25519 signature is therefore the only tamper defence, and it
+protects only when the reader enforces it: a reader holding a trusted public
+key (supplied per run, or pinned in configuration) MUST refuse an archive that
+is unsigned or whose signature does not verify. A reader with no trusted key
+provides corruption detection only, and must not claim otherwise.
 
 ### 12.1 On-import verification flow
 
@@ -392,7 +438,7 @@ A conforming reader performs verification in this order:
 4. **Read manifest.** Compute and verify manifest hash against the value in the footer.
 5. **Walk entries from manifest.** For each entry, seek to its offset, read the stored bytes, compute SHA-256, and compare to the manifest's expected hash.
 6. **If encrypted:** decrypt each entry's payload using the derived key, the per-entry nonce, and the entry header as AAD. AES-GCM will fail the authentication tag check if any byte has been modified.
-7. **If signed:** verify the Ed25519 signature — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against the trusted public key — if the operator has supplied one.
+7. **Signature enforcement:** when the operator has supplied or pinned a trusted public key, the archive MUST be signed and the Ed25519 signature MUST verify — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key; an unsigned archive is refused as presumed-tampered (a stripped signature is indistinguishable from never-signed). With no trusted key, a signed archive's signature goes unverified and the reader should say so.
 
 Any failure at any step halts the import. The reader must report which step failed, which entry or block was affected, and what the expected versus actual values were. Specifically: "Entry #1273 (`wp-content/uploads/2024/01/banner.jpg`): expected hash `a1b2…`, got `f7e8…`" — not "Import failed."
 
@@ -587,7 +633,40 @@ The following references informed this specification. URLs are stable as of May 
 
 ### Appendix A: Test vectors
 
-*(To be added when the v1.0 specification is finalised. Reference implementations must produce byte-identical output from these inputs.)*
+A canonical v1.1 archive is committed in the Pontifex repository at
+`tests/Fixtures/conformance-v1_1.wpmig`, together with a conformance test
+(`tests/Unit/Archive/ConformanceTest.php`) that rebuilds it from the inputs
+below and asserts byte identity. A reference implementation must produce these
+exact bytes from these exact inputs.
+
+**Inputs.** Provenance: WordPress `6.6.1`, PHP `8.2.0`, URL
+`https://conformance.example`, charset `utf8mb4`, collation
+`utf8mb4_unicode_520_ci`, exporter `pontifex 1.0.0`, exported at
+`2026-01-01T00:00:00+00:00`. Four entries, all raw codec (id `0`) with
+zero-filled nonces, in this order:
+
+1. `file` — path `wp-content/hello.txt`, contents `hello wpmig\n` (12 bytes),
+   mode `420` (0644), mtime `1767225600`, media type `text/plain`.
+2. `directory` — path `wp-content/uploads`, mode `493` (0755).
+3. `symlink` — path `wp-content/link`, target `../hello.txt`.
+4. `db_chunk` — table `wp_options`, chunk 0, 3 statements, payload
+   `DROP TABLE IF EXISTS \`wp_options\`;\nCREATE TABLE \`wp_options\` (id INT);\nINSERT INTO \`wp_options\` VALUES (1);\n` (106 bytes).
+
+**Expected output.** Total size **1802 bytes**; whole-file SHA-256
+`bb6cdc326fd715ec83986992639ab1e30e2d6e202a43ea2bb5da95e84d039cb4`.
+
+Header (16 bytes, hex): `57504d49470000010001000100000000` — the 8-byte magic
+`WPMIG\x00\x00\x01`, major `0x0001`, minor `0x0001`, flags `0x00000000`, all
+big-endian.
+
+Manifest entry table:
+
+| index | kind      | offset | length | entry SHA-256 (hex) |
+|-------|-----------|--------|--------|----------------------|
+| 0     | file      | 284    | 194    | `16edd8a48c5ab1780e18fb6e21a5a64b2771bdd98e0d813d543e0d6919cffa62` |
+| 1     | directory | 478    | 129    | `d6927f23eecc5a6394bd1464cd679f9636b90d7f7c46a8175c114f39bbff0737` |
+| 2     | symlink   | 607    | 137    | `1d5b40a5eafac3572570109e5df8497cfd905dcc4c396c338ac5cf8eb4be6b4a` |
+| 3     | db_chunk  | 744    | 278    | `77a552dbd7232e9c7b612672f9f760c6f4642ef1f6d8af589a8922f0c54efd81` |
 
 ### Appendix B: Glossary
 

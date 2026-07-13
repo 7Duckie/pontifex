@@ -12,6 +12,7 @@ namespace Pontifex\Tests\Unit\Manifest;
 require_once __DIR__ . '/Fakes/FakeDbAdapter.php';
 
 use InvalidArgumentException;
+use RuntimeException;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Manifest\DatabaseScanner;
@@ -283,6 +284,128 @@ final class DatabaseScannerTest extends TestCase {
 	 */
 	public function test_default_chunk_size_constant(): void {
 		$this->assertSame( 4 * 1024 * 1024, DatabaseScanner::DEFAULT_CHUNK_SIZE_BYTES );
+	}
+
+	/**
+	 * A failed row count aborts the scan loudly — never a silent table skip.
+	 *
+	 * A backup quietly missing a table is the catastrophic-silent failure
+	 * class: the adapter throws on a database failure (a real $wpdb returns
+	 * false rather than throwing, and the adapter converts that), and the
+	 * scanner must let that abort the whole scan.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_row_count_aborts_the_scan_loudly(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 10, "CREATE TABLE `wp_options` (...);\n" );
+		$db->fail_next( 'row_count', 'simulated row-count failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated row-count failure' );
+
+		self::unfiltered_scanner( $db )->scan();
+	}
+
+	/**
+	 * A failed dump during lazy chunk realisation propagates at write time.
+	 *
+	 * Chunk SQL is generated lazily when the archive writer realises the
+	 * chunk's stream; a database failure at that point must surface as a
+	 * thrown export failure, not an empty or truncated chunk.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_dump_propagates_when_the_chunk_realises(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 10, "CREATE TABLE `wp_options` (...);\n" );
+
+		$chunks = self::unfiltered_scanner( $db )->scan();
+		$db->fail_next( 'dump_table_rows', 'simulated dump failure' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'simulated dump failure' );
+
+		$chunks[0]->open_sql_stream();
+	}
+
+	/**
+	 * A wide-row table must get proportionally fewer rows per chunk.
+	 *
+	 * With a 10 KiB budget and a reported 2 KiB average row (doubled to 4 KiB
+	 * for SQL-literal overhead), each chunk holds 2 rows — so 10 rows produce
+	 * 5 chunks. Under the old fixed ~1 KiB guess the whole table would have
+	 * been one chunk, ten times the budget.
+	 *
+	 * @return void
+	 */
+	public function test_wide_row_table_gets_fewer_rows_per_chunk(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wide', 10, "CREATE TABLE `wide` (...);\n" );
+		$db->set_average_row_bytes( 'wide', 2048 );
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		$chunks  = $scanner->scan();
+
+		$this->assertCount( 5, $chunks, '10 rows at 4 KiB effective each, under a 10 KiB budget, is 2 rows per chunk = 5 chunks.' );
+	}
+
+	/**
+	 * An unknown average row width must fall back to the fixed estimate.
+	 *
+	 * The adapter reports 0 when the storage engine's figure cannot be read;
+	 * chunking must then behave exactly as before this sizing existed.
+	 *
+	 * @return void
+	 */
+	public function test_unknown_row_width_falls_back_to_the_fixed_estimate(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'unknown', 20, "CREATE TABLE `unknown` (...);\n" );
+
+		// 10 KiB budget / 1 KiB fixed estimate = 10 rows per chunk → 2 chunks.
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+
+		$this->assertCount( 2, $scanner->scan() );
+	}
+
+	/**
+	 * A narrow-row table must keep the fixed estimate as its floor.
+	 *
+	 * A reported 100-byte average (200 doubled) is smaller than the fixed
+	 * ~1 KiB estimate, so the estimate wins and chunking is unchanged — the
+	 * real width only ever *shrinks* chunks, never inflates them past today's.
+	 *
+	 * @return void
+	 */
+	public function test_narrow_row_width_keeps_the_fixed_estimate_floor(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'narrow', 20, "CREATE TABLE `narrow` (...);\n" );
+		$db->set_average_row_bytes( 'narrow', 100 );
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+
+		$this->assertCount( 2, $scanner->scan(), 'Chunking must match the fixed-estimate behaviour when rows are narrow.' );
+	}
+
+	/**
+	 * A chunk's byte_count metadata must reflect the per-table row width.
+	 *
+	 * The byte_count feeds the export's size estimates and preflights, so a
+	 * wide-row chunk must declare its real weight, not the fixed guess.
+	 *
+	 * @return void
+	 */
+	public function test_chunk_byte_count_uses_the_per_table_row_width(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wide', 4, "CREATE TABLE `wide` (...);\n" );
+		$db->set_average_row_bytes( 'wide', 2048 );
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		$chunks  = $scanner->scan();
+
+		// 2 rows per chunk at the 4 KiB effective width, plus the 2 KiB schema allowance on chunk 0.
+		$this->assertSame( ( 2 * 4096 ) + 2048, $chunks[0]->byte_count() );
+		$this->assertSame( 2 * 4096, $chunks[1]->byte_count() );
 	}
 
 	/**

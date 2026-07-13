@@ -4,11 +4,11 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.4.6
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Back up and migrate WordPress — your content and the whole database — in one openly documented .wpmig archive. CLI-first; never phones home.
+Back up and migrate WordPress — your content and the whole database — in one openly documented .wpmig archive. CLI and admin UI; never phones home.
 
 == Description ==
 
@@ -17,7 +17,7 @@ Pontifex packs your WordPress content — everything under `wp-content` (themes,
 * **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
 * **It never touches the cloud.** Pontifex runs entirely on your own infrastructure. It never uploads your data, never phones home, and needs no account.
 
-Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin UI is planned for a later release.
+Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access.
 
 = What it does =
 
@@ -29,10 +29,13 @@ Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin
 * `export --passphrase` — optional AES-256-GCM encryption with an Argon2id-derived key.
 * `import --url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
 * `wp pontifex stats`, `diagnostics`, and `doctor` — observability and a sanitised, never-uploaded diagnostics bundle.
+* `export --resumable` and `export --resume` — an export that survives timeouts, lost connections, and killed processes, continued from where it stopped.
+* `wp pontifex schedule` — automatic backups on a daily or weekly schedule (at an hour given in UTC), with old scheduled backups pruned to a retention count. Also configurable from the Backup screen.
+* The admin screens — create, verify, restore, and roll back backups from the dashboard, with live progress, a pre-restore safety archive, and chunked upload of a backup taken on another site. A backup runs as a persisted job, so reloading the page re-attaches to its progress instead of losing it.
 
 = Built for other people's live sites =
 
-Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks), fails closed on errors, takes a safety archive before every restore, and never does naive search-replace over serialised data.
+Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks, over-budget entries), restores the database atomically — a failed restore leaves your live tables untouched — takes a safety archive before every restore, and never does naive search-replace over serialised data.
 
 == Installation ==
 
@@ -56,7 +59,7 @@ Yes. The `.wpmig` format is publicly documented, so an archive can be inspected 
 
 = Is there an admin UI? =
 
-Not yet. Pontifex is currently driven through WP-CLI. An admin UI is on the roadmap.
+Yes, since v0.5.0: Overview, Backup, Verify, and Restore/Rollback screens, plus uploading a backup taken on another site. WP-CLI remains fully supported and is still the way to script Pontifex.
 
 = Can I migrate to a different site URL? =
 
@@ -66,9 +69,20 @@ Yes, with `wp pontifex import --url=…`, which rewrites the database safely (in
 
 Optionally. Pass `export --passphrase` for AES-256-GCM encryption with an Argon2id-derived key. Archives can also be signed with Ed25519 keys.
 
+= Can backups run automatically on a schedule? =
+
+Yes. Set a daily or weekly schedule — from the Backup screen or with `wp pontifex schedule set` — and Pontifex runs a content-only backup unattended at the chosen hour (UTC), pruning old scheduled backups down to the retention count you set.
+
+= What happens if a backup is interrupted? =
+
+A backup started from the admin screen runs as a persisted job: if the page is closed or the request dies, reloading the screen re-attaches to the running backup, and a background tick continues a job whose request was killed. On the CLI, `wp pontifex export --resumable` makes the export continuable with `wp pontifex export --resume` after any interruption, and the finished archive is byte-identical to an uninterrupted one.
+
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.5.0 =
+* The admin interface: Overview, Backup (progress and cancel), Verify, Restore/Rollback with a pre-restore safety archive, and cross-server backup upload. Engine hardening throughout: atomic staged-table restores, snapshot-consistent exports, streaming restores within web memory limits, and changed-file detection on export. Breaking: supplying or pinning a trusted public key now makes the archive signature mandatory. Backups now default to content-only (wp-content plus the whole database); use --whole-site for full clones.
 
 = 0.4.6 =
 * Distribution readiness: a wp.org `readme.txt`, a `.distignore` and production build, internationalised CLI output, and Plugin Check tidy-ups. No functional changes to backup or restore.

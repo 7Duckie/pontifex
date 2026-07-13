@@ -190,7 +190,11 @@ final class FileWriter {
 		$this->ensure_parent_directory( $target_path );
 
 		if ( $header->is_file() ) {
-			$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			if ( $result->is_streamed() ) {
+				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			} else {
+				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+			}
 			return;
 		}
 		if ( $header->is_directory() ) {
@@ -373,36 +377,148 @@ final class FileWriter {
 	/**
 	 * Write file contents and set mode and mtime.
 	 *
+	 * The bytes land in a sibling temp file which is renamed over the target
+	 * once complete — see {@see self::finalise_temp()} for the two properties
+	 * that buys (per-file crash atomicity, and replacing read-only targets).
+	 *
 	 * @param string $target_path Absolute path of the file to write.
 	 * @param string $payload     Decoded file contents.
 	 * @param int    $mode        POSIX mode bits to set after writing.
 	 * @param int    $mtime       Unix modification timestamp to set after writing.
-	 * @throws RuntimeException If writing, chmod, or touch fails.
+	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
 	 */
 	private function write_file( string $target_path, string $payload, int $mode, int $mtime ): void {
 		$this->remove_conflicting_symlink( $target_path );
+		$temp_path = self::temp_sibling_path( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-		$written = @file_put_contents( $target_path, $payload );
+		$written = @file_put_contents( $temp_path, $payload );
 		if ( false === $written ) {
+			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: could not write file "%s".', $target_path )
 			);
 		}
+		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
+	}
+
+	/**
+	 * Build the sibling temp path a file is written to before its atomic rename.
+	 *
+	 * A sibling of the target (same directory), so the final rename is a
+	 * same-filesystem move; a unique suffix keeps concurrent writers apart.
+	 *
+	 * @param string $target_path The final file path.
+	 * @return string The temp path to write to first.
+	 */
+	private static function temp_sibling_path( string $target_path ): string {
+		return $target_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+	}
+
+	/**
+	 * Delete a temp file left by a failed write, best-effort.
+	 *
+	 * Its own failure must not mask the write failure being reported.
+	 *
+	 * @param string $temp_path The temp path to remove.
+	 * @return void
+	 */
+	private function discard_temp( string $temp_path ): void {
+		if ( is_file( $temp_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the temp file after a failed restore write; its failure must not mask the original error.
+			@unlink( $temp_path );
+		}
+	}
+
+	/**
+	 * Apply mode and mtime to a completed temp file, then rename it into place.
+	 *
+	 * The rename buys two properties at once. First, per-file crash atomicity:
+	 * a hard kill mid-write leaves the target untouched (only an orphaned temp),
+	 * never a half-written live file. Second, read-only targets are replaceable:
+	 * POSIX rename() needs write permission on the DIRECTORY, not the target
+	 * file, so a read-only file at the destination — git object and pack files
+	 * being the everyday case — no longer aborts the restore and its recovery
+	 * the way an fopen-for-write did. This is rsync's write-to-temp-then-rename
+	 * behaviour. Mode and mtime are set on the temp BEFORE the rename, so the
+	 * file appears at its final path fully formed; rename preserves both.
+	 *
+	 * @param string $temp_path   The completed temp file.
+	 * @param string $target_path The final path to move it onto.
+	 * @param int    $mode        POSIX mode bits to set.
+	 * @param int    $mtime       Unix modification timestamp to set.
+	 * @return void
+	 * @throws RuntimeException If chmod, touch, or the rename fails; the temp is discarded.
+	 */
+	private function finalise_temp( string $temp_path, string $target_path, int $mode, int $mtime ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve POSIX mode bits.
-		if ( ! @chmod( $target_path, $mode ) ) {
+		if ( ! @chmod( $temp_path, $mode ) ) {
+			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: could not chmod file "%s".', $target_path )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve mtime.
-		if ( ! @touch( $target_path, $mtime ) ) {
+		if ( ! @touch( $temp_path, $mtime ) ) {
+			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: could not set mtime on file "%s".', $target_path )
 			);
 		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Atomically moving the completed file into place (a same-directory move); WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
+		if ( ! @rename( $temp_path, $target_path ) ) {
+			$this->discard_temp( $temp_path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not move file into place at "%s".', $target_path )
+			);
+		}
+	}
+
+	/**
+	 * Write file contents from a stream and set mode and mtime.
+	 *
+	 * The streamed twin of {@see self::write_file()} (ADR 0010): the payload is
+	 * copied to disk directly from the reader's spool, so a large file never
+	 * occupies payload-sized memory. The bytes were hash-verified before the
+	 * reader handed the stream over. The source stream is closed here — the
+	 * result's consumer owns it, and this is where it is consumed.
+	 *
+	 * @param string   $target_path Absolute path of the file to write.
+	 * @param resource $payload     Decoded file contents, positioned at the start.
+	 * @param int      $mode        POSIX mode bits to set after writing.
+	 * @param int      $mtime       Unix modification timestamp to set after writing.
+	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
+	 */
+	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime ): void {
+		$this->remove_conflicting_symlink( $target_path );
+		$temp_path = self::temp_sibling_path( $target_path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
+		$destination = @fopen( $temp_path, 'wb' );
+		if ( false === $destination ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of the reader's spool stream; not a filesystem path.
+			fclose( $payload );
+			$this->discard_temp( $temp_path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+			);
+		}
+		$copied = stream_copy_to_stream( $payload, $destination );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the restore-time write handle opened above; not a WP_Filesystem operation.
+		$closed = fclose( $destination );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of the reader's spool stream; not a filesystem path.
+		fclose( $payload );
+		if ( false === $copied || ! $closed ) {
+			$this->discard_temp( $temp_path );
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+			);
+		}
+		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
 	}
 
 	/**

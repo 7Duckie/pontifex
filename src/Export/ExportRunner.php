@@ -103,9 +103,34 @@ final class ExportRunner {
 	 */
 	public static function default_manifest_builder( WordPressContext $wordpress_context, ExclusionRules $rules, string $path_prefix = '' ): ManifestBuilder {
 		$file_scanner     = new FileScanner( $rules, $path_prefix );
-		$database_adapter = new WpdbAdapter( $wordpress_context->wpdb_instance() );
-		$database_scanner = new DatabaseScanner( $database_adapter, $rules );
+		$database_scanner = new DatabaseScanner( self::snapshot_database_adapter( $wordpress_context ), $rules );
 		return new ManifestBuilder( $file_scanner, $database_scanner );
+	}
+
+	/**
+	 * Build the export's database adapter, inside a consistent snapshot where possible.
+	 *
+	 * ADR 0011: the dump runs on a dedicated connection holding a REPEATABLE
+	 * READ consistent snapshot, so every table and chunk is read from the same
+	 * instant of the database while the global connection stays live for
+	 * progress writes and locks. The chunk SQL providers capture this adapter,
+	 * so the snapshot spans the scan and every row window realised later
+	 * during the archive write. When the host refuses a second connection or
+	 * the snapshot cannot be opened, the export falls back to the global
+	 * connection without a snapshot — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @param WordPressContext $wordpress_context WordPress-specific facts and the database connections.
+	 * @return WpdbAdapter The adapter the scanner and chunk providers will read through.
+	 */
+	private static function snapshot_database_adapter( WordPressContext $wordpress_context ): WpdbAdapter {
+		$dedicated = $wordpress_context->dedicated_wpdb_connection();
+		if ( null !== $dedicated ) {
+			$adapter = new WpdbAdapter( $dedicated );
+			if ( $adapter->begin_consistent_snapshot() ) {
+				return $adapter;
+			}
+		}
+		return new WpdbAdapter( $wordpress_context->wpdb_instance() );
 	}
 
 	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array.
@@ -124,7 +149,7 @@ final class ExportRunner {
 	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
-	 * @return ExportResult The bytes written and the entry count.
+	 * @return ExportResult The bytes written, the entry count, and any files that changed while being read.
 	 * @throws Throwable If the temp destination cannot be opened (RuntimeException), writing an entry fails (whatever the archive writer raised, re-thrown), or the completed archive cannot be moved into place (RuntimeException). In every failure the temp file is discarded and any prior archive at the output path is left untouched.
 	 */
 	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
@@ -144,6 +169,20 @@ final class ExportRunner {
 		$temp_path   = $this->temp_destination_path( $output_path );
 		$destination = $this->open_destination( $temp_path );
 
+		// Collect the files the archive writer reports as changed between the scan
+		// and the write (shrunk or grown mid-export). Each entry was written with
+		// the byte count actually captured, so the archive itself is truthful; the
+		// list rides the result so callers can warn the user which files were
+		// moving while the backup ran.
+		$changed_files   = array();
+		$on_file_changed = static function ( string $path, int $declared_size, int $actual_size ) use ( &$changed_files ): void {
+			$changed_files[] = array(
+				'path'          => $path,
+				'declared_size' => $declared_size,
+				'actual_size'   => $actual_size,
+			);
+		};
+
 		try {
 			$bytes_written = self::build_archive_writer()->write_archive(
 				$provenance,
@@ -152,7 +191,8 @@ final class ExportRunner {
 				$on_entry,
 				$options->encryption(),
 				$options->signing(),
-				$on_bytes
+				$on_bytes,
+				$on_file_changed
 			);
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the completed temp archive before moving it into place; not a WP_Filesystem operation.
 			fclose( $destination );
@@ -170,7 +210,7 @@ final class ExportRunner {
 		// complete one.
 		$this->move_into_place( $temp_path, $output_path );
 
-		return new ExportResult( $bytes_written, $entry_count );
+		return new ExportResult( $bytes_written, $entry_count, $changed_files );
 	}
 
 	/**

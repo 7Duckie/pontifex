@@ -10,8 +10,11 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
 use Mockery;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
@@ -345,6 +348,69 @@ final class InvokeBranchesTest extends TestCase {
 		$this->assertNotNull( $scope, 'A whole-site export should record a scope.' );
 		$this->assertFalse( $scope->is_content_only() );
 		$this->assertSame( '', $scope->content_root() );
+	}
+
+	/**
+	 * Files that changed while being read must surface as WP_CLI warnings.
+	 *
+	 * The scan-to-write race: the entry's header declares the scan-time size
+	 * but the source yields different bytes at write time. The engine records
+	 * the truth in the archive; the command must tell the user — one warning
+	 * naming the file with both byte counts, plus a summary. The happy-path
+	 * tests above double as the negative case: the WP_CLI alias mock throws
+	 * on any unexpected warning() call, so a steady export must stay silent.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_warns_when_a_file_changed_during_the_export(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		// The header claims 1000 bytes (the scan-time stat); only 400 remain by write time.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$source = fopen( 'php://memory', 'r+b' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open php://memory.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $source, str_repeat( 'B', 400 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $source );
+
+		$plan = new EntryPlan(
+			EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 ),
+			0,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			$source
+		);
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( array( $plan ) ) );
+
+		$warnings = array();
+		$wp_cli   = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )
+			->twice()
+			->andReturnUsing(
+				static function ( string $message ) use ( &$warnings ): void {
+					$warnings[] = $message;
+				}
+			);
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertStringContainsString( 'wp-content/moving.log', $warnings[0], 'The per-file warning must name the changed file.' );
+		$this->assertStringContainsString( '1000', $warnings[0], 'The per-file warning must state the scan-time byte count.' );
+		$this->assertStringContainsString( '400', $warnings[0], 'The per-file warning must state the captured byte count.' );
+		$this->assertStringContainsString( '1 file changed while the backup ran', $warnings[1], 'The summary must count the changed files.' );
 	}
 
 	/**

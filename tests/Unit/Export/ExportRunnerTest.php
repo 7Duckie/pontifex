@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Export;
 
 use Mockery;
+use wpdb;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
@@ -21,6 +22,8 @@ use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Manifest\ExclusionRules;
+use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 
@@ -190,6 +193,54 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A file that changed between scan and write must ride the result as a changed-file report.
+	 *
+	 * The scan-to-write race: the plan's header carries the scan-time size but
+	 * the source holds different bytes by write time. The archive records the
+	 * truth (EntryWriter corrects the header); the runner must collect the
+	 * discrepancy so callers can warn the user which files were moving.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_files_that_changed_between_scan_and_write(): void {
+		// Declared 1000 bytes at scan time; only 400 remain at write time.
+		$lying_header = EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 );
+		$plans        = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			new EntryPlan( $lying_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( str_repeat( 'B', 400 ) ) ),
+		);
+
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame(
+			array(
+				array(
+					'path'          => 'wp-content/moving.log',
+					'declared_size' => 1000,
+					'actual_size'   => 400,
+				),
+			),
+			$result->changed_files(),
+			'The changed file must be reported with its declared and actual sizes.'
+		);
+	}
+
+	/**
+	 * An export where every file matched its scanned size reports no changed files.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_no_changed_files_when_none_changed(): void {
+		$plans  = array( $this->file_plan( 'index.php', "<?php\n// fixture\n" ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( array(), $result->changed_files() );
+	}
+
+	/**
 	 * An export carrying a scope records the scope and the source table prefix.
 	 *
 	 * The scope-aware path (the CLI export and the admin Backup screen): when the
@@ -279,6 +330,74 @@ final class ExportRunnerTest extends TestCase {
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
 		return $context;
+	}
+
+	// -------------------------------------------------------------------------
+	// default_manifest_builder(): the snapshot connection and its fallbacks.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The default builder must dump on a dedicated connection inside a snapshot.
+	 *
+	 * ADR 0011: when the context supplies a dedicated connection, the builder
+	 * opens REPEATABLE READ + a consistent snapshot on it and never touches the
+	 * global connection — the property that keeps progress writes visible.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_opens_a_snapshot_on_a_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( 1 );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'START TRANSACTION WITH CONSISTENT SNAPSHOT' )->andReturn( 1 );
+		// The adapter's destructor commits the snapshot when the builder is released.
+		$dedicated->shouldReceive( 'query' )->with( 'COMMIT' )->andReturn( 1 );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldNotReceive( 'wpdb_instance' );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * With no dedicated connection available, the builder must fall back to the global one.
+	 *
+	 * A host capping connections per user refuses the second connection; the
+	 * export must still happen — a possibly-fuzzy backup beats no backup.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_no_dedicated_connection(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( null );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
+	}
+
+	/**
+	 * A snapshot that cannot open must also fall back to the global connection.
+	 *
+	 * @return void
+	 */
+	public function test_default_builder_falls_back_when_the_snapshot_cannot_open(): void {
+		require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+		$dedicated = Mockery::mock( wpdb::class );
+		$dedicated->shouldReceive( 'query' )->once()->with( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' )->andReturn( false );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'dedicated_wpdb_connection' )->once()->andReturn( $dedicated );
+		$context->shouldReceive( 'wpdb_instance' )->once()->andReturn( Mockery::mock( wpdb::class ) );
+
+		$builder = ExportRunner::default_manifest_builder( $context, ExclusionRules::none() );
+
+		$this->assertInstanceOf( ManifestBuilder::class, $builder );
 	}
 
 	// -------------------------------------------------------------------------
