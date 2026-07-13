@@ -269,6 +269,57 @@ final class Scope {
 	}
 
 	/**
+	 * Summary key: whole-site.
+	 *
+	 * @var string
+	 */
+	public const SUMMARY_WHOLE_SITE = 'whole_site';
+
+	/**
+	 * Summary key: content (wp-content plus the whole database).
+	 *
+	 * @var string
+	 */
+	public const SUMMARY_CONTENT = 'content';
+
+	/**
+	 * Summary key: files only (wp-content, no database).
+	 *
+	 * @var string
+	 */
+	public const SUMMARY_FILES_ONLY = 'files_only';
+
+	/**
+	 * Summary key: database only (no files).
+	 *
+	 * @var string
+	 */
+	public const SUMMARY_DB_ONLY = 'db_only';
+
+	/**
+	 * Classify what this scope holds into one stable key, for a human summary.
+	 *
+	 * The single source of truth for the four shapes, so a surface that turns a
+	 * scope into operator-facing text (the verify verdict) never re-derives the
+	 * branch order and cannot drift from another surface. A null scope (a legacy
+	 * archive) is the caller's concern — it has no Scope to classify.
+	 *
+	 * @return string One of the SUMMARY_* constants.
+	 */
+	public function content_summary_key(): string {
+		if ( ! $this->content_only ) {
+			return self::SUMMARY_WHOLE_SITE;
+		}
+		if ( ! $this->includes_files ) {
+			return self::SUMMARY_DB_ONLY;
+		}
+		if ( ! $this->includes_database ) {
+			return self::SUMMARY_FILES_ONLY;
+		}
+		return self::SUMMARY_CONTENT;
+	}
+
+	/**
 	 * The applied exclusion patterns.
 	 *
 	 * @return string[] The patterns, in application order.
