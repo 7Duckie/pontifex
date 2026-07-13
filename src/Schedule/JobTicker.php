@@ -78,6 +78,20 @@ final class JobTicker {
 	public const RESCHEDULE_DELAY_SECONDS = 120;
 
 	/**
+	 * How many consecutive unclean ticker deaths a job survives before it is failed.
+	 *
+	 * The attempt counter is incremented when an invocation starts and reset
+	 * when it ends cleanly, so it only ever accumulates across invocations
+	 * that died mid-tick (a fatal: out of memory, a host kill). A job that
+	 * legitimately needs many invocations resets the counter on every clean
+	 * handover and never approaches this ceiling; a job whose every attempt
+	 * dies the same way is failed loudly instead of crash-looping forever.
+	 *
+	 * @var int
+	 */
+	private const MAX_UNCLEAN_ATTEMPTS = 8;
+
+	/**
 	 * The Environment abstraction.
 	 *
 	 * @var Environment
@@ -141,6 +155,15 @@ final class JobTicker {
 	/**
 	 * The `pontifex_tick_jobs` handler: continue the active job, or stand down.
 	 *
+	 * Ordered for survival. The successor event is scheduled BEFORE any work
+	 * and cleared only when this invocation ends in a decided state (job done
+	 * or failed), because a fatal — a PHP timeout, out of memory, a host
+	 * kill — runs neither catch nor finally: whatever this handler wants to
+	 * survive its own death must already be on the calendar when the work
+	 * starts. The time limit is lifted best-effort for the same reason; on
+	 * hosts that refuse, the pre-scheduled successor is what carries the job
+	 * to completion across short-lived invocations.
+	 *
 	 * @return void
 	 */
 	public function run(): void {
@@ -156,7 +179,26 @@ final class JobTicker {
 			return;
 		}
 
+		$this->extend_time_limit();
+
+		// The dead-man's switch: with the successor already pending, a death at
+		// ANY later point leaves the chain alive.
+		$this->reschedule();
+
 		try {
+			// Count the attempt before working; reset only on a clean end. Only
+			// consecutive unclean deaths accumulate, and past the ceiling the job
+			// is failed loudly instead of crash-looping forever.
+			$attempts = $this->record_attempt( $job->id() );
+			if ( null === $attempts ) {
+				return;
+			}
+			if ( $attempts > self::MAX_UNCLEAN_ATTEMPTS ) {
+				$this->fail_stalled_job( $job->id(), $attempts );
+				wp_clear_scheduled_hook( self::CRON_HOOK );
+				return;
+			}
+
 			$runner   = new ResumableExportRunner( $this->environment, $this->wordpress_context, $this->job_store, $this->manifest_builder_factory );
 			$deadline = microtime( true ) + self::INVOCATION_BUDGET_SECONDS;
 			$done     = false;
@@ -171,18 +213,100 @@ final class JobTicker {
 
 			if ( $done ) {
 				$this->finalise( $job->id() );
+				// The job is decided; the pre-scheduled successor has nothing to do.
+				wp_clear_scheduled_hook( self::CRON_HOOK );
 				return;
 			}
-			// Budget spent, work remains: hand over to the next invocation.
-			$this->reschedule();
+			// Budget spent, work remains: a clean handover to the successor that
+			// is already pending. Reset the unclean-death counter.
+			$this->reset_attempts( $job->id() );
 		} catch ( Throwable $error ) {
 			// The runner marked the job failed; record the failure the way every
-			// export path does and stop — a failed job is not rescheduled.
+			// export path does and stop — a failed job is not rescheduled, so the
+			// pre-scheduled successor is cleared.
 			$this->logger->error( 'Cron-driven backup failed.', array( 'exception' => $error ) );
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
+			wp_clear_scheduled_hook( self::CRON_HOOK );
 		} finally {
 			$this->wordpress_context->release_named_lock( self::LOCK_NAME );
+		}
+	}
+
+	/**
+	 * Increment and persist the job's unclean-attempt counter; return the new count.
+	 *
+	 * @param string $job_id The active job's id.
+	 * @return int|null The attempt count including this one, or null when the job vanished.
+	 */
+	private function record_attempt( string $job_id ): ?int {
+		$job = $this->job_store->get( $job_id );
+		if ( null === $job || ! $job->is_active() ) {
+			return null;
+		}
+		$payload  = $job->payload();
+		$attempts = ( isset( $payload['ticker_attempts'] ) && is_numeric( $payload['ticker_attempts'] ) ? (int) $payload['ticker_attempts'] : 0 ) + 1;
+
+		$payload['ticker_attempts'] = $attempts;
+		$job->set_payload( $payload );
+		$this->job_store->save( $job );
+		return $attempts;
+	}
+
+	/**
+	 * Zero the job's unclean-attempt counter after a clean handover.
+	 *
+	 * @param string $job_id The job's id.
+	 * @return void
+	 */
+	private function reset_attempts( string $job_id ): void {
+		$job = $this->job_store->get( $job_id );
+		if ( null === $job || ! $job->is_active() ) {
+			return;
+		}
+		$payload = $job->payload();
+		if ( 0 === (int) ( $payload['ticker_attempts'] ?? 0 ) ) {
+			return;
+		}
+		$payload['ticker_attempts'] = 0;
+		$job->set_payload( $payload );
+		$this->job_store->save( $job );
+	}
+
+	/**
+	 * Fail a job whose every continuation attempt has died mid-tick.
+	 *
+	 * The same bookkeeping as any failed export, plus a log line naming the
+	 * real situation, so the operator learns the job was abandoned rather
+	 * than finding a forever-"running" record.
+	 *
+	 * @param string $job_id   The stalled job's id.
+	 * @param int    $attempts How many attempts have died.
+	 * @return void
+	 */
+	private function fail_stalled_job( string $job_id, int $attempts ): void {
+		$job = $this->job_store->get( $job_id );
+		if ( null !== $job && $job->is_active() ) {
+			$job->mark( Job::STATUS_FAILED, time() );
+			$this->job_store->save( $job );
+		}
+		$this->logger->error(
+			'Cron-driven backup abandoned: every continuation attempt died mid-tick; the host is ending the work before it can hand over.',
+			array( 'attempts' => $attempts )
+		);
+		$this->bump_counters( array( 'failed' => 1 ) );
+		TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
+	}
+
+	/**
+	 * Lift the script time limit for the duration of the invocation, where allowed.
+	 *
+	 * @return void
+	 */
+	private function extend_time_limit(): void {
+		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- A cron continuation must outlive the host's web timeout, the same posture as the admin backup; set_time_limit can be disabled by the host, so the call is best-effort and the pre-scheduled successor covers refusal.
+			@set_time_limit( 0 );
 		}
 	}
 
