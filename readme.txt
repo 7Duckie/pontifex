@@ -4,11 +4,11 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.4.6
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Back up and migrate WordPress — your content and the whole database — in one openly documented .wpmig archive. CLI-first; never phones home.
+Back up and migrate WordPress — your content and the whole database — in one openly documented .wpmig archive. CLI and admin UI; never phones home.
 
 == Description ==
 
@@ -17,7 +17,7 @@ Pontifex packs your WordPress content — everything under `wp-content` (themes,
 * **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
 * **It never touches the cloud.** Pontifex runs entirely on your own infrastructure. It never uploads your data, never phones home, and needs no account.
 
-Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin UI is planned for a later release.
+Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access.
 
 = What it does =
 
@@ -29,6 +29,7 @@ Pontifex is CLI-first: it is driven through WP-CLI (`wp pontifex …`). An admin
 * `export --passphrase` — optional AES-256-GCM encryption with an Argon2id-derived key.
 * `import --url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
 * `wp pontifex stats`, `diagnostics`, and `doctor` — observability and a sanitised, never-uploaded diagnostics bundle.
+* The admin screens — create, verify, restore, and roll back backups from the dashboard, with live progress, a pre-restore safety archive, and chunked upload of a backup taken on another site.
 
 = Built for other people's live sites =
 
@@ -56,7 +57,7 @@ Yes. The `.wpmig` format is publicly documented, so an archive can be inspected 
 
 = Is there an admin UI? =
 
-Not yet. Pontifex is currently driven through WP-CLI. An admin UI is on the roadmap.
+Yes, since v0.5.0: Overview, Backup, Verify, and Restore/Rollback screens, plus uploading a backup taken on another site. WP-CLI remains fully supported and is still the way to script Pontifex.
 
 = Can I migrate to a different site URL? =
 
@@ -69,6 +70,9 @@ Optionally. Pass `export --passphrase` for AES-256-GCM encryption with an Argon2
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.5.0 =
+* The admin interface: Overview, Backup (progress and cancel), Verify, Restore/Rollback with a pre-restore safety archive, and cross-server backup upload. Engine hardening throughout: atomic staged-table restores, snapshot-consistent exports, streaming restores within web memory limits, and changed-file detection on export. Breaking: supplying or pinning a trusted public key now makes the archive signature mandatory. Backups now default to content-only (wp-content plus the whole database); use --whole-site for full clones.
 
 = 0.4.6 =
 * Distribution readiness: a wp.org `readme.txt`, a `.distignore` and production build, internationalised CLI output, and Plugin Check tidy-ups. No functional changes to backup or restore.
