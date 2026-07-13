@@ -824,4 +824,98 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertFileExists( $this->fixture_root . '/wp-includes/version.php' );
 	}
+
+	/**
+	 * A read-only destination file must be replaceable.
+	 *
+	 * Git object and pack files are read-only by design, and an fopen-for-write
+	 * on one aborted the restore AND its auto-recovery. The write now lands in a
+	 * sibling temp renamed over the target, and POSIX rename() needs write
+	 * permission on the directory, not the target file — so a read-only file is
+	 * replaced cleanly with the archive's content and mode.
+	 *
+	 * @return void
+	 */
+	public function test_write_replaces_a_read_only_destination_file(): void {
+		$target = $this->fixture_root . '/wp-content/readonly.pack';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the test fixture directory.
+		mkdir( dirname( $target ), 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding the pre-existing read-only file the test replaces.
+		file_put_contents( $target, 'old read-only content' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the seeded file read-only, the condition under test.
+		chmod( $target, 0o444 );
+
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::file_result( 'wp-content/readonly.pack', 'restored content' ) );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'restored content', file_get_contents( $target ), 'The read-only file must be replaced with the archive content.' );
+		$this->assertSame( 0o644, fileperms( $target ) & 0o7777, 'The replaced file must carry the archive mode, not the old read-only bits.' );
+	}
+
+	/**
+	 * The streamed write path must replace a read-only destination too.
+	 *
+	 * @return void
+	 */
+	public function test_streamed_write_replaces_a_read_only_destination_file(): void {
+		$target = $this->fixture_root . '/wp-content/readonly-streamed.pack';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the test fixture directory.
+		mkdir( dirname( $target ), 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding the pre-existing read-only file the test replaces.
+		file_put_contents( $target, 'old' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the seeded file read-only, the condition under test.
+		chmod( $target, 0o444 );
+
+		$contents = 'streamed restored content';
+		$header   = EntryHeader::for_file( 'wp-content/readonly-streamed.pack', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+		rewind( $stream );
+
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( EntryReadResult::for_stream( $header, $stream, strlen( $contents ) ) );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( $contents, file_get_contents( $target ) );
+	}
+
+	/**
+	 * A failed write must leave the original file intact and no temp behind.
+	 *
+	 * The per-file crash-atomicity property: the temp write fails (unwritable
+	 * directory), the error is loud, the pre-existing file is untouched, and no
+	 * orphaned .tmp sibling remains.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_write_leaves_the_original_intact_and_no_temp(): void {
+		$dir    = $this->fixture_root . '/wp-content/locked';
+		$target = $dir . '/precious.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the test fixture directory.
+		mkdir( $dir, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding the pre-existing file the failed write must not touch.
+		file_put_contents( $target, 'original' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the DIRECTORY unwritable so the temp write fails, the condition under test.
+		chmod( $dir, 0o555 );
+
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+		try {
+			$writer->write_entry( self::file_result( 'wp-content/locked/precious.txt', 'clobber attempt' ) );
+		} catch ( RuntimeException $e ) {
+			$thrown = $e;
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+			chmod( $dir, 0o755 );
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown, 'A write into an unwritable directory must fail loudly.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'original', file_get_contents( $target ), 'A failed write must leave the original untouched.' );
+		$this->assertSame( array(), glob( $dir . '/*.tmp' ), 'A failed write must leave no orphaned temp file.' );
+	}
 }
