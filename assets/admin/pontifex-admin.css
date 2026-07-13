@@ -245,6 +245,21 @@
 	color: var(--pontifex-ink);
 }
 
+/*
+ * A health warning (e.g. a switched-on schedule with no pending cron event).
+ * Restraint over alarm, per the design language: emphasis comes from a left
+ * accent rule and ink text, not an alarm-red fill. The min-height default is
+ * dropped so the rule hugs the wrapped text rather than an empty gap.
+ */
+.pontifex-admin .pontifex-notice-warning {
+	min-height: 0;
+	max-width: 60ch;
+	padding: calc(var(--pontifex-step) * 1.25) calc(var(--pontifex-step) * 1.75);
+	border-left: 3px solid var(--pontifex-accent);
+	background: var(--pontifex-fill);
+	color: var(--pontifex-ink);
+}
+
 .pontifex-admin .pontifex-actions {
 	white-space: nowrap;
 }
