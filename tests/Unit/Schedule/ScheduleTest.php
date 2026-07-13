@@ -12,10 +12,16 @@ namespace Pontifex\Tests\Unit\Schedule;
 use Brain\Monkey\Functions;
 use InvalidArgumentException;
 use Mockery;
+use RuntimeException;
 use Pontifex\Admin\BackupStore;
+use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\Schedule\JobTicker;
 use Pontifex\Schedule\Schedule;
 use Pontifex\Schedule\ScheduleStore;
@@ -195,6 +201,193 @@ final class ScheduleTest extends TestCase {
 		// Reaching here without a Mockery unexpected-call exception IS the pass;
 		// assert explicitly so the test is not flagged as risky.
 		$this->assertTrue( true );
+	}
+
+	/**
+	 * The successor event is on the calendar before the tick runs, and a
+	 * failed tick clears it while the attempt is recorded on the job.
+	 *
+	 * The dead-man's switch: a fatal mid-tick runs neither catch nor finally,
+	 * so the only thing that can keep the chain alive is an event scheduled
+	 * BEFORE the work. Observable here: even though the tick throws
+	 * immediately, the successor was already scheduled — and because a
+	 * failed job is decided, the catch path then clears it.
+	 *
+	 * @return void
+	 */
+	public function test_ticker_schedules_the_successor_before_working(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $job_store->create(
+			Job::KIND_EXPORT,
+			array(
+				'output'      => $this->content_dir . '/x.wpmig',
+				'temp'        => $this->content_dir . '/x.part',
+				'scan_root'   => $this->content_dir,
+				'path_prefix' => 'wp-content',
+				'exclusions'  => array(),
+				'signed'      => false,
+				'phase'       => 'files',
+			),
+			1700000000
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once();
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+		$context->shouldReceive( 'save_option' );
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\expect( 'wp_schedule_single_event' )->once()->with( Mockery::type( 'int' ), JobTicker::CRON_HOOK );
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( JobTicker::CRON_HOOK );
+
+		$ticker = new JobTicker(
+			Mockery::mock( Environment::class ),
+			$context,
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			new NullLogger(),
+			static function (): ManifestBuilderInterface {
+				throw new RuntimeException( 'simulated mid-tick death' );
+			}
+		);
+
+		$ticker->run();
+
+		$failed = $job_store->get( $job->id() );
+		$this->assertNotNull( $failed );
+		$this->assertSame( Job::STATUS_FAILED, $failed->status(), 'A throwing tick leaves the job failed, not wedged running.' );
+		$this->assertSame( 1, (int) ( $failed->payload()['ticker_attempts'] ?? 0 ), 'The attempt was recorded before the work began.' );
+	}
+
+	/**
+	 * A job whose every continuation attempt died mid-tick is failed loudly.
+	 *
+	 * Past the ceiling the ticker must not touch the runner at all: the job
+	 * is marked failed, the failure is counted, and the chain ends — never
+	 * an unbounded crash loop, never a forever-"running" record.
+	 *
+	 * @return void
+	 */
+	public function test_ticker_fails_a_job_past_the_unclean_attempt_ceiling(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $job_store->create(
+			Job::KIND_EXPORT,
+			array(
+				'output'          => $this->content_dir . '/x.wpmig',
+				'ticker_attempts' => 8,
+			),
+			1700000000
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once();
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+		$context->shouldReceive( 'save_option' );
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\expect( 'wp_schedule_single_event' )->once()->with( Mockery::type( 'int' ), JobTicker::CRON_HOOK );
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( JobTicker::CRON_HOOK );
+
+		$ticker = new JobTicker(
+			Mockery::mock( Environment::class ),
+			$context,
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			new NullLogger(),
+			function (): ManifestBuilderInterface {
+				$this->fail( 'Past the attempt ceiling the runner must never be invoked.' );
+			}
+		);
+
+		$ticker->run();
+
+		$failed = $job_store->get( $job->id() );
+		$this->assertNotNull( $failed );
+		$this->assertSame( Job::STATUS_FAILED, $failed->status() );
+	}
+
+	/**
+	 * A completed job clears the pre-scheduled successor: the chain ends only
+	 * when the work is decided.
+	 *
+	 * @return void
+	 */
+	public function test_ticker_clears_the_successor_on_completion(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $job_store->create(
+			Job::KIND_EXPORT,
+			array(
+				'output'        => $this->content_dir . '/done.wpmig',
+				'temp'          => $this->content_dir . '/done.part',
+				'scan_root'     => $this->content_dir,
+				'path_prefix'   => 'wp-content',
+				'exclusions'    => array(),
+				'signed'        => false,
+				'reason'        => null,
+				'scope'         => null,
+				'phase'         => 'files',
+				'bytes_written' => 0,
+				'files_changed' => 0,
+			),
+			1700000000
+		);
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_VERSION' )->andReturn( false );
+		$environment->shouldReceive( 'php_version' )->andReturn( '8.3.0' );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once();
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+		$context->shouldReceive( 'save_option' );
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\expect( 'wp_schedule_single_event' )->once()->with( Mockery::type( 'int' ), JobTicker::CRON_HOOK );
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( JobTicker::CRON_HOOK );
+
+		$ticker = new JobTicker(
+			$environment,
+			$context,
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			new NullLogger(),
+			static function (): ManifestBuilderInterface {
+				$builder = Mockery::mock( ManifestBuilderInterface::class );
+				$builder->shouldReceive( 'build' )->andReturnUsing(
+					static function (): ManifestStream {
+						$contents = 'alpha';
+						$plan     = new EntryPlan(
+							EntryHeader::for_file( 'wp-content/a.txt', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 ),
+							0,
+							str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+							static function () use ( $contents ) {
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+								$stream = fopen( 'php://memory', 'r+b' );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+								fwrite( $stream, $contents );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+								rewind( $stream );
+								return $stream;
+							}
+						);
+						return ManifestStream::from_plans( array( $plan ) );
+					}
+				);
+				return $builder;
+			}
+		);
+
+		$ticker->run();
+
+		$this->assertFileExists( $this->content_dir . '/done.wpmig', 'The completed archive must be renamed into place.' );
+		$this->assertNull( $job_store->get( $job->id() ), 'A finished job is deleted by finalise().' );
 	}
 
 	/**
