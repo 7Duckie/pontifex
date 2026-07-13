@@ -61,6 +61,8 @@ final class BackupControllerTest extends TestCase {
 		parent::setUp();
 		$this->base = sys_get_temp_dir() . '/pontifex-backup-controller-' . uniqid( '', true );
 		$this->json = array();
+		\Brain\Monkey\Functions\when( 'wp_schedule_single_event' )->justReturn( true );
+		\Brain\Monkey\Functions\when( 'wp_clear_scheduled_hook' )->justReturn( 0 );
 	}
 
 	/**

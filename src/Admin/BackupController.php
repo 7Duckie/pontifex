@@ -22,6 +22,7 @@ use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Schedule\JobTicker;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 
@@ -321,7 +322,7 @@ final class BackupController {
 			// The backup runs as a persisted job (ADR 0014/0015): every tick saves
 			// its progress, so a request the host kills mid-run leaves a continuable
 			// job on disk instead of nothing, and the page can re-attach to it.
-			$job_store = new JobStore( $this->resolve_content_root() );
+			$job_store = $this->jobs_store();
 			$factory   = null !== $this->manifest_builder
 				? fn (): ManifestBuilderInterface => $this->manifest_builder
 				: null;
@@ -330,6 +331,11 @@ final class BackupController {
 
 			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->patterns(), time() );
 			$this->active_job = $job;
+
+			// Insurance for a request the host kills outright (no shutdown handler
+			// runs): a cron tick will find the still-active job and continue it
+			// unattended. A clean finish, cancel, or failure clears the event.
+			wp_schedule_single_event( time() + JobTicker::RESCHEDULE_DELAY_SECONDS, JobTicker::CRON_HOOK );
 
 			// Stash the byte total on the job so the progress endpoint can answer a
 			// re-attaching page from persisted state; the runner's own cursor keys
@@ -364,6 +370,7 @@ final class BackupController {
 			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
+			wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
 
 			$this->secure_file( $path );
 			$this->clear_progress();
@@ -414,6 +421,19 @@ final class BackupController {
 	}
 
 	/**
+	 * The job store, rooted at the same content directory as the backup store.
+	 *
+	 * Derived from the injected store rather than re-resolving WP_CONTENT_DIR,
+	 * so the two stores can never diverge — in production they are identical,
+	 * and in tests both live under the test's own fixture root.
+	 *
+	 * @return JobStore The job store.
+	 */
+	private function jobs_store(): JobStore {
+		return new JobStore( dirname( $this->store->directory(), 2 ) );
+	}
+
+	/**
 	 * Remove the active job's temp archive and records after a cancel or failure.
 	 *
 	 * Best-effort by design: cleanup must never mask the outcome being reported.
@@ -428,8 +448,9 @@ final class BackupController {
 		if ( null === $this->active_job ) {
 			return;
 		}
+		wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
 		try {
-			$job_store = new JobStore( $this->resolve_content_root() );
+			$job_store = $this->jobs_store();
 			$current   = $job_store->get( $this->active_job->id() );
 			$payload   = null !== $current ? $current->payload() : $this->active_job->payload();
 			$temp      = isset( $payload['temp'] ) ? (string) $payload['temp'] : '';
@@ -478,7 +499,7 @@ final class BackupController {
 		// and the store's TTL cleanup removes it with the failed record.
 		if ( null !== $this->active_job ) {
 			try {
-				$job_store = new JobStore( $this->resolve_content_root() );
+				$job_store = $this->jobs_store();
 				$current   = $job_store->get( $this->active_job->id() );
 				if ( null !== $current && $current->is_active() ) {
 					$current->mark( Job::STATUS_FAILED, time() );
@@ -536,7 +557,7 @@ final class BackupController {
 		// writing request died and a later ticker will continue — answer from the
 		// job's persisted cursors so the page can re-attach to the running backup.
 		if ( self::PHASE_IDLE === $phase ) {
-			$job = ( new JobStore( $this->resolve_content_root() ) )->active_job();
+			$job = ( $this->jobs_store() )->active_job();
 			if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
 				$payload = $job->payload();
 				wp_send_json_success(
