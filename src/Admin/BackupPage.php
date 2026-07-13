@@ -306,6 +306,12 @@ final class BackupPage {
 			(int) $schedule->retention()
 		);
 
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-exclusions">%s</label>', esc_html__( 'Also leave out (one pattern per line)', 'pontifex' ) );
+		printf(
+			'<textarea id="pontifex-schedule-exclusions" class="pontifex-action-input" rows="3" spellcheck="false">%s</textarea>',
+			esc_textarea( implode( "\n", $schedule->exclusions() ) )
+		);
+
 		printf(
 			'<p><button type="button" class="pontifex-button" id="pontifex-schedule-save">%s</button></p>',
 			esc_html__( 'Save schedule', 'pontifex' )

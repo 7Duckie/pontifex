@@ -115,7 +115,12 @@ final class ScheduledExporter {
 
 		try {
 			$this->backup_store->ensure_directory();
-			$exclusions = ExclusionRules::default_v010();
+			// The scheduled backup applies the same exclusions the operator configured,
+			// on top of the curated defaults, so a scheduled run matches a manual one
+			// rather than silently differing.
+			$exclusions = ExclusionRules::from_array(
+				array_merge( ExclusionRules::default_v010()->patterns(), $schedule->exclusions() )
+			);
 			$path       = $this->backup_store->next_backup_path( new DateTimeImmutable() );
 			$options    = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
 

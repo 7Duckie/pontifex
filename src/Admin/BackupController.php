@@ -750,9 +750,27 @@ final class BackupController {
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above.
 		$retention = isset( $_POST['retention'] ) && is_numeric( wp_unslash( (string) $_POST['retention'] ) ) ? (int) wp_unslash( (string) $_POST['retention'] ) : 0;
 
+		// The scheduled backup carries the same exclusion patterns as a manual one,
+		// validated at this boundary so a malformed regex is refused at save rather
+		// than failing every unattended run.
+		$exclusions = $this->read_user_exclusions();
+		$invalid    = self::first_invalid_pattern( $exclusions );
+		if ( null !== $invalid ) {
+			wp_send_json_error(
+				array(
+					'message' => sprintf(
+						/* translators: %s: the exclusion pattern that could not be understood */
+						__( 'That exclusion pattern is not valid: %s. Fix or remove it and try again.', 'pontifex' ),
+						$invalid
+					),
+				),
+				400
+			);
+		}
+
 		try {
-			$schedule = new Schedule( $enabled, $frequency, $hour, $retention );
-		} catch ( InvalidArgumentException $invalid ) {
+			$schedule = new Schedule( $enabled, $frequency, $hour, $retention, $exclusions );
+		} catch ( InvalidArgumentException $invalid_schedule ) {
 			wp_send_json_error( array( 'message' => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ) ), 400 );
 		}
 
