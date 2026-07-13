@@ -19,6 +19,9 @@ use Pontifex\Environment\RealEnvironment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportResult;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Job\Job;
+use Pontifex\Job\JobStore;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\ExclusionRules;
@@ -40,9 +43,23 @@ use Pontifex\WordPress\WordPressContext;
  *
  * ## OPTIONS
  *
- * --output=<path>
+ * [--output=<path>]
  * : Absolute filesystem path where the archive should be written.
- *   The parent directory must exist and be writable.
+ *   The parent directory must exist and be writable. Required —
+ *   except with --resume, which reads it from the interrupted export.
+ *
+ * [--resumable]
+ * : Run the export as a resumable job: progress is recorded as it goes,
+ *   so an export interrupted by a timeout, a lost connection, or a kill
+ *   can be continued from where it stopped with --resume instead of
+ *   starting over. Not available together with encryption (the derived
+ *   key exists only for one run and is never stored).
+ *
+ * [--resume]
+ * : Continue the interrupted resumable export from its last verified
+ *   entry. The output path, scope, and exclusions are remembered from
+ *   the original run; a signed export needs the same --sign and
+ *   --signing-key flags it began with.
  *
  * [--whole-site]
  * : Capture the entire WordPress root — WordPress core and
@@ -243,7 +260,17 @@ final class ExportCommand {
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
 		// 1. Parse and validate flags.
-		$output_path       = $this->require_output_path( $associative_args );
+		$resumable = isset( $associative_args['resumable'] ) && false !== $associative_args['resumable'];
+		$resume    = isset( $associative_args['resume'] ) && false !== $associative_args['resume'];
+		if ( $resumable && $resume ) {
+			WP_CLI::error( __( 'Pass either --resumable (start a resumable export) or --resume (continue one), not both.', 'pontifex' ) );
+		}
+
+		// On --resume the output path is remembered by the interrupted job; any
+		// --output supplied is only cross-checked against it later.
+		$output_path       = $resume
+			? ( isset( $associative_args['output'] ) ? (string) $associative_args['output'] : '' )
+			: $this->require_output_path( $associative_args );
 		$exclude_file_path = isset( $associative_args['exclude-file'] ) ? (string) $associative_args['exclude-file'] : '';
 		$use_defaults      = self::should_use_defaults( $associative_args );
 		$whole_site        = isset( $associative_args['whole-site'] ) && false !== $associative_args['whole-site'];
@@ -253,14 +280,21 @@ final class ExportCommand {
 		$signing_requested = isset( $associative_args['sign'] ) && false !== $associative_args['sign'];
 		$signing_key_path  = isset( $associative_args['signing-key'] ) ? (string) $associative_args['signing-key'] : '';
 
-		$this->validate_output_path( $output_path );
+		if ( ( $resumable || $resume ) && $encrypting ) {
+			WP_CLI::error( __( 'An encrypted export cannot be resumable: the derived key exists only for one run and is never stored. Drop --resumable/--resume, or export without encryption.', 'pontifex' ) );
+		}
 
-		// 1a. Tee a per-transfer log alongside the archive, so this export leaves a
-		// self-contained record next to its .wpmig (in addition to the central log).
-		$this->attach_transfer_log(
-			static fn (): string => dirname( $output_path ),
-			basename( $output_path ) . '.log'
-		);
+		if ( ! $resume ) {
+			$this->validate_output_path( $output_path );
+
+			// 1a. Tee a per-transfer log alongside the archive, so this export leaves a
+			// self-contained record next to its .wpmig (in addition to the central log).
+			// A resumed run attaches once its job reveals the remembered output path.
+			$this->attach_transfer_log(
+				static fn (): string => dirname( $output_path ),
+				basename( $output_path ) . '.log'
+			);
+		}
 
 		// 2. Build the exclusion rules.
 		$user_patterns = '' !== $exclude_file_path
@@ -269,8 +303,8 @@ final class ExportCommand {
 
 		$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
 
-		// 3. Confirm with the user (unless --yes).
-		if ( ! $skip_confirmation ) {
+		// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
+		if ( ! $skip_confirmation && ! $resume ) {
 			$this->print_scope_summary( $whole_site );
 			$this->print_exclusion_summary( $exclusion_rules );
 			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
@@ -340,6 +374,13 @@ final class ExportCommand {
 			? Scope::whole_site( $exclusion_rules->patterns() )
 			: Scope::content_only( $exclusion_rules->patterns() );
 
+		// 4a. A resumable export (or its resumption) takes the step-machine path
+		// (ADR 0014/0015) instead of the one-shot engine, and returns from there.
+		if ( $resumable || $resume ) {
+			$this->run_resumable( $resume, $output_path, $signing, $encryption_disabled_reason, $scan_root, $path_prefix, $exclusion_rules, $scope );
+			return;
+		}
+
 		// 5. Build the entry list (every file plus every database table to archive).
 		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix );
 
@@ -384,6 +425,167 @@ final class ExportCommand {
 
 			// 7. Print the summary.
 			$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
+		} catch ( Throwable $error ) {
+			$this->logger->error(
+				'Export failed.',
+				array(
+					'output'    => $output_path,
+					'exception' => $error,
+				)
+			);
+			$this->bump_counters( array( 'failed' => 1 ) );
+			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
+			throw $error;
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// The resumable path (ADR 0014/0015).
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Wall-clock budget per tick when the CLI drives a resumable export.
+	 *
+	 * Each tick persists its progress, so this is the most work a kill can
+	 * lose (plus one torn entry, which resume heals).
+	 *
+	 * @var float
+	 */
+	private const RESUMABLE_TICK_BUDGET_SECONDS = 20.0;
+
+	/**
+	 * Start or resume a job-backed export and tick it to completion in-process.
+	 *
+	 * The CLI is its own ticker (ADR 0014): it loops budgeted steps, reloading
+	 * the job between them exactly as separate requests would, so the on-disk
+	 * state is continuable at every boundary. A kill at any point loses at most
+	 * one tick's unlogged work, and `--resume` picks up from the last verified
+	 * entry.
+	 *
+	 * @param bool                                         $resume                     True to continue the interrupted job, false to start a new one.
+	 * @param string                                       $output_path                The archive destination ('' on resume until the job supplies it).
+	 * @param \Pontifex\Archive\Crypto\SigningContext|null $signing                  Signing inputs, or null.
+	 * @param string|null                                  $encryption_disabled_reason The recorded reason the archive is unencrypted.
+	 * @param string                                       $scan_root                  Absolute path the file scan starts from.
+	 * @param string                                       $path_prefix                Prefix for recorded paths.
+	 * @param ExclusionRules                               $exclusion_rules            The exclusion rules in force.
+	 * @param Scope                                        $scope                      The scope facts to record in provenance.
+	 * @return void
+	 * @throws RuntimeException If the job record disappears mid-run.
+	 * @throws Throwable        Re-thrown after logging if a tick fails (drift refusal, write failure).
+	 */
+	private function run_resumable( bool $resume, string $output_path, $signing, ?string $encryption_disabled_reason, string $scan_root, string $path_prefix, ExclusionRules $exclusion_rules, Scope $scope ): void {
+		$store   = new JobStore( $this->resolve_content_root() );
+		$factory = null !== $this->manifest_builder
+			? fn (): ManifestBuilderInterface => $this->manifest_builder
+			: null;
+		$runner  = new ResumableExportRunner( $this->environment, $this->wordpress_context, $store, $factory );
+
+		if ( $resume ) {
+			$job = $store->active_job();
+			if ( null === $job || Job::KIND_EXPORT !== $job->kind() ) {
+				WP_CLI::error( __( 'No interrupted resumable export found to resume.', 'pontifex' ) );
+			}
+			$payload = $job->payload();
+			if ( '' !== $output_path && (string) $payload['output'] !== $output_path ) {
+				WP_CLI::error( sprintf( /* translators: %s: the output path the interrupted export writes to */ __( 'This resumable export writes to %s; --output cannot change on resume.', 'pontifex' ), (string) $payload['output'] ) );
+			}
+			$output_path   = (string) $payload['output'];
+			$job_is_signed = (bool) $payload['signed'];
+			if ( ( null !== $signing ) !== $job_is_signed ) {
+				WP_CLI::error( __( 'This resumable export was started with different signing settings; resume with the same --sign/--signing-key flags it began with.', 'pontifex' ) );
+			}
+			$this->attach_transfer_log(
+				static fn (): string => dirname( $output_path ),
+				basename( $output_path ) . '.log'
+			);
+			WP_CLI::log( sprintf( /* translators: %s: the output path */ __( 'Resuming the interrupted export to %s.', 'pontifex' ), $output_path ) );
+		} else {
+			try {
+				$job = $runner->start(
+					new ExportOptions( $output_path, null, $signing, $encryption_disabled_reason, $scope ),
+					$scan_root,
+					$path_prefix,
+					$exclusion_rules->patterns(),
+					time()
+				);
+			} catch ( RuntimeException $e ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+				WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
+			}
+			WP_CLI::log( __( 'This export is resumable: if it is interrupted, continue it with `wp pontifex export --resume`.', 'pontifex' ) );
+		}
+
+		$bar_started = false;
+		try {
+			$done = false;
+			while ( ! $done ) {
+				// Reload between ticks exactly as separate requests would, so the
+				// persisted state is what carries the export forward.
+				$current = $store->get( $job->id() );
+				if ( null === $current ) {
+					throw new RuntimeException( 'ExportCommand: the resumable job record disappeared mid-run.' );
+				}
+				$done = $runner->tick(
+					$current,
+					self::RESUMABLE_TICK_BUDGET_SECONDS,
+					$signing,
+					null,
+					function ( int $done_entries, int $total ) use ( &$bar_started ): void {
+						if ( ! $bar_started ) {
+							$this->progress->start( $total, __( 'Writing archive', 'pontifex' ) );
+							$bar_started = true;
+						}
+						$this->progress->advance();
+					}
+				);
+			}
+			$this->progress->finish();
+
+			$finished      = $store->get( $job->id() );
+			$payload       = null !== $finished ? $finished->payload() : $job->payload();
+			$bytes_written = (int) ( $payload['bytes_written'] ?? 0 );
+			$files_changed = (int) ( $payload['files_changed'] ?? 0 );
+			$entry_count   = count( $store->progress_log( $job->id() )->read_all() );
+
+			// The job served its purpose; remove the record and its sidecar so the
+			// single-active slot and the jobs directory stay clean.
+			$store->delete( $job->id() );
+
+			$this->logger->info(
+				'Export complete.',
+				array(
+					'output'        => $output_path,
+					'entries'       => $entry_count,
+					'bytes'         => $bytes_written,
+					'files_changed' => $files_changed,
+					'resumable'     => true,
+				)
+			);
+			$this->bump_counters(
+				array(
+					'succeeded'      => 1,
+					'bytes_exported' => $bytes_written,
+					'files_changed'  => $files_changed,
+				)
+			);
+			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
+
+			if ( $files_changed > 0 ) {
+				WP_CLI::warning(
+					sprintf(
+						/* translators: %d: number of files that changed during the export */
+						_n(
+							'%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file.',
+							'%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files.',
+							$files_changed,
+							'pontifex'
+						),
+						$files_changed
+					)
+				);
+			}
+			$this->print_summary( $output_path, $entry_count, $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Export failed.',

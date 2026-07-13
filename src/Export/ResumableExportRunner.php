@@ -186,8 +186,13 @@ final class ResumableExportRunner {
 			throw new RuntimeException( 'ResumableExportRunner: the signing inputs must match how the job was started (a signed job needs its key on every tick; an unsigned job takes none).' );
 		}
 
-		$job->mark( Job::STATUS_RUNNING, (int) $clock() );
-		$this->job_store->save( $job );
+		// A job killed mid-tick is still marked running on disk; re-entering the
+		// running state is a no-op, not a transition, so only mark when coming
+		// from pending (the state machine rightly refuses running → running).
+		if ( Job::STATUS_RUNNING !== $job->status() ) {
+			$job->mark( Job::STATUS_RUNNING, (int) $clock() );
+			$this->job_store->save( $job );
+		}
 
 		try {
 			return $this->run_tick( $job, $budget_seconds, $signing, $clock, $on_entry );
@@ -476,6 +481,12 @@ final class ResumableExportRunner {
 	 * @throws RuntimeException If the file cannot be opened.
 	 */
 	private function open_temp( string $temp, bool $fresh ) {
+		if ( ! $fresh && ! is_file( $temp ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
+				sprintf( 'ResumableExportRunner: the partial archive is missing (%s); this export cannot be resumed — start it again.', $temp )
+			);
+		}
 		$mode = $fresh && ! is_file( $temp ) ? 'w+b' : 'r+b';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the job's temp archive as a stream; @ traps an unopenable-file warning converted to the exception below.
 		$destination = @fopen( $temp, $mode );
