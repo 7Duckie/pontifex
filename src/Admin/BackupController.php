@@ -301,6 +301,25 @@ final class BackupController {
 			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
 		}
 
+		// Read the operator's extra exclusion patterns and validate them at this
+		// boundary. A malformed regex would otherwise only throw deep inside a tick's
+		// scan and fail the backup mid-run; refusing it here keeps the failure at the
+		// click, before any lock is taken or work begins.
+		$user_patterns = $this->read_user_exclusions();
+		$invalid       = self::first_invalid_pattern( $user_patterns );
+		if ( null !== $invalid ) {
+			wp_send_json_error(
+				array(
+					'message' => sprintf(
+						/* translators: %s: the exclusion pattern that could not be understood */
+						__( 'That exclusion pattern is not valid: %s. Fix or remove it and try again.', 'pontifex' ),
+						$invalid
+					),
+				),
+				400
+			);
+		}
+
 		// Single-runner lock: refuse a second backup while one is already running, so
 		// two concurrent exports can never fight over the shared progress transient.
 		if ( ! $this->acquire_lock() ) {
@@ -335,7 +354,12 @@ final class BackupController {
 			// carried into it by the decorated builder, and the byte total persisted
 			// onto the job by the runner as soon as the first scan knows it. The old
 			// duplicate pre-scan doubled the wait before the first byte was written.
-			$exclusions = ExclusionRules::default_v010();
+			// The curated defaults always apply; the operator's validated patterns are
+			// appended and travel into the job payload, so re-attach and cron
+			// continuation honour them too.
+			$exclusions = ExclusionRules::from_array(
+				array_merge( ExclusionRules::default_v010()->patterns(), $user_patterns )
+			);
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
@@ -754,6 +778,62 @@ final class BackupController {
 	 */
 	private function schedules(): ScheduleStore {
 		return new ScheduleStore( $this->wordpress_context );
+	}
+
+	/**
+	 * Read the operator's extra exclusion patterns from the create request.
+	 *
+	 * One pattern per line (a textarea), with blank lines and `#` comments
+	 * dropped — the same shape the CLI's --exclude-file accepts. The nonce is
+	 * verified in {@see self::is_authorised()} before create() calls this.
+	 *
+	 * @return string[] The submitted patterns, trimmed, blanks and comments removed.
+	 */
+	private function read_user_exclusions(): array {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() at the top of create() before this runs.
+		if ( ! isset( $_POST['exclusions'] ) ) {
+			return array();
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() at the top of create() before this runs.
+		$raw   = sanitize_textarea_field( wp_unslash( (string) $_POST['exclusions'] ) );
+		$lines = preg_split( '/\R/', $raw );
+		if ( false === $lines ) {
+			return array();
+		}
+		$patterns = array();
+		foreach ( $lines as $line ) {
+			$line = trim( $line );
+			if ( '' !== $line && '#' !== $line[0] ) {
+				$patterns[] = $line;
+			}
+		}
+		return $patterns;
+	}
+
+	/**
+	 * Return the first exclusion pattern that cannot even be compiled, or null.
+	 *
+	 * Only a regex-shaped pattern (delimited with `/`) can fail to parse; a glob,
+	 * directory-tree, or exact pattern is always usable. An unparseable regex
+	 * would otherwise surface only mid-scan inside a tick and fail the backup
+	 * partway, so it is rejected here at the submit boundary. This catches a
+	 * pattern that will not compile, not one that compiles but later exhausts a
+	 * PCRE limit on a pathological input — that residual case still fails closed
+	 * (the shutdown handler removes the partial archive), it just fails later.
+	 *
+	 * @param string[] $patterns The patterns to check.
+	 * @return string|null The first uncompilable pattern, or null when all parse.
+	 */
+	private static function first_invalid_pattern( array $patterns ): ?string {
+		foreach ( $patterns as $pattern ) {
+			if ( strlen( $pattern ) >= 2 && '/' === $pattern[0] && '/' === $pattern[ strlen( $pattern ) - 1 ] ) {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A malformed pattern makes preg_match emit a warning and return false; the @ turns that into the boolean this validates on, which is the point.
+				if ( false === @preg_match( $pattern, '' ) ) {
+					return $pattern;
+				}
+			}
+		}
+		return null;
 	}
 
 	// -------------------------------------------------------------------------
