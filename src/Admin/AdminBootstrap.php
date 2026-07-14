@@ -157,6 +157,7 @@ final class AdminBootstrap {
 		add_action( 'wp_ajax_pontifex_restore', array( $this->restore_controller, 'restore' ) );
 		add_action( 'wp_ajax_pontifex_rollback', array( $this->restore_controller, 'rollback' ) );
 		add_action( 'wp_ajax_pontifex_restore_progress', array( $this->restore_controller, 'progress' ) );
+		add_action( 'wp_ajax_pontifex_restore_preview', array( $this->restore_controller, 'preview' ) );
 
 		add_action( 'wp_ajax_pontifex_upload_chunk', array( $this->upload_controller, 'chunk' ) );
 	}

@@ -254,6 +254,40 @@
 		}
 	}
 
+	var migratePreviewToken = 0;
+
+	/**
+	 * Toggle the "this backup is from another site" hint for the selected backup.
+	 *
+	 * Read-only: asks the server whether the chosen backup records a source URL
+	 * unlike this site and, if so, reveals the advisory hint by the rewrite-links
+	 * checkbox. It never ticks the box. Fail-soft — any error, or a backup from
+	 * this same site, simply leaves the hint hidden. A token guards against a
+	 * slow answer for a previously-selected backup overwriting a newer choice.
+	 *
+	 * @param {?string} file The selected backup filename, or null for none.
+	 */
+	function previewMigration( file ) {
+		var hint = document.getElementById( 'pontifex-restore-migrate-hint' );
+		if ( hint ) {
+			hint.hidden = true;
+		}
+		if ( ! file || ! hint ) {
+			return;
+		}
+		var token = ++migratePreviewToken;
+		request( 'pontifex_restore_preview', { file: file } ).then( function ( res ) {
+			if ( token !== migratePreviewToken ) {
+				return;
+			}
+			if ( res && res.success && res.data && res.data.migration ) {
+				hint.hidden = false;
+			}
+		} ).catch( function () {
+			// Fail-soft: a preview that cannot be fetched simply shows no hint.
+		} );
+	}
+
 	/**
 	 * Select one backup row, outline it, and clear the others.
 	 *
@@ -274,6 +308,7 @@
 				row.setAttribute( 'tabindex', on ? '0' : '-1' );
 			}
 		);
+		previewMigration( chosen ? chosen.getAttribute( 'data-file' ) : null );
 	}
 
 	/**
