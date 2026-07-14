@@ -14,6 +14,10 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Destination\DestinationAdapter;
+use Pontifex\Destination\DestinationException;
+use Pontifex\Destination\DestinationFactory;
+use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Export\ExportOptions;
@@ -125,6 +129,13 @@ use Pontifex\WordPress\WordPressContext;
  * [--signing-key=<path>]
  * : Path to the Ed25519 secret-key file (from `wp pontifex keygen`) to sign
  *   with. Used with --sign.
+ *
+ * [--destination=<name>]
+ * : After writing the local archive, upload it to the configured offsite
+ *   destination of this name (see `wp pontifex destination`). The upload runs
+ *   in this command, which has no web timeout, so a large archive is not bound
+ *   by a request limit. Credentials are read from the destination's configured
+ *   environment variables, never from this command line.
  *
  * ## EXAMPLES
  *
@@ -313,9 +324,14 @@ final class ExportCommand {
 		$encrypting        = $passphrase_stdin || ( isset( $associative_args['encrypt'] ) && false !== $associative_args['encrypt'] );
 		$signing_requested = isset( $associative_args['sign'] ) && false !== $associative_args['sign'];
 		$signing_key_path  = isset( $associative_args['signing-key'] ) ? (string) $associative_args['signing-key'] : '';
+		$destination_name  = isset( $associative_args['destination'] ) ? (string) $associative_args['destination'] : '';
 
 		if ( ( $resumable || $resume ) && $encrypting ) {
 			WP_CLI::error( __( 'An encrypted export cannot be resumable: the derived key exists only for one run and is never stored. Drop --resumable/--resume, or export without encryption.', 'pontifex' ) );
+		}
+
+		if ( ( $resumable || $resume ) && '' !== $destination_name ) {
+			WP_CLI::error( __( 'A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or pull the finished archive later with `wp pontifex destination`.', 'pontifex' ) );
 		}
 
 		if ( ! $resume ) {
@@ -344,6 +360,10 @@ final class ExportCommand {
 		);
 
 		$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
+
+		// 2a. Resolve the offsite destination now (if one was named), so a mistyped
+		// name or a missing credential fails before the export does any work.
+		$destination_adapter = $this->resolve_destination( $destination_name );
 
 		// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
 		if ( ! $skip_confirmation && ! $resume ) {
@@ -488,6 +508,8 @@ final class ExportCommand {
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			throw $error;
 		}
+
+		$this->upload_archive( $destination_adapter, $output_path, $encrypting );
 	}
 
 	// -------------------------------------------------------------------------
@@ -649,6 +671,65 @@ final class ExportCommand {
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			throw $error;
 		}
+	}
+
+	/**
+	 * Resolve a destination name to a live adapter, or null when none was asked for.
+	 *
+	 * Resolving before the export runs means a mistyped name or a missing
+	 * credential fails fast, without first spending time writing an archive that
+	 * then cannot be uploaded.
+	 *
+	 * @param string $name The configured destination name, or '' for none.
+	 * @return DestinationAdapter|null The adapter, or null when $name is empty.
+	 */
+	private function resolve_destination( string $name ): ?DestinationAdapter {
+		if ( '' === $name ) {
+			return null;
+		}
+
+		$spec = ( new DestinationStore( $this->wordpress_context ) )->get( $name );
+		if ( null === $spec ) {
+			WP_CLI::error( sprintf( /* translators: %s: the destination name */ __( 'No destination named "%s" is configured. Add one with `wp pontifex destination`.', 'pontifex' ), $name ) );
+		}
+
+		try {
+			return ( new DestinationFactory() )->from_spec( $spec );
+		} catch ( DestinationException $error ) {
+			WP_CLI::error( $error->getMessage() );
+		}
+	}
+
+	/**
+	 * Upload a finished archive to a resolved destination, if one was given.
+	 *
+	 * The upload runs here in the CLI process, which has no web timeout, so a
+	 * large archive is not bound by a request limit. An unencrypted upload warns
+	 * first: the archive leaves the server for storage whose safety Pontifex
+	 * cannot vouch for.
+	 *
+	 * @param DestinationAdapter|null $adapter     The resolved destination, or null for none.
+	 * @param string                  $output_path The finished archive to upload.
+	 * @param bool                    $encrypted   Whether the archive is encrypted.
+	 * @return void
+	 */
+	private function upload_archive( ?DestinationAdapter $adapter, string $output_path, bool $encrypted ): void {
+		if ( null === $adapter ) {
+			return;
+		}
+
+		if ( ! $encrypted ) {
+			WP_CLI::warning( __( 'Uploading an unencrypted archive to the destination — anyone who can read the destination can read this backup. Consider --encrypt.', 'pontifex' ) );
+		}
+
+		WP_CLI::log( __( 'Uploading the archive to the destination…', 'pontifex' ) );
+		try {
+			$adapter->put( $output_path );
+		} catch ( DestinationException $error ) {
+			WP_CLI::error( sprintf( /* translators: 1: the failure reason, 2: the local archive path */ __( 'The upload to the destination failed: %1$s The local archive is still at %2$s.', 'pontifex' ), $error->getMessage(), $output_path ) );
+		}
+
+		WP_CLI::success( __( 'Uploaded the archive to the destination.', 'pontifex' ) );
 	}
 
 	// -------------------------------------------------------------------------
