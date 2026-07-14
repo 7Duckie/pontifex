@@ -281,15 +281,66 @@ final class BackupControllerTest extends TestCase {
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
+		// The lock transient alone no longer proves a live run (a dead run's lock
+		// is reclaimed — see backup_is_live()); a fresh, non-idle progress
+		// transient is the live signal that keeps this "already running".
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_backup_lock' === $key ? time() : false;
+				if ( 'pontifex_backup_lock' === $key ) {
+					return time();
+				}
+				if ( 'pontifex_backup_progress' === $key ) {
+					return array(
+						'phase' => 'copying',
+						'at'    => time(),
+					);
+				}
+				return false;
 			}
 		);
 
 		try {
 			$this->controller()->create();
 			$this->fail( 'create() should refuse while a backup is already running.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'A refused backup must write nothing.' );
+	}
+
+	/**
+	 * A backup is refused while a job-backed export is active between cron ticks.
+	 *
+	 * A resumable export releases the database-level named lock between ticks but
+	 * is still running; its lock transient persists and its job stays active. The
+	 * active export job — not the transient — is the liveness signal that must
+	 * keep a second backup out, so the reclaim path never tears down a live
+	 * job-backed run.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_while_a_job_backed_backup_is_active(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		// The lock transient persists across ticks; the named lock is free between
+		// them, so the active export job is what proves the run is still live.
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_backup_lock' === $key ? time() : false;
+			}
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$jobs->create( \Pontifex\Job\Job::KIND_EXPORT, array(), time() );
+
+		try {
+			$this->controller()->create();
+			$this->fail( 'create() should refuse while a job-backed backup is active.' );
 		} catch ( RuntimeException $halt ) {
 			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
 		}
@@ -355,9 +406,20 @@ final class BackupControllerTest extends TestCase {
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
+		// As above: a fresh, non-idle progress transient is the live signal that
+		// makes the transient guard refuse (rather than reclaim) the lock.
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_backup_lock' === $key ? time() : false;
+				if ( 'pontifex_backup_lock' === $key ) {
+					return time();
+				}
+				if ( 'pontifex_backup_progress' === $key ) {
+					return array(
+						'phase' => 'copying',
+						'at'    => time(),
+					);
+				}
+				return false;
 			}
 		);
 
@@ -776,6 +838,136 @@ final class BackupControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertSame( 5, $this->json['data']['bytes_done'], 'A live transient is trusted while it is being refreshed.' );
 		$this->assertSame( $job->created_at(), $this->json['data']['started_at'] );
+	}
+
+	/**
+	 * A stale transient with no active job is reported as idle, not as running.
+	 *
+	 * A fatal that kills a backup leaves the transient behind at its last phase
+	 * (handle_shutdown() releases the lock and marks the job failed, but a stale
+	 * transient with nothing left running must not be served as live progress —
+	 * the screen would otherwise re-attach to a backup that is already over.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_idle_for_a_stale_transient_with_no_active_job(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase' => 'scanning',
+				'done'  => 42,
+				'at'    => time() - 60,
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'], 'A dead run\'s stale transient must not be reported as still running.' );
+		$this->assertArrayNotHasKey( 'started_at', $this->json['data'], 'No job is live, so no start time should ride along.' );
+	}
+
+	/**
+	 * A fresh transient with no active job is still served as live, not downgraded.
+	 *
+	 * Only a STALE transient with nothing running is downgraded to idle; a
+	 * transient still being actively refreshed must be trusted even before a job
+	 * record exists for it (e.g. the brief window before the job is created).
+	 *
+	 * @return void
+	 */
+	public function test_progress_serves_a_fresh_transient_with_no_active_job(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase' => 'scanning',
+				'done'  => 7,
+				'at'    => time(),
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'scanning', $this->json['data']['phase'], 'A fresh transient must not be downgraded to idle.' );
+		$this->assertSame( 7, $this->json['data']['done'] );
+	}
+
+	/**
+	 * A dead run's stale lock is reclaimed, so the next backup is not blocked.
+	 *
+	 * Before this fix a crashed run's lock transient blocked every backup for
+	 * its full TTL. With no active job and no live progress, the lock is dead
+	 * and acquire_lock() must reclaim it rather than refuse with 409.
+	 *
+	 * @return void
+	 */
+	public function test_create_reclaims_a_dead_runs_stale_lock(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		// The lock transient is set (a crashed run left it behind), but neither an
+		// active job nor a live progress transient exists — nothing is actually
+		// running, so the lock must be reclaimed rather than refused.
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				return 'pontifex_backup_lock' === $key ? time() - 500 : false;
+			}
+		);
+
+		$plans = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+
+		$this->controller( $this->manifest_builder_returning( $plans ) )->create();
+
+		$this->assertTrue( $this->json['success'], 'A dead run\'s lock must be reclaimed, letting a fresh backup proceed.' );
+		$this->assertCount( 1, ( new BackupStore( $this->base ) )->backups(), 'The reclaimed lock must let the backup actually run.' );
+	}
+
+	/**
+	 * The shutdown handler clears the progress transient after a fatal.
+	 *
+	 * Without this, a fatal-killed backup leaves the transient frozen at its
+	 * last phase, and progress() would report the dead run as still running
+	 * until the transient's TTL expired.
+	 *
+	 * @return void
+	 */
+	public function test_handle_shutdown_clears_the_progress_transient_on_a_fatal(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'error_get_last' )->justReturn(
+			array(
+				'type'    => E_ERROR,
+				'message' => 'simulated fatal',
+			)
+		);
+
+		$deleted = array();
+		Functions\when( 'delete_transient' )->alias(
+			static function ( string $key ) use ( &$deleted ): bool {
+				$deleted[] = $key;
+				return true;
+			}
+		);
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'error' )->atLeast()->once();
+
+		$controller = $this->controller( null, $logger );
+
+		// Acquire the lock as create() would at the start of a run, so
+		// handle_shutdown() treats this request as one mid-backup when the
+		// simulated fatal struck.
+		( new \ReflectionMethod( BackupController::class, 'acquire_lock' ) )->invoke( $controller );
+
+		$controller->handle_shutdown();
+
+		$this->assertContains( 'pontifex_backup_progress', $deleted, 'A fatal-killed backup must not leave the progress transient behind.' );
 	}
 
 	// -------------------------------------------------------------------------
