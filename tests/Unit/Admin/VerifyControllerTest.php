@@ -367,6 +367,167 @@ final class VerifyControllerTest extends TestCase {
 	}
 
 	/**
+	 * Refuses a fresh lock even though it has no progress transient yet.
+	 *
+	 * The window between acquire_lock() and the runner's first progress write
+	 * has a lock but no progress transient; treating that absence as "dead"
+	 * would let a second concurrent request barge in and break the
+	 * single-runner guarantee, so a lock younger than the staleness horizon
+	 * must still be respected.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_a_fresh_lock_before_the_first_progress_write(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time();
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+			$this->fail( 'verify() should refuse a fresh lock still in its startup window.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * Reclaims a lock whose owning runner has died, once its progress transient
+	 * has gone stale and the lock has aged past the startup window.
+	 *
+	 * A verify keeps no persisted job and no cron successor to release its own
+	 * lock, so a died runner (closed tab, host execution-time kill) must not
+	 * wedge the lock for its full TTL — the very next attempt would otherwise
+	 * be refused with an "already running" contradiction of the "finished"
+	 * re-attach just showed.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reclaims_a_dead_lock_whose_progress_has_gone_stale(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time() - 120;
+				}
+				if ( 'pontifex_verify_progress' === $key ) {
+					return array(
+						'phase'       => 'verifying',
+						'bytes_done'  => 4096,
+						'bytes_total' => 8192,
+						'started_at'  => time() - 120,
+						'at'          => time() - 60,
+					);
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// The engine is not injected: the placeholder file is not a valid archive,
+		// so verify() reaches and reports the broken-verdict path — proof the lock
+		// was RECLAIMED (verify proceeded past it) rather than refused outright.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A reclaimed lock lets verify() proceed to the broken-verdict path, not the already-running refusal.' );
+		$this->assertFalse( $this->json['data']['sound'] );
+	}
+
+	/**
+	 * Refuses an old lock while its verify is still actively reporting progress.
+	 *
+	 * A long verify's lock ages well past the startup window, but the run is
+	 * alive as long as it keeps refreshing the progress transient. Liveness, not
+	 * lock age, must win here: an old lock with a fresh progress write is a
+	 * running verification and a second attempt must still be refused, or the
+	 * reclaim would tear down a genuinely-live check.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_an_old_lock_whose_verify_is_still_live(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time() - 300;
+				}
+				if ( 'pontifex_verify_progress' === $key ) {
+					return array(
+						'phase'       => 'verifying',
+						'bytes_done'  => 4096,
+						'bytes_total' => 8192,
+						'started_at'  => time() - 300,
+						// A fresh write: the run is alive despite the old lock.
+						'at'          => time(),
+					);
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+			$this->fail( 'verify() should refuse while an old lock is still reporting live progress.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
 	 * A provenance that cannot be re-read degrades the reported facts to unknown,
 	 * rather than turning a sound verify into a failure (presentation, not integrity).
 	 *

@@ -331,11 +331,9 @@ final class VerifyController {
 		$progress = get_transient( self::PROGRESS_TRANSIENT );
 		$progress = is_array( $progress ) ? $progress : array();
 
-		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
-
-		if ( self::PHASE_IDLE !== $phase && ( time() - $this->counter_int( $progress, 'at' ) ) > self::PROGRESS_STALE_SECONDS ) {
-			$phase = self::PHASE_IDLE;
-		}
+		$phase = $this->progress_is_live( $progress )
+			? $progress['phase']
+			: self::PHASE_IDLE;
 
 		wp_send_json_success(
 			array(
@@ -553,11 +551,28 @@ final class VerifyController {
 	/**
 	 * Acquire the single-runner verify lock, or report that it is already held.
 	 *
+	 * A verification keeps no persisted job and no cron successor to release its
+	 * own lock, so a runner that dies (a closed tab, a host execution-time kill)
+	 * would otherwise leave the lock held for its full TTL, refusing the very
+	 * next attempt with a "already running" contradiction. A held lock is
+	 * therefore reclaimed once it is genuinely dead: {@see self::progress_is_live()}
+	 * finds no live progress AND the lock itself has aged past the startup
+	 * window ({@see self::PROGRESS_STALE_SECONDS}) between acquiring the lock and
+	 * the runner's first progress write, where progress is legitimately absent
+	 * but the runner is not dead — reclaiming there would let a second
+	 * concurrent request break the single-runner guarantee.
+	 *
 	 * @return bool True if the lock was acquired; false if a verification is already running.
 	 */
 	private function acquire_lock(): bool {
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
-			return false;
+		$lock = get_transient( self::LOCK_TRANSIENT );
+		if ( false !== $lock ) {
+			$progress = get_transient( self::PROGRESS_TRANSIENT );
+			$progress = is_array( $progress ) ? $progress : array();
+			$lock_age = time() - (int) $lock;
+			if ( $this->progress_is_live( $progress ) || $lock_age <= self::PROGRESS_STALE_SECONDS ) {
+				return false;
+			}
 		}
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
 		return true;
@@ -570,6 +585,25 @@ final class VerifyController {
 	 */
 	private function release_lock(): void {
 		delete_transient( self::LOCK_TRANSIENT );
+	}
+
+	/**
+	 * Whether a running verification is genuinely still alive.
+	 *
+	 * The progress transient is the liveness signal: a live verify refreshes it
+	 * on every read chunk, so a non-idle phase whose last write is within
+	 * {@see self::PROGRESS_STALE_SECONDS} means a request is really working. A
+	 * stale (or idle, or absent) transient means no live verify is reporting.
+	 *
+	 * @param array<string, mixed> $progress The decoded progress transient.
+	 * @return bool True if a verification is actively reporting progress.
+	 */
+	private function progress_is_live( array $progress ): bool {
+		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
+		if ( self::PHASE_IDLE === $phase ) {
+			return false;
+		}
+		return ( time() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
 	}
 
 	/**
