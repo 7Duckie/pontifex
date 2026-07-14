@@ -117,6 +117,8 @@ What follows from this choice — positive, negative, and neutral?
   Resumable exports: the progress log is the truth; drift refused; DB in one snapshot tick.
 - [ADR 0016](./0016-partial-scope-backups.md) —
   Files-only and db-only backups: two booleans, includes_files emit-only-when-false, restore fails closed on a self-contradicting archive.
+- [ADR 0017](./0017-offsite-destination-adapters.md) —
+  Offsite destinations: a DestinationAdapter seam uploads a finished archive to the user's own SFTP/S3 storage; CLI-first, host-key pinned, credentials by env-var reference, put paired with pull.
 
 ## Further reading
 
