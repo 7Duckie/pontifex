@@ -62,8 +62,9 @@ use Pontifex\WordPress\WordPressContext;
  * [--username=<username>]
  * : SFTP login username (with `add`).
  *
- * [--path=<path>]
- * : Remote directory the archives live in (with `add`).
+ * [--remote-path=<path>]
+ * : Remote directory the archives live in (with `add`). (Not `--path`, which
+ *   WP-CLI reserves for the WordPress install path.)
  *
  * [--auth=<auth>]
  * : SFTP authentication method (with `add`): `key` or `password`. Default: key.
@@ -84,17 +85,13 @@ use Pontifex\WordPress\WordPressContext;
  * : Accept any host key instead of pinning one (with `add`). Unsafe — it
  *   defeats man-in-the-middle protection; pin `--host-key` instead where you can.
  *
- * [--retention=<count>]
- * : How many archives to keep at the destination (with `add`). Default: 0
- *   (keep all). Must not be negative.
- *
  * [--output=<path>]
  * : Where to write the downloaded archive (with `pull`). Defaults to the
  *   archive's basename in the current working directory.
  *
  * ## EXAMPLES
  *
- *     wp pontifex destination add offsite --host=backup.example.com --username=wp --path=/backups --key-path=/home/wp/.ssh/id_ed25519 --host-key=SHA256:abc… --retention=7
+ *     wp pontifex destination add offsite --host=backup.example.com --username=wp --remote-path=/backups --key-path=/home/wp/.ssh/id_ed25519 --host-key=SHA256:abc… --retention=7
  *     wp pontifex destination list
  *     wp pontifex destination test offsite
  *     wp pontifex destination archives offsite
@@ -188,9 +185,9 @@ final class DestinationCommand {
 
 		$host     = isset( $associative_args['host'] ) ? (string) $associative_args['host'] : '';
 		$username = isset( $associative_args['username'] ) ? (string) $associative_args['username'] : '';
-		$path     = isset( $associative_args['path'] ) ? (string) $associative_args['path'] : '';
+		$path     = isset( $associative_args['remote-path'] ) ? (string) $associative_args['remote-path'] : '';
 		if ( '' === $host || '' === $username || '' === $path ) {
-			WP_CLI::error( __( 'An sftp destination needs --host, --username, and --path.', 'pontifex' ) );
+			WP_CLI::error( __( 'An sftp destination needs --host, --username, and --remote-path.', 'pontifex' ) );
 		}
 
 		$auth = isset( $associative_args['auth'] ) ? (string) $associative_args['auth'] : 'key';
@@ -213,11 +210,6 @@ final class DestinationCommand {
 			WP_CLI::warning( __( 'No host key pinned. `test` and `export --destination` will refuse to connect until you pass --host-key=<fingerprint>, or accept the risk with --insecure-host-key.', 'pontifex' ) );
 		}
 
-		$retention = isset( $associative_args['retention'] ) ? (int) $associative_args['retention'] : 0;
-		if ( $retention < 0 ) {
-			WP_CLI::error( __( 'The --retention count must not be negative.', 'pontifex' ) );
-		}
-
 		$settings = array(
 			'host'              => $host,
 			'port'              => isset( $associative_args['port'] ) ? (int) $associative_args['port'] : 22,
@@ -230,7 +222,9 @@ final class DestinationCommand {
 			'insecure_host_key' => $insecure,
 		);
 
-		$this->store()->save( new DestinationSpec( $name, $type, $settings, $retention ) );
+		// Retention is stored on the spec but not yet configurable or enforced;
+		// the --retention flag and pruning arrive together in a later slice.
+		$this->store()->save( new DestinationSpec( $name, $type, $settings, 0 ) );
 
 		WP_CLI::success(
 			sprintf(
@@ -284,13 +278,12 @@ final class DestinationCommand {
 		$rows = array();
 		foreach ( $specs as $spec ) {
 			$rows[] = array(
-				'name'      => $spec->name(),
-				'type'      => $spec->type(),
-				'retention' => 0 === $spec->retention() ? __( '(keep all)', 'pontifex' ) : (string) $spec->retention(),
+				'name' => $spec->name(),
+				'type' => $spec->type(),
 			);
 		}
 
-		\WP_CLI\Utils\format_items( 'table', $rows, array( 'name', 'type', 'retention' ) );
+		\WP_CLI\Utils\format_items( 'table', $rows, array( 'name', 'type' ) );
 	}
 
 	/**
@@ -370,6 +363,16 @@ final class DestinationCommand {
 		$output = isset( $associative_args['output'] ) && is_string( $associative_args['output'] ) && '' !== $associative_args['output']
 			? $associative_args['output']
 			: self::default_output_path( $archive );
+
+		if ( file_exists( $output ) ) {
+			WP_CLI::error(
+				sprintf(
+					/* translators: %s: the local output path that already exists */
+					__( 'The output path %s already exists; choose a different --output.', 'pontifex' ),
+					$output
+				)
+			);
+		}
 
 		try {
 			$adapter->get( $archive, $output );

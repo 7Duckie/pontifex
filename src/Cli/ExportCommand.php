@@ -330,6 +330,10 @@ final class ExportCommand {
 			WP_CLI::error( __( 'An encrypted export cannot be resumable: the derived key exists only for one run and is never stored. Drop --resumable/--resume, or export without encryption.', 'pontifex' ) );
 		}
 
+		if ( ( $resumable || $resume ) && '' !== $destination_name ) {
+			WP_CLI::error( __( 'A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or pull the finished archive later with `wp pontifex destination`.', 'pontifex' ) );
+		}
+
 		if ( ! $resume ) {
 			$this->validate_output_path( $output_path );
 
@@ -445,7 +449,6 @@ final class ExportCommand {
 		// step runner reads which halves to capture from the recorded scope.
 		if ( $resumable || $resume ) {
 			$this->run_resumable( $resume, $output_path, $signing, $encryption_disabled_reason, $scan_root, $path_prefix, $exclusion_rules, $scope );
-			$this->upload_archive( $destination_adapter, $output_path, false );
 			return;
 		}
 
