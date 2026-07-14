@@ -16,6 +16,9 @@ use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\RestoreController;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Crypto\Cipher;
+use Pontifex\Archive\Crypto\EncryptionContext;
+use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
@@ -992,6 +995,200 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// preview() — the migration hint.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Reports a migration hint when the backup's recorded URL differs from this site's.
+	 *
+	 * @return void
+	 */
+	public function test_preview_reports_migration_when_the_backup_is_from_another_site(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// sample_provenance() records https://example.test; the default context()'s
+		// site_url() is https://this-site.test, so the two differ.
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * Reports no migration hint when the backup was taken on this same site.
+	 *
+	 * @return void
+	 */
+	public function test_preview_reports_no_migration_for_a_same_site_backup(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller_with_site_url( 'https://example.test' )->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * The URL comparison ignores case and a single trailing slash.
+	 *
+	 * @return void
+	 */
+	public function test_preview_ignores_case_and_a_trailing_slash(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller_with_site_url( 'https://EXAMPLE.test/' )->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * The hint is suppressed for an encrypted archive — the admin cannot restore one anyway.
+	 *
+	 * The site_url() differs from the archive's recorded URL (as in the first test above),
+	 * so an unencrypted archive with the same provenance would report a migration hint;
+	 * this proves encryption alone suppresses it, not a same-URL coincidence.
+	 *
+	 * @return void
+	 */
+	public function test_preview_suppresses_the_hint_for_an_encrypted_backup(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_encrypted_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * Fails soft — never a 404 — when the chosen filename does not resolve to a backup.
+	 *
+	 * @return void
+	 */
+	public function test_preview_reports_no_migration_when_the_backup_cannot_be_found(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$_POST['file'] = 'does-not-exist.wpmig';
+
+		try {
+			$this->controller()->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * Reports no migration hint for a resolvable file that is not a valid archive.
+	 *
+	 * The name resolves, so the read is attempted, but the bytes are not an
+	 * archive: the reader throws and the fail-soft path answers "no hint" rather
+	 * than surfacing an error to the operator — a stray or corrupt file in the
+	 * backups directory must never break the screen.
+	 *
+	 * @return void
+	 */
+	public function test_preview_reports_no_migration_for_a_corrupt_archive(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a corrupt (non-archive) fixture in a temp directory.
+		file_put_contents( $store->directory() . '/' . $name, 'this is not a valid archive' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->preview();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['migration'] );
+	}
+
+	/**
+	 * Refuses without the managing capability or a valid nonce.
+	 *
+	 * @return void
+	 */
+	public function test_preview_refuses_without_capability_or_nonce(): void {
+		Functions\when( 'current_user_can' )->justReturn( false );
+		$this->stub_json();
+
+		try {
+			$this->controller()->preview();
+			$this->fail( 'preview() should refuse without the capability.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 403, $this->json['status'] );
+	}
+
+	// -------------------------------------------------------------------------
 	// Collaborator builders and stubs.
 	// -------------------------------------------------------------------------
 
@@ -1023,6 +1220,26 @@ final class RestoreControllerTest extends TestCase {
 			$logger ?? new NullLogger(),
 			$runner,
 			$archiver
+		);
+	}
+
+	/**
+	 * Build a controller whose WordPressContext reports the given site_url(), for
+	 * the preview() migration-comparison tests.
+	 *
+	 * @param string $site_url The URL site_url() should report.
+	 * @return RestoreController
+	 */
+	private function controller_with_site_url( string $site_url ): RestoreController {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'site_url' )->andReturn( $site_url );
+
+		return new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
 		);
 	}
 
@@ -1182,6 +1399,32 @@ final class RestoreControllerTest extends TestCase {
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
 			->write_archive( $this->sample_provenance( $scope ), array(), $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
+		fclose( $dest );
+	}
+
+	/**
+	 * Write a valid, empty, encrypted archive to the given path.
+	 *
+	 * For {@see self::test_preview_suppresses_the_hint_for_an_encrypted_backup()}:
+	 * the controller's encryption pre-check must see a genuinely encrypted header,
+	 * not merely a scope, so this writes with an EncryptionContext rather than
+	 * going through write_archive_with_scope().
+	 *
+	 * @param string $path Absolute path to write the archive to.
+	 * @return void
+	 */
+	private function write_encrypted_archive( string $path ): void {
+		$key        = str_repeat( 'k', Cipher::KEY_SIZE );
+		$encryption = new EncryptionContext( new OpensslAesGcmCipher(), $key, str_repeat( 's', 16 ) );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
+		$dest = fopen( $path, 'w+b' );
+		if ( false === $dest ) {
+			$this->fail( 'Could not open the fixture archive for writing.' );
+		}
+		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
+			->write_archive( $this->sample_provenance( Scope::content_only( array() ) ), array(), $dest, null, $encryption );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
 	}

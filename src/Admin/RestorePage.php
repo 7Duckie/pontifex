@@ -282,6 +282,10 @@ final class RestorePage {
 			'<label class="pontifex-action-toggle" for="pontifex-restore-migrate"><input type="checkbox" id="pontifex-restore-migrate"> %s</label>',
 			esc_html__( 'This backup came from another site — rewrite its links to this site\'s address', 'pontifex' )
 		);
+		printf(
+			'<p class="pontifex-restore-hint" id="pontifex-restore-migrate-hint" hidden>%s</p>',
+			esc_html__( 'This backup was taken on a different site, so its links point at that address. Tick the box above before you restore to rewrite them to this site.', 'pontifex' )
+		);
 
 		printf(
 			'<label class="pontifex-action-label" for="pontifex-restore-action">%s</label>',

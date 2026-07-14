@@ -610,6 +610,18 @@
 	outline-offset: 1px;
 }
 
+/*
+ * A quiet advisory line under the relink checkbox — never a status colour, only
+ * size and colour carry the reduced emphasis. The `hidden` attribute (set in
+ * markup, toggled by JS) does the actual showing/hiding.
+ */
+.pontifex-admin .pontifex-restore-hint {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * -1.5) 0 calc(var(--pontifex-step) * 2.5);
+	color: var(--pontifex-muted);
+	font-size: 13px;
+}
+
 /* Signed-out modal --------------------------------------------------------- */
 
 /*
