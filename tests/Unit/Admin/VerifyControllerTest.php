@@ -387,6 +387,113 @@ final class VerifyControllerTest extends TestCase {
 		$this->assertSame( 'unknown', $facts['created'] );
 	}
 
+	/**
+	 * Echoes the live verification's start time alongside its progress.
+	 *
+	 * Lets a page that re-attaches mid-run show elapsed time computed from when
+	 * the verification actually started, not from when it happened to re-attach.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_started_at_for_a_live_verification(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$started_at = time() - 5;
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 0,
+				'bytes_total' => 8192,
+				'started_at'  => $started_at,
+				'at'          => time(),
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'verifying', $this->json['data']['phase'] );
+		$this->assertSame( $started_at, $this->json['data']['started_at'] );
+	}
+
+	/**
+	 * Reports the live verifying phase and byte counts while the transient is
+	 * still being freshly refreshed.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_live_phase_and_bytes_when_fresh(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 4096,
+				'bytes_total' => 8192,
+				'started_at'  => time() - 5,
+				'at'          => time(),
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'verifying', $this->json['data']['phase'] );
+		$this->assertSame( 4096, $this->json['data']['bytes_done'] );
+		$this->assertSame( 8192, $this->json['data']['bytes_total'] );
+	}
+
+	/**
+	 * Downgrades a running phase to idle once the transient's last write has
+	 * gone stale, since a verification has no persisted job to fall back to —
+	 * a stale write means the request driving it has died.
+	 *
+	 * @return void
+	 */
+	public function test_progress_downgrades_to_idle_when_the_transient_is_stale(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 4096,
+				'bytes_total' => 8192,
+				'started_at'  => time() - 120,
+				// Well past PROGRESS_STALE_SECONDS (10s): the writing request has died.
+				'at'          => time() - 60,
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'], 'A stale transient must be reported as idle, not frozen progress.' );
+	}
+
+	/**
+	 * Reports idle when there is no progress transient at all.
+	 *
+	 * This is the load path the re-attach relies on: a freshly loaded page with
+	 * no verify running must see an idle phase, so its re-attach guard does
+	 * nothing rather than arming a bar against a run that is not happening.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_idle_when_there_is_no_transient(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn( false );
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'] );
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborator builders and stubs.
 	// -------------------------------------------------------------------------

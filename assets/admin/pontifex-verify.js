@@ -413,11 +413,20 @@
 	 * (an encrypted backup, an unresolved file, a concurrent run, a lost
 	 * connection) has no proof to show, so it falls back to the plain result
 	 * line the server already phrased, unchanged from before the proof panel.
+	 * A plain string is also accepted, for the re-attach completion path: that
+	 * page's own request never received the verdict (it was addressed to the
+	 * tab that started the verification), so there is nothing to render but a
+	 * plain finished notice.
 	 *
-	 * @param {?Object} res The decoded JSON response, or null on a network failure.
+	 * @param {?Object|string} res The decoded JSON response, a plain notice, or null on a network failure.
 	 */
 	function finishVerify( res ) {
 		resetVerifyControls();
+
+		if ( 'string' === typeof res ) {
+			setText( 'pontifex-verify-result', res );
+			return;
+		}
 
 		var data = res && res.data ? res.data : null;
 
@@ -437,9 +446,82 @@
 	}
 
 	/**
+	 * Re-attach to a verification already running server-side.
+	 *
+	 * Unlike the Backup screen's resumable job, a verification runs to completion
+	 * within the single request that started it and persists no verdict anywhere
+	 * — the proof (or broken message) is a one-time response addressed to that
+	 * request alone. So a page that reloads mid-run cannot ever learn the
+	 * outcome: re-attach resumes only the LIVE progress bar and elapsed time
+	 * from the shared transient, and on completion shows a plain finished
+	 * notice rather than a verdict it never received.
+	 */
+	function reattachIfRunning() {
+		request( 'pontifex_verify_progress' ).then( function ( res ) {
+			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+				return;
+			}
+
+			setControlsEnabled( false );
+			// The re-attach status lives in the result line, which is otherwise
+			// empty while a verify runs, so it persists for the whole run; the
+			// progress line below is immediately taken over by the byte counter.
+			// On completion finishVerify() replaces it with the finished notice.
+			setText( 'pontifex-verify-result', cfg.strings.reattached );
+			clearProof();
+			setText( 'pontifex-verify-progress', cfg.strings.reattached );
+			showBar( true );
+
+			// The server reports when the running verification started, so the
+			// timing line survives a reload: elapsed is computed from the run's
+			// own start, not from when this page happened to re-attach.
+			var startedAt = res.data.started_at > 0 ? res.data.started_at : 0;
+			function showElapsed() {
+				if ( startedAt > 0 ) {
+					setText( 'pontifex-verify-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( ( Date.now() / 1000 ) - startedAt ) ) );
+				}
+			}
+			showElapsed();
+			if ( res.data.bytes_total > 0 ) {
+				setBar( res.data.bytes_done, res.data.bytes_total );
+				setText(
+					'pontifex-verify-progress',
+					cfg.strings.progress.replace( '%1$s', formatBytes( res.data.bytes_done ) ).replace( '%2$s', formatBytes( res.data.bytes_total ) )
+				);
+			}
+
+			var poll = window.setInterval( function () {
+				request( 'pontifex_verify_progress' ).then( function ( r ) {
+					if ( ! r || ! r.success || ! r.data ) {
+						return;
+					}
+					if ( 'idle' === r.data.phase ) {
+						window.clearInterval( poll );
+						finishVerify( cfg.strings.finishedElsewhere );
+						return;
+					}
+					if ( r.data.started_at > 0 ) {
+						startedAt = r.data.started_at;
+					}
+					showElapsed();
+					if ( r.data.bytes_total > 0 ) {
+						setBar( r.data.bytes_done, r.data.bytes_total );
+						setText(
+							'pontifex-verify-progress',
+							cfg.strings.progress.replace( '%1$s', formatBytes( r.data.bytes_done ) ).replace( '%2$s', formatBytes( r.data.bytes_total ) )
+						);
+					}
+				} ).catch( function () {} );
+			}, 1000 );
+		} ).catch( function () {} );
+	}
+
+	/**
 	 * Wire the backup row buttons and the Verify button.
 	 */
 	function init() {
+		reattachIfRunning();
+
 		Array.prototype.forEach.call(
 			document.querySelectorAll( '.pontifex-restore-row' ),
 			function ( row ) {
