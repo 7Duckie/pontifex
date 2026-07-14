@@ -356,13 +356,27 @@ final class Menu {
 			array(
 				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
 				'nonce'   => wp_create_nonce( VerifyController::NONCE_ACTION ),
+				'specUrl' => VerifyPage::FORMAT_SPEC_URL,
 				'strings' => array(
-					'starting' => __( 'Verifying…', 'pontifex' ),
+					'starting'            => __( 'Verifying…', 'pontifex' ),
 					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
-					'progress' => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'            => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'  => __( 'Time elapsed - %s', 'pontifex' ),
-					'failed'   => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'elapsed'             => __( 'Time elapsed - %s', 'pontifex' ),
+					'reattached'          => __( 'A verification is running — re-attached to its progress.', 'pontifex' ),
+					/* translators: shown after re-attaching to a verification that then finished; the verdict went to the tab that started it */
+					'finishedElsewhere'   => __( 'The running verification finished. Its result was shown in the tab that started it.', 'pontifex' ),
+					'failed'              => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'verdictIntact'       => __( 'Verified — this backup is intact.', 'pontifex' ),
+					'verdictBroken'       => __( 'Not verified — this backup is broken.', 'pontifex' ),
+					'factEntries'         => __( 'Entries checked', 'pontifex' ),
+					'factSize'            => __( 'Total size', 'pontifex' ),
+					'factContains'        => __( 'Contains', 'pontifex' ),
+					'factCreated'         => __( 'Created', 'pontifex' ),
+					'factFormat'          => __( 'Format version', 'pontifex' ),
+					'assuranceHashes'     => __( 'Every file and database chunk was re-read and its SHA-256 hash re-checked against the value recorded when the backup was made.', 'pontifex' ),
+					'assuranceDocumented' => __( 'The .wpmig format is publicly documented, so this backup is never hostage to this plugin — it can be read, verified, or recovered without Pontifex.', 'pontifex' ),
+					'specLinkText'        => __( 'Read the format specification', 'pontifex' ),
 				),
 			)
 		);
@@ -392,10 +406,9 @@ final class Menu {
 			'pontifex-restore',
 			'pontifexRestore',
 			array(
-				'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
-				'nonce'    => wp_create_nonce( RestoreController::NONCE_ACTION ),
-				'loginUrl' => wp_login_url(),
-				'strings'  => array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( RestoreController::NONCE_ACTION ),
+				'strings' => array(
 					'starting'           => __( 'Starting…', 'pontifex' ),
 					'verifying'          => __( 'Verifying the backup…', 'pontifex' ),
 					'backingUp'          => __( 'Backing up your content…', 'pontifex' ),
@@ -410,9 +423,7 @@ final class Menu {
 					'sessionUnknown'     => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
 					/* translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it */
 					'reattachedFinished' => __( 'The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome.', 'pontifex' ),
-					'signedOutTitle'     => __( 'Restore complete', 'pontifex' ),
-					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
-					'loginLink'          => __( 'Log in', 'pontifex' ),
+					'sessionReset'       => __( 'The restore reached its final stage and reset your session — this is expected. Log in again to continue; the Overview screen and the Pontifex log will show the outcome.', 'pontifex' ),
 				),
 			)
 		);

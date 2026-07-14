@@ -637,6 +637,60 @@ final class RestoreController {
 	}
 
 	/**
+	 * Report whether a chosen backup would need its links rewritten to this site.
+	 *
+	 * The `wp_ajax_pontifex_restore_preview` handler, queried by the page when a
+	 * backup is selected. It is read-only and fail-soft: it opens the archive
+	 * only to read its recorded source URL, compares that to this site's URL, and
+	 * answers whether the two differ — a purely advisory signal for the "rewrite
+	 * its links" checkbox, which it never changes. Any archive that cannot be read,
+	 * an encrypted archive (which the admin cannot restore in any case), or one
+	 * recording no source URL all answer "no" — the hint is a convenience, never a
+	 * gate, so it fails towards staying silent. Unlike {@see self::restore()} it
+	 * takes no lock, writes no progress, and touches neither the database nor any
+	 * file.
+	 *
+	 * @return void
+	 */
+	public function preview(): void {
+		if ( ! $this->is_authorised() ) {
+			wp_send_json_error( array( 'message' => $this->unauthorised_message() ), 403 );
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() above; this only reads the filename to resolve.
+		$requested = isset( $_POST['file'] ) ? sanitize_file_name( wp_unslash( (string) $_POST['file'] ) ) : '';
+		$path      = $this->store->resolve( $requested );
+
+		wp_send_json_success(
+			array(
+				'migration' => ( null !== $path && $this->archive_needs_migration( (string) $path ) ),
+			)
+		);
+	}
+
+	/**
+	 * Report whether the current request is an authenticated Pontifex manager.
+	 *
+	 * The `wp_ajax_pontifex_auth_check` handler, polled by the post-restore
+	 * signed-out overlay so it can clear itself once the operator has logged back
+	 * in. It deliberately verifies NO nonce: a restore that replaces the users
+	 * table invalidates the session, and a fresh login mints a new session token,
+	 * so the page's baked-in nonce — bound to the old session — can never verify
+	 * again; requiring one here would make the overlay impossible to dismiss,
+	 * which is the very bug this closes. Skipping the nonce is safe: the handler
+	 * changes nothing and returns only whether THIS request is a logged-in
+	 * manager — state the same-origin caller already knows and that CORS keeps
+	 * any cross-origin page from reading. It is registered only as `wp_ajax_`
+	 * (logged-in), never `wp_ajax_nopriv_`, so a logged-out request is never
+	 * dispatched and admin-ajax answers a bare `0`.
+	 *
+	 * @return void
+	 */
+	public function auth_check(): void {
+		wp_send_json_success( array( 'authenticated' => current_user_can( Menu::CAPABILITY ) ) );
+	}
+
+	/**
 	 * Release the lock and clear progress if a fatal error ended a run.
 	 *
 	 * Registered with register_shutdown_function() at the start of a run. A fatal
@@ -832,6 +886,65 @@ final class RestoreController {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filesize -- Reading the size of a plugin-owned archive as the progress denominator; WP_Filesystem is unavailable in this context.
 		$size = filesize( $path );
 		return false !== $size ? $size : 0;
+	}
+
+	/**
+	 * Whether the archive at the given path records a source URL unlike this site.
+	 *
+	 * Opens the archive only for its header and provenance block, never its
+	 * manifest or entries. An encrypted archive answers false (the admin refuses
+	 * to restore one, so the hint would mislead); an unreadable, corrupt, or
+	 * non-archive file answers false (a convenience must never break on a bad
+	 * file); an archive recording no source URL answers false. Otherwise it
+	 * answers whether the recorded source URL differs from this site's, compared
+	 * case-insensitively and ignoring a single trailing slash.
+	 *
+	 * @param string $path Absolute path to the archive on disk.
+	 * @return bool True when a link rewrite would apply on restore.
+	 */
+	private function archive_needs_migration( string $path ): bool {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening a plugin-owned backup as a stream; @ traps an unopenable-file warning handled by the fail-soft return below.
+		$source = @fopen( $path, 'rb' );
+		if ( false === $source ) {
+			return false;
+		}
+
+		try {
+			$reader = new ArchiveReader( $source );
+			if ( $reader->header()->is_encrypted() ) {
+				return false;
+			}
+			$source_url = $reader->provenance()->url();
+		} catch ( Throwable $error ) {
+			unset( $error );
+			return false;
+		} finally {
+			if ( is_resource( $source ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened above; not a WP_Filesystem operation.
+				fclose( $source );
+			}
+		}
+
+		if ( '' === $source_url ) {
+			return false;
+		}
+
+		return $this->normalise_url( $source_url ) !== $this->normalise_url( $this->wordpress_context->site_url() );
+	}
+
+	/**
+	 * Normalise a site URL for comparison: lower case, no trailing slash.
+	 *
+	 * Scheme, host, port and path remain significant; only case and a single
+	 * trailing slash — neither of which changes which site a URL points at — are
+	 * folded away, so `https://Example.test/` and `https://example.test` compare
+	 * equal.
+	 *
+	 * @param string $url The URL to normalise.
+	 * @return string The normalised URL.
+	 */
+	private function normalise_url( string $url ): string {
+		return strtolower( rtrim( $url, '/' ) );
 	}
 
 	/**

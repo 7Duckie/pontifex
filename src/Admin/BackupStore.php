@@ -203,8 +203,21 @@ final class BackupStore {
 		if ( false === $matches ) {
 			return array();
 		}
-		sort( $matches );
-		return $matches;
+
+		// List only files matching the strict retrieval pattern that resolve()
+		// gates on, so anything shown here can always be verified, downloaded, or
+		// deleted. A foreign or malformed file that the loose glob catches but
+		// resolve() would refuse is left out rather than shown as a row that no
+		// action can touch.
+		$backups = array();
+		foreach ( $matches as $path ) {
+			if ( 1 === preg_match( self::NAME_PATTERN, basename( $path ) ) ) {
+				$backups[] = $path;
+			}
+		}
+
+		sort( $backups );
+		return $backups;
 	}
 
 	/**

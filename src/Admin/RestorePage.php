@@ -128,6 +128,7 @@ final class RestorePage {
 			$filename = basename( $path );
 			$rows[]   = array(
 				'filename' => $filename,
+				'contains' => ArchiveScopeReader::label( $path ),
 				'when'     => $this->backup_when( $filename ),
 				'size'     => $this->context->format_size( $this->file_size( $path ) ),
 			);
@@ -187,10 +188,11 @@ final class RestorePage {
 		);
 
 		printf(
-			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span></div>',
+			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span><span>%s</span></div>',
 			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
-			esc_html__( 'Size', 'pontifex' )
+			esc_html__( 'Size', 'pontifex' ),
+			esc_html__( 'Contains', 'pontifex' )
 		);
 
 		// Roving tabindex (ARIA radio-group pattern): with nothing selected yet, the
@@ -201,12 +203,14 @@ final class RestorePage {
 			printf(
 				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" tabindex="%1$s" data-file="%2$s">'
 				. '<span class="pontifex-restore-name">%3$s</span>'
-				. '<span class="pontifex-restore-when">%4$s</span>'
-				. '<span class="pontifex-restore-size">%5$s</span>'
+				. '<span class="pontifex-restore-when">%5$s</span>'
+				. '<span class="pontifex-restore-size">%6$s</span>'
+				. '<span class="pontifex-restore-contains">%4$s</span>'
 				. '</button>',
 				0 === $row_index ? '0' : '-1',
 				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
+				esc_html( $row['contains'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] )
 			);
@@ -277,6 +281,10 @@ final class RestorePage {
 		printf(
 			'<label class="pontifex-action-toggle" for="pontifex-restore-migrate"><input type="checkbox" id="pontifex-restore-migrate"> %s</label>',
 			esc_html__( 'This backup came from another site — rewrite its links to this site\'s address', 'pontifex' )
+		);
+		printf(
+			'<p class="pontifex-restore-hint" id="pontifex-restore-migrate-hint" hidden>%s</p>',
+			esc_html__( 'This backup was taken on a different site, so its links point at that address. Tick the box above before you restore to rewrite them to this site.', 'pontifex' )
 		);
 
 		printf(

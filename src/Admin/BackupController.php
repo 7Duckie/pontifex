@@ -523,8 +523,11 @@ final class BackupController {
 	 * try/catch in create() never runs and PHP dies after the destination file was
 	 * opened, leaving a half-written archive. On shutdown, when a backup was still
 	 * in progress and the request ended on a fatal, this logs the real reason and
-	 * removes the partial file and releases the lock. A clean run, or one that
-	 * failed with a catchable exception, has already released the lock, so this
+	 * removes the partial file, releases the lock, and clears the progress
+	 * transient — otherwise it is left frozen at its last phase, and
+	 * {@see self::progress()} would report a dead run as still running until the
+	 * transient's TTL expired. A clean run, or one that failed with a catchable
+	 * exception, has already released the lock and cleared progress, so this
 	 * does nothing.
 	 *
 	 * @return void
@@ -563,6 +566,7 @@ final class BackupController {
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
 		$this->release_lock();
+		$this->clear_progress();
 		$this->store->clear_cancel();
 	}
 
@@ -633,6 +637,17 @@ final class BackupController {
 				'done'        => 0,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+			);
+		} elseif ( null === $job && $transient_stale ) {
+			// No active job and the transient has gone stale: the run that wrote it
+			// died without clearing it (a fatal kill leaves the transient behind).
+			// Nothing is running — report idle so the screen does not re-attach to a
+			// backup that is already over.
+			$response = array(
+				'phase'       => self::PHASE_IDLE,
+				'done'        => 0,
+				'bytes_done'  => 0,
+				'bytes_total' => 0,
 			);
 		} else {
 			$response = array(
@@ -1099,11 +1114,15 @@ final class BackupController {
 	 * server grants it atomically, so two simultaneous requests can never
 	 * both acquire — closing the check-then-set race a transient alone
 	 * cannot — and it vanishes with the connection if the request crashes.
-	 * The transient stays as a second, independent guard behind it: checked
-	 * only while the named lock is held, its old race is gone, and it still
-	 * refuses a run in the rare case a runner's named lock is silently lost
-	 * mid-operation (on old MySQL, other code taking its own named lock on
-	 * the same connection releases ours).
+	 * The transient stays as a second, independent guard behind it, checked
+	 * only while the named lock is held: it still refuses a job-backed run
+	 * between cron ticks (the named lock is not held between ticks) or a
+	 * synchronous run actively writing progress (the rare case a runner's
+	 * named lock is silently lost mid-operation, e.g. on old MySQL, other
+	 * code taking its own named lock on the same connection releases ours),
+	 * but a dead run's lock transient — {@see self::backup_is_live()} finds
+	 * no live signal — is reclaimed rather than blocking the next backup for
+	 * the transient's full TTL.
 	 *
 	 * @return bool True if the lock was acquired; false if a backup is already running.
 	 */
@@ -1111,7 +1130,7 @@ final class BackupController {
 		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
 			return false;
 		}
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
+		if ( false !== get_transient( self::LOCK_TRANSIENT ) && $this->backup_is_live() ) {
 			// A concurrent runner, or a crashed run's transient still inside its
 			// TTL: refuse, and hand back the named lock just taken.
 			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
@@ -1120,6 +1139,34 @@ final class BackupController {
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
 		$this->lock_held = true;
 		return true;
+	}
+
+	/**
+	 * Whether a backup is genuinely running right now.
+	 *
+	 * A job-backed export between cron ticks has released the DB-level named lock
+	 * but is still live (its job is active); a synchronous run is live while it is
+	 * still writing fresh progress. Anything else — a crashed run's leftover lock
+	 * transient with no active job and stale (or no) progress — is dead and its
+	 * lock is reclaimable, so a killed backup never blocks the next one for the
+	 * transient's full TTL.
+	 *
+	 * @return bool True when a backup is currently running.
+	 */
+	private function backup_is_live(): bool {
+		$job = ( $this->jobs_store() )->active_job();
+		if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
+			return true;
+		}
+		$progress = get_transient( self::PROGRESS_TRANSIENT );
+		if ( ! is_array( $progress ) ) {
+			return false;
+		}
+		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
+		if ( self::PHASE_IDLE === $phase ) {
+			return false;
+		}
+		return ( time() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
 	}
 
 	/**
