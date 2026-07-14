@@ -28,6 +28,7 @@ use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\ExclusionRules;
@@ -252,6 +253,20 @@ final class ExportCommand {
 	private PassphraseSource $passphrase_source;
 
 	/**
+	 * The shared single-runner lock, contended with import and rollback.
+	 *
+	 * Optional in the constructor: when null, {@see self::operation_lock()}
+	 * builds a default OperationLock lazily, at the point __invoke() needs it
+	 * — not in the constructor, because building its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH, which is not available to every test that
+	 * constructs this command. Tests inject a fake fulfilling the same class,
+	 * or a real one over mocked collaborators.
+	 *
+	 * @var OperationLock|null
+	 */
+	private ?OperationLock $lock;
+
+	/**
 	 * Construct an ExportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not
@@ -264,6 +279,7 @@ final class ExportCommand {
 	 * @param LoggerInterface|null          $logger Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null         $progress Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 * @param PassphraseSource|null         $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
+	 * @param OperationLock|null            $lock Optional. When null, a default OperationLock is built lazily at run time.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -271,7 +287,8 @@ final class ExportCommand {
 		?ManifestBuilderInterface $manifest_builder = null,
 		?LoggerInterface $logger = null,
 		?ProgressReporter $progress = null,
-		?PassphraseSource $passphrase_source = null
+		?PassphraseSource $passphrase_source = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment          = $environment ?? new RealEnvironment();
 		$this->wordpress_context    = $wordpress_context ?? new RealWordPressContext();
@@ -280,6 +297,41 @@ final class ExportCommand {
 		$this->logger               = $logger ?? $this->build_default_logger();
 		$this->progress             = $progress ?? new WpCliProgressBar();
 		$this->passphrase_source    = $passphrase_source ?? new CliPassphraseSource();
+		$this->lock                 = $lock;
+	}
+
+	/**
+	 * The shared OperationLock, built lazily on first use.
+	 *
+	 * Deferred past the constructor because its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH resolved through {@see self::resolve_content_root()},
+	 * which is only guaranteed once the command actually runs.
+	 *
+	 * @return OperationLock The lock to acquire before this run's work begins.
+	 */
+	private function operation_lock(): OperationLock {
+		if ( null === $this->lock ) {
+			$this->lock = new OperationLock( $this->wordpress_context, new JobStore( $this->resolve_content_root() ) );
+		}
+		return $this->lock;
+	}
+
+	/**
+	 * Release the site-operation lock if this command still holds it at shutdown.
+	 *
+	 * A WP-CLI command ends via exit() on WP_CLI::error/success/halt, and a PHP
+	 * fatal ends it abruptly — both skip the finally that normally releases. This
+	 * shutdown handler is the backstop that clears the holder transient so a
+	 * failed or fatally-killed command cannot wedge every site operation for the
+	 * lock's full TTL. It no-ops when the finally already released (is_held() is
+	 * false), so a clean run releases exactly once.
+	 *
+	 * @return void
+	 */
+	public function release_lock_on_shutdown(): void {
+		if ( null !== $this->lock && $this->lock->is_held() ) {
+			$this->lock->release();
+		}
 	}
 
 	/**
@@ -336,188 +388,208 @@ final class ExportCommand {
 			WP_CLI::error( __( 'A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or pull the finished archive later with `wp pontifex destination`.', 'pontifex' ) );
 		}
 
-		if ( ! $resume ) {
-			$this->validate_output_path( $output_path );
-
-			// 1a. Tee a per-transfer log alongside the archive, so this export leaves a
-			// self-contained record next to its .wpmig (in addition to the central log).
-			// A resumed run attaches once its job reveals the remembered output path.
-			$this->attach_transfer_log(
-				static fn (): string => dirname( $output_path ),
-				basename( $output_path ) . '.log'
-			);
+		// Single-runner lock: refuse to start while any site-mutating operation
+		// — a backup, restore, or rollback, admin or CLI — is already running, so
+		// two of them can never fight over the site at once. A leaked "backup"
+		// holder is always reclaimable (see OperationLock::is_reclaimable()), so
+		// this acquire's position ahead of the flag validation below is safe —
+		// unlike import/rollback, a refusal further down can never wedge a later
+		// operation. The shutdown handler below is still registered, so a fatal
+		// mid-export clears the transient promptly rather than waiting for the
+		// next acquire attempt to reclaim it.
+		$lock = $this->operation_lock();
+		if ( ! $lock->acquire( OperationLock::OP_BACKUP ) ) {
+			WP_CLI::error( sprintf( /* translators: %s: the kind of operation currently running */ __( 'Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry.', 'pontifex' ), $lock->current_holder() ?? 'unknown' ) );
 		}
-
-		// 2. Build the exclusion rules. File patterns come from --exclude-file, then
-		// inline --exclude; table patterns from --exclude-table are appended to the
-		// same list — the pattern engine matches a bare table name the same way it
-		// matches a path, so one uniform list drives both scanners.
-		$user_patterns = '' !== $exclude_file_path
-			? $this->load_exclude_file( $exclude_file_path )
-			: array();
-		$user_patterns = array_merge(
-			$user_patterns,
-			self::split_patterns( $associative_args['exclude'] ?? null ),
-			self::split_patterns( $associative_args['exclude-table'] ?? null )
-		);
-
-		$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
-
-		// 2a. Resolve the offsite destination now (if one was named), so a mistyped
-		// name or a missing credential fails before the export does any work.
-		$destination_spec    = $this->resolve_destination_spec( $destination_name );
-		$destination_adapter = null !== $destination_spec ? $this->build_destination_adapter( $destination_spec ) : null;
-
-		// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
-		if ( ! $skip_confirmation && ! $resume ) {
-			$this->print_scope_summary( $whole_site, $files_only, $db_only );
-			$this->print_exclusion_summary( $exclusion_rules );
-			WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
-		}
-
-		// 3a. Collect the passphrase and build the encryption context, if encrypting.
-		// The passphrase and derived key are secrets — never logged; the passphrase is
-		// scrubbed once the key is derived.
-		$encryption                 = null;
-		$encryption_disabled_reason = self::ENCRYPTION_DISABLED_REASON;
-		if ( $encrypting ) {
-			if ( ! $passphrase_stdin ) {
-				WP_CLI::warning( __( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.', 'pontifex' ) );
-			}
-			$passphrase = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
-			try {
-				$encryption                 = Encryption::context( $passphrase );
-				$encryption_disabled_reason = null;
-			} finally {
-				// Always scrub the passphrase, even if context derivation throws.
-				sodium_memzero( $passphrase );
-			}
-		}
-
-		// 3b. Load the signing key and build the signing context, if signing. The
-		// secret key is scrubbed once the context holds it; signing is independent
-		// of encryption.
-		$signing = null;
-		if ( $signing_requested ) {
-			if ( '' === $signing_key_path ) {
-				WP_CLI::error( __( '--sign requires --signing-key=<path> (the secret-key file from "wp pontifex keygen").', 'pontifex' ) );
-			}
-			try {
-				$secret_key = SigningKeys::load_secret_key( $signing_key_path );
-				try {
-					$signing = SigningKeys::signing_context( $secret_key );
-				} finally {
-					// Always scrub the secret key, even if building the context throws.
-					sodium_memzero( $secret_key );
-				}
-			} catch ( \Exception $e ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
-				WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
-			}
-		}
-
-		$this->logger->info(
-			'Export started.',
-			array(
-				'output'     => $output_path,
-				'exclusions' => count( $exclusion_rules->patterns() ),
-				'encrypted'  => null !== $encryption,
-				'signed'     => null !== $signing,
-			)
-		);
-
-		$this->bump_counters( array( 'attempted' => 1 ) );
-
-		// 4. Resolve the export scope. Content-only (the default) scans wp-content and
-		// records each file under a "wp-content" path prefix, so the recorded paths
-		// stay WordPress-root-relative; --whole-site scans the whole WordPress root
-		// with no prefix. The scope facts are recorded in provenance so a destination
-		// can tell what the archive holds before unpacking it (ADR 0008).
-		$scan_root        = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
-		$path_prefix      = $whole_site ? '' : 'wp-content';
-		$include_files    = ! $db_only;
-		$include_database = ! $files_only;
-		if ( $whole_site ) {
-			$scope = Scope::whole_site( $exclusion_rules->patterns() );
-		} elseif ( $files_only ) {
-			$scope = Scope::files_only( $exclusion_rules->patterns() );
-		} elseif ( $db_only ) {
-			$scope = Scope::db_only( $exclusion_rules->patterns() );
-		} else {
-			$scope = Scope::content_only( $exclusion_rules->patterns() );
-		}
-
-		// 4a. A resumable export (or its resumption) takes the step-machine path
-		// (ADR 0014/0015) instead of the one-shot engine, and returns from there. The
-		// step runner reads which halves to capture from the recorded scope.
-		if ( $resumable || $resume ) {
-			$this->run_resumable( $resume, $output_path, $signing, $encryption_disabled_reason, $scan_root, $path_prefix, $exclusion_rules, $scope );
-			return;
-		}
-
-		// 5. Build the entry list — the files, the database, or both, per the scope.
-		$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix, $include_files, $include_database );
-
-		// 6. Write the archive through the shared export engine.
-		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
+		$this->lock = $lock;
+		register_shutdown_function( array( $this, 'release_lock_on_shutdown' ) );
 
 		try {
-			$entry_plans = $manifest_builder->build( $scan_root );
+			if ( ! $resume ) {
+				$this->validate_output_path( $output_path );
 
-			$this->progress->start( count( $entry_plans ), 'Writing archive' );
-			$result = $export_runner->export(
-				new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason, $scope ),
-				$entry_plans,
-				function (): void {
-					$this->progress->advance();
-				}
+				// 1a. Tee a per-transfer log alongside the archive, so this export leaves a
+				// self-contained record next to its .wpmig (in addition to the central log).
+				// A resumed run attaches once its job reveals the remembered output path.
+				$this->attach_transfer_log(
+					static fn (): string => dirname( $output_path ),
+					basename( $output_path ) . '.log'
+				);
+			}
+
+			// 2. Build the exclusion rules. File patterns come from --exclude-file, then
+			// inline --exclude; table patterns from --exclude-table are appended to the
+			// same list — the pattern engine matches a bare table name the same way it
+			// matches a path, so one uniform list drives both scanners.
+			$user_patterns = '' !== $exclude_file_path
+				? $this->load_exclude_file( $exclude_file_path )
+				: array();
+			$user_patterns = array_merge(
+				$user_patterns,
+				self::split_patterns( $associative_args['exclude'] ?? null ),
+				self::split_patterns( $associative_args['exclude-table'] ?? null )
 			);
-			$this->progress->finish();
 
-			$this->print_changed_file_warnings( $result );
+			$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
 
-			$bytes_written = $result->bytes_written();
+			// 2a. Resolve the offsite destination now (if one was named), so a mistyped
+			// name or a missing credential fails before the export does any work.
+			$destination_spec    = $this->resolve_destination_spec( $destination_name );
+			$destination_adapter = null !== $destination_spec ? $this->build_destination_adapter( $destination_spec ) : null;
+
+			// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
+			if ( ! $skip_confirmation && ! $resume ) {
+				$this->print_scope_summary( $whole_site, $files_only, $db_only );
+				$this->print_exclusion_summary( $exclusion_rules );
+				WP_CLI::confirm( sprintf( /* translators: %s: the output file path */ __( 'Export to %s?', 'pontifex' ), $output_path ), $associative_args );
+			}
+
+			// 3a. Collect the passphrase and build the encryption context, if encrypting.
+			// The passphrase and derived key are secrets — never logged; the passphrase is
+			// scrubbed once the key is derived.
+			$encryption                 = null;
+			$encryption_disabled_reason = self::ENCRYPTION_DISABLED_REASON;
+			if ( $encrypting ) {
+				if ( ! $passphrase_stdin ) {
+					WP_CLI::warning( __( 'There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted.', 'pontifex' ) );
+				}
+				$passphrase = Encryption::collect_for_export( $this->passphrase_source, $passphrase_stdin );
+				try {
+					$encryption                 = Encryption::context( $passphrase );
+					$encryption_disabled_reason = null;
+				} finally {
+					// Always scrub the passphrase, even if context derivation throws.
+					sodium_memzero( $passphrase );
+				}
+			}
+
+			// 3b. Load the signing key and build the signing context, if signing. The
+			// secret key is scrubbed once the context holds it; signing is independent
+			// of encryption.
+			$signing = null;
+			if ( $signing_requested ) {
+				if ( '' === $signing_key_path ) {
+					WP_CLI::error( __( '--sign requires --signing-key=<path> (the secret-key file from "wp pontifex keygen").', 'pontifex' ) );
+				}
+				try {
+					$secret_key = SigningKeys::load_secret_key( $signing_key_path );
+					try {
+						$signing = SigningKeys::signing_context( $secret_key );
+					} finally {
+						// Always scrub the secret key, even if building the context throws.
+						sodium_memzero( $secret_key );
+					}
+				} catch ( \Exception $e ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+					WP_CLI::error( PathRedactor::from_environment()->redact( $e->getMessage() ) );
+				}
+			}
 
 			$this->logger->info(
-				'Export complete.',
+				'Export started.',
 				array(
-					'output'        => $output_path,
-					'entries'       => $result->entry_count(),
-					'bytes'         => $bytes_written,
-					'files_changed' => count( $result->changed_files() ),
+					'output'     => $output_path,
+					'exclusions' => count( $exclusion_rules->patterns() ),
+					'encrypted'  => null !== $encryption,
+					'signed'     => null !== $signing,
 				)
 			);
 
-			$this->bump_counters(
-				array(
-					'succeeded'      => 1,
-					'bytes_exported' => $bytes_written,
-					'files_changed'  => count( $result->changed_files() ),
-				)
-			);
-			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
+			$this->bump_counters( array( 'attempted' => 1 ) );
 
-			// 7. Print the summary.
-			$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
-		} catch ( Throwable $error ) {
-			$this->logger->error(
-				'Export failed.',
-				array(
-					'output'    => $output_path,
-					'exception' => $error,
-				)
+			// 4. Resolve the export scope. Content-only (the default) scans wp-content and
+			// records each file under a "wp-content" path prefix, so the recorded paths
+			// stay WordPress-root-relative; --whole-site scans the whole WordPress root
+			// with no prefix. The scope facts are recorded in provenance so a destination
+			// can tell what the archive holds before unpacking it (ADR 0008).
+			$scan_root        = $whole_site ? $this->resolve_wordpress_root() : $this->resolve_content_root();
+			$path_prefix      = $whole_site ? '' : 'wp-content';
+			$include_files    = ! $db_only;
+			$include_database = ! $files_only;
+			if ( $whole_site ) {
+				$scope = Scope::whole_site( $exclusion_rules->patterns() );
+			} elseif ( $files_only ) {
+				$scope = Scope::files_only( $exclusion_rules->patterns() );
+			} elseif ( $db_only ) {
+				$scope = Scope::db_only( $exclusion_rules->patterns() );
+			} else {
+				$scope = Scope::content_only( $exclusion_rules->patterns() );
+			}
+
+			// 4a. A resumable export (or its resumption) takes the step-machine path
+			// (ADR 0014/0015) instead of the one-shot engine, and returns from there. The
+			// step runner reads which halves to capture from the recorded scope.
+			if ( $resumable || $resume ) {
+				$this->run_resumable( $resume, $output_path, $signing, $encryption_disabled_reason, $scan_root, $path_prefix, $exclusion_rules, $scope );
+				return;
+			}
+
+			// 5. Build the entry list — the files, the database, or both, per the scope.
+			$manifest_builder = $this->manifest_builder ?? ExportRunner::default_manifest_builder( $this->wordpress_context, $exclusion_rules, $path_prefix, $include_files, $include_database );
+
+			// 6. Write the archive through the shared export engine.
+			$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
+
+			try {
+				$entry_plans = $manifest_builder->build( $scan_root );
+
+				$this->progress->start( count( $entry_plans ), 'Writing archive' );
+				$result = $export_runner->export(
+					new ExportOptions( $output_path, $encryption, $signing, $encryption_disabled_reason, $scope ),
+					$entry_plans,
+					function (): void {
+						$this->progress->advance();
+					}
+				);
+				$this->progress->finish();
+
+				$this->print_changed_file_warnings( $result );
+
+				$bytes_written = $result->bytes_written();
+
+				$this->logger->info(
+					'Export complete.',
+					array(
+						'output'        => $output_path,
+						'entries'       => $result->entry_count(),
+						'bytes'         => $bytes_written,
+						'files_changed' => count( $result->changed_files() ),
+					)
+				);
+
+				$this->bump_counters(
+					array(
+						'succeeded'      => 1,
+						'bytes_exported' => $bytes_written,
+						'files_changed'  => count( $result->changed_files() ),
+					)
+				);
+				TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
+
+				// 7. Print the summary.
+				$this->print_summary( $output_path, $result->entry_count(), $bytes_written );
+			} catch ( Throwable $error ) {
+				$this->logger->error(
+					'Export failed.',
+					array(
+						'output'    => $output_path,
+						'exception' => $error,
+					)
+				);
+				$this->bump_counters( array( 'failed' => 1 ) );
+				TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
+				throw $error;
+			}
+
+			$this->upload_archive(
+				$destination_adapter,
+				$output_path,
+				$encrypting,
+				null !== $destination_spec ? $destination_spec->retention() : 0
 			);
-			$this->bump_counters( array( 'failed' => 1 ) );
-			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
-			throw $error;
+		} finally {
+			$lock->release();
 		}
-
-		$this->upload_archive(
-			$destination_adapter,
-			$output_path,
-			$encrypting,
-			null !== $destination_spec ? $destination_spec->retention() : 0
-		);
 	}
 
 	// -------------------------------------------------------------------------

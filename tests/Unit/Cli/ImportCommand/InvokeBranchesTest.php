@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Cli\ImportCommand;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Crypto\SigningContext;
@@ -28,6 +29,8 @@ use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\RestoreRunnerInterface;
@@ -952,6 +955,127 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * A whole-site archive under the default (content-only) scope gate never
+	 * acquires the lock — the reorder regression test.
+	 *
+	 * Before the fix, acquire() ran ahead of open_source()/verify_signature_gate()/
+	 * assert_scope_permits_restore(), so a refused archive left the holder
+	 * transient set (WP_CLI::error exits the real process, skipping the finally
+	 * that would have released it). The command now validates the archive first,
+	 * so a real OperationLock's acquire_named_lock() — the first thing acquire()
+	 * itself calls — must never be reached; the command still errors exactly as
+	 * before.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_refuses_a_whole_site_archive_without_acquiring_the_lock(): void {
+		self::write_whole_site_archive( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldNotReceive( 'acquire_named_lock' );
+		$lock_context->shouldNotReceive( 'release_named_lock' );
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-import-lock-test-' . uniqid( '', true ) ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'refusing a whole-site archive' ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver,
+			null,
+			null,
+			$lock
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'refusing a whole-site archive' );
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+	}
+
+	/**
+	 * The shutdown backstop releases a lock this command still holds.
+	 *
+	 * Simulates a mid-work fatal: the lock was genuinely acquired (as if by a real
+	 * run) but nothing else called release(), so is_held() is still true when
+	 * release_lock_on_shutdown() runs — mirroring register_shutdown_function()
+	 * firing after PHP dies mid-restore. A second call afterwards must be a no-op,
+	 * proving the idempotent release() guard: the transient is cleared exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_releases_a_held_lock(): void {
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		$delete_transient_calls = 0;
+		Functions\when( 'delete_transient' )->alias(
+			static function () use ( &$delete_transient_calls ): bool {
+				++$delete_transient_calls;
+				return true;
+			}
+		);
+
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$lock_context->shouldReceive( 'release_named_lock' )->once();
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-import-lock-test-' . uniqid( '', true ) ) );
+		$this->assertTrue( $lock->acquire( OperationLock::OP_RESTORE ), 'The lock must be genuinely held before the shutdown handler runs.' );
+
+		$command = new ImportCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A held lock must be released at shutdown, clearing the holder transient.' );
+		$this->assertFalse( $lock->is_held(), 'The lock must no longer be held once the shutdown handler has released it.' );
+
+		// A second shutdown call (e.g. two register_shutdown_function() registrations
+		// firing) must not clear another operation's transient a second time.
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A second shutdown call after a clean release must be a no-op.' );
+	}
+
+	/**
+	 * The shutdown backstop is a no-op when the lock was never acquired (or was
+	 * already released cleanly through the normal finally).
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_is_a_no_op_when_the_lock_is_not_held(): void {
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldNotReceive( 'acquire_named_lock' );
+		$lock_context->shouldNotReceive( 'release_named_lock' );
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-import-lock-test-' . uniqid( '', true ) ) );
+
+		$command = new ImportCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+
+		$this->assertFalse( $lock->is_held(), 'A lock that was never held must still report unheld after the no-op shutdown call.' );
+	}
+
+	/**
 	 * Build an Environment mock that answers the ABSPATH lookup.
 	 *
 	 * The take_safety_archive step resolves the WordPress root through ABSPATH to
@@ -1019,6 +1143,16 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
+		// The shared single-runner lock: free by default so __invoke's new lock
+		// acquisition does not need a dedicated stub in every test. The named
+		// lock is granted through the context mock above; the holder transient
+		// OperationLock reads/writes directly via the global WordPress transient
+		// functions, stubbed here to a plain "nothing is running" default.
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
 		return $mock;
 	}
 

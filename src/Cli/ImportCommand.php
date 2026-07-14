@@ -19,6 +19,8 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
@@ -231,6 +233,20 @@ final class ImportCommand {
 	private PassphraseSource $passphrase_source;
 
 	/**
+	 * The shared single-runner lock, contended with export and rollback.
+	 *
+	 * Optional in the constructor: when null, {@see self::operation_lock()}
+	 * builds a default OperationLock lazily, at the point __invoke() needs it
+	 * — not in the constructor, because building its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH, which is not available to every test that
+	 * constructs this command. Tests inject a fake fulfilling the same class,
+	 * or a real one over mocked collaborators.
+	 *
+	 * @var OperationLock|null
+	 */
+	private ?OperationLock $lock;
+
+	/**
 	 * Construct an ImportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
@@ -245,6 +261,7 @@ final class ImportCommand {
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a SafetyArchiver rooted at WP_CONTENT_DIR is built.
 	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and --url is given, a UrlMigrator over the real $wpdb is built.
 	 * @param PassphraseSource|null        $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
+	 * @param OperationLock|null           $lock              Optional. When null, a default OperationLock is built lazily at run time.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -254,7 +271,8 @@ final class ImportCommand {
 		?ProgressReporter $progress = null,
 		?SafetyArchiverInterface $safety_archiver = null,
 		?UrlMigratorInterface $url_migrator = null,
-		?PassphraseSource $passphrase_source = null
+		?PassphraseSource $passphrase_source = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment          = $environment ?? new RealEnvironment();
 		$this->wordpress_context    = $wordpress_context ?? new RealWordPressContext();
@@ -265,6 +283,41 @@ final class ImportCommand {
 		$this->safety_archiver      = $safety_archiver;
 		$this->url_migrator         = $url_migrator;
 		$this->passphrase_source    = $passphrase_source ?? new CliPassphraseSource();
+		$this->lock                 = $lock;
+	}
+
+	/**
+	 * The shared OperationLock, built lazily on first use.
+	 *
+	 * Deferred past the constructor because its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH resolved through {@see self::resolve_content_root()},
+	 * which is only guaranteed once the command actually runs.
+	 *
+	 * @return OperationLock The lock to acquire before a real (non-dry-run) import.
+	 */
+	private function operation_lock(): OperationLock {
+		if ( null === $this->lock ) {
+			$this->lock = new OperationLock( $this->wordpress_context, new JobStore( $this->resolve_content_root() ) );
+		}
+		return $this->lock;
+	}
+
+	/**
+	 * Release the site-operation lock if this command still holds it at shutdown.
+	 *
+	 * A WP-CLI command ends via exit() on WP_CLI::error/success/halt, and a PHP
+	 * fatal ends it abruptly — both skip the finally that normally releases. This
+	 * shutdown handler is the backstop that clears the holder transient so a
+	 * failed or fatally-killed command cannot wedge every site operation for the
+	 * lock's full TTL. It no-ops when the finally already released (is_held() is
+	 * false), so a clean run releases exactly once.
+	 *
+	 * @return void
+	 */
+	public function release_lock_on_shutdown(): void {
+		if ( null !== $this->lock && $this->lock->is_held() ) {
+			$this->lock->release();
+		}
 	}
 
 	/**
@@ -353,6 +406,24 @@ final class ImportCommand {
 		// The safety archive's path, once taken — the undo the failure handler replays to
 		// recover the site if the restore then fails part-written. Null until it is taken.
 		$safety_path = null;
+
+		// 5a. Single-runner lock: acquire only now, immediately before the try below —
+		// after every exit-prone step above (opening the archive, the signature gate,
+		// the scope gate, the confirmation prompt) has already passed. Each of those
+		// exits the process via WP_CLI::error() or a declined WP_CLI::confirm(), which
+		// skips the finally that releases the lock; acquiring this late means none of
+		// them can ever leave the holder transient set behind a refusal or a decline.
+		// A dry-run touches nothing (like the admin Restore screen's preview()), so it
+		// takes no lock.
+		$lock = null;
+		if ( ! $dry_run ) {
+			$lock = $this->operation_lock();
+			if ( ! $lock->acquire( OperationLock::OP_RESTORE ) ) {
+				WP_CLI::error( sprintf( /* translators: %s: the kind of operation currently running */ __( 'Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry.', 'pontifex' ), $lock->current_holder() ?? 'unknown' ) );
+			}
+			$this->lock = $lock;
+			register_shutdown_function( array( $this, 'release_lock_on_shutdown' ) );
+		}
 
 		try {
 			// Wire the restore engine. For an encrypted archive this reads the salt and
@@ -451,6 +522,9 @@ final class ImportCommand {
 
 			throw $error;
 		} finally {
+			if ( null !== $lock ) {
+				$lock->release();
+			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
 			fclose( $source );
 		}

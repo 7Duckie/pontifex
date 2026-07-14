@@ -16,6 +16,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 
@@ -47,11 +48,20 @@ final class JobTicker {
 	public const CRON_HOOK = 'pontifex_tick_jobs';
 
 	/**
-	 * The backup lock name — shared with the admin controller by contract.
+	 * The shared site-operation lock name.
+	 *
+	 * The same {@see OperationLock::LOCK_NAME} the admin controllers and the
+	 * CLI commands contend for, so a cron tick continuing a backup job is
+	 * excluded by — and excludes — a restore or rollback running anywhere
+	 * else. The ticker itself still takes the raw named lock directly
+	 * (rather than going through OperationLock::acquire()): it is continuing
+	 * a backup that has already been granted the lock, not starting a new
+	 * operation, so it only needs the atomic per-connection gate, not a fresh
+	 * holder-transient decision.
 	 *
 	 * @var string
 	 */
-	private const LOCK_NAME = 'pontifex_backup_lock';
+	private const LOCK_NAME = OperationLock::LOCK_NAME;
 
 	/**
 	 * Wall-clock budget per runner tick (seconds).
@@ -346,6 +356,7 @@ final class JobTicker {
 		$bytes_written = isset( $payload['bytes_written'] ) ? (int) $payload['bytes_written'] : 0;
 		$files_changed = isset( $payload['files_changed'] ) ? (int) $payload['files_changed'] : 0;
 		$this->job_store->delete( $job_id );
+		$this->release_holder_if_backup();
 
 		$this->bump_counters(
 			array(
@@ -365,6 +376,32 @@ final class JobTicker {
 
 		if ( ! empty( $payload['schedule'] ) ) {
 			$this->prune_to_retention();
+		}
+	}
+
+	/**
+	 * Clear the shared lock's holder transient when it still names this backup.
+	 *
+	 * The holder transient carries a fixed TTL ({@see OperationLock}) shorter
+	 * than a long, many-tick backup can take, so a finished job may leave a
+	 * stale "backup" holder standing until that TTL expires — needlessly
+	 * refusing the next operation in the meantime, since nothing is actually
+	 * running any more. Clearing it here, right after the job record itself
+	 * is deleted, closes that gap. Only ever clears a BACKUP holder: while
+	 * this method runs, the ticker still holds the raw named lock it took at
+	 * the top of {@see self::run()}, so no other operation could have
+	 * acquired the shared lock (and thus set a different holder) in the
+	 * meantime — {@see OperationLock::acquire()} always takes the named lock
+	 * first. The kind check is still asserted explicitly, so a future change
+	 * to that ordering fails safe rather than silently clearing someone
+	 * else's lock.
+	 *
+	 * @return void
+	 */
+	private function release_holder_if_backup(): void {
+		$holder = get_transient( OperationLock::LOCK_NAME );
+		if ( is_array( $holder ) && isset( $holder['kind'] ) && OperationLock::OP_BACKUP === $holder['kind'] ) {
+			delete_transient( OperationLock::LOCK_NAME );
 		}
 	}
 

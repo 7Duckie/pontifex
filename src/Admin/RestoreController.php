@@ -17,6 +17,8 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
@@ -79,20 +81,7 @@ final class RestoreController {
 	private const PROGRESS_TRANSIENT = 'pontifex_restore_progress';
 
 	/**
-	 * The transient key marking that a restore or rollback is currently running.
-	 *
-	 * The secondary single-runner guard: the primary is an atomic named
-	 * database lock (this constant doubles as its logical name), and this
-	 * transient is checked only while that lock is held — see
-	 * {@see self::acquire_lock()}. Carries a TTL so a crash that skips the
-	 * shutdown handler still self-heals.
-	 *
-	 * @var string
-	 */
-	private const LOCK_TRANSIENT = 'pontifex_restore_lock';
-
-	/**
-	 * How long the progress and lock transients live, in seconds (15 minutes).
+	 * How long the progress transient lives, in seconds (15 minutes).
 	 *
 	 * A literal rather than MINUTE_IN_SECONDS so the class is testable without
 	 * WordPress loaded; comfortably longer than any single restore.
@@ -235,11 +224,15 @@ final class RestoreController {
 	private ?UrlMigratorInterface $url_migrator;
 
 	/**
-	 * Whether this request holds the single-runner lock.
+	 * The shared single-runner lock, contended with backup and rollback.
 	 *
-	 * @var bool
+	 * Optional in the constructor: when null, a default OperationLock over this
+	 * controller's own context and job store is built. Tests inject a fake or a
+	 * real one over mocked collaborators.
+	 *
+	 * @var OperationLock
 	 */
-	private bool $lock_held = false;
+	private OperationLock $lock;
 
 	/**
 	 * Construct the controller around its collaborators.
@@ -252,6 +245,7 @@ final class RestoreController {
 	 * @param RestoreRunnerInterface|null  $restore_runner    Optional. When null, a default live-site engine is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a default archiver is used.
 	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and a URL is given, a UrlMigrator over the live $wpdb is wired.
+	 * @param OperationLock|null           $lock              Optional. When null, a default OperationLock over this controller's own context and job store is built.
 	 */
 	public function __construct(
 		Environment $environment,
@@ -261,7 +255,8 @@ final class RestoreController {
 		LoggerInterface $logger,
 		?RestoreRunnerInterface $restore_runner = null,
 		?SafetyArchiverInterface $safety_archiver = null,
-		?UrlMigratorInterface $url_migrator = null
+		?UrlMigratorInterface $url_migrator = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
@@ -271,6 +266,7 @@ final class RestoreController {
 		$this->restore_runner    = $restore_runner;
 		$this->safety_archiver   = $safety_archiver;
 		$this->url_migrator      = $url_migrator;
+		$this->lock              = $lock ?? new OperationLock( $this->wordpress_context, $this->jobs_store() );
 	}
 
 	/**
@@ -301,8 +297,8 @@ final class RestoreController {
 		// before any side effect; the target is always this site, never a typed address.
 		$migrate = $this->migrate_requested();
 
-		if ( ! $this->acquire_lock() ) {
-			wp_send_json_error( array( 'message' => __( 'A restore is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
+		if ( ! $this->lock->acquire( OperationLock::OP_RESTORE ) ) {
+			wp_send_json_error( array( 'message' => $this->lock_busy_message() ), 409 );
 		}
 
 		$this->extend_time_limit();
@@ -511,8 +507,8 @@ final class RestoreController {
 			);
 		}
 
-		if ( ! $this->acquire_lock() ) {
-			wp_send_json_error( array( 'message' => __( 'A restore is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
+		if ( ! $this->lock->acquire( OperationLock::OP_ROLLBACK ) ) {
+			wp_send_json_error( array( 'message' => $this->lock_busy_message() ), 409 );
 		}
 
 		$this->extend_time_limit();
@@ -705,7 +701,7 @@ final class RestoreController {
 	 * @return void
 	 */
 	public function handle_shutdown(): void {
-		if ( ! $this->lock_held ) {
+		if ( ! $this->lock->is_held() ) {
 			return;
 		}
 
@@ -718,7 +714,7 @@ final class RestoreController {
 			'Admin restore ended on a fatal error; the site may be partially restored. Roll back to recover.',
 			array( 'error' => $last_error['message'] )
 		);
-		$this->release_lock();
+		$this->lock->release();
 		$this->clear_progress();
 	}
 
@@ -1010,7 +1006,7 @@ final class RestoreController {
 	 * @return void
 	 */
 	private function finish( $source ): void {
-		$this->release_lock();
+		$this->lock->release();
 		$this->clear_progress();
 		if ( is_resource( $source ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this request; not a WP_Filesystem operation.
@@ -1044,6 +1040,22 @@ final class RestoreController {
 	 */
 	private function unauthorised_message(): string {
 		return __( 'You do not have permission to restore backups, or your session has expired. Reload the page and try again.', 'pontifex' );
+	}
+
+	/**
+	 * The message returned when the shared single-runner lock refuses a restore or rollback.
+	 *
+	 * Names whichever kind of operation is actually holding the lock, so an
+	 * operator refused because a backup is running is not told (misleadingly)
+	 * that a restore is already running.
+	 *
+	 * @return string A human-readable refusal message.
+	 */
+	private function lock_busy_message(): string {
+		if ( OperationLock::OP_BACKUP === $this->lock->current_holder() ) {
+			return __( 'A backup is currently running. Please wait for it to finish before restoring or rolling back.', 'pontifex' );
+		}
+		return __( 'A restore is already running. Please wait for it to finish.', 'pontifex' );
 	}
 
 	/**
@@ -1129,45 +1141,18 @@ final class RestoreController {
 	}
 
 	/**
-	 * Acquire the single-runner lock, or report that an operation is already running.
+	 * The job store, rooted at the wp-content directory.
 	 *
-	 * Two independent guards, and both must pass. The primary is a named
-	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
-	 * server grants it atomically, so two simultaneous requests can never
-	 * both acquire — closing the check-then-set race a transient alone
-	 * cannot — and it vanishes with the connection if the request crashes.
-	 * The transient stays as a second, independent guard behind it: checked
-	 * only while the named lock is held, its old race is gone, and it still
-	 * refuses a run in the rare case a runner's named lock is silently lost
-	 * mid-operation (on old MySQL, other code taking its own named lock on
-	 * the same connection releases ours).
+	 * Built for the default OperationLock's backup-liveness check (a restore
+	 * or rollback must never slip in while a job-backed backup is still
+	 * genuinely running, even between its cron ticks). Derived from the
+	 * Environment seam rather than the (admin-only) BackupStore, so it is
+	 * available before any store-specific wiring.
 	 *
-	 * @return bool True if the lock was acquired; false if an operation is already running.
+	 * @return JobStore The job store.
 	 */
-	private function acquire_lock(): bool {
-		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
-			return false;
-		}
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
-			// A concurrent runner, or a crashed run's transient still inside its
-			// TTL: refuse, and hand back the named lock just taken.
-			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-			return false;
-		}
-		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
-		$this->lock_held = true;
-		return true;
-	}
-
-	/**
-	 * Release the single-runner lock held by this request.
-	 *
-	 * @return void
-	 */
-	private function release_lock(): void {
-		delete_transient( self::LOCK_TRANSIENT );
-		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-		$this->lock_held = false;
+	private function jobs_store(): JobStore {
+		return new JobStore( $this->resolve_content_root() );
 	}
 
 	// -------------------------------------------------------------------------

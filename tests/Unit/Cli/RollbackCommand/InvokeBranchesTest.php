@@ -9,10 +9,13 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\RollbackCommand;
 
+use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\RollbackCommand;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
@@ -241,6 +244,112 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * With no safety archive, the lock is never acquired — the reorder regression test.
+	 *
+	 * Before the fix, acquire() ran ahead of require_most_recent(), so a missing
+	 * safety archive left the holder transient set (WP_CLI::error exits the real
+	 * process, skipping the finally that would have released it). The command now
+	 * finds and validates the archive first, so a real OperationLock's
+	 * acquire_named_lock() — the first thing acquire() itself calls — must never be
+	 * reached; the command still errors exactly as before.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_with_no_safety_archive_never_acquires_the_lock(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturnNull();
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldNotReceive( 'restore' );
+		$restore_runner->shouldNotReceive( 'verify' );
+
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldNotReceive( 'acquire_named_lock' );
+		$lock_context->shouldNotReceive( 'release_named_lock' );
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-rollback-lock-test-' . uniqid( '', true ) ) );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'wp-cli halt: no safety archive' ) );
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), null, $lock );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp-cli halt: no safety archive' );
+
+		$command( array(), array() );
+	}
+
+	/**
+	 * The shutdown backstop releases a lock this command still holds.
+	 *
+	 * Simulates a mid-work fatal: the lock was genuinely acquired (as if by a real
+	 * run) but nothing else called release(), so is_held() is still true when
+	 * release_lock_on_shutdown() runs — mirroring register_shutdown_function()
+	 * firing after PHP dies mid-restore. A second call afterwards must be a no-op,
+	 * proving the idempotent release() guard: the transient is cleared exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_releases_a_held_lock(): void {
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		$delete_transient_calls = 0;
+		Functions\when( 'delete_transient' )->alias(
+			static function () use ( &$delete_transient_calls ): bool {
+				++$delete_transient_calls;
+				return true;
+			}
+		);
+
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$lock_context->shouldReceive( 'release_named_lock' )->once();
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-rollback-lock-test-' . uniqid( '', true ) ) );
+		$this->assertTrue( $lock->acquire( OperationLock::OP_ROLLBACK ), 'The lock must be genuinely held before the shutdown handler runs.' );
+
+		$command = new RollbackCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A held lock must be released at shutdown, clearing the holder transient.' );
+		$this->assertFalse( $lock->is_held(), 'The lock must no longer be held once the shutdown handler has released it.' );
+
+		// A second shutdown call (e.g. two register_shutdown_function() registrations
+		// firing) must not clear another operation's transient a second time.
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A second shutdown call after a clean release must be a no-op.' );
+	}
+
+	/**
+	 * The shutdown backstop is a no-op when the lock was never acquired (or was
+	 * already released cleanly through the normal finally).
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_is_a_no_op_when_the_lock_is_not_held(): void {
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldNotReceive( 'acquire_named_lock' );
+		$lock_context->shouldNotReceive( 'release_named_lock' );
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-rollback-lock-test-' . uniqid( '', true ) ) );
+
+		$command = new RollbackCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+
+		$this->assertFalse( $lock->is_held(), 'A lock that was never held must still report unheld after the no-op shutdown call.' );
+	}
+
+	/**
 	 * Build a RollbackCommand with injected store, runner, and logger.
 	 *
 	 * The Environment is a bare mock (its default-wiring path is never reached). The
@@ -251,9 +360,10 @@ final class InvokeBranchesTest extends TestCase {
 	 * @param RestoreRunnerInterface $restore_runner The injected restore engine.
 	 * @param LoggerInterface        $logger         The injected logger.
 	 * @param WordPressContext|null  $context        Optional. A custom context to assert on; a tolerant stub by default.
+	 * @param OperationLock|null     $lock           Optional. A custom lock to assert on; the default lazy wiring by default.
 	 * @return RollbackCommand
 	 */
-	private function build_command( $store, $restore_runner, $logger, ?WordPressContext $context = null ): RollbackCommand {
+	private function build_command( $store, $restore_runner, $logger, ?WordPressContext $context = null, ?OperationLock $lock = null ): RollbackCommand {
 		if ( null === $context ) {
 			$context = Mockery::mock( WordPressContext::class );
 			$context->shouldReceive( 'option_value' )->andReturnUsing(
@@ -265,13 +375,33 @@ final class InvokeBranchesTest extends TestCase {
 			$context->shouldReceive( 'save_option' );
 			$context->shouldReceive( 'flush_cache' );
 		}
+		// The shared single-runner lock: free by default so __invoke's new lock
+		// acquisition does not need a dedicated stub in every test. The named
+		// lock is granted through the context mock above; the holder transient
+		// OperationLock reads/writes directly via the global WordPress transient
+		// functions, stubbed here to a plain "nothing is running" default.
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$environment = Mockery::mock( Environment::class );
+		// Bare in every other respect (the default-wiring path is never reached
+		// when the restore engine is injected, as it always is here); these two
+		// are what the shared lock's default JobStore needs to resolve its
+		// content root.
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( '/var/www/html/wp-content' );
+
 		return new RollbackCommand(
-			Mockery::mock( Environment::class ),
+			$environment,
 			$context,
 			$store,
 			$restore_runner,
 			$logger,
-			new NullProgressBar()
+			new NullProgressBar(),
+			$lock
 		);
 	}
 }

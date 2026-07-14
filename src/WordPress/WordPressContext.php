@@ -262,7 +262,7 @@ interface WordPressContext {
 	 * failure immediately. A query error also reports failure — callers must
 	 * treat "not acquired" as "do not proceed" (fail closed).
 	 *
-	 * @param string $name The lock's logical name, unique per operation (e.g. "pontifex_backup_lock").
+	 * @param string $name The lock's logical name (e.g. {@see \Pontifex\Lock\OperationLock::LOCK_NAME}, the shared name every site-mutating operation contends for).
 	 * @return bool True if this connection now holds the lock; false if it is held elsewhere or the query failed.
 	 */
 	public function acquire_named_lock( string $name ): bool;
