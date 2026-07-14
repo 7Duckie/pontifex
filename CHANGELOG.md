@@ -17,6 +17,57 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.9.0] — 2026-07-14 — Admin legibility
+
+The release that makes the engine's trustworthiness and each archive's contents
+legible from the admin, without removing a single safety confirmation. A verify
+now shows its full proof rather than a one-line verdict; every backup list says
+what an archive contains and, for one taken elsewhere, that its links can be
+rewritten here; the long-running Verify screen survives a page reload; and two
+rough edges — a signed-out restore that froze, and a finished-but-stale backup
+that looked like it was still running — are put right. No engine or format
+change, and no breaking changes.
+
+### Added
+
+- **A "verified — here's the proof" panel.** A sound verify now shows a persistent,
+  plain-language panel — the verdict, the entry count and size, what the archive
+  contains, when it was created, and the format version — with the assurance that
+  every file and database chunk was re-read and its SHA-256 re-checked, and a link
+  to the published `.wpmig` format specification. Typographic throughout: the words
+  carry the verdict, never a status colour.
+- **What each archive contains, in every list.** The Backup, Restore, and Verify
+  lists gain a "Contains" column — content and database, database only, files only,
+  or whole site — read fail-soft from each archive's provenance, so a content backup
+  is told apart from a database-only one without opening it.
+- **The Verify screen re-attaches after a reload.** A verification that is already
+  running is picked back up when the page is reloaded, showing live progress and an
+  elapsed timer from the run's own start, matching the Backup and Restore screens; a
+  dead verifier's lock is reclaimed so it never blocks the next check.
+- **A migration hint on the Restore screen.** Selecting a backup recorded as taken
+  on another site shows a quiet advisory line that the "rewrite its links" checkbox
+  applies to it, from a read-only preview of the archive's provenance. It never ticks
+  the box, and it stays silent for encrypted archives, which the admin cannot restore.
+
+### Fixed
+
+- **The Backup screen no longer re-attaches to a finished backup.** A backup that
+  died on a fatal — the classic web execution-time kill — left the screen showing
+  "a backup is running" until the progress transient's TTL expired. The shutdown
+  handler now clears that transient, the progress endpoint reports idle for a stale
+  transient with no active job, and the single-runner lock is reclaimable, so a dead
+  run never blocks the next backup.
+- **A restore that signs you out reports honestly instead of freezing.** A restore
+  replaces the users table and so signs the operator out mid-run; the progress bar
+  used to freeze while WordPress core's own session modal appeared over the top. The
+  screen now recognises the reset from the progress poll, shows an honest in-page
+  message — the restore reached its final stage and reset the session, with the
+  outcome recorded on the Overview and in the log — and reloads to that outcome once
+  the operator logs back in through core's native session modal.
+- **The backup list agrees with what can be restored.** A stray or malformed file in
+  the backups directory no longer appears as a phantom row that cannot be actioned;
+  the list is filtered to the exact names the restore path will accept.
+
 ## [0.8.0] — 2026-07-14 — Offsite SFTP destinations
 
 The release that gets a backup off the machine it was made on, without Pontifex
@@ -784,7 +835,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/7Duckie/pontifex/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/7Duckie/pontifex/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/7Duckie/pontifex/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/7Duckie/pontifex/compare/v0.5.0...v0.6.0
