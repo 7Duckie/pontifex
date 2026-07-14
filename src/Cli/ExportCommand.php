@@ -17,6 +17,8 @@ use Pontifex\Archive\Format\Scope;
 use Pontifex\Destination\DestinationAdapter;
 use Pontifex\Destination\DestinationException;
 use Pontifex\Destination\DestinationFactory;
+use Pontifex\Destination\DestinationRetention;
+use Pontifex\Destination\DestinationSpec;
 use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
@@ -363,7 +365,8 @@ final class ExportCommand {
 
 		// 2a. Resolve the offsite destination now (if one was named), so a mistyped
 		// name or a missing credential fails before the export does any work.
-		$destination_adapter = $this->resolve_destination( $destination_name );
+		$destination_spec    = $this->resolve_destination_spec( $destination_name );
+		$destination_adapter = null !== $destination_spec ? $this->build_destination_adapter( $destination_spec ) : null;
 
 		// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
 		if ( ! $skip_confirmation && ! $resume ) {
@@ -509,7 +512,12 @@ final class ExportCommand {
 			throw $error;
 		}
 
-		$this->upload_archive( $destination_adapter, $output_path, $encrypting );
+		$this->upload_archive(
+			$destination_adapter,
+			$output_path,
+			$encrypting,
+			null !== $destination_spec ? $destination_spec->retention() : 0
+		);
 	}
 
 	// -------------------------------------------------------------------------
@@ -674,16 +682,17 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Resolve a destination name to a live adapter, or null when none was asked for.
+	 * Resolve a destination name to its stored spec, or null when none was asked for.
 	 *
-	 * Resolving before the export runs means a mistyped name or a missing
-	 * credential fails fast, without first spending time writing an archive that
-	 * then cannot be uploaded.
+	 * Resolving the spec before the export runs (and, via
+	 * {@see build_destination_adapter()}, building the adapter) means a
+	 * mistyped name or a missing credential fails fast, without first
+	 * spending time writing an archive that then cannot be uploaded.
 	 *
 	 * @param string $name The configured destination name, or '' for none.
-	 * @return DestinationAdapter|null The adapter, or null when $name is empty.
+	 * @return DestinationSpec|null The stored spec, or null when $name is empty.
 	 */
-	private function resolve_destination( string $name ): ?DestinationAdapter {
+	private function resolve_destination_spec( string $name ): ?DestinationSpec {
 		if ( '' === $name ) {
 			return null;
 		}
@@ -693,9 +702,20 @@ final class ExportCommand {
 			WP_CLI::error( sprintf( /* translators: %s: the destination name */ __( 'No destination named "%s" is configured. Add one with `wp pontifex destination`.', 'pontifex' ), $name ) );
 		}
 
+		return $spec;
+	}
+
+	/**
+	 * Build a live adapter from a resolved destination spec.
+	 *
+	 * @param DestinationSpec $spec The stored destination spec.
+	 * @return DestinationAdapter The live adapter.
+	 */
+	private function build_destination_adapter( DestinationSpec $spec ): DestinationAdapter {
 		try {
 			return ( new DestinationFactory() )->from_spec( $spec );
 		} catch ( DestinationException $error ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
 			WP_CLI::error( $error->getMessage() );
 		}
 	}
@@ -706,14 +726,18 @@ final class ExportCommand {
 	 * The upload runs here in the CLI process, which has no web timeout, so a
 	 * large archive is not bound by a request limit. An unencrypted upload warns
 	 * first: the archive leaves the server for storage whose safety Pontifex
-	 * cannot vouch for.
+	 * cannot vouch for. Once uploaded, the destination's configured retention is
+	 * enforced by pruning the oldest surplus archives; a prune failure only
+	 * warns — the backup itself is already safely uploaded, so a retention
+	 * problem must never fail the export.
 	 *
 	 * @param DestinationAdapter|null $adapter     The resolved destination, or null for none.
 	 * @param string                  $output_path The finished archive to upload.
 	 * @param bool                    $encrypted   Whether the archive is encrypted.
+	 * @param int                     $retention   How many archives to keep at the destination; below MIN_RETENTION keeps all.
 	 * @return void
 	 */
-	private function upload_archive( ?DestinationAdapter $adapter, string $output_path, bool $encrypted ): void {
+	private function upload_archive( ?DestinationAdapter $adapter, string $output_path, bool $encrypted, int $retention ): void {
 		if ( null === $adapter ) {
 			return;
 		}
@@ -730,6 +754,18 @@ final class ExportCommand {
 		}
 
 		WP_CLI::success( __( 'Uploaded the archive to the destination.', 'pontifex' ) );
+
+		if ( $retention >= DestinationRetention::MIN_RETENTION ) {
+			try {
+				$deleted = ( new DestinationRetention( $adapter, $retention ) )->prune();
+				foreach ( $deleted as $remote_name ) {
+					WP_CLI::log( sprintf( /* translators: %s: the remote archive name that was deleted */ __( 'Pruned old archive from the destination: %s', 'pontifex' ), $remote_name ) );
+				}
+			} catch ( DestinationException $error ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::warning renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
+				WP_CLI::warning( sprintf( /* translators: %s: the failure reason */ __( 'The archive uploaded successfully, but pruning old archives at the destination failed: %s', 'pontifex' ), $error->getMessage() ) );
+			}
+		}
 	}
 
 	// -------------------------------------------------------------------------
