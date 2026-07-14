@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-07-13T21:14:35+00:00\n"
+"POT-Creation-Date: 2026-07-13T23:21:55+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
@@ -57,7 +57,7 @@ msgstr ""
 
 #. translators: %s: the exclusion pattern that could not be understood
 #: src/Admin/BackupController.php:315
-#: src/Admin/BackupController.php:763
+#: src/Admin/BackupController.php:765
 #, php-format
 msgid "That exclusion pattern is not valid: %s. Fix or remove it and try again."
 msgstr ""
@@ -70,20 +70,20 @@ msgstr ""
 msgid "That backup could not be deleted."
 msgstr ""
 
-#: src/Admin/BackupController.php:774
+#: src/Admin/BackupController.php:776
 #: src/Admin/Menu.php:327
 msgid "The schedule could not be saved. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:883
+#: src/Admin/BackupController.php:885
 msgid "You do not have permission to download this backup."
 msgstr ""
 
-#: src/Admin/BackupController.php:892
+#: src/Admin/BackupController.php:894
 msgid "You do not have permission to manage backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:906
+#: src/Admin/BackupController.php:908
 #: src/Admin/Menu.php:322
 msgid "The backup could not be completed. Check the Pontifex log for details."
 msgstr ""
@@ -277,10 +277,7 @@ msgstr ""
 msgid "Scanning files… %s"
 msgstr ""
 
-#. translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes
-#. translators: 1: bytes read so far, 2: archive size, both as human-readable sizes
-#. translators: 1: bytes done so far, 2: total bytes, both as human-readable sizes
-#. translators: 1: bytes uploaded so far, 2: total bytes, both as human-readable sizes
+#. translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes
 #: src/Admin/Menu.php:307
 #: src/Admin/Menu.php:362
 #: src/Admin/Menu.php:405

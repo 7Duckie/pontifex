@@ -246,3 +246,9 @@ jobs:
         with:
           build-dir: ./build
           slug: pontifex
+          # strict makes Plugin Check treat warnings (not only errors) as a
+          # build failure, so the "zero errors AND zero warnings" policy is
+          # enforced by CI rather than by hand. Without it the action goes
+          # green on warnings, which let four sanitisation warnings ride
+          # through v0.6.0 and v0.7.0 unnoticed.
+          strict: true

@@ -280,6 +280,52 @@ round-trip guarantee is never quietly weakened.
   content-type pruning is refused for now because it risks a
   referentially broken restore.
 
+## v0.8.0 — Offsite destinations
+
+An offsite copy of a backup, written to storage the user already owns,
+so a lost disk no longer means a lost backup — without Pontifex ever
+running a service, holding anyone's data, or phoning home.
+
+### What ships
+
+- **User-owned destinations** — a finished `.wpmig` can be uploaded to
+  the user's own **SFTP** server, configured as a named destination
+  stored on the site. `wp pontifex export --destination=<name>` uploads
+  after writing the local archive
+  ([ADR 0017](./adr/0017-offsite-destination-adapters.md)).
+- **Recoverable, not write-only** — `wp pontifex destination pull`
+  fetches an archive back from a destination for recovery after local
+  loss, alongside `destination test` (a live reachability check) and
+  `destination list`.
+- **Safe by default** — SFTP host keys are pinned (an unknown key is
+  refused unless an insecure opt-in is set); credentials are referenced
+  by environment-variable name, never passed as flags or stored in
+  plaintext; and uploading an unencrypted archive warns before it leaves
+  the server.
+- **Per-destination retention** — each destination prunes its own remote
+  copies to a retention count, with a floor that never prunes to nothing.
+- **A destination health check** in `wp pontifex doctor` — configuration
+  and credential presence, without touching the network.
+
+### What is deliberately deferred
+
+- **Scheduled/cron offsite upload** — a large upload cannot finish inside
+  one web-cron tick, so unattended offsite waits for a cross-request
+  chunked-resumable upload with its own ADR (a v0.8.x follow-up). v0.8.0
+  uploads run in the CLI process, which has unlimited time.
+- **S3-compatible destinations** — an S3 adapter (S3, Backblaze B2,
+  Wasabi, MinIO, DigitalOcean Spaces) was scoped for v0.8.0 but deferred:
+  the pure-PHP S3 library it needs pulls in native extensions, a GPLv3
+  licence, and a cloud-SDK surface that cut against the project's
+  in-house, minimal-dependency posture (ADR 0017 revision). SFTP — one
+  pure-PHP library to a server the user owns — is the offsite adapter
+  that ships.
+- **Dropbox and Google Drive** — their OAuth token lifecycle and reviewed
+  application are heavier; the no-OAuth SFTP adapter ships first.
+- **An admin destination surface** — offsite is CLI-only in v0.8.0, as
+  partial and whole-site scopes are (ADR 0008/0016); the admin screens
+  may display destination status in a later slice.
+
 ## Beyond v0.7.0 — operational maturity
 
 The longer-running operational features, not yet committed to a

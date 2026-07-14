@@ -11,6 +11,8 @@ namespace Pontifex\Cli;
 
 use WP_CLI;
 use WP_CLI\Formatter;
+use Pontifex\Destination\DestinationSpec;
+use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\WordPress\RealWordPressContext;
@@ -192,6 +194,10 @@ final class DoctorCommand {
 
 		// WordPress configuration.
 		$check_rows[] = $this->check_action_scheduler_presence();
+
+		// Offsite destinations. Variable-length — zero, one, or many rows —
+		// so it is merged rather than appended like the single-row checks above.
+		$check_rows = array_merge( $check_rows, $this->check_destinations() );
 
 		return $check_rows;
 	}
@@ -531,6 +537,205 @@ final class DoctorCommand {
 			self::STATUS_INFO,
 			'Pontifex does not yet use Action Scheduler; planned for resumable exports in a later release.'
 		);
+	}
+
+	/**
+	 * Report the configured offsite destinations and whether each looks usable.
+	 *
+	 * "Usable" here means "could an upload work", read entirely from the
+	 * stored spec — no socket is opened. Live reachability is the separate,
+	 * explicit `wp pontifex destination test` command; doctor stays fast
+	 * and safe to run on every page load's worth of checks. An empty store
+	 * is reported as a single informational row rather than silently
+	 * disappearing from the output.
+	 *
+	 * @return array<int, array<string, string>>
+	 */
+	private function check_destinations(): array {
+
+		$destinations = $this->destination_store()->all();
+
+		if ( empty( $destinations ) ) {
+			return array(
+				$this->build_row(
+					'Destinations',
+					'Offsite destinations',
+					'none configured',
+					self::STATUS_INFO,
+					__( 'No offsite destinations are configured. Add one with `wp pontifex destination add`.', 'pontifex' )
+				),
+			);
+		}
+
+		$destination_rows = array();
+		foreach ( $destinations as $spec ) {
+			$destination_rows[] = $this->check_destination( $spec );
+		}
+
+		return $destination_rows;
+	}
+
+	/**
+	 * Grade one destination spec: could an upload work, without connecting?
+	 *
+	 * Walks a first-match-wins precedence ladder over the stored, non-secret
+	 * settings. Every problem this method can find is reported as WARN, never
+	 * FAIL — a misconfigured *optional* destination must never make
+	 * `wp pontifex doctor`'s exit code non-zero for an otherwise healthy
+	 * site (compare check_action_scheduler_presence(), which is informational
+	 * for the same reason: an unused feature is not a failure). Only a
+	 * variable name or a file path ever appears in a note; a secret's value
+	 * is never read here (ADR 0017) — that mirrors DestinationFactory's own
+	 * require_env()/read_key_file(), just without ever calling either.
+	 *
+	 * @param DestinationSpec $spec The stored destination to grade.
+	 * @return array<string, string>
+	 */
+	private function check_destination( DestinationSpec $spec ): array {
+
+		$category = 'Destinations';
+		$name     = $spec->name();
+		$value    = $spec->type();
+
+		if ( DestinationSpec::TYPE_SFTP !== $spec->type() ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				sprintf(
+					/* translators: %s: the unsupported destination type */
+					__( 'The destination type "%s" is not supported; only sftp destinations can be used.', 'pontifex' ),
+					$spec->type()
+				)
+			);
+		}
+
+		$host              = (string) $spec->setting( 'host' );
+		$username          = (string) $spec->setting( 'username' );
+		$path              = (string) $spec->setting( 'path' );
+		$auth              = (string) $spec->setting( 'auth', 'key' );
+		$key_path          = (string) $spec->setting( 'key_path', '' );
+		$secret_env        = (string) $spec->setting( 'secret_env', '' );
+		$host_key          = (string) $spec->setting( 'host_key', '' );
+		$insecure_host_key = (bool) $spec->setting( 'insecure_host_key', false );
+
+		$missing_settings = array();
+		if ( '' === $host ) {
+			$missing_settings[] = 'host';
+		}
+		if ( '' === $username ) {
+			$missing_settings[] = 'username';
+		}
+		if ( '' === $path ) {
+			$missing_settings[] = 'path';
+		}
+		if ( ! empty( $missing_settings ) ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				sprintf(
+					/* translators: %s: comma-separated list of the missing setting names */
+					__( 'Missing required setting(s): %s. Re-add the destination with --host, --username, and --remote-path.', 'pontifex' ),
+					implode( ', ', $missing_settings )
+				)
+			);
+		}
+
+		if ( 'password' === $auth && '' === $secret_env ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				__( 'Password authentication has no secret_env naming the environment variable that holds the password.', 'pontifex' )
+			);
+		}
+
+		if ( 'password' !== $auth && '' === $key_path ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				__( 'Key authentication has no key_path naming the private-key file.', 'pontifex' )
+			);
+		}
+
+		if ( '' === $host_key && ! $insecure_host_key ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				__( 'No host key is pinned and --insecure-host-key is not set; `destination test` and export will refuse to connect. Pin a fingerprint with --host-key, or accept the risk with --insecure-host-key.', 'pontifex' )
+			);
+		}
+
+		if ( '' !== $secret_env && in_array( getenv( $secret_env ), array( false, '' ), true ) ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				sprintf(
+					/* translators: %s: the environment variable name (never its value) */
+					__( 'The environment variable "%s" is not set in this environment; the credential cannot be read.', 'pontifex' ),
+					$secret_env
+				)
+			);
+		}
+
+		if ( 'password' !== $auth && '' !== $key_path && ! is_readable( $key_path ) ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				sprintf(
+					/* translators: %s: absolute path to the private-key file */
+					__( 'The private-key file "%s" is not readable by PHP.', 'pontifex' ),
+					$key_path
+				)
+			);
+		}
+
+		if ( true === $insecure_host_key ) {
+			return $this->build_row(
+				$category,
+				$name,
+				$value,
+				self::STATUS_WARN,
+				__( 'Host-key verification is disabled (--insecure-host-key); the connection is exposed to a man-in-the-middle. Pin a fingerprint with --host-key when you can.', 'pontifex' )
+			);
+		}
+
+		return $this->build_row(
+			$category,
+			$name,
+			$value,
+			self::STATUS_OK,
+			sprintf(
+				/* translators: %s: the destination name */
+				__( 'Configuration complete and a credential is present. Run `wp pontifex destination test %s` to prove reachability; doctor does not connect.', 'pontifex' ),
+				$name
+			)
+		);
+	}
+
+	/**
+	 * The destination store over this command's WordPress context.
+	 *
+	 * Mirrors {@see \Pontifex\Cli\DestinationCommand::store()} — same seam,
+	 * same construction. Kept as its own private helper rather than shared
+	 * because the two command classes have no common base to hold it.
+	 *
+	 * @return DestinationStore The store.
+	 */
+	private function destination_store(): DestinationStore {
+		return new DestinationStore( $this->wordpress_context );
 	}
 
 	// -------------------------------------------------------------------------
