@@ -425,7 +425,7 @@ final class Menu {
 					/* translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it */
 					'reattachedFinished' => __( 'The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome.', 'pontifex' ),
 					'signedOutTitle'     => __( 'Restore complete', 'pontifex' ),
-					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
+					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Log in again — in this tab or another — and this screen will refresh itself.', 'pontifex' ),
 					'loginLink'          => __( 'Log in', 'pontifex' ),
 				),
 			)

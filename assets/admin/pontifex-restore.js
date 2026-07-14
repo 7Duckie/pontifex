@@ -486,6 +486,34 @@
 		} );
 	}
 
+	var reauthPoll = 0;
+
+	/**
+	 * After the signed-out overlay is shown, watch for the operator logging back
+	 * in (in this tab or another — the login cookie is shared browser-wide) and
+	 * reload the page the moment they have, so the overlay clears itself instead
+	 * of stranding a stale "please log in" screen. The check is nonce-free by
+	 * necessity: the restore invalidated the session that the page's nonce was
+	 * tied to. A logged-out poll answers a bare 0 (not the success envelope), so
+	 * it simply keeps waiting.
+	 */
+	function watchForReauth() {
+		if ( reauthPoll ) {
+			return;
+		}
+		reauthPoll = window.setInterval( function () {
+			request( 'pontifex_auth_check' ).then( function ( res ) {
+				if ( res && res.success && res.data && res.data.authenticated ) {
+					window.clearInterval( reauthPoll );
+					window.location.reload();
+				}
+			} ).catch( function () {
+				// A failed poll (still logged out, or a transient error) just waits
+				// for the next tick; the overlay stays until re-auth is confirmed.
+			} );
+		}, 5000 );
+	}
+
 	/**
 	 * Show the sign-out modal: a blocking overlay whose only action is to log in.
 	 *
@@ -544,6 +572,8 @@
 
 		// Move focus to the only action, so keyboard and screen-reader users land on it.
 		link.focus();
+
+		watchForReauth();
 	}
 
 	/**
