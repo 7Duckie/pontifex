@@ -2,6 +2,7 @@
 
 - **Status:** Proposed, 2026-07-13.
 - **Deciders:** 7Duckie (v0.8.0).
+- **Revised:** 2026-07-14 — v0.8.0 ships **SFTP only**; the S3 adapter is deferred. See "Revision" at the end.
 
 ## Context
 
@@ -117,5 +118,26 @@ unattended path needs more than a naive upload call.
   re-introduce the timeout the resumable engine exists to avoid. It needs a
   cross-request chunked-resumable upload and its own ADR.
 - **Dropbox / Google Drive as the first destinations.** Deferred: OAuth adds a
-  token-refresh lifecycle and a reviewed application; the no-OAuth SFTP and S3
-  adapters ship first.
+  token-refresh lifecycle and a reviewed application; the no-OAuth SFTP adapter
+  ships first.
+
+## Revision (2026-07-14) — SFTP only for v0.8.0; the S3 adapter is deferred
+
+Slice 2's pre-build research established that `akeeba/s3` — the pure-PHP S3
+connector this ADR chose — in fact requires the `ext-curl` and `ext-simplexml`
+extensions, is GPL-3.0-or-later (making the distributed whole GPLv3+), and brings
+a cloud-SDK surface. Together those cut against the project's in-house,
+minimal-dependency, airgap-leaning posture. 7Duckie's decision: **v0.8.0 ships
+SFTP only; the S3 adapter (and any external-SDK backend) is deferred**, revisited
+only if a future need outweighs the dependency and ethos cost.
+
+This narrows the "two adapters first" decision above to one. Nothing else in this
+ADR changes: the seam, credential-by-environment-variable-name, host-key pinning,
+`put` paired with `pull`, per-destination retention, and the network-free doctor
+check all stand for the SFTP adapter. On the airgap question this surfaced: an
+SFTP upload is an outbound connection but **not** a phone-home — Pontifex runs no
+server in the path; the user's backup goes to the user's own server, under the
+user's own credentials, only on the user's explicit `export --destination`
+command. SFTP is the minimal way to offer that (one pure-PHP library, no service,
+no SDK); the only stricter posture is local-only, where the plugin opens no socket
+and the user moves the archive themselves.
