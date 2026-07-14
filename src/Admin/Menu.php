@@ -406,10 +406,9 @@ final class Menu {
 			'pontifex-restore',
 			'pontifexRestore',
 			array(
-				'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
-				'nonce'    => wp_create_nonce( RestoreController::NONCE_ACTION ),
-				'loginUrl' => wp_login_url(),
-				'strings'  => array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( RestoreController::NONCE_ACTION ),
+				'strings' => array(
 					'starting'           => __( 'Starting…', 'pontifex' ),
 					'verifying'          => __( 'Verifying the backup…', 'pontifex' ),
 					'backingUp'          => __( 'Backing up your content…', 'pontifex' ),
@@ -424,9 +423,7 @@ final class Menu {
 					'sessionUnknown'     => __( 'If pages ask you to log in again, your session was reset by the restore.', 'pontifex' ),
 					/* translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it */
 					'reattachedFinished' => __( 'The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome.', 'pontifex' ),
-					'signedOutTitle'     => __( 'Restore complete', 'pontifex' ),
-					'signedOut'          => __( 'Your site\'s users were restored, so you\'ve been signed out. Please log in again.', 'pontifex' ),
-					'loginLink'          => __( 'Log in', 'pontifex' ),
+					'sessionReset'       => __( 'The restore reached its final stage and reset your session — this is expected. Log in again to continue; the Overview screen and the Pontifex log will show the outcome.', 'pontifex' ),
 				),
 			)
 		);

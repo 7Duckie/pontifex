@@ -25,12 +25,13 @@
 	/**
 	 * POST an admin-ajax action with the nonce and optional extra fields.
 	 *
-	 * A rejected promise carries a `pontifexReason` telling the two failure
-	 * shapes apart, which matters on this screen: 'server' means WordPress
-	 * answered but not with JSON (a PHP fatal's HTML page, or admin-ajax's bare
-	 * "0"/"-1" rejection of a dead session), while 'network' means no response
-	 * arrived at all (a severed connection). A plain response.json() would
-	 * collapse both into one indistinguishable rejection.
+	 * A rejected promise carries a `pontifexReason` telling the failure shapes
+	 * apart, which matters on this screen: 'auth' means admin-ajax's bare "0" or
+	 * "-1" reply (the session is gone), 'server' means WordPress answered but
+	 * with some other non-JSON body (a PHP fatal's HTML page), and 'network'
+	 * means no response arrived at all (a severed connection). A plain
+	 * response.json() would collapse all three into one indistinguishable
+	 * rejection.
 	 *
 	 * @param {string} action The wp_ajax action name.
 	 * @param {Object} extra  Optional extra form fields.
@@ -55,9 +56,11 @@
 					try {
 						return JSON.parse( text );
 					} catch ( e ) {
-						var serverError = new Error( 'pontifex: non-JSON response' );
-						serverError.pontifexReason = 'server';
-						throw serverError;
+						var trimmed = text.trim();
+						var reason = ( '0' === trimmed || '-1' === trimmed ) ? 'auth' : 'server';
+						var parseError = new Error( 'pontifex: non-JSON response' );
+						parseError.pontifexReason = reason;
+						throw parseError;
 					}
 				} );
 			},
@@ -378,9 +381,20 @@
 		setIndeterminate( false );
 		setBar( 0, 1 );
 
+		// A restore replaces the users and sessions tables, so once it reaches that
+		// stage the progress poll can no longer read an authenticated answer and the
+		// main request below freezes until the destination server times it out. These
+		// two guards let the poll declare the terminal state itself rather than
+		// leaving the bar stuck: `settled` stops the poll-driven and main-request
+		// completion paths from both firing, and `authMisses` requires two
+		// consecutive dead-session polls so a single fluke does not trip it early.
+		var settled = false;
+		var authMisses = 0;
+
 		var startedAt = Date.now();
 		var poll = window.setInterval( function () {
 			request( 'pontifex_restore_progress' ).then( function ( res ) {
+				authMisses = 0;
 				if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
 					return;
 				}
@@ -405,11 +419,29 @@
 					setIndeterminate( true );
 					setText( 'pontifex-restore-progress', label );
 				}
-			} ).catch( function () {} );
+			} ).catch( function ( err ) {
+				if ( err && 'auth' === err.pontifexReason ) {
+					authMisses++;
+					// Two consecutive dead-session polls: the restore has reached the
+					// users-table swap and reset this session. Declare the terminal state
+					// once, early — do not wait on the frozen main request.
+					if ( authMisses >= 2 && ! settled ) {
+						settled = true;
+						window.clearInterval( poll );
+						finishSessionReset();
+					}
+					return;
+				}
+				// A transient 'server'/'network' blip: ignore and keep polling.
+			} );
 		}, 1000 );
 
 		request( ajaxAction, extra ).then( function ( res ) {
 			window.clearInterval( poll );
+			if ( settled ) {
+				return;
+			}
+			settled = true;
 			var data = ( res && res.data ) ? res.data : {};
 			var message = data.message ? data.message : cfg.strings.failed;
 			// A successful restore or rollback replaces the database — including the
@@ -422,6 +454,10 @@
 			}
 		} ).catch( function () {
 			window.clearInterval( poll );
+			if ( settled ) {
+				return;
+			}
+			settled = true;
 			// The request was dispatched but no verdict came back — a severed
 			// connection or a fatal on the server. On a destructive action a flat
 			// "failed" here would be a lie: the operation may have completed, or may
@@ -452,14 +488,15 @@
 	 * After a restore or rollback wrote the database, check whether this session is
 	 * still authenticated before finishing. A restore replaces wp_usermeta, so the
 	 * operator may have been signed out; an authenticated ping that comes back
-	 * unauthenticated means it is so, and only then is the sign-out notice shown.
+	 * unauthenticated means it is so, and only then is the in-page session-reset
+	 * terminal state shown (not a blocking modal — see finishSessionReset()).
 	 *
-	 * The signals are told apart so a transient network blip cannot raise the
-	 * blocking sign-out modal over a restore that succeeded: WordPress answering
-	 * without a JSON envelope (admin-ajax's bare "0"/"-1") is the authoritative
-	 * signed-out signal; a network-level failure is retried twice, and if the
-	 * session state still cannot be determined the verdict is shown with a soft
-	 * caveat instead of the modal — fail toward not blocking the operator.
+	 * The signals are told apart so a transient network blip cannot raise that
+	 * terminal state over a restore that succeeded: WordPress answering without a
+	 * JSON envelope — either admin-ajax's bare "0"/"-1" or some other non-JSON body
+	 * — is the authoritative signed-out signal; a network-level failure is retried
+	 * twice, and if the session state still cannot be determined the verdict is
+	 * shown with a soft caveat instead — fail toward not blocking the operator.
 	 *
 	 * @param {string} message The verdict the server phrased.
 	 * @param {number} attempt How many checks have already failed at network level.
@@ -469,11 +506,11 @@
 			if ( res && res.success ) {
 				finishRun( message );
 			} else {
-				finishSignedOut();
+				finishSessionReset();
 			}
 		} ).catch( function ( err ) {
-			if ( err && 'server' === err.pontifexReason ) {
-				finishSignedOut();
+			if ( err && ( 'server' === err.pontifexReason || 'auth' === err.pontifexReason ) ) {
+				finishSessionReset();
 				return;
 			}
 			if ( attempt < 2 ) {
@@ -486,64 +523,75 @@
 		} );
 	}
 
+	var reauthPoll = 0;
+	var reauthDone = false;
+
 	/**
-	 * Show the sign-out modal: a blocking overlay whose only action is to log in.
-	 *
-	 * Reached only when the post-restore session check came back unauthenticated —
-	 * the restored users table did not carry this session, so WordPress signed the
-	 * operator out. The restore itself still succeeded. The overlay deliberately has
-	 * no close control and no dismiss-on-backdrop, so the sign-out cannot be missed
-	 * or assumed away the way the old inline notice below the Run button could.
+	 * Ask the server whether the operator is authenticated again and, once they
+	 * are, reload to a normal Restore screen. Nonce-free by necessity: the
+	 * restore invalidated the session the page's nonce was tied to, so a fresh
+	 * login mints a new token the old nonce can never match. A logged-out check
+	 * answers a bare 0 (not the success envelope) and is simply ignored. The
+	 * guard makes the reload fire once even if two triggers land together.
 	 */
-	function finishSignedOut() {
+	function checkReauth() {
+		if ( reauthDone ) {
+			return;
+		}
+		request( 'pontifex_auth_check' ).then( function ( res ) {
+			if ( res && res.success && res.data && res.data.authenticated ) {
+				reauthDone = true;
+				window.clearInterval( reauthPoll );
+				window.location.reload();
+			}
+		} ).catch( function () {
+			// Still logged out, or a transient error: wait for the next trigger.
+		} );
+	}
+
+	/**
+	 * After the session-reset terminal state is shown, watch for the operator
+	 * logging back in (in this tab or another — the login cookie is shared
+	 * browser-wide) and reload to the real outcome the moment they have. It
+	 * checks immediately whenever this tab regains focus or becomes visible — so
+	 * returning to it after logging in through core's session modal clears it at
+	 * once — and polls slowly in the background as a fallback for a tab that is
+	 * never refocused.
+	 */
+	function watchForReauth() {
+		if ( reauthPoll ) {
+			return;
+		}
+		reauthPoll = window.setInterval( checkReauth, 5000 );
+		document.addEventListener( 'visibilitychange', function () {
+			if ( 'visible' === document.visibilityState ) {
+				checkReauth();
+			}
+		} );
+		window.addEventListener( 'focus', checkReauth );
+	}
+
+	/**
+	 * Show the terminal state when a restore reset this session mid-run.
+	 *
+	 * A restore replaces the users and sessions tables, so once it reaches that
+	 * stage the browser is signed out and the progress poll can no longer read an
+	 * authenticated answer. Rather than freezing the bar, this renders a truthful,
+	 * NON-blocking in-page message: the restore reached its final stage (which is
+	 * expected on success) and the session was reset. It deliberately does NOT
+	 * claim the whole restore succeeded — the proven outcome is recorded in the
+	 * transfer history and shown on the Overview after re-login. WordPress core's
+	 * native session-expired modal provides the actual log-in; this only explains
+	 * what happened and, via watchForReauth(), reloads to the real result once the
+	 * operator is back. No blocking overlay is stacked over core's modal.
+	 */
+	function finishSessionReset() {
 		showBar( false );
 		setIndeterminate( false );
 		setText( 'pontifex-restore-progress', '' );
 		setText( 'pontifex-restore-timing', '' );
-
-		// If, somehow, the modal is already up, do not stack a second one.
-		if ( document.querySelector( '.pontifex-modal-backdrop' ) ) {
-			return;
-		}
-
-		var backdrop = document.createElement( 'div' );
-		backdrop.className = 'pontifex-modal-backdrop';
-
-		var modal = document.createElement( 'div' );
-		modal.className = 'pontifex-modal';
-		modal.setAttribute( 'role', 'dialog' );
-		modal.setAttribute( 'aria-modal', 'true' );
-		modal.setAttribute( 'aria-label', cfg.strings.signedOutTitle );
-
-		var title = document.createElement( 'p' );
-		title.className = 'pontifex-modal-title';
-		title.textContent = cfg.strings.signedOutTitle;
-
-		var message = document.createElement( 'p' );
-		message.className = 'pontifex-modal-message';
-		message.textContent = cfg.strings.signedOut;
-
-		var actions = document.createElement( 'p' );
-		actions.className = 'pontifex-modal-actions';
-
-		var link = document.createElement( 'a' );
-		link.className = 'pontifex-button';
-		link.href = cfg.loginUrl;
-		link.textContent = cfg.strings.loginLink;
-
-		actions.appendChild( link );
-		modal.appendChild( title );
-		modal.appendChild( message );
-		modal.appendChild( actions );
-		backdrop.appendChild( modal );
-
-		// Mount inside the admin wrap so the .pontifex-admin-scoped styles apply; the
-		// backdrop is position: fixed, so it still covers the whole viewport.
-		var host = document.querySelector( '.pontifex-admin' ) || document.body;
-		host.appendChild( backdrop );
-
-		// Move focus to the only action, so keyboard and screen-reader users land on it.
-		link.focus();
+		setText( 'pontifex-restore-result', cfg.strings.sessionReset );
+		watchForReauth();
 	}
 
 	/**

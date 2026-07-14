@@ -669,6 +669,28 @@ final class RestoreController {
 	}
 
 	/**
+	 * Report whether the current request is an authenticated Pontifex manager.
+	 *
+	 * The `wp_ajax_pontifex_auth_check` handler, polled by the post-restore
+	 * signed-out overlay so it can clear itself once the operator has logged back
+	 * in. It deliberately verifies NO nonce: a restore that replaces the users
+	 * table invalidates the session, and a fresh login mints a new session token,
+	 * so the page's baked-in nonce — bound to the old session — can never verify
+	 * again; requiring one here would make the overlay impossible to dismiss,
+	 * which is the very bug this closes. Skipping the nonce is safe: the handler
+	 * changes nothing and returns only whether THIS request is a logged-in
+	 * manager — state the same-origin caller already knows and that CORS keeps
+	 * any cross-origin page from reading. It is registered only as `wp_ajax_`
+	 * (logged-in), never `wp_ajax_nopriv_`, so a logged-out request is never
+	 * dispatched and admin-ajax answers a bare `0`.
+	 *
+	 * @return void
+	 */
+	public function auth_check(): void {
+		wp_send_json_success( array( 'authenticated' => current_user_can( Menu::CAPABILITY ) ) );
+	}
+
+	/**
 	 * Release the lock and clear progress if a fatal error ended a run.
 	 *
 	 * Registered with register_shutdown_function() at the start of a run. A fatal

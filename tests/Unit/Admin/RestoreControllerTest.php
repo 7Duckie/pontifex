@@ -1189,6 +1189,70 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// auth_check() — the nonce-free re-auth poll behind the signed-out overlay.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Reports authenticated when the current request holds the managing capability.
+	 *
+	 * @return void
+	 */
+	public function test_auth_check_reports_authenticated_for_a_manager(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		$this->stub_json();
+
+		$this->controller()->auth_check();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['authenticated'] );
+	}
+
+	/**
+	 * Reports not authenticated when the current request lacks the capability.
+	 *
+	 * @return void
+	 */
+	public function test_auth_check_reports_not_authenticated_without_the_capability(): void {
+		Functions\when( 'current_user_can' )->justReturn( false );
+		$this->stub_json();
+
+		$this->controller()->auth_check();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertFalse( $this->json['data']['authenticated'] );
+	}
+
+	/**
+	 * The handler never gates on a nonce, unlike every other one on this controller.
+	 *
+	 * A restore that replaces the users table invalidates the session, so a
+	 * fresh login mints a new session token and the page's baked-in nonce
+	 * (bound to the old session) can never verify again. If auth_check() went
+	 * through {@see RestoreController::is_authorised()} like restore(),
+	 * rollback(), progress() and preview() all do, it would need a valid
+	 * `pontifex_restore` nonce to pass check_ajax_referer() — deliberately left
+	 * unstubbed here, unlike {@see self::authorise()} which stubs it for every
+	 * other test. If the nonce gate were reached, the unstubbed
+	 * check_ajax_referer() call would fatal instead of the handler returning a
+	 * normal success envelope, so a clean success proves the 403
+	 * unauthorised-nonce path is never hit.
+	 *
+	 * @return void
+	 */
+	public function test_auth_check_does_not_require_a_nonce(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		$this->stub_json();
+
+		$this->controller()->auth_check();
+
+		// With current_user_can stubbed true, routing through the nonce gate would
+		// reach the unstubbed check_ajax_referer() and fatal; a clean success
+		// envelope proves auth_check() never reaches a nonce check at all.
+		$this->assertTrue( $this->json['success'], 'auth_check() must answer without ever reaching a nonce gate.' );
+		$this->assertTrue( $this->json['data']['authenticated'] );
+	}
+
+	// -------------------------------------------------------------------------
 	// Collaborator builders and stubs.
 	// -------------------------------------------------------------------------
 
