@@ -14,8 +14,55 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward v0.8.0 — the next operational increment — begins
-after this tag. See [`docs/roadmap.md`](docs/roadmap.md).
+Nothing yet. Work toward the next operational increment begins after this
+tag. See [`docs/roadmap.md`](docs/roadmap.md).
+
+## [0.8.0] — 2026-07-14 — Offsite SFTP destinations
+
+The release that gets a backup off the machine it was made on, without Pontifex
+ever becoming a service. A finished archive can be uploaded to an SFTP server the
+user already owns — their box, their credentials, on their command — so a lost
+disk no longer means a lost backup. It is an outbound connection, never a
+phone-home: Pontifex runs no server in the path and holds none of the data. SFTP
+is the only destination type this release ships; a planned S3 adapter was deferred
+because the pure-PHP S3 library it needed pulls in native extensions, a GPL-3.0
+licence, and a cloud-SDK surface, against the project's in-house posture
+([ADR 0017](docs/adr/0017-offsite-destination-adapters.md)). No breaking changes.
+
+### Added
+
+- **Offsite SFTP destinations.** `wp pontifex export --destination=<name>` uploads
+  the finished archive to a configured SFTP server after writing it locally, in the
+  CLI process, which has no web-request timeout, so a large archive is not bound by
+  one. The host key is pinned before any credential is sent — an unknown or
+  mismatched key is refused unless `--insecure-host-key` is explicitly set — and
+  credentials are referenced by environment-variable name, never a flag or
+  plaintext ([ADR 0017](docs/adr/0017-offsite-destination-adapters.md)).
+- **`wp pontifex destination`** — `add`, `remove`, `list`, `test` (a live
+  reachability, authentication, and writability check), `archives`, `pull` (fetch an
+  archive back for recovery after a local loss, so a destination is never
+  write-only), and `prune`.
+- **Per-destination retention.** `--retention=<count>` keeps the newest N archives
+  at a destination and prunes the rest — after each successful upload and on demand
+  via `destination prune` — ordered by the archive's name, with a floor that can
+  never prune a destination down to nothing. A prune failure never fails the export.
+- **A destination health check in `wp pontifex doctor`.** For each configured
+  destination it reports whether the configuration is complete and its credential
+  environment variable is present, without ever connecting to the network; live
+  reachability stays the on-demand `destination test`.
+- **`phpseclib/phpseclib`** as a runtime dependency (pure PHP, no native extension
+  required) for the SFTP transport.
+
+### Fixed
+
+- **Plugin Check runs clean, and stays that way.** Four
+  `WordPress.Security.ValidatedSanitizedInput` warnings on the admin schedule-save
+  handler were fixed at source, and the CI Plugin Check step now fails the build on
+  warnings, not only errors — so the zero-errors-and-zero-warnings policy is enforced
+  rather than kept by hand.
+- **A translator-comment warning** where four progress bars localised the same
+  string with different comments is resolved, so the translation template
+  regenerates cleanly.
 
 ## [0.7.0] — 2026-07-13 — Selective content
 
@@ -737,7 +784,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/7Duckie/pontifex/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/7Duckie/pontifex/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/7Duckie/pontifex/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/7Duckie/pontifex/compare/v0.4.6...v0.5.0
