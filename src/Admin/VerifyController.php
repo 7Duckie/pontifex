@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Admin;
 
+use DateTimeImmutable;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
@@ -214,13 +215,16 @@ final class VerifyController {
 
 			// Encrypted archives need a passphrase, which the admin UI does not collect;
 			// refuse with a pointer to the CLI rather than a confusing decode failure.
-			if ( ( new ArchiveReader( $source ) )->header()->is_encrypted() ) {
+			$reader = new ArchiveReader( $source );
+			$header = $reader->header();
+			if ( $header->is_encrypted() ) {
 				$this->finish( $source );
 				wp_send_json_error(
 					array( 'message' => __( 'This backup is encrypted. Verify it with the WP-CLI command: wp pontifex verify.', 'pontifex' ) ),
 					422
 				);
 			}
+			$format_version = $header->major() . '.' . $header->minor();
 
 			// ArchiveReader sought through the stream to read the header; rewind so the
 			// verify walk starts from the beginning.
@@ -250,9 +254,11 @@ final class VerifyController {
 				}
 			);
 
-			// Read the scope label before finish() closes the stream.
-			$scope_label = $this->describe_archive_scope( $source );
+			// Read the archive's facts before finish() closes the stream.
+			$facts = $this->archive_facts( $source );
 			$this->finish( $source );
+
+			$size = $this->wordpress_context->format_size( $bytes_total );
 
 			wp_send_json_success(
 				array(
@@ -262,8 +268,15 @@ final class VerifyController {
 						/* translators: 1: number of entries verified, 2: the archive's size, human-readable, 3: what the backup contains */
 						__( 'Verified — this backup is intact. All %1$d entries (%2$s) were re-read and every hash matched. It contains %3$s.', 'pontifex' ),
 						$entry_total,
-						$this->wordpress_context->format_size( $bytes_total ),
-						$scope_label
+						$size,
+						$facts['scope']
+					),
+					'proof'   => array(
+						'entries' => $entry_total,
+						'size'    => $size,
+						'scope'   => $facts['scope'],
+						'created' => $facts['created'],
+						'format'  => $format_version,
 					),
 				)
 			);
@@ -390,29 +403,45 @@ final class VerifyController {
 	}
 
 	/**
-	 * Describe, in one human clause, what an archive holds, from its recorded scope.
+	 * Read the facts a sound verdict shows the operator, from the archive's provenance.
 	 *
 	 * Tells the operator what a sound backup actually contains — in particular
 	 * whether it is a deliberately partial (files-only or database-only) backup —
-	 * before they trust it. A legacy archive with no recorded scope is a
-	 * whole-site backup.
+	 * and when it was made, before they trust it. A legacy archive with no
+	 * recorded scope is a whole-site backup. Presentation, not integrity: verify
+	 * already checked every hash, so a provenance that cannot be re-read must not
+	 * turn a sound archive into a failure — its facts are simply reported unknown.
 	 *
 	 * @param resource $source The archive stream (already read for verification).
-	 * @return string The human-readable content description.
+	 * @return array{scope: string, created: string} The content description and creation time.
 	 */
-	private function describe_archive_scope( $source ): string {
+	private function archive_facts( $source ): array {
 		try {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the archive stream to re-read its provenance for the label; not a filesystem path.
 			rewind( $source );
-			$scope = ( new ArchiveReader( $source ) )->provenance()->scope();
+			$provenance = ( new ArchiveReader( $source ) )->provenance();
+			return array(
+				'scope'   => ScopeSummary::describe( $provenance->scope() ),
+				'created' => $this->format_created( $provenance->timestamp() ),
+			);
 		} catch ( Throwable $error ) {
-			// A label is presentation, not integrity: verify already checked every
-			// hash, so a provenance that cannot be re-read must not turn a sound
-			// archive into a failure — it just cannot be described.
 			unset( $error );
-			return ScopeSummary::unreadable();
+			return array(
+				'scope'   => ScopeSummary::unreadable(),
+				'created' => __( 'unknown', 'pontifex' ),
+			);
 		}
-		return ScopeSummary::describe( $scope );
+	}
+
+	/**
+	 * Format a moment as the site's local time, matching {@see VerifyPage::backup_when()}.
+	 *
+	 * @param DateTimeImmutable $when The moment to format.
+	 * @return string The formatted local time, or a placeholder if it cannot be rendered.
+	 */
+	private function format_created( DateTimeImmutable $when ): string {
+		$formatted = wp_date( 'H:i \o\n d-m-Y', $when->getTimestamp() );
+		return false !== $formatted ? $formatted : __( 'unknown', 'pontifex' );
 	}
 
 	/**

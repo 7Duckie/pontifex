@@ -356,13 +356,24 @@ final class Menu {
 			array(
 				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
 				'nonce'   => wp_create_nonce( VerifyController::NONCE_ACTION ),
+				'specUrl' => VerifyPage::FORMAT_SPEC_URL,
 				'strings' => array(
-					'starting' => __( 'Verifying…', 'pontifex' ),
+					'starting'            => __( 'Verifying…', 'pontifex' ),
 					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
-					'progress' => __( '%1$s of %2$s', 'pontifex' ),
+					'progress'            => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
-					'elapsed'  => __( 'Time elapsed - %s', 'pontifex' ),
-					'failed'   => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'elapsed'             => __( 'Time elapsed - %s', 'pontifex' ),
+					'failed'              => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
+					'verdictIntact'       => __( 'Verified — this backup is intact.', 'pontifex' ),
+					'verdictBroken'       => __( 'Not verified — this backup is broken.', 'pontifex' ),
+					'factEntries'         => __( 'Entries checked', 'pontifex' ),
+					'factSize'            => __( 'Total size', 'pontifex' ),
+					'factContains'        => __( 'Contains', 'pontifex' ),
+					'factCreated'         => __( 'Created', 'pontifex' ),
+					'factFormat'          => __( 'Format version', 'pontifex' ),
+					'assuranceHashes'     => __( 'Every file and database chunk was re-read and its SHA-256 hash re-checked against the value recorded when the backup was made.', 'pontifex' ),
+					'assuranceDocumented' => __( 'The .wpmig format is publicly documented, so this backup is never hostage to this plugin — it can be read, verified, or recovered without Pontifex.', 'pontifex' ),
+					'specLinkText'        => __( 'Read the format specification', 'pontifex' ),
 				),
 			)
 		);

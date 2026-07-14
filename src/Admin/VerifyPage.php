@@ -40,6 +40,13 @@ final class VerifyPage {
 	private const STAMP_FORMAT = 'Ymd\THis\Z';
 
 	/**
+	 * The published archive format specification, linked from a sound verify's proof panel.
+	 *
+	 * @var string
+	 */
+	public const FORMAT_SPEC_URL = 'https://github.com/7Duckie/pontifex/blob/main/docs/archive-format.md';
+
+	/**
 	 * The WordPress context this page formats sizes through.
 	 *
 	 * @var WordPressContext
@@ -203,6 +210,7 @@ final class VerifyPage {
 		echo '<p class="pontifex-progress" id="pontifex-verify-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-timing" id="pontifex-verify-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-verify-result" aria-live="polite"></p>';
+		echo '<div class="pontifex-proof" id="pontifex-verify-proof" aria-live="polite" hidden></div>';
 		echo '</section>';
 	}
 

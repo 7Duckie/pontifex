@@ -123,6 +123,36 @@ final class VerifyPageTest extends TestCase {
 		$this->assertStringContainsString( 'pontifex-verify-timing', $html );
 	}
 
+	/**
+	 * Renders a persistent, hidden proof panel container the script fills in.
+	 *
+	 * @return void
+	 */
+	public function test_render_includes_a_hidden_proof_panel(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		ob_start();
+		( new VerifyPage( $this->context(), $store ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'id="pontifex-verify-proof"', $html, 'The proof panel container is present for the script to fill in.' );
+		$this->assertStringContainsString( 'class="pontifex-proof"', $html );
+		$this->assertMatchesRegularExpression(
+			'/id="pontifex-verify-proof"[^>]*\shidden/',
+			$html,
+			'The proof panel starts hidden until a sound verify fills and reveals it.'
+		);
+
+		// A cheap no-colour tripwire: the design language forbids a status-colour
+		// class for the verdict, so no such token may ever appear in this markup.
+		foreach ( array( 'is-error', 'is-success', 'red', 'green', 'amber' ) as $forbidden ) {
+			$this->assertStringNotContainsString( $forbidden, $html, "The Verify screen must never carry a status-colour token such as \"{$forbidden}\"." );
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborators and fixtures.
 	// -------------------------------------------------------------------------
