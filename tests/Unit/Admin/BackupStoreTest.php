@@ -101,6 +101,25 @@ final class BackupStoreTest extends TestCase {
 	}
 
 	/**
+	 * A file the loose glob catches but the strict pattern refuses is not listed,
+	 * so every listed backup can always be verified, downloaded, or deleted.
+	 *
+	 * @return void
+	 */
+	public function test_backups_excludes_a_glob_match_that_resolve_would_refuse(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->seed( $store, 'pontifex-backup-20260101T000000Z.wpmig' );
+		$this->seed( $store, 'pontifex-backup-corrupt.wpmig' );
+
+		$backups = $store->backups();
+
+		$this->assertCount( 1, $backups, 'A backup-prefixed file without a valid timestamp must not be listed.' );
+		$this->assertStringEndsWith( '20260101T000000Z.wpmig', $backups[0] );
+		$this->assertNull( $store->resolve( 'pontifex-backup-corrupt.wpmig' ), 'The non-conforming file must not resolve either, so list and actions agree.' );
+	}
+
+	/**
 	 * Resolves a genuine backup in the directory to its real path.
 	 *
 	 * @return void
