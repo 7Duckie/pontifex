@@ -487,31 +487,51 @@
 	}
 
 	var reauthPoll = 0;
+	var reauthDone = false;
+
+	/**
+	 * Ask the server whether the operator is authenticated again and, once they
+	 * are, reload to a normal Restore screen. Nonce-free by necessity: the
+	 * restore invalidated the session the page's nonce was tied to, so a fresh
+	 * login mints a new token the old nonce can never match. A logged-out check
+	 * answers a bare 0 (not the success envelope) and is simply ignored. The
+	 * guard makes the reload fire once even if two triggers land together.
+	 */
+	function checkReauth() {
+		if ( reauthDone ) {
+			return;
+		}
+		request( 'pontifex_auth_check' ).then( function ( res ) {
+			if ( res && res.success && res.data && res.data.authenticated ) {
+				reauthDone = true;
+				window.clearInterval( reauthPoll );
+				window.location.reload();
+			}
+		} ).catch( function () {
+			// Still logged out, or a transient error: wait for the next trigger.
+		} );
+	}
 
 	/**
 	 * After the signed-out overlay is shown, watch for the operator logging back
 	 * in (in this tab or another — the login cookie is shared browser-wide) and
-	 * reload the page the moment they have, so the overlay clears itself instead
-	 * of stranding a stale "please log in" screen. The check is nonce-free by
-	 * necessity: the restore invalidated the session that the page's nonce was
-	 * tied to. A logged-out poll answers a bare 0 (not the success envelope), so
-	 * it simply keeps waiting.
+	 * reload the moment they have, so the overlay clears itself instead of
+	 * stranding a stale "please log in" screen. It checks immediately whenever
+	 * this tab regains focus or becomes visible — so returning to it after
+	 * logging in elsewhere clears it at once — and polls slowly in the background
+	 * as a fallback for a tab that is never refocused.
 	 */
 	function watchForReauth() {
 		if ( reauthPoll ) {
 			return;
 		}
-		reauthPoll = window.setInterval( function () {
-			request( 'pontifex_auth_check' ).then( function ( res ) {
-				if ( res && res.success && res.data && res.data.authenticated ) {
-					window.clearInterval( reauthPoll );
-					window.location.reload();
-				}
-			} ).catch( function () {
-				// A failed poll (still logged out, or a transient error) just waits
-				// for the next tick; the overlay stays until re-auth is confirmed.
-			} );
-		}, 5000 );
+		reauthPoll = window.setInterval( checkReauth, 5000 );
+		document.addEventListener( 'visibilitychange', function () {
+			if ( 'visible' === document.visibilityState ) {
+				checkReauth();
+			}
+		} );
+		window.addEventListener( 'focus', checkReauth );
 	}
 
 	/**
