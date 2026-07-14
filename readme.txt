@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.8.0
+Stable tag: 0.9.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -88,6 +88,9 @@ No. An offsite upload is a plain SFTP connection to the server you configured, u
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.9.0 =
+* Admin legibility. A sound verify now shows a full proof panel — verdict, entry count, size, what the archive contains, created date, format version, and a link to the published format specification — instead of a single line. Every backup list gains a "Contains" column, the Verify screen re-attaches to a running check after a page reload, and selecting a backup taken on another site hints that its links can be rewritten to this one. Fixes: a fatal-killed backup no longer shows as "running"; a restore that signs you out now reports honestly and reloads once you log back in, instead of freezing; and the backup list no longer shows phantom rows for stray files. No breaking changes.
 
 = 0.8.0 =
 * Offsite SFTP destinations. Upload a finished backup to an SFTP server you own with `wp pontifex export --destination`; a new `wp pontifex destination` command adds, tests, lists, prunes, and pulls archives back for recovery. Host keys are pinned and credentials come from an environment variable, never a flag. Per-destination retention keeps the newest N with a floor that never prunes to nothing, and `wp pontifex doctor` checks each destination without connecting. SFTP only this release (an S3 adapter was deferred). No breaking changes.
