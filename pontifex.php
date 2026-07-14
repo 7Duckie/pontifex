@@ -165,6 +165,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex keygen', \Pontifex\Cli\KeygenCommand::class );
 	\WP_CLI::add_command( 'pontifex stats', \Pontifex\Cli\StatsCommand::class );
 	\WP_CLI::add_command( 'pontifex schedule', \Pontifex\Cli\ScheduleCommand::class );
+	\WP_CLI::add_command( 'pontifex destination', \Pontifex\Cli\DestinationCommand::class );
 	\WP_CLI::add_command( 'pontifex diagnostics', \Pontifex\Cli\DiagnosticsCommand::class );
 }
 
