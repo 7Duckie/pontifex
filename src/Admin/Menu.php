@@ -303,7 +303,7 @@ final class Menu {
 					'starting'          => __( 'Starting backup…', 'pontifex' ),
 					/* translators: %s: number of files found so far */
 					'scanning'          => __( 'Scanning files… %s', 'pontifex' ),
-					/* translators: 1: bytes copied so far, 2: total bytes, both as human-readable sizes */
+					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
 					'progress'          => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'           => __( 'Time elapsed - %s', 'pontifex' ),
@@ -358,7 +358,7 @@ final class Menu {
 				'nonce'   => wp_create_nonce( VerifyController::NONCE_ACTION ),
 				'strings' => array(
 					'starting' => __( 'Verifying…', 'pontifex' ),
-					/* translators: 1: bytes read so far, 2: archive size, both as human-readable sizes */
+					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
 					'progress' => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'  => __( 'Time elapsed - %s', 'pontifex' ),
@@ -401,7 +401,7 @@ final class Menu {
 					'backingUp'          => __( 'Backing up your content…', 'pontifex' ),
 					'restoring'          => __( 'Restoring…', 'pontifex' ),
 					'rollingBack'        => __( 'Rolling back…', 'pontifex' ),
-					/* translators: 1: bytes done so far, 2: total bytes, both as human-readable sizes */
+					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
 					'progress'           => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'            => __( 'Time elapsed - %s', 'pontifex' ),
@@ -457,7 +457,7 @@ final class Menu {
 				'chunkSize' => $chunk_size,
 				'strings'   => array(
 					'starting' => __( 'Uploading…', 'pontifex' ),
-					/* translators: 1: bytes uploaded so far, 2: total bytes, both as human-readable sizes */
+					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
 					'progress' => __( '%1$s of %2$s', 'pontifex' ),
 					'done'     => __( 'Upload complete.', 'pontifex' ),
 					'failed'   => __( 'The upload could not be completed. Check the Pontifex log for details.', 'pontifex' ),

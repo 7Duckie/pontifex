@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.7.0
+Stable tag: 0.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -17,7 +17,7 @@ Pontifex packs your WordPress content — everything under `wp-content` (themes,
 * **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
 * **It never touches the cloud.** Pontifex runs entirely on your own infrastructure. It never uploads your data, never phones home, and needs no account.
 
-Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access.
+Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access. A finished backup can also be sent offsite to a **server you own**, over SFTP — still no cloud service, no account, and no phone-home; it's your server and your credentials, only when you command it.
 
 = What it does =
 
@@ -77,9 +77,20 @@ Yes. Set a daily or weekly schedule — from the Backup screen or with `wp ponti
 
 A backup started from the admin screen runs as a persisted job: if the page is closed or the request dies, reloading the screen re-attaches to the running backup, and a background tick continues a job whose request was killed. On the CLI, `wp pontifex export --resumable` makes the export continuable with `wp pontifex export --resume` after any interruption, and the finished archive is byte-identical to an uninterrupted one.
 
+= Can Pontifex store backups offsite? =
+
+Yes. `wp pontifex destination add` configures a named SFTP destination on a server you own, and `wp pontifex export --destination=<name>` uploads the finished archive there after writing it locally. `wp pontifex destination pull` fetches an archive back for recovery after a local loss.
+
+= Does uploading a backup phone home? =
+
+No. An offsite upload is a plain SFTP connection to the server you configured, using credentials you supply — Pontifex runs no service in between and holds none of your data. It only connects when you run an export with `--destination` or pull an archive back; it never connects on its own.
+
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.8.0 =
+* Offsite SFTP destinations. Upload a finished backup to an SFTP server you own with `wp pontifex export --destination`; a new `wp pontifex destination` command adds, tests, lists, prunes, and pulls archives back for recovery. Host keys are pinned and credentials come from an environment variable, never a flag. Per-destination retention keeps the newest N with a floor that never prunes to nothing, and `wp pontifex doctor` checks each destination without connecting. SFTP only this release (an S3 adapter was deferred). No breaking changes.
 
 = 0.7.0 =
 * Selective content. `export --exclude`/`--exclude-table` drop named files and database tables from a backup; `--files-only` and `--db-only` capture just the files or just the database, each restorable on its own and leaving the other half of the live site untouched. Scheduled backups inherit the configured exclusions, and `verify` and the admin Verify screen now state what an archive contains. No breaking changes.

@@ -3,7 +3,7 @@
  * Plugin Name:       Pontifex
  * Plugin URI:        https://github.com/7Duckie/pontifex
  * Description:       A free, open-source WordPress migration and backup plugin with a documented archive format.
- * Version:           0.7.0
+ * Version:           0.8.0
  * Requires at least: 6.5
  * Requires PHP:      8.2
  * Author:            7Duckie
@@ -114,7 +114,7 @@ define( 'PONTIFEX_MINIMUM_WP_VERSION', '6.5' );
  * formalises this with a CI guard that fails the workflow on tag
  * push if the values disagree with the tag.
  */
-define( 'PONTIFEX_VERSION', '0.7.0' );
+define( 'PONTIFEX_VERSION', '0.8.0' );
 
 // -----------------------------------------------------------------------------
 // Autoloader
@@ -165,6 +165,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'pontifex keygen', \Pontifex\Cli\KeygenCommand::class );
 	\WP_CLI::add_command( 'pontifex stats', \Pontifex\Cli\StatsCommand::class );
 	\WP_CLI::add_command( 'pontifex schedule', \Pontifex\Cli\ScheduleCommand::class );
+	\WP_CLI::add_command( 'pontifex destination', \Pontifex\Cli\DestinationCommand::class );
 	\WP_CLI::add_command( 'pontifex diagnostics', \Pontifex\Cli\DiagnosticsCommand::class );
 }
 
