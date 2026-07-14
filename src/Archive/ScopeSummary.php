@@ -58,4 +58,44 @@ final class ScopeSummary {
 	public static function unreadable(): string {
 		return __( 'contents that could not be read from the archive', 'pontifex' );
 	}
+
+	/**
+	 * Describe, in a compact list label, what an archive with this scope holds.
+	 *
+	 * The short form of {@see self::describe()}: a couple of words for a
+	 * "Contains" column rather than a full sentence clause, over the same
+	 * {@see Scope::content_summary_key()} classification so the two never
+	 * disagree about what a given scope is.
+	 *
+	 * @param Scope|null $scope The recorded scope, or null for a legacy archive with no scope block.
+	 * @return string The human-readable compact label.
+	 */
+	public static function label( ?Scope $scope ): string {
+		if ( null === $scope ) {
+			return __( 'Whole site (legacy)', 'pontifex' );
+		}
+		switch ( $scope->content_summary_key() ) {
+			case Scope::SUMMARY_WHOLE_SITE:
+				return __( 'Whole site', 'pontifex' );
+			case Scope::SUMMARY_DB_ONLY:
+				return __( 'Database only', 'pontifex' );
+			case Scope::SUMMARY_FILES_ONLY:
+				return __( 'Files only', 'pontifex' );
+			default:
+				return __( 'Content and database', 'pontifex' );
+		}
+	}
+
+	/**
+	 * The compact list label used when the archive's scope could not be read.
+	 *
+	 * The short form of {@see self::unreadable()}, for the same fail-soft reason:
+	 * a label is presentation, not integrity, so an archive a list cannot read the
+	 * scope of is simply shown as unknown rather than breaking the list.
+	 *
+	 * @return string The human-readable fallback label.
+	 */
+	public static function unreadable_label(): string {
+		return __( 'Unknown', 'pontifex' );
+	}
 }

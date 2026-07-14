@@ -18,6 +18,7 @@ use Pontifex\Admin\VerifyController;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
@@ -134,6 +135,7 @@ final class VerifyControllerTest extends TestCase {
 		$this->stub_transients();
 		Functions\when( 'wp_unslash' )->returnArg();
 		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'wp_date' )->justReturn( '10:00 on 23-05-2026' );
 
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
@@ -161,6 +163,61 @@ final class VerifyControllerTest extends TestCase {
 		$this->assertSame( 3, $this->json['data']['entries'] );
 		$this->assertStringContainsString( 'It contains', $this->json['data']['message'], 'The verdict states what the backup contains.' );
 		$this->assertStringContainsString( 'whole site', $this->json['data']['message'], 'A scope-less fixture reads as a legacy whole-site archive.' );
+
+		$proof = $this->json['data']['proof'];
+		$this->assertSame( 3, $proof['entries'] );
+		$this->assertArrayHasKey( 'size', $proof );
+		$this->assertStringContainsString( 'whole site', $proof['scope'], 'A scope-less fixture reads as a legacy whole-site archive.' );
+		$this->assertSame( '10:00 on 23-05-2026', $proof['created'] );
+		$this->assertSame( '1.1', $proof['format'] );
+	}
+
+	/**
+	 * States what the archive contains in the proof payload, per its recorded scope.
+	 *
+	 * @return void
+	 */
+	public function test_verify_proof_states_the_recorded_scope(): void {
+		$cases = array(
+			'content-only' => array( Scope::content_only( array() ), 'your content' ),
+			'db-only'      => array( Scope::db_only( array() ), 'database only' ),
+			'files-only'   => array( Scope::files_only( array() ), 'files only' ),
+		);
+
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'wp_date' )->justReturn( '10:00 on 23-05-2026' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+
+		foreach ( $cases as $label => $case ) {
+			[ $scope, $expected ] = $case;
+
+			$this->write_plain_archive( $store->directory() . '/' . $name, $scope );
+			$_POST['file'] = $name;
+
+			$runner = Mockery::mock( RestoreRunnerInterface::class );
+			$runner->shouldReceive( 'verify' )->once()->andReturnUsing(
+				static function ( $source, ?callable $callback ): void {
+					if ( null !== $callback ) {
+						$callback( 1, 1 );
+					}
+				}
+			);
+
+			try {
+				$this->controller( $runner )->verify();
+			} finally {
+				unset( $_POST['file'] );
+			}
+
+			$this->assertStringContainsString( $expected, $this->json['data']['proof']['scope'], "Scope label for the {$label} fixture." );
+		}
 	}
 
 	/**
@@ -264,6 +321,7 @@ final class VerifyControllerTest extends TestCase {
 
 		$this->assertTrue( $this->json['success'], 'A broken verdict is reported as a JSON success.' );
 		$this->assertFalse( $this->json['data']['sound'] );
+		$this->assertArrayNotHasKey( 'proof', $this->json['data'], 'A broken verdict has nothing sound to prove.' );
 	}
 
 	/**
@@ -306,6 +364,295 @@ final class VerifyControllerTest extends TestCase {
 
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * Refuses a fresh lock even though it has no progress transient yet.
+	 *
+	 * The window between acquire_lock() and the runner's first progress write
+	 * has a lock but no progress transient; treating that absence as "dead"
+	 * would let a second concurrent request barge in and break the
+	 * single-runner guarantee, so a lock younger than the staleness horizon
+	 * must still be respected.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_a_fresh_lock_before_the_first_progress_write(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time();
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+			$this->fail( 'verify() should refuse a fresh lock still in its startup window.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * Reclaims a lock whose owning runner has died, once its progress transient
+	 * has gone stale and the lock has aged past the startup window.
+	 *
+	 * A verify keeps no persisted job and no cron successor to release its own
+	 * lock, so a died runner (closed tab, host execution-time kill) must not
+	 * wedge the lock for its full TTL — the very next attempt would otherwise
+	 * be refused with an "already running" contradiction of the "finished"
+	 * re-attach just showed.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reclaims_a_dead_lock_whose_progress_has_gone_stale(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time() - 120;
+				}
+				if ( 'pontifex_verify_progress' === $key ) {
+					return array(
+						'phase'       => 'verifying',
+						'bytes_done'  => 4096,
+						'bytes_total' => 8192,
+						'started_at'  => time() - 120,
+						'at'          => time() - 60,
+					);
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// The engine is not injected: the placeholder file is not a valid archive,
+		// so verify() reaches and reports the broken-verdict path — proof the lock
+		// was RECLAIMED (verify proceeded past it) rather than refused outright.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A reclaimed lock lets verify() proceed to the broken-verdict path, not the already-running refusal.' );
+		$this->assertFalse( $this->json['data']['sound'] );
+	}
+
+	/**
+	 * Refuses an old lock while its verify is still actively reporting progress.
+	 *
+	 * A long verify's lock ages well past the startup window, but the run is
+	 * alive as long as it keeps refreshing the progress transient. Liveness, not
+	 * lock age, must win here: an old lock with a fresh progress write is a
+	 * running verification and a second attempt must still be refused, or the
+	 * reclaim would tear down a genuinely-live check.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_an_old_lock_whose_verify_is_still_live(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		Functions\when( 'get_transient' )->alias(
+			static function ( string $key ) {
+				if ( 'pontifex_verify_lock' === $key ) {
+					return time() - 300;
+				}
+				if ( 'pontifex_verify_progress' === $key ) {
+					return array(
+						'phase'       => 'verifying',
+						'bytes_done'  => 4096,
+						'bytes_total' => 8192,
+						'started_at'  => time() - 300,
+						// A fresh write: the run is alive despite the old lock.
+						'at'          => time(),
+					);
+				}
+				return false;
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder backup in a temp directory; the lock is checked before it is opened.
+		file_put_contents( $store->directory() . '/' . $name, 'x' );
+		$_POST['file'] = $name;
+
+		try {
+			$this->controller()->verify();
+			$this->fail( 'verify() should refuse while an old lock is still reporting live progress.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * A provenance that cannot be re-read degrades the reported facts to unknown,
+	 * rather than turning a sound verify into a failure (presentation, not integrity).
+	 *
+	 * @return void
+	 */
+	public function test_archive_facts_degrade_when_provenance_cannot_be_read(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening an in-memory stream of non-archive bytes to exercise the fail-soft read.
+		$garbage = fopen( 'php://temp', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing non-archive bytes to the in-memory fixture stream.
+		fwrite( $garbage, 'this is not a valid wpmig archive' );
+
+		$facts = ( new \ReflectionMethod( VerifyController::class, 'archive_facts' ) )->invoke( $this->controller(), $garbage );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the in-memory fixture stream.
+		fclose( $garbage );
+
+		$this->assertSame( 'contents that could not be read from the archive', $facts['scope'] );
+		$this->assertSame( 'unknown', $facts['created'] );
+	}
+
+	/**
+	 * Echoes the live verification's start time alongside its progress.
+	 *
+	 * Lets a page that re-attaches mid-run show elapsed time computed from when
+	 * the verification actually started, not from when it happened to re-attach.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_started_at_for_a_live_verification(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$started_at = time() - 5;
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 0,
+				'bytes_total' => 8192,
+				'started_at'  => $started_at,
+				'at'          => time(),
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'verifying', $this->json['data']['phase'] );
+		$this->assertSame( $started_at, $this->json['data']['started_at'] );
+	}
+
+	/**
+	 * Reports the live verifying phase and byte counts while the transient is
+	 * still being freshly refreshed.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_live_phase_and_bytes_when_fresh(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 4096,
+				'bytes_total' => 8192,
+				'started_at'  => time() - 5,
+				'at'          => time(),
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'verifying', $this->json['data']['phase'] );
+		$this->assertSame( 4096, $this->json['data']['bytes_done'] );
+		$this->assertSame( 8192, $this->json['data']['bytes_total'] );
+	}
+
+	/**
+	 * Downgrades a running phase to idle once the transient's last write has
+	 * gone stale, since a verification has no persisted job to fall back to —
+	 * a stale write means the request driving it has died.
+	 *
+	 * @return void
+	 */
+	public function test_progress_downgrades_to_idle_when_the_transient_is_stale(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'verifying',
+				'bytes_done'  => 4096,
+				'bytes_total' => 8192,
+				'started_at'  => time() - 120,
+				// Well past PROGRESS_STALE_SECONDS (10s): the writing request has died.
+				'at'          => time() - 60,
+			)
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'], 'A stale transient must be reported as idle, not frozen progress.' );
+	}
+
+	/**
+	 * Reports idle when there is no progress transient at all.
+	 *
+	 * This is the load path the re-attach relies on: a freshly loaded page with
+	 * no verify running must see an idle phase, so its re-attach guard does
+	 * nothing rather than arming a bar against a run that is not happening.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_idle_when_there_is_no_transient(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		Functions\when( 'get_transient' )->justReturn( false );
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'] );
 	}
 
 	// -------------------------------------------------------------------------
@@ -398,17 +745,18 @@ final class VerifyControllerTest extends TestCase {
 	 * Enough for the controller's encryption pre-check to read a plain header; the
 	 * injected engine stands in for the entry walk.
 	 *
-	 * @param string $path Absolute path to write the archive to.
+	 * @param string     $path  Absolute path to write the archive to.
+	 * @param Scope|null $scope Optional recorded scope; null for a legacy scope-less fixture.
 	 * @return void
 	 */
-	private function write_plain_archive( string $path ): void {
+	private function write_plain_archive( string $path, ?Scope $scope = null ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
 		if ( false === $dest ) {
 			$this->fail( 'Could not open the fixture archive for writing.' );
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
-			->write_archive( $this->sample_provenance(), array(), $dest );
+			->write_archive( $this->sample_provenance( $scope ), array(), $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
 	}
@@ -416,9 +764,10 @@ final class VerifyControllerTest extends TestCase {
 	/**
 	 * Build a Provenance with realistic but arbitrary field values for the fixture.
 	 *
+	 * @param Scope|null $scope Optional recorded scope; null for a legacy scope-less fixture.
 	 * @return Provenance
 	 */
-	private function sample_provenance(): Provenance {
+	private function sample_provenance( ?Scope $scope = null ): Provenance {
 		return new Provenance(
 			'6.6.1',
 			'8.2.10',
@@ -426,7 +775,10 @@ final class VerifyControllerTest extends TestCase {
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
 			new ExporterInfo( 'pontifex', '0.1.0' ),
-			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			null,
+			$scope
 		);
 	}
 

@@ -326,6 +326,45 @@ running a service, holding anyone's data, or phoning home.
   partial and whole-site scopes are (ADR 0008/0016); the admin screens
   may display destination status in a later slice.
 
+## v0.9.0 — Legible trust in the admin UI
+
+Every fact behind a verdict already exists somewhere in the engine —
+the entry count, the recorded scope, the format version, the source
+timestamp. v0.9.0 does not change what the engine checks; it makes
+what the admin UI already knows legible, so an operator can see for
+themselves why a result is trustworthy instead of taking a single
+sentence on faith.
+
+### What ships
+
+- **The Verify proof panel** — a sound verify replaces its one-line
+  result with a persistent, plain-language record of what was
+  checked: the entry count, the total size, what the archive contains,
+  when it was made, and its format version, alongside a note that
+  every hash was re-checked and a link to the published format
+  specification. A broken verify keeps its own plain verdict; the
+  panel never uses a status colour to carry the result — restraint
+  over alarm, per the design language.
+- **Archive contents shown in every admin list** — the Backup and
+  Restore screens' backup lists gain the same honest scope label
+  Verify already shows, so a files-only or database-only backup is
+  never mistaken for a complete one anywhere it is listed, not only
+  at the moment it is verified.
+- **Verify re-attach after reload** — a page reload during a long
+  verify re-attaches to its progress instead of losing it, the same
+  re-attach the Backup screen already has for exports.
+- **A restore migration hint** — when the backup selected for restore
+  was made on a different URL than the current site, the Restore
+  screen surfaces that fact before the operator commits, pointing at
+  the cross-URL migration behaviour rather than leaving it a surprise.
+
+### What is deliberately deferred
+
+- **A per-entry "what was checked" breakdown** — listing every file
+  and database chunk a verify walked needs a manifest read the admin
+  UI does not do today; a follow-up once there is a concrete need for
+  that level of detail.
+
 ## Beyond v0.7.0 — operational maturity
 
 The longer-running operational features, not yet committed to a

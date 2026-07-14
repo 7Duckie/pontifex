@@ -297,6 +297,63 @@
 	cursor: default;
 }
 
+/* Verify proof panel ---------------------------------------------------------- */
+
+/*
+ * Shown after a sound verify, replacing the single result sentence with a
+ * persistent record of what was checked. The verdict line is styled
+ * identically whether the panel followed a sound or a broken verify — per the
+ * design language, a result is never carried by colour, only by its words.
+ */
+.pontifex-admin .pontifex-proof {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * 2) 0 0;
+	padding-top: calc(var(--pontifex-step) * 2);
+	border-top: 2px solid var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-proof[hidden] {
+	display: none;
+}
+
+.pontifex-admin .pontifex-proof-verdict {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-ink);
+	font-size: 16px;
+	font-weight: 700;
+}
+
+.pontifex-admin .pontifex-proof-facts {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+}
+
+.pontifex-admin .pontifex-proof-label {
+	margin: 0;
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-proof-value {
+	margin: 0;
+	color: var(--pontifex-ink);
+	font-variant-numeric: tabular-nums;
+}
+
+.pontifex-admin .pontifex-proof-assurance {
+	margin: 0 0 var(--pontifex-step);
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-proof-link {
+	color: var(--pontifex-accent);
+}
+
 /* Restore -------------------------------------------------------------------- */
 
 .pontifex-admin .pontifex-hint {
@@ -316,7 +373,7 @@
    so they align. */
 .pontifex-admin .pontifex-restore-head {
 	display: grid;
-	grid-template-columns: 1fr 168px 64px;
+	grid-template-columns: minmax(0, 1fr) 168px 64px 160px;
 	gap: calc(var(--pontifex-step) * 2);
 	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
 	border-bottom: 2px solid var(--pontifex-ink);
@@ -329,7 +386,7 @@
 
 .pontifex-admin .pontifex-restore-row {
 	display: grid;
-	grid-template-columns: 1fr 168px 64px;
+	grid-template-columns: minmax(0, 1fr) 168px 64px 160px;
 	gap: calc(var(--pontifex-step) * 2);
 	align-items: baseline;
 	width: 100%;
@@ -369,6 +426,7 @@
 	cursor: default;
 }
 
+.pontifex-admin .pontifex-restore-contains,
 .pontifex-admin .pontifex-restore-when,
 .pontifex-admin .pontifex-restore-size {
 	color: var(--pontifex-muted);
@@ -552,52 +610,16 @@
 	outline-offset: 1px;
 }
 
-/* Signed-out modal --------------------------------------------------------- */
-
 /*
- * Shown only after a restore or rollback signed the operator out: a blocking
- * overlay whose single action is to log back in. There is deliberately no close
- * control and no dismiss-on-backdrop, so the sign-out cannot be missed or assumed
- * away the way the old inline notice could.
+ * A quiet advisory line under the relink checkbox — never a status colour, only
+ * size and colour carry the reduced emphasis. The `hidden` attribute (set in
+ * markup, toggled by JS) does the actual showing/hiding.
  */
-.pontifex-admin .pontifex-modal-backdrop {
-	position: fixed;
-	inset: 0;
-	z-index: 100000;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: calc(var(--pontifex-step) * 2);
-	background: rgba(17, 17, 17, 0.55);
-}
-
-.pontifex-admin .pontifex-modal {
-	max-width: 30rem;
-	width: 100%;
-	padding: calc(var(--pontifex-step) * 5);
-	background: var(--pontifex-paper);
-	border-top: 2px solid var(--pontifex-ink);
-}
-
-/* The overline title: hierarchy through type, not a coloured alert bar. */
-.pontifex-admin .pontifex-modal-title {
-	margin: 0 0 calc(var(--pontifex-step) * 2);
+.pontifex-admin .pontifex-restore-hint {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * -1.5) 0 calc(var(--pontifex-step) * 2.5);
 	color: var(--pontifex-muted);
-	font-size: 12px;
-	font-weight: 700;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-}
-
-.pontifex-admin .pontifex-modal-message {
-	max-width: 40ch;
-	margin: 0 0 calc(var(--pontifex-step) * 4);
-	color: var(--pontifex-ink);
-	line-height: 1.5;
-}
-
-.pontifex-admin .pontifex-modal-actions {
-	margin: 0;
+	font-size: 13px;
 }
 
 /* Narrow screens ------------------------------------------------------------ */

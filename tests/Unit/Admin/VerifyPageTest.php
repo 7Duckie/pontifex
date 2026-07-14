@@ -10,9 +10,18 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Admin;
 
 use Brain\Monkey\Functions;
+use DateTimeImmutable;
+use DateTimeZone;
 use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\VerifyPage;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use RuntimeException;
@@ -123,6 +132,77 @@ final class VerifyPageTest extends TestCase {
 		$this->assertStringContainsString( 'pontifex-verify-timing', $html );
 	}
 
+	/**
+	 * Renders a persistent, hidden proof panel container the script fills in.
+	 *
+	 * @return void
+	 */
+	public function test_render_includes_a_hidden_proof_panel(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		ob_start();
+		( new VerifyPage( $this->context(), $store ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'id="pontifex-verify-proof"', $html, 'The proof panel container is present for the script to fill in.' );
+		$this->assertStringContainsString( 'class="pontifex-proof"', $html );
+		$this->assertMatchesRegularExpression(
+			'/id="pontifex-verify-proof"[^>]*\shidden/',
+			$html,
+			'The proof panel starts hidden until a sound verify fills and reveals it.'
+		);
+
+		// A cheap no-colour tripwire: the design language forbids a status-colour
+		// class for the verdict, so no such token may ever appear in this markup.
+		foreach ( array( 'is-error', 'is-success', 'red', 'green', 'amber' ) as $forbidden ) {
+			$this->assertStringNotContainsString( $forbidden, $html, "The Verify screen must never carry a status-colour token such as \"{$forbidden}\"." );
+		}
+	}
+
+	/**
+	 * Reports each row's recorded scope as its "Contains" label, and "Unknown" for a corrupt one.
+	 *
+	 * @return void
+	 */
+	public function test_backup_rows_report_the_contains_label(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260101T000000Z.wpmig', Scope::db_only( array() ) );
+		$this->seed( $store, 'pontifex-backup-20260301T000000Z.wpmig' );
+
+		$rows        = ( new VerifyPage( $this->context(), $store ) )->backup_rows();
+		$by_filename = array();
+		foreach ( $rows as $row ) {
+			$by_filename[ $row['filename'] ] = $row;
+		}
+
+		$this->assertSame( 'Database only', $by_filename['pontifex-backup-20260101T000000Z.wpmig']['contains'] );
+		$this->assertSame( 'Unknown', $by_filename['pontifex-backup-20260301T000000Z.wpmig']['contains'], 'A corrupt archive fails soft to Unknown, never an exception.' );
+	}
+
+	/**
+	 * Renders each backup row with its "Contains" scope label.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_the_contains_label_per_row(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260101T000000Z.wpmig', Scope::db_only( array() ) );
+
+		ob_start();
+		( new VerifyPage( $this->context(), $store ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( '<span>Contains</span>', $html, 'The chooser head names the Contains column.' );
+		$this->assertStringContainsString( 'class="pontifex-restore-contains">Database only</span>', $html, 'The row states the archive\'s recorded scope.' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborators and fixtures.
 	// -------------------------------------------------------------------------
@@ -152,6 +232,39 @@ final class VerifyPageTest extends TestCase {
 	private function seed( BackupStore $store, string $filename ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a fixture backup in a temp directory.
 		file_put_contents( $store->directory() . '/' . $filename, 'x' );
+	}
+
+	/**
+	 * Write a valid, empty, unencrypted archive with the given scope into the store.
+	 *
+	 * @param BackupStore $store    The store whose directory to write into.
+	 * @param string      $filename The filename to write.
+	 * @param Scope|null  $scope    The recorded scope; null for a legacy scope-less fixture.
+	 * @return void
+	 */
+	private function write_scoped_archive( BackupStore $store, string $filename, ?Scope $scope ): void {
+		$path = $store->directory() . '/' . $filename;
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
+		$dest = fopen( $path, 'w+b' );
+		if ( false === $dest ) {
+			$this->fail( 'Could not open the fixture archive for writing.' );
+		}
+		$provenance = new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			'utf8mb4_unicode_520_ci',
+			new ExporterInfo( 'pontifex', '0.1.0' ),
+			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			null,
+			$scope
+		);
+		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
+			->write_archive( $provenance, array(), $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
+		fclose( $dest );
 	}
 
 	/**

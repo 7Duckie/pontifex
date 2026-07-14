@@ -40,6 +40,13 @@ final class VerifyPage {
 	private const STAMP_FORMAT = 'Ymd\THis\Z';
 
 	/**
+	 * The published archive format specification, linked from a sound verify's proof panel.
+	 *
+	 * @var string
+	 */
+	public const FORMAT_SPEC_URL = 'https://github.com/7Duckie/pontifex/blob/main/docs/archive-format.md';
+
+	/**
 	 * The WordPress context this page formats sizes through.
 	 *
 	 * @var WordPressContext
@@ -108,6 +115,7 @@ final class VerifyPage {
 			$filename = basename( $path );
 			$rows[]   = array(
 				'filename' => $filename,
+				'contains' => ArchiveScopeReader::label( $path ),
 				'when'     => $this->backup_when( $filename ),
 				'size'     => $this->context->format_size( $this->file_size( $path ) ),
 			);
@@ -152,10 +160,11 @@ final class VerifyPage {
 		);
 
 		printf(
-			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span></div>',
+			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span><span>%s</span></div>',
 			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
-			esc_html__( 'Size', 'pontifex' )
+			esc_html__( 'Size', 'pontifex' ),
+			esc_html__( 'Contains', 'pontifex' )
 		);
 
 		// Roving tabindex (ARIA radio-group pattern): with nothing selected yet, the
@@ -166,12 +175,14 @@ final class VerifyPage {
 			printf(
 				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" tabindex="%1$s" data-file="%2$s">'
 				. '<span class="pontifex-restore-name">%3$s</span>'
-				. '<span class="pontifex-restore-when">%4$s</span>'
-				. '<span class="pontifex-restore-size">%5$s</span>'
+				. '<span class="pontifex-restore-when">%5$s</span>'
+				. '<span class="pontifex-restore-size">%6$s</span>'
+				. '<span class="pontifex-restore-contains">%4$s</span>'
 				. '</button>',
 				0 === $row_index ? '0' : '-1',
 				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
+				esc_html( $row['contains'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] )
 			);
@@ -203,6 +214,7 @@ final class VerifyPage {
 		echo '<p class="pontifex-progress" id="pontifex-verify-progress" aria-live="polite"></p>';
 		echo '<p class="pontifex-timing" id="pontifex-verify-timing" aria-live="polite"></p>';
 		echo '<p class="pontifex-notice" id="pontifex-verify-result" aria-live="polite"></p>';
+		echo '<div class="pontifex-proof" id="pontifex-verify-proof" aria-live="polite" hidden></div>';
 		echo '</section>';
 	}
 
