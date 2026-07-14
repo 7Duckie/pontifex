@@ -183,6 +183,27 @@ final class DestinationSpecTest extends TestCase {
 	}
 
 	/**
+	 * A stored setting whose value is not a scalar (a corrupted record) is dropped
+	 * rather than kept, so no consumer can trip an array-to-string conversion.
+	 *
+	 * @return void
+	 */
+	public function test_from_array_drops_non_scalar_setting_values(): void {
+		$spec = DestinationSpec::from_array(
+			'backup-server',
+			array(
+				'type'     => DestinationSpec::TYPE_SFTP,
+				'settings' => array(
+					'host' => array( 'nested' ),
+					'port' => 22,
+				),
+			)
+		);
+
+		$this->assertSame( array( 'port' => 22 ), $spec->settings() );
+	}
+
+	/**
 	 * Rebuilding from an array accepts a numeric-string retention, coercing it to int.
 	 *
 	 * @return void

@@ -172,7 +172,7 @@ final class DestinationSpec {
 	 */
 	public static function from_array( string $name, array $data ): self {
 		$type      = isset( $data['type'] ) && is_string( $data['type'] ) ? $data['type'] : '';
-		$settings  = isset( $data['settings'] ) && is_array( $data['settings'] ) ? $data['settings'] : array();
+		$settings  = isset( $data['settings'] ) && is_array( $data['settings'] ) ? array_filter( $data['settings'], 'is_scalar' ) : array();
 		$retention = isset( $data['retention'] ) && is_numeric( $data['retention'] ) ? (int) $data['retention'] : 0;
 
 		return new self( $name, $type, $settings, $retention );
