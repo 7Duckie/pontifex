@@ -13,6 +13,7 @@ use WP_CLI;
 use Pontifex\Destination\DestinationAdapter;
 use Pontifex\Destination\DestinationException;
 use Pontifex\Destination\DestinationFactory;
+use Pontifex\Destination\DestinationRetention;
 use Pontifex\Destination\DestinationSpec;
 use Pontifex\Destination\DestinationStore;
 use Pontifex\WordPress\RealWordPressContext;
@@ -42,6 +43,7 @@ use Pontifex\WordPress\WordPressContext;
  *   - test
  *   - archives
  *   - pull
+ *   - prune
  * ---
  *
  * [<name>]
@@ -85,6 +87,13 @@ use Pontifex\WordPress\WordPressContext;
  * : Accept any host key instead of pinning one (with `add`). Unsafe — it
  *   defeats man-in-the-middle protection; pin `--host-key` instead where you can.
  *
+ * [--retention=<count>]
+ * : How many archives to keep at the destination (with `add`); `prune`
+ *   deletes the oldest surplus down to this count. 0 means keep all
+ *   (the default) — `prune` then does nothing. Archives are ordered
+ *   oldest-first by remote name, so retention is only meaningful when
+ *   `--output` uses a sortable, timestamped archive name.
+ *
  * [--output=<path>]
  * : Where to write the downloaded archive (with `pull`). Defaults to the
  *   archive's basename in the current working directory.
@@ -96,6 +105,7 @@ use Pontifex\WordPress\WordPressContext;
  *     wp pontifex destination test offsite
  *     wp pontifex destination archives offsite
  *     wp pontifex destination pull offsite pontifex-2026-07-13-030000.wpmig --output=/tmp/restore.wpmig
+ *     wp pontifex destination prune offsite
  *     wp pontifex destination remove offsite
  *
  * @when after_wp_load
@@ -165,8 +175,11 @@ final class DestinationCommand {
 				}
 				$this->pull( $name, $archive, $associative_args );
 				break;
+			case 'prune':
+				$this->prune( $name );
+				break;
 			default:
-				WP_CLI::error( __( 'Unknown action. Usage: wp pontifex destination <add|remove|list|test|archives|pull>.', 'pontifex' ) );
+				WP_CLI::error( __( 'Unknown action. Usage: wp pontifex destination <add|remove|list|test|archives|pull|prune>.', 'pontifex' ) );
 		}
 	}
 
@@ -222,9 +235,13 @@ final class DestinationCommand {
 			'insecure_host_key' => $insecure,
 		);
 
-		// Retention is stored on the spec but not yet configurable or enforced;
-		// the --retention flag and pruning arrive together in a later slice.
-		$this->store()->save( new DestinationSpec( $name, $type, $settings, 0 ) );
+		$retention_raw = $associative_args['retention'] ?? '0';
+		if ( ! is_string( $retention_raw ) || ! ctype_digit( $retention_raw ) ) {
+			WP_CLI::error( __( 'The --retention value must be a whole number, 0 or greater (0 keeps every archive).', 'pontifex' ) );
+		}
+		$retention = (int) $retention_raw;
+
+		$this->store()->save( new DestinationSpec( $name, $type, $settings, $retention ) );
 
 		WP_CLI::success(
 			sprintf(
@@ -278,12 +295,13 @@ final class DestinationCommand {
 		$rows = array();
 		foreach ( $specs as $spec ) {
 			$rows[] = array(
-				'name' => $spec->name(),
-				'type' => $spec->type(),
+				'name'      => $spec->name(),
+				'type'      => $spec->type(),
+				'retention' => 0 === $spec->retention() ? __( '(keep all)', 'pontifex' ) : (string) $spec->retention(),
 			);
 		}
 
-		\WP_CLI\Utils\format_items( 'table', $rows, array( 'name', 'type' ) );
+		\WP_CLI\Utils\format_items( 'table', $rows, array( 'name', 'type', 'retention' ) );
 	}
 
 	/**
@@ -386,6 +404,81 @@ final class DestinationCommand {
 				/* translators: %s: the local path the archive was written to */
 				__( 'Downloaded to %s.', 'pontifex' ),
 				$output
+			)
+		);
+	}
+
+	/**
+	 * Delete the oldest surplus archives at a destination, down to its configured retention.
+	 *
+	 * @param string $name The destination name.
+	 * @return void
+	 */
+	private function prune( string $name ): void {
+		$spec = $this->store()->get( $name );
+		if ( null === $spec ) {
+			WP_CLI::error(
+				sprintf(
+					/* translators: %s: the destination name that was not found */
+					__( 'No destination named "%s" is configured.', 'pontifex' ),
+					$name
+				)
+			);
+		}
+
+		$retention = $spec->retention();
+		if ( $retention < DestinationRetention::MIN_RETENTION ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: the destination name that keeps every archive */
+					__( 'Destination "%s" keeps every archive; nothing to prune.', 'pontifex' ),
+					$name
+				)
+			);
+			return;
+		}
+
+		try {
+			$adapter = $this->factory()->from_spec( $spec );
+		} catch ( DestinationException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
+			WP_CLI::error( $e->getMessage() );
+		}
+
+		$deleted = ( new DestinationRetention( $adapter, $retention ) )->prune();
+
+		if ( array() === $deleted ) {
+			WP_CLI::success(
+				sprintf(
+					/* translators: %s: the destination name that is already within its retention */
+					__( 'Destination "%s" is already within its retention; nothing was pruned.', 'pontifex' ),
+					$name
+				)
+			);
+			return;
+		}
+
+		foreach ( $deleted as $remote_name ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: the remote archive name that was deleted */
+					__( 'Deleted %s.', 'pontifex' ),
+					$remote_name
+				)
+			);
+		}
+
+		WP_CLI::success(
+			sprintf(
+				/* translators: 1: number of archives pruned, 2: the destination name they were pruned from */
+				_n(
+					'Pruned %1$d old archive from "%2$s".',
+					'Pruned %1$d old archives from "%2$s".',
+					count( $deleted ),
+					'pontifex'
+				),
+				count( $deleted ),
+				$name
 			)
 		);
 	}
