@@ -115,6 +115,7 @@ final class VerifyPage {
 			$filename = basename( $path );
 			$rows[]   = array(
 				'filename' => $filename,
+				'contains' => ArchiveScopeReader::label( $path ),
 				'when'     => $this->backup_when( $filename ),
 				'size'     => $this->context->format_size( $this->file_size( $path ) ),
 			);
@@ -159,10 +160,11 @@ final class VerifyPage {
 		);
 
 		printf(
-			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span></div>',
+			'<div class="pontifex-restore-head"><span>%s</span><span>%s</span><span>%s</span><span>%s</span></div>',
 			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
-			esc_html__( 'Size', 'pontifex' )
+			esc_html__( 'Size', 'pontifex' ),
+			esc_html__( 'Contains', 'pontifex' )
 		);
 
 		// Roving tabindex (ARIA radio-group pattern): with nothing selected yet, the
@@ -173,12 +175,14 @@ final class VerifyPage {
 			printf(
 				'<button type="button" class="pontifex-restore-row" role="radio" aria-checked="false" tabindex="%1$s" data-file="%2$s">'
 				. '<span class="pontifex-restore-name">%3$s</span>'
-				. '<span class="pontifex-restore-when">%4$s</span>'
-				. '<span class="pontifex-restore-size">%5$s</span>'
+				. '<span class="pontifex-restore-when">%5$s</span>'
+				. '<span class="pontifex-restore-size">%6$s</span>'
+				. '<span class="pontifex-restore-contains">%4$s</span>'
 				. '</button>',
 				0 === $row_index ? '0' : '-1',
 				esc_attr( $row['filename'] ),
 				esc_html( $row['filename'] ),
+				esc_html( $row['contains'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] )
 			);

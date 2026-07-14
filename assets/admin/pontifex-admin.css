@@ -373,7 +373,7 @@
    so they align. */
 .pontifex-admin .pontifex-restore-head {
 	display: grid;
-	grid-template-columns: 1fr 168px 64px;
+	grid-template-columns: minmax(0, 1fr) 168px 64px 160px;
 	gap: calc(var(--pontifex-step) * 2);
 	padding: var(--pontifex-step) calc(var(--pontifex-step) * 2) var(--pontifex-step) 0;
 	border-bottom: 2px solid var(--pontifex-ink);
@@ -386,7 +386,7 @@
 
 .pontifex-admin .pontifex-restore-row {
 	display: grid;
-	grid-template-columns: 1fr 168px 64px;
+	grid-template-columns: minmax(0, 1fr) 168px 64px 160px;
 	gap: calc(var(--pontifex-step) * 2);
 	align-items: baseline;
 	width: 100%;
@@ -426,6 +426,7 @@
 	cursor: default;
 }
 
+.pontifex-admin .pontifex-restore-contains,
 .pontifex-admin .pontifex-restore-when,
 .pontifex-admin .pontifex-restore-size {
 	color: var(--pontifex-muted);

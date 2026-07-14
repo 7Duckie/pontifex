@@ -114,6 +114,7 @@ final class BackupPage {
 				'filename' => $filename,
 				'when'     => $this->backup_when( $filename ),
 				'size'     => $this->context->format_size( $this->file_size( $path ) ),
+				'contains' => ArchiveScopeReader::label( $path ),
 			);
 		}
 		return array_reverse( $rows );
@@ -209,10 +210,11 @@ final class BackupPage {
 
 		echo '<table class="pontifex-table"><thead><tr>';
 		printf(
-			'<th>%s</th><th>%s</th><th>%s</th><th>%s</th>',
+			'<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>',
 			esc_html__( 'Backup', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
 			esc_html__( 'Size', 'pontifex' ),
+			esc_html__( 'Contains', 'pontifex' ),
 			esc_html__( 'Actions', 'pontifex' )
 		);
 		echo '</tr></thead><tbody>';
@@ -226,12 +228,13 @@ final class BackupPage {
 				admin_url( 'admin-ajax.php' )
 			);
 			printf(
-				'<tr><td>%s</td><td>%s</td><td>%s</td>'
+				'<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
 				. '<td class="pontifex-actions"><a class="pontifex-link" href="%s">%s</a>'
 				. ' <button type="button" class="pontifex-delete-backup" data-file="%s">%s</button></td></tr>',
 				esc_html( $row['filename'] ),
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] ),
+				esc_html( $row['contains'] ),
 				esc_url( $download_url ),
 				esc_html__( 'Download', 'pontifex' ),
 				esc_attr( $row['filename'] ),
