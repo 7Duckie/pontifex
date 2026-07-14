@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.7.0
+Stable tag: 0.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -88,6 +88,9 @@ No. An offsite upload is a plain SFTP connection to the server you configured, u
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.8.0 =
+* Offsite SFTP destinations. Upload a finished backup to an SFTP server you own with `wp pontifex export --destination`; a new `wp pontifex destination` command adds, tests, lists, prunes, and pulls archives back for recovery. Host keys are pinned and credentials come from an environment variable, never a flag. Per-destination retention keeps the newest N with a floor that never prunes to nothing, and `wp pontifex doctor` checks each destination without connecting. SFTP only this release (an S3 adapter was deferred). No breaking changes.
 
 = 0.7.0 =
 * Selective content. `export --exclude`/`--exclude-table` drop named files and database tables from a backup; `--files-only` and `--db-only` capture just the files or just the database, each restorable on its own and leaving the other half of the live site untouched. Scheduled backups inherit the configured exclusions, and `verify` and the admin Verify screen now state what an archive contains. No breaking changes.
