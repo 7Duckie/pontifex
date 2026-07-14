@@ -18,6 +18,7 @@ use Pontifex\Admin\VerifyController;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
@@ -134,6 +135,7 @@ final class VerifyControllerTest extends TestCase {
 		$this->stub_transients();
 		Functions\when( 'wp_unslash' )->returnArg();
 		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'wp_date' )->justReturn( '10:00 on 23-05-2026' );
 
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
@@ -161,6 +163,61 @@ final class VerifyControllerTest extends TestCase {
 		$this->assertSame( 3, $this->json['data']['entries'] );
 		$this->assertStringContainsString( 'It contains', $this->json['data']['message'], 'The verdict states what the backup contains.' );
 		$this->assertStringContainsString( 'whole site', $this->json['data']['message'], 'A scope-less fixture reads as a legacy whole-site archive.' );
+
+		$proof = $this->json['data']['proof'];
+		$this->assertSame( 3, $proof['entries'] );
+		$this->assertArrayHasKey( 'size', $proof );
+		$this->assertStringContainsString( 'whole site', $proof['scope'], 'A scope-less fixture reads as a legacy whole-site archive.' );
+		$this->assertSame( '10:00 on 23-05-2026', $proof['created'] );
+		$this->assertSame( '1.1', $proof['format'] );
+	}
+
+	/**
+	 * States what the archive contains in the proof payload, per its recorded scope.
+	 *
+	 * @return void
+	 */
+	public function test_verify_proof_states_the_recorded_scope(): void {
+		$cases = array(
+			'content-only' => array( Scope::content_only( array() ), 'your content' ),
+			'db-only'      => array( Scope::db_only( array() ), 'database only' ),
+			'files-only'   => array( Scope::files_only( array() ), 'files only' ),
+		);
+
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'wp_date' )->justReturn( '10:00 on 23-05-2026' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+
+		foreach ( $cases as $label => $case ) {
+			[ $scope, $expected ] = $case;
+
+			$this->write_plain_archive( $store->directory() . '/' . $name, $scope );
+			$_POST['file'] = $name;
+
+			$runner = Mockery::mock( RestoreRunnerInterface::class );
+			$runner->shouldReceive( 'verify' )->once()->andReturnUsing(
+				static function ( $source, ?callable $callback ): void {
+					if ( null !== $callback ) {
+						$callback( 1, 1 );
+					}
+				}
+			);
+
+			try {
+				$this->controller( $runner )->verify();
+			} finally {
+				unset( $_POST['file'] );
+			}
+
+			$this->assertStringContainsString( $expected, $this->json['data']['proof']['scope'], "Scope label for the {$label} fixture." );
+		}
 	}
 
 	/**
@@ -264,6 +321,7 @@ final class VerifyControllerTest extends TestCase {
 
 		$this->assertTrue( $this->json['success'], 'A broken verdict is reported as a JSON success.' );
 		$this->assertFalse( $this->json['data']['sound'] );
+		$this->assertArrayNotHasKey( 'proof', $this->json['data'], 'A broken verdict has nothing sound to prove.' );
 	}
 
 	/**
@@ -306,6 +364,27 @@ final class VerifyControllerTest extends TestCase {
 
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 409, $this->json['status'] );
+	}
+
+	/**
+	 * A provenance that cannot be re-read degrades the reported facts to unknown,
+	 * rather than turning a sound verify into a failure (presentation, not integrity).
+	 *
+	 * @return void
+	 */
+	public function test_archive_facts_degrade_when_provenance_cannot_be_read(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening an in-memory stream of non-archive bytes to exercise the fail-soft read.
+		$garbage = fopen( 'php://temp', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing non-archive bytes to the in-memory fixture stream.
+		fwrite( $garbage, 'this is not a valid wpmig archive' );
+
+		$facts = ( new \ReflectionMethod( VerifyController::class, 'archive_facts' ) )->invoke( $this->controller(), $garbage );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the in-memory fixture stream.
+		fclose( $garbage );
+
+		$this->assertSame( 'contents that could not be read from the archive', $facts['scope'] );
+		$this->assertSame( 'unknown', $facts['created'] );
 	}
 
 	// -------------------------------------------------------------------------
@@ -398,17 +477,18 @@ final class VerifyControllerTest extends TestCase {
 	 * Enough for the controller's encryption pre-check to read a plain header; the
 	 * injected engine stands in for the entry walk.
 	 *
-	 * @param string $path Absolute path to write the archive to.
+	 * @param string     $path  Absolute path to write the archive to.
+	 * @param Scope|null $scope Optional recorded scope; null for a legacy scope-less fixture.
 	 * @return void
 	 */
-	private function write_plain_archive( string $path ): void {
+	private function write_plain_archive( string $path, ?Scope $scope = null ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
 		if ( false === $dest ) {
 			$this->fail( 'Could not open the fixture archive for writing.' );
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
-			->write_archive( $this->sample_provenance(), array(), $dest );
+			->write_archive( $this->sample_provenance( $scope ), array(), $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
 	}
@@ -416,9 +496,10 @@ final class VerifyControllerTest extends TestCase {
 	/**
 	 * Build a Provenance with realistic but arbitrary field values for the fixture.
 	 *
+	 * @param Scope|null $scope Optional recorded scope; null for a legacy scope-less fixture.
 	 * @return Provenance
 	 */
-	private function sample_provenance(): Provenance {
+	private function sample_provenance( ?Scope $scope = null ): Provenance {
 		return new Provenance(
 			'6.6.1',
 			'8.2.10',
@@ -426,7 +507,10 @@ final class VerifyControllerTest extends TestCase {
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
 			new ExporterInfo( 'pontifex', '0.1.0' ),
-			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			null,
+			$scope
 		);
 	}
 

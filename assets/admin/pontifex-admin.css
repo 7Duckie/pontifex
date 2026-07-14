@@ -297,6 +297,63 @@
 	cursor: default;
 }
 
+/* Verify proof panel ---------------------------------------------------------- */
+
+/*
+ * Shown after a sound verify, replacing the single result sentence with a
+ * persistent record of what was checked. The verdict line is styled
+ * identically whether the panel followed a sound or a broken verify — per the
+ * design language, a result is never carried by colour, only by its words.
+ */
+.pontifex-admin .pontifex-proof {
+	max-width: 60ch;
+	margin: calc(var(--pontifex-step) * 2) 0 0;
+	padding-top: calc(var(--pontifex-step) * 2);
+	border-top: 2px solid var(--pontifex-ink);
+}
+
+.pontifex-admin .pontifex-proof[hidden] {
+	display: none;
+}
+
+.pontifex-admin .pontifex-proof-verdict {
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+	color: var(--pontifex-ink);
+	font-size: 16px;
+	font-weight: 700;
+}
+
+.pontifex-admin .pontifex-proof-facts {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: var(--pontifex-step) calc(var(--pontifex-step) * 2);
+	margin: 0 0 calc(var(--pontifex-step) * 2);
+}
+
+.pontifex-admin .pontifex-proof-label {
+	margin: 0;
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-proof-value {
+	margin: 0;
+	color: var(--pontifex-ink);
+	font-variant-numeric: tabular-nums;
+}
+
+.pontifex-admin .pontifex-proof-assurance {
+	margin: 0 0 var(--pontifex-step);
+	color: var(--pontifex-muted);
+}
+
+.pontifex-admin .pontifex-proof-link {
+	color: var(--pontifex-accent);
+}
+
 /* Restore -------------------------------------------------------------------- */
 
 .pontifex-admin .pontifex-hint {

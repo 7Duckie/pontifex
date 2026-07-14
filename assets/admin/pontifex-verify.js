@@ -132,6 +132,134 @@
 	}
 
 	/**
+	 * The proof panel element, if the page has one.
+	 *
+	 * @return {?Element} The proof panel, or null.
+	 */
+	function proofEl() {
+		return document.getElementById( 'pontifex-verify-proof' );
+	}
+
+	/**
+	 * Empty and hide the proof panel.
+	 */
+	function clearProof() {
+		var panel = proofEl();
+		if ( ! panel ) {
+			return;
+		}
+		while ( panel.firstChild ) {
+			panel.removeChild( panel.firstChild );
+		}
+		panel.hidden = true;
+	}
+
+	/**
+	 * Build the panel's verdict line.
+	 *
+	 * Styled identically whether the verdict is sound or broken — the words carry
+	 * the result, never a status colour (design language: restraint over alarm).
+	 *
+	 * @param {string} text The verdict sentence.
+	 * @return {Element} The verdict paragraph.
+	 */
+	function verdictLine( text ) {
+		var p = document.createElement( 'p' );
+		p.className = 'pontifex-proof-verdict';
+		p.textContent = text;
+		return p;
+	}
+
+	/**
+	 * Append one label/value pair to a facts definition list.
+	 *
+	 * @param {Element} dl    The <dl> to append to.
+	 * @param {string}  label The fact's label.
+	 * @param {string}  value The fact's value.
+	 */
+	function fact( dl, label, value ) {
+		var dt = document.createElement( 'dt' );
+		dt.className = 'pontifex-proof-label';
+		dt.textContent = label;
+		var dd = document.createElement( 'dd' );
+		dd.className = 'pontifex-proof-value';
+		dd.textContent = value;
+		dl.appendChild( dt );
+		dl.appendChild( dd );
+	}
+
+	/**
+	 * Render the persistent proof panel for a sound verify.
+	 *
+	 * Built with createElement/textContent throughout, never innerHTML, since the
+	 * facts (in particular the scope and formatted date) are server-supplied text.
+	 *
+	 * @param {Object} proof The `proof` payload from a sound verify response.
+	 */
+	function renderProof( proof ) {
+		var panel = proofEl();
+		if ( ! panel || ! proof ) {
+			return;
+		}
+		clearProof();
+
+		panel.appendChild( verdictLine( cfg.strings.verdictIntact ) );
+
+		var facts = document.createElement( 'dl' );
+		facts.className = 'pontifex-proof-facts';
+		fact( facts, cfg.strings.factEntries, String( proof.entries ) );
+		fact( facts, cfg.strings.factSize, proof.size );
+		fact( facts, cfg.strings.factContains, proof.scope );
+		fact( facts, cfg.strings.factCreated, proof.created );
+		fact( facts, cfg.strings.factFormat, proof.format );
+		panel.appendChild( facts );
+
+		var hashes = document.createElement( 'p' );
+		hashes.className = 'pontifex-proof-assurance';
+		hashes.textContent = cfg.strings.assuranceHashes;
+		panel.appendChild( hashes );
+
+		var documented = document.createElement( 'p' );
+		documented.className = 'pontifex-proof-assurance';
+		documented.appendChild( document.createTextNode( cfg.strings.assuranceDocumented + ' ' ) );
+		var link = document.createElement( 'a' );
+		link.className = 'pontifex-link pontifex-proof-link';
+		link.href = cfg.specUrl;
+		link.target = '_blank';
+		link.rel = 'noopener noreferrer';
+		link.textContent = cfg.strings.specLinkText;
+		documented.appendChild( link );
+		panel.appendChild( documented );
+
+		panel.hidden = false;
+	}
+
+	/**
+	 * Render the panel for a broken verify — the verdict plus the server's
+	 * message, with no facts grid (there is nothing sound to report).
+	 *
+	 * @param {string} message The broken verdict's message from the server.
+	 */
+	function renderBroken( message ) {
+		var panel = proofEl();
+		if ( ! panel ) {
+			return;
+		}
+		clearProof();
+
+		panel.appendChild( verdictLine( cfg.strings.verdictBroken ) );
+
+		if ( message ) {
+			var detail = document.createElement( 'p' );
+			detail.className = 'pontifex-proof-assurance';
+			detail.textContent = message;
+			panel.appendChild( detail );
+		}
+
+		panel.hidden = false;
+	}
+
+	/**
 	 * The filename of the selected backup, or null when none is selected.
 	 *
 	 * @return {?string} The selected backup filename, or null.
@@ -161,6 +289,7 @@
 				row.setAttribute( 'tabindex', on ? '0' : '-1' );
 			}
 		);
+		clearProof();
 	}
 
 	/**
@@ -230,6 +359,7 @@
 
 		setControlsEnabled( false );
 		setText( 'pontifex-verify-result', '' );
+		clearProof();
 		setText( 'pontifex-verify-progress', cfg.strings.starting );
 		setText( 'pontifex-verify-timing', '' );
 		showBar( true );
@@ -256,27 +386,54 @@
 
 		request( 'pontifex_verify', { file: file } ).then( function ( res ) {
 			window.clearInterval( poll );
-			finishVerify( ( res && res.data && res.data.message ) ? res.data.message : cfg.strings.failed );
+			finishVerify( res );
 		} ).catch( function () {
 			window.clearInterval( poll );
-			finishVerify( cfg.strings.failed );
+			finishVerify( null );
 		} );
+	}
+
+	/**
+	 * Reset the controls that only matter while a verification is running.
+	 *
+	 * Shared by every outcome — sound, broken, or a refusal — so a verification
+	 * never leaves the bar, timing, or disabled controls behind.
+	 */
+	function resetVerifyControls() {
+		showBar( false );
+		setText( 'pontifex-verify-progress', '' );
+		setText( 'pontifex-verify-timing', '' );
+		setControlsEnabled( true );
 	}
 
 	/**
 	 * Reset the controls after a verification and show its verdict.
 	 *
-	 * The verdict — sound, broken, or a refusal such as an encrypted backup — all
-	 * arrive as a message the server already phrased, so it is shown verbatim.
+	 * A sound or broken verdict renders the persistent proof panel; a refusal
+	 * (an encrypted backup, an unresolved file, a concurrent run, a lost
+	 * connection) has no proof to show, so it falls back to the plain result
+	 * line the server already phrased, unchanged from before the proof panel.
 	 *
-	 * @param {string} message The verdict or error message to show.
+	 * @param {?Object} res The decoded JSON response, or null on a network failure.
 	 */
-	function finishVerify( message ) {
-		showBar( false );
-		setText( 'pontifex-verify-progress', '' );
-		setText( 'pontifex-verify-timing', '' );
-		setControlsEnabled( true );
-		setText( 'pontifex-verify-result', message );
+	function finishVerify( res ) {
+		resetVerifyControls();
+
+		var data = res && res.data ? res.data : null;
+
+		if ( res && res.success && data && true === data.sound ) {
+			setText( 'pontifex-verify-result', '' );
+			renderProof( data.proof );
+			return;
+		}
+
+		if ( res && res.success && data && false === data.sound ) {
+			setText( 'pontifex-verify-result', '' );
+			renderBroken( data.message );
+			return;
+		}
+
+		setText( 'pontifex-verify-result', ( data && data.message ) ? data.message : cfg.strings.failed );
 	}
 
 	/**
