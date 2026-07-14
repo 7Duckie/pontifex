@@ -363,6 +363,9 @@ final class Menu {
 					'progress'            => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */
 					'elapsed'             => __( 'Time elapsed - %s', 'pontifex' ),
+					'reattached'          => __( 'A verification is running — re-attached to its progress.', 'pontifex' ),
+					/* translators: shown after re-attaching to a verification that then finished; the verdict went to the tab that started it */
+					'finishedElsewhere'   => __( 'The running verification finished. Its result was shown in the tab that started it.', 'pontifex' ),
 					'failed'              => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'verdictIntact'       => __( 'Verified — this backup is intact.', 'pontifex' ),
 					'verdictBroken'       => __( 'Not verified — this backup is broken.', 'pontifex' ),

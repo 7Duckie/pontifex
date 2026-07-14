@@ -114,6 +114,20 @@ final class VerifyController {
 	private const PROGRESS_THROTTLE_SECONDS = 0.3;
 
 	/**
+	 * Age, in seconds, past which a progress transient is distrusted.
+	 *
+	 * A verification runs as one synchronous request with no persisted job to
+	 * fall back to (unlike the Backup screen's resumable runner), so a transient
+	 * whose `at` has stopped being refreshed means the request that was writing
+	 * it has died — reporting its last value would freeze a re-attached bar at a
+	 * lie for the rest of the transient's TTL. Reporting idle instead lets a
+	 * re-attached page stop cleanly. Generous against the throttle interval.
+	 *
+	 * @var int
+	 */
+	private const PROGRESS_STALE_SECONDS = 10;
+
+	/**
 	 * The Environment abstraction (constant reads).
 	 *
 	 * @var Environment
@@ -205,12 +219,16 @@ final class VerifyController {
 			wp_send_json_error( array( 'message' => __( 'A verification is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
 		}
 
+		// Captured once, before the first progress write, so a page that re-attaches
+		// mid-run can show elapsed time from when THIS verification actually started.
+		$started_at = time();
+
 		$this->extend_time_limit();
 
 		$source      = null;
 		$bytes_total = $this->archive_size( (string) $path );
 		try {
-			$this->set_progress( 0, $bytes_total );
+			$this->set_progress( 0, $bytes_total, $started_at );
 			$source = $this->open_source( (string) $path );
 
 			// Encrypted archives need a passphrase, which the admin UI does not collect;
@@ -244,11 +262,11 @@ final class VerifyController {
 					unset( $done );
 					$entry_total = $total;
 				},
-				function ( int $bytes ) use ( &$bytes_done, &$last, $bytes_total ): void {
+				function ( int $bytes ) use ( &$bytes_done, &$last, $bytes_total, $started_at ): void {
 					$bytes_done += $bytes;
 					$now         = microtime( true );
 					if ( ( $now - $last ) >= self::PROGRESS_THROTTLE_SECONDS ) {
-						$this->set_progress( $bytes_done, $bytes_total );
+						$this->set_progress( $bytes_done, $bytes_total, $started_at );
 						$last = $now;
 					}
 				}
@@ -296,8 +314,12 @@ final class VerifyController {
 	 * Report the in-progress verification's byte progress.
 	 *
 	 * The `wp_ajax_pontifex_verify_progress` handler, polled by the page while a
-	 * verification runs. Returns the bytes read so far against the archive size,
-	 * or zeroes when none is recorded.
+	 * verification runs — including a page that just reloaded, so it can re-attach
+	 * to a verification already running instead of showing an idle screen. Returns
+	 * the bytes read so far against the archive size and the run's start time, or
+	 * zeroes when none is recorded. A transient whose last write has gone stale
+	 * while reporting a running phase means the writing request died; that is
+	 * reported as idle rather than as frozen, stale progress.
 	 *
 	 * @return void
 	 */
@@ -309,13 +331,16 @@ final class VerifyController {
 		$progress = get_transient( self::PROGRESS_TRANSIENT );
 		$progress = is_array( $progress ) ? $progress : array();
 
-		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
+		$phase = $this->progress_is_live( $progress )
+			? $progress['phase']
+			: self::PHASE_IDLE;
 
 		wp_send_json_success(
 			array(
 				'phase'       => $phase,
 				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
 				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
+				'started_at'  => $this->counter_int( $progress, 'started_at' ),
 			)
 		);
 	}
@@ -491,17 +516,24 @@ final class VerifyController {
 	/**
 	 * Write the running byte progress to the transient.
 	 *
+	 * Stamps both the run's start time and this write's own time: the former lets
+	 * a re-attached page show elapsed time from when the verification actually
+	 * started, the latter is what {@see self::progress()} checks for staleness.
+	 *
 	 * @param int $bytes_done  Archive bytes read so far.
 	 * @param int $bytes_total The archive size, the progress denominator.
+	 * @param int $started_at  When this verification started, as a Unix timestamp.
 	 * @return void
 	 */
-	private function set_progress( int $bytes_done, int $bytes_total ): void {
+	private function set_progress( int $bytes_done, int $bytes_total, int $started_at ): void {
 		set_transient(
 			self::PROGRESS_TRANSIENT,
 			array(
 				'phase'       => self::PHASE_VERIFYING,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $bytes_total,
+				'started_at'  => $started_at,
+				'at'          => time(),
 			),
 			self::PROGRESS_TTL
 		);
@@ -519,11 +551,28 @@ final class VerifyController {
 	/**
 	 * Acquire the single-runner verify lock, or report that it is already held.
 	 *
+	 * A verification keeps no persisted job and no cron successor to release its
+	 * own lock, so a runner that dies (a closed tab, a host execution-time kill)
+	 * would otherwise leave the lock held for its full TTL, refusing the very
+	 * next attempt with a "already running" contradiction. A held lock is
+	 * therefore reclaimed once it is genuinely dead: {@see self::progress_is_live()}
+	 * finds no live progress AND the lock itself has aged past the startup
+	 * window ({@see self::PROGRESS_STALE_SECONDS}) between acquiring the lock and
+	 * the runner's first progress write, where progress is legitimately absent
+	 * but the runner is not dead — reclaiming there would let a second
+	 * concurrent request break the single-runner guarantee.
+	 *
 	 * @return bool True if the lock was acquired; false if a verification is already running.
 	 */
 	private function acquire_lock(): bool {
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) ) {
-			return false;
+		$lock = get_transient( self::LOCK_TRANSIENT );
+		if ( false !== $lock ) {
+			$progress = get_transient( self::PROGRESS_TRANSIENT );
+			$progress = is_array( $progress ) ? $progress : array();
+			$lock_age = time() - (int) $lock;
+			if ( $this->progress_is_live( $progress ) || $lock_age <= self::PROGRESS_STALE_SECONDS ) {
+				return false;
+			}
 		}
 		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
 		return true;
@@ -536,6 +585,25 @@ final class VerifyController {
 	 */
 	private function release_lock(): void {
 		delete_transient( self::LOCK_TRANSIENT );
+	}
+
+	/**
+	 * Whether a running verification is genuinely still alive.
+	 *
+	 * The progress transient is the liveness signal: a live verify refreshes it
+	 * on every read chunk, so a non-idle phase whose last write is within
+	 * {@see self::PROGRESS_STALE_SECONDS} means a request is really working. A
+	 * stale (or idle, or absent) transient means no live verify is reporting.
+	 *
+	 * @param array<string, mixed> $progress The decoded progress transient.
+	 * @return bool True if a verification is actively reporting progress.
+	 */
+	private function progress_is_live( array $progress ): bool {
+		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
+		if ( self::PHASE_IDLE === $phase ) {
+			return false;
+		}
+		return ( time() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
 	}
 
 	/**
