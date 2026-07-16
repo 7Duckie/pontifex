@@ -545,7 +545,9 @@ final class VerifyControllerTest extends TestCase {
 		fclose( $garbage );
 
 		$this->assertSame( 'contents that could not be read from the archive', $facts['scope'] );
-		$this->assertSame( 'unknown', $facts['created'] );
+		// Capitalised to match the same "Unknown" the backup lists show for an
+		// archive whose provenance cannot be read; both appear on this screen.
+		$this->assertSame( 'Unknown', $facts['created'] );
 	}
 
 	/**

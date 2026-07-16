@@ -56,6 +56,15 @@ final class VerifyPageTest extends TestCase {
 				return gmdate( $format, $timestamp ?? 0 );
 			}
 		);
+		// A row's identity resolves the recorded source's host via ArchiveFacts,
+		// which calls wp_parse_url(); no WordPress runtime is loaded here.
+		Functions\when( 'wp_parse_url' )->alias(
+			static function ( string $url, int $component = -1 ): ?string {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- This closure IS the wp_parse_url() stub for this WordPress-runtime-free test; calling wp_parse_url() here would be circular.
+				$parsed = parse_url( $url, $component );
+				return is_string( $parsed ) ? $parsed : null;
+			}
+		);
 	}
 
 	/**
@@ -86,22 +95,38 @@ final class VerifyPageTest extends TestCase {
 	}
 
 	/**
-	 * Lists the backups newest first, with a colon-formatted local time.
+	 * Lists the backups newest first by filename, with each "Created" value coming
+	 * from its own recorded provenance rather than the filename.
+	 *
+	 * The two fixtures deliberately record a creation moment unrelated to their
+	 * filename timestamps, to prove sort order stays filename-based (the store's
+	 * naming contract) while "Created" no longer is.
 	 *
 	 * @return void
 	 */
 	public function test_backup_rows_lists_backups_newest_first(): void {
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
-		$this->seed( $store, 'pontifex-backup-20260101T090000Z.wpmig' );
-		$this->seed( $store, 'pontifex-backup-20260301T120000Z.wpmig' );
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260101T090000Z.wpmig',
+			Scope::content_only( array() ),
+			new DateTimeImmutable( '2025-11-05T07:15:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260301T120000Z.wpmig',
+			Scope::content_only( array() ),
+			new DateTimeImmutable( '2026-03-01T12:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
 
 		$rows = ( new VerifyPage( $this->context(), $store ) )->backup_rows();
 
 		$this->assertCount( 2, $rows );
-		$this->assertSame( 'pontifex-backup-20260301T120000Z.wpmig', $rows[0]['filename'], 'Newest backup comes first.' );
+		$this->assertSame( 'pontifex-backup-20260301T120000Z.wpmig', $rows[0]['filename'], 'Newest backup by filename comes first.' );
 		$this->assertSame( 'pontifex-backup-20260101T090000Z.wpmig', $rows[1]['filename'] );
 		$this->assertSame( '12:00 on 01-03-2026', $rows[0]['when'] );
+		$this->assertSame( '07:15 on 05-11-2025', $rows[1]['when'], 'Created reflects provenance even though it disagrees with this filename\'s own timestamp.' );
 	}
 
 	/**
@@ -184,6 +209,29 @@ final class VerifyPageTest extends TestCase {
 	}
 
 	/**
+	 * Reports "This site" for a backup made here, and the true source for one made elsewhere.
+	 *
+	 * @return void
+	 */
+	public function test_backup_rows_report_the_source_and_foreign_fields(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260101T000000Z.wpmig', Scope::content_only( array() ), null, 'https://this-site.test/' );
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260301T000000Z.wpmig', Scope::content_only( array() ), null, 'https://clientsite.com/' );
+
+		$rows        = ( new VerifyPage( $this->context(), $store ) )->backup_rows();
+		$by_filename = array();
+		foreach ( $rows as $row ) {
+			$by_filename[ $row['filename'] ] = $row;
+		}
+
+		$this->assertSame( 'This site', $by_filename['pontifex-backup-20260101T000000Z.wpmig']['source'] );
+		$this->assertFalse( $by_filename['pontifex-backup-20260101T000000Z.wpmig']['foreign'] );
+		$this->assertSame( 'clientsite.com', $by_filename['pontifex-backup-20260301T000000Z.wpmig']['source'] );
+		$this->assertTrue( $by_filename['pontifex-backup-20260301T000000Z.wpmig']['foreign'] );
+	}
+
+	/**
 	 * Renders each backup row with its "Contains" scope label.
 	 *
 	 * @return void
@@ -203,6 +251,49 @@ final class VerifyPageTest extends TestCase {
 		$this->assertStringContainsString( 'class="pontifex-restore-contains">Database only</span>', $html, 'The row states the archive\'s recorded scope.' );
 	}
 
+	/**
+	 * Renders the identity column with a "Source" header, and an "Another site" tag
+	 * for a foreign backup, with a hostile recorded URL escaped and never raw.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_the_source_identity_and_escapes_a_hostile_url(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		// TestCase's setUp() stubs esc_html()/esc_attr() as a plain passthrough (it
+		// only needs to strip translation, not prove escaping). This test's whole
+		// point is escaping, so it overrides both with the real htmlspecialchars()
+		// behaviour for this one test.
+		Functions\when( 'esc_html' )->alias(
+			static function ( string $text ): string {
+				return htmlspecialchars( $text, ENT_QUOTES );
+			}
+		);
+		Functions\when( 'esc_attr' )->alias(
+			static function ( string $text ): string {
+				return htmlspecialchars( $text, ENT_QUOTES );
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260101T000000Z.wpmig',
+			Scope::content_only( array() ),
+			null,
+			'https://clientsite.com/"><script>alert(1)</script>'
+		);
+
+		ob_start();
+		( new VerifyPage( $this->context(), $store ) )->render();
+		$html = (string) ob_get_clean();
+
+		$this->assertStringContainsString( '<span>Source</span>', $html, 'The chooser head is relabelled Source.' );
+		$this->assertStringContainsString( 'pontifex-restore-tag">Another site<', $html, 'A backup made elsewhere carries the Another site tag.' );
+		$this->assertStringNotContainsString( '<script>alert(1)</script>', $html, 'The recorded URL is never emitted unescaped, wherever it appears.' );
+		$this->assertStringContainsString( '&lt;script&gt;', $html, 'The hostile fragment is present only in its escaped form.' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Collaborators and fixtures.
 	// -------------------------------------------------------------------------
@@ -219,6 +310,7 @@ final class VerifyPageTest extends TestCase {
 				return $bytes . ' B';
 			}
 		);
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
 		return $context;
 	}
 
@@ -237,12 +329,14 @@ final class VerifyPageTest extends TestCase {
 	/**
 	 * Write a valid, empty, unencrypted archive with the given scope into the store.
 	 *
-	 * @param BackupStore $store    The store whose directory to write into.
-	 * @param string      $filename The filename to write.
-	 * @param Scope|null  $scope    The recorded scope; null for a legacy scope-less fixture.
+	 * @param BackupStore            $store    The store whose directory to write into.
+	 * @param string                 $filename The filename to write.
+	 * @param Scope|null             $scope    The recorded scope; null for a legacy scope-less fixture.
+	 * @param DateTimeImmutable|null $created  The recorded creation moment; defaults to an arbitrary fixed moment unrelated to the filename, so tests can prove the row's "Created" comes from provenance, not the name.
+	 * @param string                 $url      The recorded source URL.
 	 * @return void
 	 */
-	private function write_scoped_archive( BackupStore $store, string $filename, ?Scope $scope ): void {
+	private function write_scoped_archive( BackupStore $store, string $filename, ?Scope $scope, ?DateTimeImmutable $created = null, string $url = 'https://example.test' ): void {
 		$path = $store->directory() . '/' . $filename;
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
@@ -252,11 +346,11 @@ final class VerifyPageTest extends TestCase {
 		$provenance = new Provenance(
 			'6.6.1',
 			'8.2.10',
-			'https://example.test',
+			$url,
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
 			new ExporterInfo( 'pontifex', '0.1.0' ),
-			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			$created ?? new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
 			null,
 			null,
 			$scope

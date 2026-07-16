@@ -453,20 +453,20 @@ final class VerifyController {
 			unset( $error );
 			return array(
 				'scope'   => ScopeSummary::unreadable(),
-				'created' => __( 'unknown', 'pontifex' ),
+				'created' => __( 'Unknown', 'pontifex' ),
 			);
 		}
 	}
 
 	/**
-	 * Format a moment as the site's local time, matching {@see VerifyPage::backup_when()}.
+	 * Format a moment as the site's local time, matching {@see \Pontifex\Admin\ArchiveFacts::created_label()}.
 	 *
 	 * @param DateTimeImmutable $when The moment to format.
 	 * @return string The formatted local time, or a placeholder if it cannot be rendered.
 	 */
 	private function format_created( DateTimeImmutable $when ): string {
 		$formatted = wp_date( 'H:i \o\n d-m-Y', $when->getTimestamp() );
-		return false !== $formatted ? $formatted : __( 'unknown', 'pontifex' );
+		return false !== $formatted ? $formatted : __( 'Unknown', 'pontifex' );
 	}
 
 	/**
