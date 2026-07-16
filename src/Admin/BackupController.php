@@ -1161,11 +1161,18 @@ final class BackupController {
 	/**
 	 * Stream a resolved backup file to the client as an attachment, then exit.
 	 *
+	 * The downloaded filename is a friendly '<source host>-<created date>.wpmig'
+	 * built from the archive's own provenance where one can be built safely
+	 * (see {@see ArchiveFacts::download_name()}); the file actually stored on
+	 * disk keeps its `pontifex-backup-<UTC>.wpmig` name always — only the
+	 * `Content-Disposition` header changes.
+	 *
 	 * @param string $path Absolute path of a backup already validated by the store.
 	 * @return void
 	 */
 	private function stream_download( string $path ): void {
-		$filename = basename( $path );
+		$facts    = ArchiveFactsReader::facts( $path );
+		$filename = $facts->download_name() ?? basename( $path );
 
 		nocache_headers();
 		header( 'Content-Type: application/octet-stream' );

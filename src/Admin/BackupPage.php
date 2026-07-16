@@ -9,8 +9,6 @@ declare(strict_types=1);
 
 namespace Pontifex\Admin;
 
-use DateTimeImmutable;
-use DateTimeZone;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Schedule\Schedule;
 use Pontifex\Schedule\ScheduleStore;
@@ -28,20 +26,16 @@ use Pontifex\WordPress\WordPressContext;
  * the script that drives the button and the delete actions is enqueued by
  * {@see Menu} on this screen.
  *
+ * Each row's identity — its source and its true creation time — comes from the
+ * archive's own recorded provenance via {@see ArchiveFactsReader}, never from
+ * the on-disk filename: an uploaded backup's filename is stamped with the
+ * upload time, not the source site's export time.
+ *
  * The pure data method {@see self::backup_rows()} is unit-tested directly;
  * {@see self::render()} is exercised only as a capability gate and a smoke test,
  * the same split OverviewPage uses.
  */
 final class BackupPage {
-
-	/**
-	 * The format a backup's UTC timestamp is encoded with in its name.
-	 *
-	 * Mirrors {@see BackupStore}'s naming contract (`pontifex-backup-<UTC>.wpmig`).
-	 *
-	 * @var string
-	 */
-	private const STAMP_FORMAT = 'Ymd\THis\Z';
 
 	/**
 	 * The WordPress context this page formats sizes through.
@@ -101,20 +95,26 @@ final class BackupPage {
 	/**
 	 * Build the rows for the backups table, newest first.
 	 *
-	 * The creation time is parsed from each filename (the store's naming contract);
+	 * The identity fields (source, whether it is foreign, and the true creation
+	 * time) come from the archive's own recorded provenance, read once per row;
 	 * the size is read from disk and formatted. Pure given the store and context.
 	 *
-	 * @return array<int, array<string, string>> One row per backup, newest first.
+	 * @return array<int, array{filename: string, source: string, foreign: bool, source_url: string, when: string, size: string, contains: string}> One row per backup, newest first.
 	 */
 	public function backup_rows(): array {
-		$rows = array();
+		$site_url = $this->context->site_url();
+		$rows     = array();
 		foreach ( $this->store->backups() as $path ) {
 			$filename = basename( $path );
+			$facts    = ArchiveFactsReader::facts( $path );
 			$rows[]   = array(
-				'filename' => $filename,
-				'when'     => $this->backup_when( $filename ),
-				'size'     => $this->context->format_size( $this->file_size( $path ) ),
-				'contains' => ArchiveScopeReader::label( $path ),
+				'filename'   => $filename,
+				'source'     => $facts->source_label( $site_url ),
+				'foreign'    => $facts->is_foreign( $site_url ),
+				'source_url' => (string) $facts->source_url(),
+				'when'       => $facts->created_label(),
+				'size'       => $this->context->format_size( $this->file_size( $path ) ),
+				'contains'   => $facts->scope_label(),
 			);
 		}
 		return array_reverse( $rows );
@@ -193,7 +193,7 @@ final class BackupPage {
 	/**
 	 * Render the backups table, or an empty state.
 	 *
-	 * @param array<int, array<string, string>> $rows The backup rows.
+	 * @param array<int, array{filename: string, source: string, foreign: bool, source_url: string, when: string, size: string, contains: string}> $rows The backup rows.
 	 * @return void
 	 */
 	private function render_backups( array $rows ): void {
@@ -211,7 +211,7 @@ final class BackupPage {
 		echo '<table class="pontifex-table"><thead><tr>';
 		printf(
 			'<th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th>',
-			esc_html__( 'Backup', 'pontifex' ),
+			esc_html__( 'Source', 'pontifex' ),
 			esc_html__( 'Created', 'pontifex' ),
 			esc_html__( 'Size', 'pontifex' ),
 			esc_html__( 'Contains', 'pontifex' ),
@@ -231,7 +231,7 @@ final class BackupPage {
 				'<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
 				. '<td class="pontifex-actions"><a class="pontifex-link" href="%s">%s</a>'
 				. ' <button type="button" class="pontifex-delete-backup" data-file="%s">%s</button></td></tr>',
-				esc_html( $row['filename'] ),
+				$this->render_identity( $row ), // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Built entirely from esc_html()/esc_attr()-escaped fragments in render_identity() below.
 				esc_html( $row['when'] ),
 				esc_html( $row['size'] ),
 				esc_html( $row['contains'] ),
@@ -243,6 +243,34 @@ final class BackupPage {
 		}
 		echo '</tbody></table>';
 		echo '</section>';
+	}
+
+	/**
+	 * Render a row's two-line identity block: its source (with an "Another site"
+	 * tag when foreign), and the stored filename beneath.
+	 *
+	 * The recorded source URL is shown only in a `title` attribute, for
+	 * inspection on hover — never as a link, never in a data attribute. Every
+	 * dynamic value is escaped here so callers can splice the result straight
+	 * into their own markup.
+	 *
+	 * @param array{filename: string, source: string, foreign: bool, source_url: string, when: string, size: string, contains: string} $row One row built by {@see self::backup_rows()}.
+	 * @return string The identity block markup.
+	 */
+	private function render_identity( array $row ): string {
+		$tag = $row['foreign']
+			? sprintf( '<span class="pontifex-restore-tag">%s</span>', esc_html__( 'Another site', 'pontifex' ) )
+			: '';
+
+		return sprintf(
+			'<span class="pontifex-restore-identity"><span class="pontifex-restore-origin">'
+			. '<span class="pontifex-restore-source" title="%1$s">%2$s</span>%3$s</span>'
+			. '<span class="pontifex-restore-file">%4$s</span></span>',
+			esc_attr( $row['source_url'] ),
+			esc_html( $row['source'] ),
+			$tag, // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Built from esc_html__() above, or the empty string.
+			esc_html( $row['filename'] )
+		);
 	}
 
 	/**
@@ -360,27 +388,6 @@ final class BackupPage {
 				esc_html( gmdate( 'Y-m-d H:i', (int) $pending ) . ' UTC' )
 			)
 		);
-	}
-
-	/**
-	 * Format a backup's creation time from its filename.
-	 *
-	 * @param string $filename The backup basename.
-	 * @return string A readable creation time in the site's timezone, or '(unknown)' if the name does not match.
-	 */
-	private function backup_when( string $filename ): string {
-		if ( 1 === preg_match( '/pontifex-backup-(\d{8}T\d{6}Z)\./', $filename, $matches ) ) {
-			$parsed = DateTimeImmutable::createFromFormat( self::STAMP_FORMAT, $matches[1], new DateTimeZone( 'UTC' ) );
-			if ( false !== $parsed ) {
-				// Render in the site's configured timezone (Settings -> General), not UTC,
-				// so operators see local time; the format reads "08:45 on 25-06-2026".
-				$formatted = wp_date( 'H:i \o\n d-m-Y', $parsed->getTimestamp() );
-				if ( false !== $formatted ) {
-					return $formatted;
-				}
-			}
-		}
-		return '(unknown)';
 	}
 
 	/**

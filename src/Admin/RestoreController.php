@@ -925,22 +925,7 @@ final class RestoreController {
 			return false;
 		}
 
-		return $this->normalise_url( $source_url ) !== $this->normalise_url( $this->wordpress_context->site_url() );
-	}
-
-	/**
-	 * Normalise a site URL for comparison: lower case, no trailing slash.
-	 *
-	 * Scheme, host, port and path remain significant; only case and a single
-	 * trailing slash — neither of which changes which site a URL points at — are
-	 * folded away, so `https://Example.test/` and `https://example.test` compare
-	 * equal.
-	 *
-	 * @param string $url The URL to normalise.
-	 * @return string The normalised URL.
-	 */
-	private function normalise_url( string $url ): string {
-		return strtolower( rtrim( $url, '/' ) );
+		return ! ArchiveFacts::is_same_site( $source_url, $this->wordpress_context->site_url() );
 	}
 
 	/**

@@ -56,6 +56,15 @@ final class BackupPageTest extends TestCase {
 				return gmdate( $format, $timestamp ?? 0 );
 			}
 		);
+		// A row's identity resolves the recorded source's host via ArchiveFacts,
+		// which calls wp_parse_url(); no WordPress runtime is loaded here.
+		Functions\when( 'wp_parse_url' )->alias(
+			static function ( string $url, int $component = -1 ): ?string {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- This closure IS the wp_parse_url() stub for this WordPress-runtime-free test; calling wp_parse_url() here would be circular.
+				$parsed = parse_url( $url, $component );
+				return is_string( $parsed ) ? $parsed : null;
+			}
+		);
 	}
 
 	/**
@@ -324,25 +333,41 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
-	 * Lists backups newest-first, with the time parsed from the name and the size formatted.
+	 * Lists backups newest-first by filename, with each "Created" value coming from
+	 * its own recorded provenance rather than the filename.
+	 *
+	 * The two fixtures deliberately record a creation moment unrelated to their
+	 * filename timestamps, to prove sort order stays filename-based (the store's
+	 * naming contract, `pontifex-backup-<UTC>.wpmig`) while "Created" no longer
+	 * is — the exact bug this slice fixes for an uploaded backup.
 	 *
 	 * @return void
 	 */
 	public function test_backup_rows_are_newest_first(): void {
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
-		$this->seed( $store, 'pontifex-backup-20260101T120000Z.wpmig', 'old' );
-		$this->seed( $store, 'pontifex-backup-20260301T093000Z.wpmig', 'newer-bytes' );
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260101T120000Z.wpmig',
+			Scope::content_only( array() ),
+			new DateTimeImmutable( '2025-12-20T08:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260301T093000Z.wpmig',
+			Scope::content_only( array() ),
+			new DateTimeImmutable( '2026-03-01T09:30:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
 		$page = new BackupPage( $this->context_mock(), $store );
 
 		$rows = $page->backup_rows();
 
 		$this->assertCount( 2, $rows );
-		$this->assertSame( 'pontifex-backup-20260301T093000Z.wpmig', $rows[0]['filename'] );
-		$this->assertSame( '09:30 on 01-03-2026', $rows[0]['when'] );
-		$this->assertSame( '11 B', $rows[0]['size'], 'Size should be the file length, formatted.' );
+		$this->assertSame( 'pontifex-backup-20260301T093000Z.wpmig', $rows[0]['filename'], 'Newest backup by filename comes first.' );
+		$this->assertSame( '09:30 on 01-03-2026', $rows[0]['when'], 'Created matches the recorded provenance, which happens to agree with this filename.' );
+		$this->assertMatchesRegularExpression( '/^\d+ B$/', $rows[0]['size'] );
 		$this->assertSame( 'pontifex-backup-20260101T120000Z.wpmig', $rows[1]['filename'] );
-		$this->assertSame( '12:00 on 01-01-2026', $rows[1]['when'] );
+		$this->assertSame( '08:00 on 20-12-2025', $rows[1]['when'], 'Created reflects provenance even though it disagrees with this filename\'s own timestamp.' );
 	}
 
 	/**
@@ -365,6 +390,30 @@ final class BackupPageTest extends TestCase {
 
 		$this->assertSame( 'Database only', $by_filename['pontifex-backup-20260101T000000Z.wpmig']['contains'] );
 		$this->assertSame( 'Unknown', $by_filename['pontifex-backup-20260301T000000Z.wpmig']['contains'], 'A corrupt archive fails soft to Unknown, never an exception.' );
+	}
+
+	/**
+	 * Reports "This site" for a backup made here, and the true source for one made elsewhere.
+	 *
+	 * @return void
+	 */
+	public function test_backup_rows_report_the_source_and_foreign_fields(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260101T000000Z.wpmig', Scope::content_only( array() ), null, 'https://this-site.test/' );
+		$this->write_scoped_archive( $store, 'pontifex-backup-20260301T000000Z.wpmig', Scope::content_only( array() ), null, 'https://clientsite.com/' );
+		$page = new BackupPage( $this->context_mock(), $store );
+
+		$rows        = $page->backup_rows();
+		$by_filename = array();
+		foreach ( $rows as $row ) {
+			$by_filename[ $row['filename'] ] = $row;
+		}
+
+		$this->assertSame( 'This site', $by_filename['pontifex-backup-20260101T000000Z.wpmig']['source'] );
+		$this->assertFalse( $by_filename['pontifex-backup-20260101T000000Z.wpmig']['foreign'] );
+		$this->assertSame( 'clientsite.com', $by_filename['pontifex-backup-20260301T000000Z.wpmig']['source'] );
+		$this->assertTrue( $by_filename['pontifex-backup-20260301T000000Z.wpmig']['foreign'] );
 	}
 
 	/**
@@ -397,6 +446,58 @@ final class BackupPageTest extends TestCase {
 	}
 
 	/**
+	 * Renders the identity column with a "Source" header, and an "Another site" tag
+	 * for a foreign backup, with a hostile recorded URL escaped and never raw.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_the_source_identity_and_escapes_a_hostile_url(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'wp_create_nonce' )->justReturn( 'test-nonce' );
+		Functions\when( 'admin_url' )->returnArg();
+		Functions\when( 'esc_url' )->returnArg();
+		Functions\when( 'add_query_arg' )->alias(
+			static function ( array $args, string $url ): string {
+				return $url . '?' . http_build_query( $args );
+			}
+		);
+		// TestCase's setUp() stubs esc_html()/esc_attr() as a plain passthrough (it
+		// only needs to strip translation, not prove escaping). This test's whole
+		// point is escaping, so it overrides both with the real htmlspecialchars()
+		// behaviour for this one test.
+		Functions\when( 'esc_html' )->alias(
+			static function ( string $text ): string {
+				return htmlspecialchars( $text, ENT_QUOTES );
+			}
+		);
+		Functions\when( 'esc_attr' )->alias(
+			static function ( string $text ): string {
+				return htmlspecialchars( $text, ENT_QUOTES );
+			}
+		);
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->write_scoped_archive(
+			$store,
+			'pontifex-backup-20260101T000000Z.wpmig',
+			Scope::content_only( array() ),
+			null,
+			'https://clientsite.com/"><script>alert(1)</script>'
+		);
+		$page = new BackupPage( $this->context_mock(), $store );
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( '<th>Source</th>', $output, 'The Backup column is relabelled Source.' );
+		$this->assertStringContainsString( 'pontifex-restore-tag">Another site<', $output, 'A backup made elsewhere carries the Another site tag.' );
+		$this->assertStringNotContainsString( '<script>alert(1)</script>', $output, 'The recorded URL is never emitted unescaped, wherever it appears (the visible label or the title attribute).' );
+		$this->assertStringContainsString( '&lt;script&gt;', $output, 'The hostile fragment is present only in its escaped form.' );
+	}
+
+	/**
 	 * A WordPressContext mock with a simple byte-count size formatter.
 	 *
 	 * The stored-schedule read is stubbed too: render() loads the schedule for
@@ -414,6 +515,7 @@ final class BackupPageTest extends TestCase {
 			}
 		);
 		$context->shouldReceive( 'option_value' )->andReturn( $schedule );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
 		return $context;
 	}
 
@@ -433,12 +535,14 @@ final class BackupPageTest extends TestCase {
 	/**
 	 * Write a valid, empty, unencrypted archive with the given scope into the store.
 	 *
-	 * @param BackupStore $store    The store whose directory to write into.
-	 * @param string      $filename The filename to write.
-	 * @param Scope|null  $scope    The recorded scope; null for a legacy scope-less fixture.
+	 * @param BackupStore            $store    The store whose directory to write into.
+	 * @param string                 $filename The filename to write.
+	 * @param Scope|null             $scope    The recorded scope; null for a legacy scope-less fixture.
+	 * @param DateTimeImmutable|null $created  The recorded creation moment; defaults to an arbitrary fixed moment unrelated to the filename, so tests can prove the row's "Created" comes from provenance, not the name.
+	 * @param string                 $url      The recorded source URL.
 	 * @return void
 	 */
-	private function write_scoped_archive( BackupStore $store, string $filename, ?Scope $scope ): void {
+	private function write_scoped_archive( BackupStore $store, string $filename, ?Scope $scope, ?DateTimeImmutable $created = null, string $url = 'https://example.test' ): void {
 		$path = $store->directory() . '/' . $filename;
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
@@ -448,11 +552,11 @@ final class BackupPageTest extends TestCase {
 		$provenance = new Provenance(
 			'6.6.1',
 			'8.2.10',
-			'https://example.test',
+			$url,
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
 			new ExporterInfo( 'pontifex', '0.1.0' ),
-			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			$created ?? new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
 			null,
 			null,
 			$scope
