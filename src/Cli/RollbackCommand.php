@@ -17,6 +17,8 @@ use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
@@ -122,6 +124,20 @@ final class RollbackCommand {
 	private ProgressReporter $progress;
 
 	/**
+	 * The shared single-runner lock, contended with export and import.
+	 *
+	 * Optional in the constructor: when null, {@see self::operation_lock()}
+	 * builds a default OperationLock lazily, at the point __invoke() needs it
+	 * — not in the constructor, because building its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH, which is not available to every test that
+	 * constructs this command. Tests inject a fake fulfilling the same class,
+	 * or a real one over mocked collaborators.
+	 *
+	 * @var OperationLock|null
+	 */
+	private ?OperationLock $lock;
+
+	/**
 	 * Construct a RollbackCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not pass
@@ -134,6 +150,7 @@ final class RollbackCommand {
 	 * @param RestoreRunnerInterface|null $restore_runner    Optional. When null, a concrete RestoreRunner is built at run time.
 	 * @param LoggerInterface|null        $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null       $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
+	 * @param OperationLock|null          $lock              Optional. When null, a default OperationLock is built lazily at run time.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -141,7 +158,8 @@ final class RollbackCommand {
 		?RollbackStoreInterface $store = null,
 		?RestoreRunnerInterface $restore_runner = null,
 		?LoggerInterface $logger = null,
-		?ProgressReporter $progress = null
+		?ProgressReporter $progress = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment       = $environment ?? new RealEnvironment();
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
@@ -149,6 +167,41 @@ final class RollbackCommand {
 		$this->restore_runner    = $restore_runner;
 		$this->logger            = $logger ?? $this->build_default_logger();
 		$this->progress          = $progress ?? new WpCliProgressBar();
+		$this->lock              = $lock;
+	}
+
+	/**
+	 * The shared OperationLock, built lazily on first use.
+	 *
+	 * Deferred past the constructor because its default JobStore needs
+	 * WP_CONTENT_DIR/ABSPATH resolved through {@see self::resolve_content_root()},
+	 * which is only guaranteed once the command actually runs.
+	 *
+	 * @return OperationLock The lock to acquire before a real (non-dry-run) rollback.
+	 */
+	private function operation_lock(): OperationLock {
+		if ( null === $this->lock ) {
+			$this->lock = new OperationLock( $this->wordpress_context, new JobStore( $this->resolve_content_root() ) );
+		}
+		return $this->lock;
+	}
+
+	/**
+	 * Release the site-operation lock if this command still holds it at shutdown.
+	 *
+	 * A WP-CLI command ends via exit() on WP_CLI::error/success/halt, and a PHP
+	 * fatal ends it abruptly — both skip the finally that normally releases. This
+	 * shutdown handler is the backstop that clears the holder transient so a
+	 * failed or fatally-killed command cannot wedge every site operation for the
+	 * lock's full TTL. It no-ops when the finally already released (is_held() is
+	 * false), so a clean run releases exactly once.
+	 *
+	 * @return void
+	 */
+	public function release_lock_on_shutdown(): void {
+		if ( null !== $this->lock && $this->lock->is_held() ) {
+			$this->lock->release();
+		}
 	}
 
 	/**
@@ -187,6 +240,23 @@ final class RollbackCommand {
 		// 4. Open the safety archive and wire the restore engine.
 		$source         = $this->open_source( $archive_path );
 		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
+
+		// 4a. Single-runner lock: acquire only now, after every exit-prone step above
+		// (finding the safety archive, the confirmation prompt, opening the archive)
+		// has already passed. Each of those exits the process via WP_CLI::error() or
+		// a declined WP_CLI::confirm(), which skips the finally that releases the
+		// lock; acquiring this late means none of them can ever leave the holder
+		// transient set behind a refusal or a decline. A dry-run touches nothing
+		// (like the admin Restore screen's preview()), so it takes no lock.
+		$lock = null;
+		if ( ! $dry_run ) {
+			$lock = $this->operation_lock();
+			if ( ! $lock->acquire( OperationLock::OP_ROLLBACK ) ) {
+				WP_CLI::error( sprintf( /* translators: %s: the kind of operation currently running */ __( 'Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry.', 'pontifex' ), $lock->current_holder() ?? 'unknown' ) );
+			}
+			$this->lock = $lock;
+			register_shutdown_function( array( $this, 'release_lock_on_shutdown' ) );
+		}
 
 		$entry_total = 0;
 		$on_entry    = function ( int $done, int $total ) use ( &$entry_total ): void {
@@ -259,6 +329,9 @@ final class RollbackCommand {
 			}
 			throw $error;
 		} finally {
+			if ( null !== $lock ) {
+				$lock->release();
+			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
 			fclose( $source );
 		}
@@ -375,6 +448,24 @@ final class RollbackCommand {
 			throw new RuntimeException( 'RollbackCommand: ABSPATH is not defined; is WordPress loaded?' );
 		}
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+	}
+
+	/**
+	 * Resolve the wp-content root, for the shared lock's default job store.
+	 *
+	 * Reads WP_CONTENT_DIR through the Environment abstraction, falling back to
+	 * ABSPATH/wp-content (WordPress's own default for the constant) when it is
+	 * not defined, so the resolver still works outside a full WordPress
+	 * request, as in unit tests.
+	 *
+	 * @return string The absolute path of the wp-content directory.
+	 * @throws RuntimeException If WP_CONTENT_DIR is undefined and ABSPATH is too (should never happen inside a WordPress request).
+	 */
+	private function resolve_content_root(): string {
+		if ( $this->environment->is_constant_defined( 'WP_CONTENT_DIR' ) ) {
+			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
+		}
+		return $this->resolve_wordpress_root() . '/wp-content';
 	}
 
 

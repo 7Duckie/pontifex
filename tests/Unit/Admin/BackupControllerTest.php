@@ -18,6 +18,9 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\Job;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
@@ -281,13 +284,18 @@ final class BackupControllerTest extends TestCase {
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
-		// The lock transient alone no longer proves a live run (a dead run's lock
-		// is reclaimed — see backup_is_live()); a fresh, non-idle progress
-		// transient is the live signal that keeps this "already running".
+		// The holder transient alone no longer proves a live run (a dead
+		// holder is reclaimed — see OperationLock::is_reclaimable()); a
+		// fresh, non-idle progress transient is the live signal (the R1
+		// guard) that keeps this "already running", independent of whatever
+		// the holder transient says.
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				if ( 'pontifex_backup_lock' === $key ) {
-					return time();
+				if ( OperationLock::LOCK_NAME === $key ) {
+					return array(
+						'kind' => OperationLock::OP_BACKUP,
+						'at'   => time(),
+					);
 				}
 				if ( 'pontifex_backup_progress' === $key ) {
 					return array(
@@ -327,16 +335,23 @@ final class BackupControllerTest extends TestCase {
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
-		// The lock transient persists across ticks; the named lock is free between
-		// them, so the active export job is what proves the run is still live.
+		// The holder transient persists across ticks; the named lock is free
+		// between them, so the active export job is what proves the run is
+		// still live (the R1 guard) — checked before the holder transient is
+		// even consulted.
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_backup_lock' === $key ? time() : false;
+				return OperationLock::LOCK_NAME === $key
+					? array(
+						'kind' => OperationLock::OP_BACKUP,
+						'at'   => time(),
+					)
+					: false;
 			}
 		);
 
-		$jobs = new \Pontifex\Job\JobStore( $this->base );
-		$jobs->create( \Pontifex\Job\Job::KIND_EXPORT, array(), time() );
+		$jobs = new JobStore( $this->base );
+		$jobs->create( Job::KIND_EXPORT, array(), time() );
 
 		try {
 			$this->controller()->create();
@@ -369,7 +384,7 @@ final class BackupControllerTest extends TestCase {
 		Functions\when( 'delete_transient' )->justReturn( true );
 
 		$context = Mockery::mock( WordPressContext::class );
-		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( false );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( false );
 		$context->shouldNotReceive( 'release_named_lock' );
 
 		$controller = new BackupController(
@@ -392,40 +407,40 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
-	 * The named lock is handed back when the transient guard refuses a backup.
+	 * The named lock is handed back when a restore holds the shared lock.
 	 *
-	 * The transient is the secondary guard, checked only while the named lock is
-	 * held. When it refuses — a crashed run's transient still inside its TTL —
-	 * the named lock just taken must be released again; under a persistent
+	 * The holder transient is the secondary guard, checked only while the named
+	 * lock is held. A restore holder is never reclaimed (unlike a dead backup's),
+	 * so a backup attempt is refused here purely on the holder-transient check —
+	 * with no active job and no live progress, the R1 guard has already passed —
+	 * and the named lock just taken must be released again; under a persistent
 	 * database connection it would otherwise linger and block every later run.
+	 * This is the unified lock's cross-operation refusal: a restore running
+	 * anywhere (admin or CLI) now keeps a new backup out too.
 	 *
 	 * @return void
 	 */
-	public function test_create_hands_back_the_named_lock_when_the_transient_guard_refuses(): void {
+	public function test_create_hands_back_the_named_lock_when_a_restore_holds_it(): void {
 		$this->authorise();
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
-		// As above: a fresh, non-idle progress transient is the live signal that
-		// makes the transient guard refuse (rather than reclaim) the lock.
+		// No active job and no live progress, so the R1 guard passes; the refusal
+		// must come from the holder transient itself recording a restore.
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				if ( 'pontifex_backup_lock' === $key ) {
-					return time();
-				}
-				if ( 'pontifex_backup_progress' === $key ) {
-					return array(
-						'phase' => 'copying',
-						'at'    => time(),
-					);
-				}
-				return false;
+				return OperationLock::LOCK_NAME === $key
+					? array(
+						'kind' => OperationLock::OP_RESTORE,
+						'at'   => time(),
+					)
+					: false;
 			}
 		);
 
 		$context = Mockery::mock( WordPressContext::class );
-		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_backup_lock' )->andReturn( true );
-		$context->shouldReceive( 'release_named_lock' )->once()->with( 'pontifex_backup_lock' );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once()->with( OperationLock::LOCK_NAME );
 
 		$controller = new BackupController(
 			$this->environment_mock(),
@@ -436,7 +451,7 @@ final class BackupControllerTest extends TestCase {
 
 		try {
 			$controller->create();
-			$this->fail( 'create() should refuse while the lock transient is set.' );
+			$this->fail( 'create() should refuse while a restore holds the shared lock.' );
 		} catch ( RuntimeException $halt ) {
 			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
 		}
@@ -909,12 +924,17 @@ final class BackupControllerTest extends TestCase {
 		$this->stub_json();
 		Functions\when( 'set_transient' )->justReturn( true );
 		Functions\when( 'delete_transient' )->justReturn( true );
-		// The lock transient is set (a crashed run left it behind), but neither an
-		// active job nor a live progress transient exists — nothing is actually
+		// The holder transient is set (a crashed run left it behind), but neither
+		// an active job nor a live progress transient exists — nothing is actually
 		// running, so the lock must be reclaimed rather than refused.
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_backup_lock' === $key ? time() - 500 : false;
+				return OperationLock::LOCK_NAME === $key
+					? array(
+						'kind' => OperationLock::OP_BACKUP,
+						'at'   => time() - 500,
+					)
+					: false;
 			}
 		);
 
@@ -960,10 +980,13 @@ final class BackupControllerTest extends TestCase {
 
 		$controller = $this->controller( null, $logger );
 
-		// Acquire the lock as create() would at the start of a run, so
+		// Acquire the shared lock as create() would at the start of a run, so
 		// handle_shutdown() treats this request as one mid-backup when the
-		// simulated fatal struck.
-		( new \ReflectionMethod( BackupController::class, 'acquire_lock' ) )->invoke( $controller );
+		// simulated fatal struck. The lock is now a collaborator object
+		// (OperationLock) rather than a private method on the controller, so
+		// it is reached via the controller's own private $lock property.
+		$lock_property = new \ReflectionProperty( BackupController::class, 'lock' );
+		$lock_property->getValue( $controller )->acquire( OperationLock::OP_BACKUP );
 
 		$controller->handle_shutdown();
 

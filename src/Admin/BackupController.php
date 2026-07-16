@@ -21,6 +21,7 @@ use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ScanProgressManifestBuilder;
@@ -70,21 +71,6 @@ final class BackupController {
 	 * @var string
 	 */
 	private const PROGRESS_TRANSIENT = 'pontifex_backup_progress';
-
-	/**
-	 * The transient key marking that a backup is currently running.
-	 *
-	 * The secondary single-runner guard: the primary is an atomic named
-	 * database lock (this constant doubles as its logical name), and this
-	 * transient is checked only while that lock is held — see
-	 * {@see self::acquire_lock()}. create() refuses a second backup while
-	 * either guard is engaged, so two concurrent exports can never fight
-	 * over the progress transient. Carries a TTL so a crash that skips the
-	 * shutdown handler still self-heals.
-	 *
-	 * @var string
-	 */
-	private const LOCK_TRANSIENT = 'pontifex_backup_lock';
 
 	/**
 	 * How long the progress transient lives, in seconds (15 minutes).
@@ -248,14 +234,15 @@ final class BackupController {
 	private ?Job $active_job = null;
 
 	/**
-	 * Whether this request holds the single-runner backup lock.
+	 * The shared single-runner lock, contended with restore and rollback.
 	 *
-	 * Set when create() acquires the lock and cleared when it releases it, so the
-	 * shutdown handler knows whether a fatal left the lock (and a partial) behind.
+	 * Optional in the constructor: when null, a default OperationLock over this
+	 * controller's own context and job store is built. Tests inject a fake or a
+	 * real one over mocked collaborators.
 	 *
-	 * @var bool
+	 * @var OperationLock
 	 */
-	private bool $lock_held = false;
+	private OperationLock $lock;
 
 	/**
 	 * Construct the controller around its collaborators.
@@ -265,19 +252,22 @@ final class BackupController {
 	 * @param BackupStore                   $store             The backups directory.
 	 * @param LoggerInterface               $logger            Records a failed backup's real cause.
 	 * @param ManifestBuilderInterface|null $manifest_builder  Optional. When null, a default scanner-backed builder is used.
+	 * @param OperationLock|null            $lock              Optional. When null, a default OperationLock over this controller's own context and job store is built.
 	 */
 	public function __construct(
 		Environment $environment,
 		WordPressContext $wordpress_context,
 		BackupStore $store,
 		LoggerInterface $logger,
-		?ManifestBuilderInterface $manifest_builder = null
+		?ManifestBuilderInterface $manifest_builder = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
 		$this->logger            = $logger;
 		$this->manifest_builder  = $manifest_builder;
+		$this->lock              = $lock ?? new OperationLock( $this->wordpress_context, $this->jobs_store() );
 	}
 
 	/**
@@ -320,10 +310,12 @@ final class BackupController {
 			);
 		}
 
-		// Single-runner lock: refuse a second backup while one is already running, so
-		// two concurrent exports can never fight over the shared progress transient.
-		if ( ! $this->acquire_lock() ) {
-			wp_send_json_error( array( 'message' => __( 'A backup is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
+		// Single-runner lock: refuse a second backup while any site-mutating
+		// operation — a backup, restore, or rollback, admin or CLI — is already
+		// running, so two of them can never fight over the site or the shared
+		// progress transient.
+		if ( ! $this->lock->acquire( OperationLock::OP_BACKUP ) ) {
+			wp_send_json_error( array( 'message' => $this->lock_busy_message() ), 409 );
 		}
 
 		$this->extend_time_limit();
@@ -425,7 +417,7 @@ final class BackupController {
 			$this->secure_file( $path );
 			$this->clear_progress();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->store->clear_cancel();
 
 			$this->bump_counters(
@@ -452,7 +444,7 @@ final class BackupController {
 			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			wp_send_json_success( array( 'cancelled' => true ) );
@@ -461,7 +453,7 @@ final class BackupController {
 			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			$this->bump_counters( array( 'failed' => 1 ) );
@@ -533,7 +525,7 @@ final class BackupController {
 	 * @return void
 	 */
 	public function handle_shutdown(): void {
-		if ( ! $this->lock_held ) {
+		if ( ! $this->lock->is_held() ) {
 			return;
 		}
 
@@ -565,7 +557,7 @@ final class BackupController {
 		}
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
-		$this->release_lock();
+		$this->lock->release();
 		$this->clear_progress();
 		$this->store->clear_cancel();
 	}
@@ -910,6 +902,23 @@ final class BackupController {
 	}
 
 	/**
+	 * The message returned when the shared single-runner lock refuses a backup.
+	 *
+	 * Names whichever kind of operation is actually holding the lock, so an
+	 * operator refused because a restore or rollback is running is not told
+	 * (misleadingly) that a backup is already running.
+	 *
+	 * @return string A human-readable refusal message.
+	 */
+	private function lock_busy_message(): string {
+		$holder = $this->lock->current_holder();
+		if ( OperationLock::OP_RESTORE === $holder || OperationLock::OP_ROLLBACK === $holder ) {
+			return __( 'A restore or rollback is currently running. Please wait for it to finish before starting a backup.', 'pontifex' );
+		}
+		return __( 'A backup is already running. Please wait for it to finish.', 'pontifex' );
+	}
+
+	/**
 	 * The message returned when an export fails.
 	 *
 	 * The underlying error is recorded in the log via the export path; the
@@ -1104,80 +1113,6 @@ final class BackupController {
 	 */
 	private function clear_progress(): void {
 		delete_transient( self::PROGRESS_TRANSIENT );
-	}
-
-	/**
-	 * Acquire the single-runner backup lock, or report that a backup is already running.
-	 *
-	 * Two independent guards, and both must pass. The primary is a named
-	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
-	 * server grants it atomically, so two simultaneous requests can never
-	 * both acquire — closing the check-then-set race a transient alone
-	 * cannot — and it vanishes with the connection if the request crashes.
-	 * The transient stays as a second, independent guard behind it, checked
-	 * only while the named lock is held: it still refuses a job-backed run
-	 * between cron ticks (the named lock is not held between ticks) or a
-	 * synchronous run actively writing progress (the rare case a runner's
-	 * named lock is silently lost mid-operation, e.g. on old MySQL, other
-	 * code taking its own named lock on the same connection releases ours),
-	 * but a dead run's lock transient — {@see self::backup_is_live()} finds
-	 * no live signal — is reclaimed rather than blocking the next backup for
-	 * the transient's full TTL.
-	 *
-	 * @return bool True if the lock was acquired; false if a backup is already running.
-	 */
-	private function acquire_lock(): bool {
-		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
-			return false;
-		}
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) && $this->backup_is_live() ) {
-			// A concurrent runner, or a crashed run's transient still inside its
-			// TTL: refuse, and hand back the named lock just taken.
-			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-			return false;
-		}
-		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
-		$this->lock_held = true;
-		return true;
-	}
-
-	/**
-	 * Whether a backup is genuinely running right now.
-	 *
-	 * A job-backed export between cron ticks has released the DB-level named lock
-	 * but is still live (its job is active); a synchronous run is live while it is
-	 * still writing fresh progress. Anything else — a crashed run's leftover lock
-	 * transient with no active job and stale (or no) progress — is dead and its
-	 * lock is reclaimable, so a killed backup never blocks the next one for the
-	 * transient's full TTL.
-	 *
-	 * @return bool True when a backup is currently running.
-	 */
-	private function backup_is_live(): bool {
-		$job = ( $this->jobs_store() )->active_job();
-		if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
-			return true;
-		}
-		$progress = get_transient( self::PROGRESS_TRANSIENT );
-		if ( ! is_array( $progress ) ) {
-			return false;
-		}
-		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
-		if ( self::PHASE_IDLE === $phase ) {
-			return false;
-		}
-		return ( time() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
-	}
-
-	/**
-	 * Release the single-runner backup lock held by this request.
-	 *
-	 * @return void
-	 */
-	private function release_lock(): void {
-		delete_transient( self::LOCK_TRANSIENT );
-		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-		$this->lock_held = false;
 	}
 
 	// -------------------------------------------------------------------------
