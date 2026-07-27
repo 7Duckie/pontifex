@@ -165,9 +165,10 @@ final class BackupPage {
 	 * Render the effective scope and the always-applied default exclusions.
 	 *
 	 * The admin backup is always content-only (ADR 0008), and Pontifex always
-	 * leaves out its own working directory and the ephemeral cache. Showing
-	 * both before the operator acts satisfies the "defaults are visible" rule
-	 * the CLI already honours; the admin surface did not, until now.
+	 * leaves out its own working directory, the ephemeral cache, and
+	 * version-control metadata (.git, at any depth). Showing all three before
+	 * the operator acts satisfies the "defaults are visible" rule the CLI
+	 * already honours; the admin surface did not, until now.
 	 *
 	 * @return void
 	 */
@@ -185,9 +186,31 @@ final class BackupPage {
 		printf( '<p class="pontifex-lead">%s</p>', esc_html__( 'Always left out:', 'pontifex' ) );
 		echo '<ul class="pontifex-list">';
 		foreach ( $defaults as $pattern ) {
-			printf( '<li><code>%s</code></li>', esc_html( (string) $pattern ) );
+			printf( '<li><code>%s</code></li>', esc_html( self::pattern_label( (string) $pattern ) ) );
 		}
 		echo '</ul>';
+	}
+
+	/**
+	 * Render a default exclusion pattern for a non-technical admin.
+	 *
+	 * The two path-shaped defaults ({@see ExclusionRules::default_v010()}) read
+	 * fine as raw patterns ("wp-content/cache/**"); the third is a PCRE regex
+	 * (`.git` at any depth), which is hostile to show a non-technical admin
+	 * verbatim, so it is swapped for a plain-language, translated label. A
+	 * pattern not covered by this match is shown raw, so a future default this
+	 * has not caught up with still degrades to something legible rather than
+	 * disappearing, matching what the CLI's own printed exclusion summary
+	 * shows.
+	 *
+	 * @param string $pattern The raw pattern from ExclusionRules::default_v010().
+	 * @return string The label to display.
+	 */
+	private static function pattern_label( string $pattern ): string {
+		return match ( $pattern ) {
+			'/(^|\/)\.git(\/|$)/' => __( '.git directories (version-control history)', 'pontifex' ),
+			default               => $pattern,
+		};
 	}
 
 	/**

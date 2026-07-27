@@ -515,6 +515,55 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
+	 * The default .git exclusion must prevent the scanner from entering a .git
+	 * directory ITSELF, not merely omit its entries after the fact.
+	 *
+	 * The .git directory ITSELF is made unreadable, at a nested depth (a plugin's
+	 * own repository — the depth a plain glob would miss, per ExclusionRules'
+	 * class docblock). A scanner that omits excluded entries only after the fact
+	 * still has to open that directory to walk it, and opening it raises the
+	 * UnexpectedValueException that scan() translates into a RuntimeException. A
+	 * scanner that prunes never opens it, so the scan completes. Completion is
+	 * therefore a property that post-hoc filtering cannot produce, which is what
+	 * makes this test able to fail.
+	 *
+	 * Note that making a FILE inside .git unreadable proves nothing: the
+	 * readability check lives in build_scanned_entry(), downstream of the
+	 * exclusion decision, so an excluded file is never checked either way.
+	 *
+	 * Skipped as root, for whom chmod 0000 does not block reads.
+	 *
+	 * @return void
+	 */
+	public function test_git_directory_is_pruned_not_walked(): void {
+		if ( 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test unreadable directories when running as root (chmod is not enforced).' );
+		}
+
+		$this->write_file( 'wp-content/uploads/keep.txt', 'site-content' );
+		$this->write_file( 'wp-content/plugins/demo/demo.php', '<?php // a real plugin file' );
+		$this->write_file( 'wp-content/plugins/demo/.git/objects/pack/pack-abc.pack', 'binary-ish' );
+		$locked_git = $this->fixture_root . '/wp-content/plugins/demo/.git';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; unreadability is how this test proves the nested .git directory was never opened.
+		chmod( $locked_git, 0o000 );
+
+		try {
+			$entries = ( new FileScanner( ExclusionRules::default_v010() ) )->scan( $this->fixture_root );
+			$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+			$this->assertContains( 'wp-content/uploads/keep.txt', $paths );
+			$this->assertContains( 'wp-content/plugins/demo/demo.php', $paths );
+			foreach ( $paths as $path ) {
+				$this->assertStringNotContainsString( '.git', $path );
+			}
+		} finally {
+			// Restore readability so teardown can clean up.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture cleanup.
+			chmod( $locked_git, 0o755 );
+		}
+	}
+
+	/**
 	 * An excluded directory must never consume the entry that follows it.
 	 *
 	 * The regression this pins: pruning used to be attempted by calling next() on

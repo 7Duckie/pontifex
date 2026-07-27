@@ -1,7 +1,7 @@
 # 0008 — Backups are content-only by default (wp-content + database); whole-site is an explicit opt-in
 
-- **Status:** Accepted, 2026-06-25.
-- **Deciders:** 7Duckie (v0.5.0 admin-UI work surfaced the question).
+- **Status:** Accepted, 2026-06-25. Amended 2026-07-16 (`.git` added to the curated default exclusions — see Amendment).
+- **Deciders:** 7Duckie (v0.5.0 admin-UI work surfaced the question; amendment: v0.9.3).
 
 ## Context
 
@@ -127,3 +127,84 @@ as an explicit, off-by-default opt-in.**
 - This supersedes the implicit whole-site scope. A future proposal to change the
   default scope must supersede this ADR explicitly rather than relitigate it
   (per the precedent of ADR 0004).
+
+## Amendment — 2026-07-16: `.git` added to the curated default exclusions
+
+**This explicitly supersedes** the "Add `.git` to the default exclusions" entry
+under "Alternatives considered and rejected" above, on new information.
+
+**New information:** the original rejection reasoned from a hypothetical. A real
+one arrived: the plugin's own dev-site bind mount — a live, git-deployed
+`wp-content/plugins/pontifex` checkout — carries a `.git` directory into every
+backup, and a restore's safety archive backed up 695 MB of it alongside `vendor`
+and `node_modules`. A working copy deployed from git is an ordinary, common way
+to run a WordPress plugin or theme directory, not an edge case; the observation
+generalises to any git-deployed site, not only this dev environment. Two further
+considerations sharpen the
+original rejection:
+
+- **`.git/time-travel` is a restore hazard, not just a size cost.** A restore
+  that writes a stranger's `.git` history over a live, git-deployed directory
+  can silently rewind that directory's working tree relative to its own commit
+  history the next time git is used against it — a correctness hazard on top of
+  the size one.
+- **A `.git`-carrying `.wpmig` is a secret-bearing artefact.** Full commit
+  history — author identities, commit messages, anything ever committed
+  including since-removed secrets — travels inside every archive and every
+  place that archive is handed around (an offsite destination, a colleague,
+  cross-server import), which is a materially larger exposure than the archive
+  not existing at all.
+
+**What makes this NOT the curated drop-list the original ADR decision (and
+`test_default_v010_keeps_other_plugin_directories`) guards against:** the
+guard is about *site content* — data another plugin wrote, which is the site
+owner's and stays in by default. `.git` is not site content; it is
+version-control metadata *about* the content, generated and owned by git,
+regenerable in full from the same remote the working copy was cloned from. A
+backup exists to recover content that cannot be regenerated elsewhere; `.git`
+fails that test in a way `wp-content/some-plugin/backup.zip` does not. This is
+also why the new default is a single, narrowly-scoped, self-documenting
+pattern — `.git` directories specifically, at any depth — rather than a
+reopening of the curated-drop-list question generally.
+
+**Amended decision:** `ExclusionRules::default_v010()` gains a third default
+exclusion, `.git` (any depth, matched as `/(^|\/)\.git(\/|$)/` — a regex, not a
+directory-tree pattern, because a `.git` directory's position is not fixed the
+way `wp-content/cache` is; see the class docblock in
+[`src/Manifest/ExclusionRules.php`](../../src/Manifest/ExclusionRules.php)).
+Like the existing two defaults, it is visible in the printed exclusion summary,
+overridable with `--no-defaults`, and does not change the underlying
+`ExclusionRules` pattern language — only the curated list gains an entry.
+
+**`vendor/` and `node_modules/` are deliberately NOT added, and this is the
+part of the amendment meant to stop that question recurring.** They differ from
+`.git` in kind, not just degree:
+
+- **`vendor/` is required at runtime.** WordPress.org performs no build step; a
+  restored site's `vendor/autoload.php` is `require`d on every request. Excluding
+  it produces a site that restores "successfully" and then fatals — silent data
+  loss of the operational kind ADR 0013 exists to prevent, not a saved byte.
+- **`node_modules/` is the same failure class, merely rarer.** A theme can
+  legitimately `wp_enqueue_script()` a file that lives under `node_modules/`, and
+  nothing on a restored production site runs `npm install` to regenerate it.
+  Excluding it risks the identical "restores, then breaks" failure `vendor/`
+  would produce, for a smaller but real set of sites.
+- **No comparable tool excludes either by default**, which was already the
+  standing reason the original `.git` proposal was rejected; that reasoning
+  still holds for `vendor/` and `node_modules/` specifically, because — unlike
+  `.git` — both are runtime dependencies of the running site, not metadata
+  about how the site's own source got there.
+
+The size win this amendment buys is real but narrower than the number that
+prompted it: the dev-site's 695 MB figure was `.git` **plus** `vendor` **plus**
+`node_modules` combined, so excluding only `.git` will not shrink that
+particular bind-mounted dev site by anything close to 695 MB. The `.git`
+default's real-world payoff is a genuinely git-deployed production site (a
+common WordPress deployment pattern outside this dev environment), where the
+entire commit history — not just a large-but-static dependency tree — is what
+gets carried into, and then back out of, every backup.
+
+**Cost:** a site that (unusually) relies on Pontifex to carry its `.git`
+directory loses that copy by default; `--no-defaults` restores the old
+behaviour (all three curated defaults are opted out together — there is no
+per-default toggle) for anyone who wants it.
