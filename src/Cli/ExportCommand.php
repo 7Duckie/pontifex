@@ -108,9 +108,10 @@ use Pontifex\WordPress\WordPressContext;
  *   destination can rebuild.
  *
  * [--no-defaults]
- * : Skip the curated default exclusion list (Pontifex's working dir
- *   and wp-content/cache). Use only patterns from `--exclude-file`,
- *   `--exclude`, and `--exclude-table`, if any.
+ * : Skip the curated default exclusion list (Pontifex's working dir,
+ *   wp-content/cache, and .git directories at any depth). Use only
+ *   patterns from `--exclude-file`, `--exclude`, and `--exclude-table`,
+ *   if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
