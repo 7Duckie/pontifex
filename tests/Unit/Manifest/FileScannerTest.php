@@ -515,6 +515,66 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
+	 * An excluded directory must never consume the entry that follows it.
+	 *
+	 * The regression this pins: pruning used to be attempted by calling next() on
+	 * the walker from inside the foreach, which — on top of foreach's own
+	 * end-of-iteration next() — advanced twice. The entry immediately after an
+	 * excluded directory was consumed without ever being tested against the rules
+	 * and was silently dropped from the archive. When the excluded directory was
+	 * EMPTY, that entry was a real sibling, so real site files vanished with no
+	 * error and no warning, and verify still passed because the archive was
+	 * internally consistent — merely incomplete. A real "git init" creates four
+	 * empty directories, so a default .git exclusion made this routine.
+	 *
+	 * The fixture creates twelve EMPTY excluded directories interleaved with
+	 * twelve wanted files, each pair made one after the other (empty directory,
+	 * then its wanted neighbour), so an excluded directory always precedes a
+	 * wanted entry in creation order. That positioning matters because readdir
+	 * order is not lexicographic — it is not guaranteed to follow creation
+	 * order either — so the only reliable way to put a wanted entry directly
+	 * after an excluded one is to interleave them at the point of creation
+	 * rather than create every excluded directory in a block of its own. The
+	 * assertion checks the COMPLETE expected entry set rather than spot-checking
+	 * individual paths, so it is independent of whatever order the walk actually
+	 * visits entries in, and it catches a swallowed directory entry (whose
+	 * children would still otherwise survive) as readily as a swallowed file.
+	 *
+	 * @return void
+	 */
+	public function test_an_excluded_empty_directory_does_not_swallow_the_next_entry(): void {
+		$base = 'wp-content/plugins/demo';
+
+		$expected = array(
+			'wp-content',
+			'wp-content/plugins',
+			$base,
+			$base . '/keep-dir',
+			$base . '/keep-dir/inner.php',
+		);
+
+		$patterns = array();
+		foreach ( array( 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l' ) as $n => $suffix ) {
+			// Create the excluded empty directory, then immediately its wanted
+			// neighbour, so the two are adjacent in creation order.
+			$this->make_dir( $base . '/empty-' . $suffix );
+			$patterns[] = $base . '/empty-' . $suffix . '/**';
+
+			$relative   = sprintf( '%s/file-%02d.php', $base, $n + 1 );
+			$expected[] = $relative;
+			$this->write_file( $relative, '<?php // a real site file' );
+		}
+		$this->write_file( $base . '/keep-dir/inner.php', '<?php // a real site file' );
+
+		$entries = ( new FileScanner( new ExclusionRules( $patterns ) ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		sort( $expected, SORT_STRING );
+
+		$this->assertSame( $expected, $paths, 'Every non-excluded entry must survive the scan, and no excluded one may appear.' );
+	}
+
+	/**
 	 * Scanned file entries must carry a non-empty media_type.
 	 *
 	 * The exact value depends on the host's finfo magic database, so
