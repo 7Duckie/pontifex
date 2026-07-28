@@ -185,7 +185,7 @@ final class ScheduledExporter {
 		$current = $this->wordpress_context->option_value( 'pontifex_export_stats', array() );
 		$current = is_array( $current ) ? $current : array();
 		$merged  = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed' ) as $key ) {
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
 			$merged[ $key ] = isset( $current[ $key ] ) && is_numeric( $current[ $key ] ) ? (int) $current[ $key ] : 0;
 		}
 		++$merged['attempted'];

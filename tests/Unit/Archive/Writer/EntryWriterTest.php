@@ -610,4 +610,178 @@ final class EntryWriterTest extends TestCase {
 		$this->assertFalse( $result->size_was_corrected() );
 		$this->assertSame( 5000, $parsed_header->byte_count(), 'A db_chunk byte_count must pass through untouched.' );
 	}
+
+	/**
+	 * A file entry whose draft header carries a null media_type must be sniffed at write time.
+	 *
+	 * The performance-fix round trip: a caller (ManifestBuilder) no longer sniffs
+	 * during the scan, so the draft header it builds has media_type = null.
+	 * EntryWriter must sniff a real, non-empty media type from the source's
+	 * underlying path before serialising the header, so the on-disk entry
+	 * still carries the true sniffed value — only the timing changed.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_sniffs_media_type_from_the_source_path_when_header_carries_null(): void {
+		if ( ! function_exists( 'finfo_open' ) ) {
+			$this->markTestSkipped( 'ext-fileinfo is unavailable; the write-time sniff correctly falls back to the generic media type on a host without it.' );
+		}
+
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-entrywriter-sniff-' );
+		if ( false === $path ) {
+			$this->fail( 'Could not create a temp file for the test.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Writing the test's own fixture file under sys_get_temp_dir; WP_Filesystem is not available in PHPUnit context.
+		file_put_contents( $path, '<?php echo "pontifex";' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the test fixture file as an EntryWriter source, matching how ManifestBuilder opens real files.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a file the test created.
+			unlink( $path );
+			$this->fail( 'Could not open the temp file for reading.' );
+		}
+		$dest = self::memory_stream();
+
+		try {
+			// The draft header carries no media_type, exactly as ManifestBuilder now
+			// builds it — media type is no longer known at scan/build time.
+			$draft_header = EntryHeader::for_file( 'script.php', filesize( $path ), 0644, 1690000000, null, 0 );
+			$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+			$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+			$this->assertIsString( $parsed_header->media_type(), 'The header actually serialised to disk must carry a real media_type.' );
+			$this->assertNotSame( '', $parsed_header->media_type() );
+			// A total path-recovery failure would also produce a non-empty string
+			// here — the generic fallback. Asserting against that fallback (rather
+			// than an exact libmagic-dependent type, which can vary across the
+			// PHP 8.2-8.5 CI images) is what actually distinguishes "sniffed the
+			// real source" from "recovery silently failed and fell back".
+			$this->assertNotSame( 'application/octet-stream', $parsed_header->media_type(), 'A real, readable PHP source file must sniff to something more specific than the generic fallback; the fallback here would mean path recovery failed.' );
+			$this->assertFalse( $result->media_type_was_unresolved(), 'A genuine sniff must not be counted as an unresolved failure.' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a file the test created.
+			unlink( $path );
+		}
+	}
+
+	/**
+	 * A file entry whose header already carries a media_type must not be re-sniffed.
+	 *
+	 * A caller-supplied media_type is authoritative and trusted as-is — this
+	 * is also what keeps every existing test in this file (and the
+	 * conformance golden archive) byte-identical, since none of them touch a
+	 * real file on disk.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_does_not_resniff_a_header_that_already_carries_a_media_type(): void {
+		$source = self::memory_stream( 'irrelevant payload bytes' );
+		$dest   = self::memory_stream();
+
+		$header = EntryHeader::for_file( 'a.txt', 24, 0644, 0, 'application/x-custom', 0 );
+		$result = self::make_writer()->write_entry( $header, 0, self::zero_nonce(), $source, $dest );
+
+		$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+		$this->assertSame( 'application/x-custom', $parsed_header->media_type() );
+		$this->assertFalse( $result->media_type_was_unresolved(), 'A trusted, caller-supplied media_type must never be sniffed, so it must never count as an unresolved failure.' );
+	}
+
+	/**
+	 * A php://temp source must fall back rather than be sniffed as if its uri were a real path.
+	 *
+	 * The php://temp wrapper reports a non-empty "uri" (the literal string
+	 * "php://temp"), so a guard that only checks the uri for emptiness would
+	 * hand that string straight to finfo_file(), which opens it as a
+	 * brand-new, unrelated stream and returns a media type describing
+	 * whatever php://temp happens to hold globally — not this entry's actual
+	 * payload. That would be a confidently wrong value, worse than the
+	 * fallback. is_file( 'php://temp' ) is false, so the guard must
+	 * recognise this uri does not resolve to a real file and fall back
+	 * instead.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_falls_back_for_a_non_plainfile_stream_source(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem has no equivalent abstraction.
+		$source = fopen( 'php://temp', 'r+b' );
+		if ( false === $source ) {
+			$this->fail( 'Could not open php://temp for the test.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a php://temp stream resource.
+		fwrite( $source, '<?php echo "not a real file on disk";' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a php://temp stream resource.
+		rewind( $source );
+
+		$dest = self::memory_stream();
+
+		$draft_header = EntryHeader::for_file( 'script.php', 38, 0644, 1690000000, null, 0 );
+		$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+		$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+		$this->assertSame(
+			'application/octet-stream',
+			$parsed_header->media_type(),
+			'A php://temp source must fall back to the generic media type, not be sniffed as if its uri were a real filesystem path.'
+		);
+		$this->assertTrue( $result->media_type_was_unresolved(), 'The fallback path must be counted as an unresolved failure, since it is indistinguishable on disk from a genuine octet-stream sniff.' );
+	}
+
+	/**
+	 * A file that genuinely sniffs as application/octet-stream must not be counted as unresolved.
+	 *
+	 * A real, unidentifiable file (exactly what a real .DS_Store, or any other
+	 * file libmagic cannot recognise, legitimately sniffs as) is byte-identical
+	 * at the media_type level to every one of sniff_media_type()'s four failure
+	 * paths — that ambiguity is the whole reason the resolved flag exists. This
+	 * test pins the flag's semantics the other way round from the two tests
+	 * above: a genuine sniff that happens to land on the generic value must
+	 * still report media_type_was_unresolved() as false.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_does_not_count_a_genuine_octet_stream_sniff_as_unresolved(): void {
+		if ( ! function_exists( 'finfo_open' ) ) {
+			$this->markTestSkipped( 'ext-fileinfo is unavailable; every sniff on this host takes the unresolved fallback path regardless of content, so this test cannot isolate a genuine octet-stream sniff.' );
+		}
+
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-entrywriter-unidentifiable-' );
+		if ( false === $path ) {
+			$this->fail( 'Could not create a temp file for the test.' );
+		}
+		// High-entropy bytes with no recognisable file signature — the kind of
+		// content libmagic itself falls back to describing as
+		// application/octet-stream, the same string every sniff FAILURE also
+		// falls back to.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Writing the test's own fixture file under sys_get_temp_dir; WP_Filesystem is not available in PHPUnit context.
+		file_put_contents( $path, random_bytes( 256 ) );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening the test fixture file as an EntryWriter source, matching how ManifestBuilder opens real files.
+		$source = fopen( $path, 'rb' );
+		if ( false === $source ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a file the test created.
+			unlink( $path );
+			$this->fail( 'Could not open the temp file for reading.' );
+		}
+		$dest = self::memory_stream();
+
+		try {
+			$draft_header = EntryHeader::for_file( 'blob.bin', filesize( $path ), 0644, 1690000000, null, 0 );
+			$result       = self::make_writer()->write_entry( $draft_header, 0, self::zero_nonce(), $source, $dest );
+
+			$parsed_header = EntryHeader::from_bytes( self::parse_entry_record( self::read_all( $dest ) )['header_bytes'] );
+
+			if ( 'application/octet-stream' !== $parsed_header->media_type() ) {
+				$this->markTestSkipped( 'The libmagic database on this host identified the random-byte fixture as something other than application/octet-stream; the negative case this test exists to pin did not occur.' );
+			}
+
+			$this->assertFalse( $result->media_type_was_unresolved(), 'A genuine sniff that lands on application/octet-stream must not be counted as an unresolved failure.' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a file the test created.
+			unlink( $path );
+		}
+	}
 }

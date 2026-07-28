@@ -35,6 +35,14 @@ use Pontifex\Archive\Integrity\Sha256;
  *                         the end of the entry on disk. The caller
  *                         puts this into the ManifestEntry's hash
  *                         field (hex-encoded).
+ *  - media_type_unresolved — true when a file entry's media_type had to be
+ *                         sniffed (EntryWriter::sniff_media_type()) and the
+ *                         sniff could not genuinely determine one, so the
+ *                         written header carries the generic fallback as a
+ *                         failure rather than a real identification. False
+ *                         both for a genuine sniff and for an entry that was
+ *                         never sniffed at all (a trusted, caller-supplied
+ *                         media_type, or a non-file entry).
  *
  * EntryWriter knows nothing about offsets or other entries; it just
  * writes one record and reports back. The caller composes these
@@ -86,16 +94,24 @@ final class EntryWriteResult {
 	private ?int $actual_size;
 
 	/**
+	 * Whether a file entry's media_type was sniffed and the sniff failed to resolve one.
+	 *
+	 * @var bool
+	 */
+	private bool $media_type_unresolved;
+
+	/**
 	 * Construct an EntryWriteResult with the reported values.
 	 *
-	 * @param int      $payload_length     Encoded payload byte count (non-negative).
-	 * @param int      $total_entry_length Total entry record byte count (non-negative).
-	 * @param string   $entry_hash         SHA-256 of the entry record (exactly Sha256::DIGEST_SIZE bytes).
-	 * @param int|null $declared_size      The size the header declared before the writer corrected it, or null when no correction happened.
-	 * @param int|null $actual_size        The byte count actually captured, or null when no correction happened. Must be null exactly when $declared_size is null.
+	 * @param int      $payload_length         Encoded payload byte count (non-negative).
+	 * @param int      $total_entry_length     Total entry record byte count (non-negative).
+	 * @param string   $entry_hash             SHA-256 of the entry record (exactly Sha256::DIGEST_SIZE bytes).
+	 * @param int|null $declared_size          The size the header declared before the writer corrected it, or null when no correction happened.
+	 * @param int|null $actual_size            The byte count actually captured, or null when no correction happened. Must be null exactly when $declared_size is null.
+	 * @param bool     $media_type_unresolved  Whether a sniffed media_type could not be genuinely determined; defaults to false (no sniff happened, or the sniff resolved one).
 	 * @throws InvalidArgumentException If any argument is out of range, the wrong length, or the two correction fields do not travel together.
 	 */
-	public function __construct( int $payload_length, int $total_entry_length, string $entry_hash, ?int $declared_size = null, ?int $actual_size = null ) {
+	public function __construct( int $payload_length, int $total_entry_length, string $entry_hash, ?int $declared_size = null, ?int $actual_size = null, bool $media_type_unresolved = false ) {
 		if ( $payload_length < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf( 'EntryWriteResult: payload_length %d must be non-negative.', (int) $payload_length )
@@ -123,11 +139,12 @@ final class EntryWriteResult {
 			throw new InvalidArgumentException( 'EntryWriteResult: declared_size and actual_size must be non-negative.' );
 		}
 
-		$this->payload_length     = $payload_length;
-		$this->total_entry_length = $total_entry_length;
-		$this->entry_hash         = $entry_hash;
-		$this->declared_size      = $declared_size;
-		$this->actual_size        = $actual_size;
+		$this->payload_length        = $payload_length;
+		$this->total_entry_length    = $total_entry_length;
+		$this->entry_hash            = $entry_hash;
+		$this->declared_size         = $declared_size;
+		$this->actual_size           = $actual_size;
+		$this->media_type_unresolved = $media_type_unresolved;
 	}
 
 	/**
@@ -186,5 +203,19 @@ final class EntryWriteResult {
 	 */
 	public function actual_size(): ?int {
 		return $this->actual_size;
+	}
+
+	/**
+	 * Whether a sniffed media_type could not be genuinely determined.
+	 *
+	 * False both when no sniff ran (a trusted header, or a non-file entry) and
+	 * when the sniff genuinely resolved a media type — including a genuine
+	 * resolution to the same generic value the fallback also uses. True only
+	 * when the sniff itself gave up.
+	 *
+	 * @return bool True when a sniff ran and failed to resolve a media type.
+	 */
+	public function media_type_was_unresolved(): bool {
+		return $this->media_type_unresolved;
 	}
 }

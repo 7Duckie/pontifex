@@ -296,19 +296,35 @@ final class ExclusionRulesTest extends TestCase {
 	}
 
 	/**
-	 * The default_v010 factory must hold only the two structural exclusions.
+	 * The default_v010 factory must include the .git-at-any-depth regex pattern.
 	 *
-	 * The curated defaults were trimmed (ADR 0008) to just Pontifex's own working
-	 * directory and WordPress's regenerable cache; anything else a site holds is
-	 * the owner's data and is kept by default.
+	 * Added in v0.9.3 (ADR 0008 amendment): version-control metadata is not site
+	 * content, so it is excluded like the other two structural defaults.
 	 *
 	 * @return void
 	 */
-	public function test_default_v010_holds_only_the_two_structural_exclusions(): void {
+	public function test_default_v010_includes_git_exclusion(): void {
+		$patterns = ExclusionRules::default_v010()->patterns();
+
+		$this->assertContains( '/(^|\/)\.git(\/|$)/', $patterns );
+	}
+
+	/**
+	 * The default_v010 factory must hold only the three structural exclusions.
+	 *
+	 * The curated defaults were trimmed (ADR 0008) to Pontifex's own working
+	 * directory and WordPress's regenerable cache, then grew a third entry
+	 * (ADR 0008 amendment, v0.9.3): version-control metadata (`.git`), which is
+	 * not site content either. Anything else a site holds is the owner's data
+	 * and is kept by default.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_holds_only_the_three_structural_exclusions(): void {
 		$patterns = ExclusionRules::default_v010()->patterns();
 
 		$this->assertSame(
-			array( 'wp-content/pontifex/**', 'wp-content/cache/**' ),
+			array( 'wp-content/pontifex/**', 'wp-content/cache/**', '/(^|\/)\.git(\/|$)/' ),
 			$patterns
 		);
 	}
@@ -357,6 +373,82 @@ final class ExclusionRulesTest extends TestCase {
 		$this->assertFalse( $rules->matches( 'wp-content/uploads/2026/05/image.jpg', EntryHeader::KIND_FILE ) );
 		$this->assertFalse( $rules->matches( 'wp-content/themes/twentytwentyfour/style.css', EntryHeader::KIND_FILE ) );
 		$this->assertFalse( $rules->matches( 'wp-content/plugins/akismet/akismet.php', EntryHeader::KIND_FILE ) );
+	}
+
+	/**
+	 * The default_v010 factory must exclude a `.git` directory at the scan root.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_excludes_git_at_the_scan_root(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertTrue( $rules->matches( '.git', EntryHeader::KIND_DIRECTORY ) );
+		$this->assertTrue( $rules->matches( '.git/config', EntryHeader::KIND_FILE ) );
+	}
+
+	/**
+	 * The default_v010 factory must exclude a `.git` directory one level deep.
+	 *
+	 * The depth a whole-site or content-only scan actually sees for a
+	 * git-deployed wp-content directory.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_excludes_git_one_level_deep(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertTrue( $rules->matches( 'wp-content/.git', EntryHeader::KIND_DIRECTORY ) );
+		$this->assertTrue( $rules->matches( 'wp-content/.git/HEAD', EntryHeader::KIND_FILE ) );
+	}
+
+	/**
+	 * The default_v010 factory must exclude a `.git` directory nested inside a plugin or theme.
+	 *
+	 * This is the case a "**\/.git/**" glob would silently miss (fnmatch() has
+	 * no globstar and FNM_PATHNAME stops "*" at "/"); only a regex matches at
+	 * every depth, which is why default_v010() uses one for this entry.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_excludes_git_nested_in_a_plugin(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertTrue( $rules->matches( 'wp-content/plugins/foo/.git', EntryHeader::KIND_DIRECTORY ) );
+		$this->assertTrue( $rules->matches( 'wp-content/plugins/foo/.git/objects/ab/cdef', EntryHeader::KIND_FILE ) );
+	}
+
+	/**
+	 * The default_v010 factory must exclude `.git` even when it is a FILE, not a directory.
+	 *
+	 * A git submodule or a worktree records ".git" as a one-line gitdir pointer
+	 * file, not a directory. {@see ExclusionRules::matches()} validates $kind but
+	 * never conditions the match on it, so the same pattern catches both shapes.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_excludes_git_when_it_is_a_file(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertTrue( $rules->matches( 'wp-content/plugins/foo/.git', EntryHeader::KIND_FILE ) );
+	}
+
+	/**
+	 * The default_v010 factory must NOT exclude paths that merely resemble `.git`.
+	 *
+	 * Defends against an over-eager pattern: a `.gitignore` file, a `.github`
+	 * directory, a coincidentally-named "mygit" upload folder, and a filename
+	 * that merely contains the substring "git." must all survive.
+	 *
+	 * @return void
+	 */
+	public function test_default_v010_does_not_exclude_git_lookalikes(): void {
+		$rules = ExclusionRules::default_v010();
+
+		$this->assertFalse( $rules->matches( '.gitignore', EntryHeader::KIND_FILE ) );
+		$this->assertFalse( $rules->matches( '.github/workflows/ci.yml', EntryHeader::KIND_FILE ) );
+		$this->assertFalse( $rules->matches( 'wp-content/uploads/mygit/x.txt', EntryHeader::KIND_FILE ) );
+		$this->assertFalse( $rules->matches( 'notes.git.txt', EntryHeader::KIND_FILE ) );
 	}
 
 	/**

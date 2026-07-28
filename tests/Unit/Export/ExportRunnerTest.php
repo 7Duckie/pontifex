@@ -241,6 +241,44 @@ final class ExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A file entry whose media_type could not be sniffed rides the result as an
+	 * unresolved-media_type count.
+	 *
+	 * The header carries no media_type, so EntryWriter sniffs one at write
+	 * time; the plan's source is a php://memory stream, whose reported uri
+	 * never resolves to a real filesystem path, so the sniff always falls
+	 * back and the entry counts as unresolved.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_an_unresolved_media_type_count(): void {
+		$header = EntryHeader::for_file( 'wp-content/mystery.bin', 5, 0o644, 1690000000, null, 0 );
+		$plans  = array(
+			$this->file_plan( 'index.php', "<?php\n" ),
+			new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( 'alpha' ) ),
+		);
+
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( 1, $result->media_type_unresolved_count(), 'The one entry with no genuinely sniffable media_type must be counted.' );
+	}
+
+	/**
+	 * An export where every entry's media_type is already known reports zero unresolved.
+	 *
+	 * @return void
+	 */
+	public function test_export_reports_zero_unresolved_media_type_when_all_are_known(): void {
+		$plans  = array( $this->file_plan( 'index.php', "<?php\n// fixture\n" ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( 0, $result->media_type_unresolved_count() );
+	}
+
+	/**
 	 * An export carrying a scope records the scope and the source table prefix.
 	 *
 	 * The scope-aware path (the CLI export and the admin Backup screen): when the

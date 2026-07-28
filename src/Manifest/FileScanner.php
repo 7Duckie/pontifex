@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Manifest;
 
 use InvalidArgumentException;
+use RecursiveCallbackFilterIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use RuntimeException;
@@ -23,7 +24,13 @@ use Pontifex\Archive\Format\EntryHeader;
  * Returns a list of {@see ScannedEntry} value objects, one per file,
  * directory, or symlink found, after applying {@see ExclusionRules}.
  * Does NOT read file contents; only stats them. Reading happens later
- * at archive-write time inside ArchiveWriter / EntryWriter.
+ * at archive-write time inside ArchiveWriter / EntryWriter — and so
+ * does determining a file entry's media type: every file entry this
+ * scanner produces carries a null media_type, sniffed only later by
+ * EntryWriter for the entries actually written. Sniffing costs opening
+ * and reading the head of every file, so doing it here would pay that
+ * cost on every scan of a resumable export's every tick, including the
+ * final tick that writes no entries at all.
  *
  * The scanner is deterministic: two scans of the same tree return
  * identical ScannedEntry lists in the same order. Sort order is
@@ -39,9 +46,17 @@ use Pontifex\Archive\Format\EntryHeader;
  *
  * Excluded directories are not recursed into. If ExclusionRules
  * matches a directory's relative path, the directory itself is
- * omitted from the output AND the scanner does not enter it. This is
- * a performance optimisation for common cases like wp-content/cache,
- * where the directory and its contents would all be excluded anyway.
+ * omitted from the output AND the scanner does not enter it. The
+ * decision is taken by a RecursiveCallbackFilterIterator wrapped
+ * around the directory iterator, so PHP never opens a pruned
+ * directory at all. That is both a performance optimisation for
+ * common cases like wp-content/cache — where the directory and its
+ * contents would all be excluded anyway — and a correctness
+ * guarantee: an unreadable object inside an excluded tree cannot
+ * abort the scan, because nothing inside an excluded tree is ever
+ * looked at. This matches the established behaviour of general
+ * archive and synchronisation tools, whose exclude patterns
+ * short-circuit directory traversal rather than filtering afterwards.
  *
  * Unreadable paths cause a RuntimeException. Silent skipping would
  * produce an incomplete archive without the user knowing. The
@@ -50,9 +65,11 @@ use Pontifex\Archive\Format\EntryHeader;
  *
  * Implementation notes (internal; not part of the stable API):
  *
- *  - Uses PHP's RecursiveDirectoryIterator + RecursiveIteratorIterator.
- *    These are part of PHP since 5.x, mature, and handle the edge
- *    cases (long paths, special filenames, UTF-8) reliably.
+ *  - Uses PHP's RecursiveDirectoryIterator + RecursiveIteratorIterator,
+ *    with a RecursiveCallbackFilterIterator sitting between the two to
+ *    prune excluded directories before they are ever opened. All three
+ *    are part of PHP since 5.x, mature, and handle the edge cases (long
+ *    paths, special filenames, UTF-8) reliably.
  *  - WP_Filesystem is intentionally NOT used. It's designed for
  *    plugin/theme writes during WordPress core operations and has
  *    poor read/walk support, no symlink awareness, and is awkward
@@ -136,15 +153,57 @@ final class FileScanner {
 		// Normalise root: strip trailing slashes so the slice arithmetic below is consistent.
 		$normalised_root = rtrim( $root, '/\\' );
 		$root_prefix_len = strlen( $normalised_root ) + 1;
+		$path_prefix     = $this->path_prefix;
+		$exclusions      = $this->exclusions;
 
 		$entries = array();
 
 		$flags = RecursiveDirectoryIterator::SKIP_DOTS | RecursiveDirectoryIterator::UNIX_PATHS;
 		$inner = new RecursiveDirectoryIterator( $normalised_root, $flags );
 
-		// SELF_FIRST: visit a directory BEFORE its children.
-		// This lets us record the directory entry and then prune the iterator if it is excluded.
-		$walker = new RecursiveIteratorIterator( $inner, RecursiveIteratorIterator::SELF_FIRST );
+		// Pruning happens HERE, inside the recursive walk, not in the loop below.
+		// A callback that returns false for a directory means PHP never opens that
+		// directory at all, so an excluded subtree is genuinely never entered. The
+		// callback is carried into every child iterator by the engine, so the rules
+		// apply at every depth without this class having to re-inject anything.
+		//
+		// It must be the RECURSIVE filter, wrapped around the directory iterator and
+		// sitting INSIDE the RecursiveIteratorIterator. A plain CallbackFilterIterator
+		// around the flattened walker would omit the same entries but would still open
+		// and stat every excluded directory's contents.
+		//
+		// The declared ": bool" return type is load-bearing: the callback's result is
+		// evaluated by truthiness, so a future edit that fell off the end of this
+		// closure without returning would exclude EVERYTHING and produce an empty
+		// archive that still verified as internally consistent. With the return type
+		// declared, the same mistake raises a TypeError immediately.
+		$filtered = new RecursiveCallbackFilterIterator(
+			$inner,
+			static function ( SplFileInfo $current ) use ( $root_prefix_len, $path_prefix, $exclusions ): bool {
+				$absolute_path = $current->getPathname();
+				$relative_path = self::relative_path_for( $absolute_path, $root_prefix_len, $path_prefix );
+
+				// Structural recursion-prevention invariant: Pontifex's own working directory.
+				// Enforced here, independently of ExclusionRules, so it still holds when the
+				// caller passes ExclusionRules::none(). Prevents an existing Pontifex export
+				// from being recursively re-included in a new archive, which would produce an
+				// archive-of-archives.
+				if ( self::is_pontifex_working_path( $relative_path ) ) {
+					return false;
+				}
+
+				return ! $exclusions->matches( $relative_path, self::classify( $current, $absolute_path ) );
+			}
+		);
+
+		// SELF_FIRST: visit a directory BEFORE its children, so a directory's own entry
+		// is recorded ahead of everything it contains. Pruning is the filter's job, not
+		// this iterator's — never advance this walker by hand.
+		//
+		// The flags deliberately do NOT include CATCH_GET_CHILD: that would turn every
+		// unreadable directory into a silent skip, i.e. a silent hole in a stranger's
+		// backup, which is exactly what this class promises never to do.
+		$walker = new RecursiveIteratorIterator( $filtered, RecursiveIteratorIterator::SELF_FIRST );
 
 		// RecursiveDirectoryIterator throws UnexpectedValueException when it cannot
 		// open a sub-directory mid-walk (e.g. an unreadable directory). Translate it
@@ -155,41 +214,14 @@ final class FileScanner {
 		try {
 			foreach ( $walker as $info ) {
 				$absolute_path = $info->getPathname();
-				$relative_path = substr( $absolute_path, $root_prefix_len );
+				$relative_path = self::relative_path_for( $absolute_path, $root_prefix_len, $path_prefix );
 
-				// Normalise relative path to forward slashes regardless of host OS.
-				$relative_path = str_replace( '\\', '/', $relative_path );
-
-				// Re-root the path under the configured prefix (e.g. "wp-content") so a
-				// content-only scan rooted at WP_CONTENT_DIR still records
-				// WordPress-root-relative paths. Done before the recursion guard and the
-				// exclusion checks below, so those — which are keyed on "wp-content/..." —
-				// match identically whether this is a content-only or a whole-site scan.
-				if ( '' !== $this->path_prefix ) {
-					$relative_path = $this->path_prefix . '/' . $relative_path;
-				}
-
-				$kind = self::classify( $info, $absolute_path );
-
-				// Structural recursion-prevention invariant: Pontifex's own working directory.
-				// Always excluded regardless of the ExclusionRules configuration.
-				// Prevents an existing Pontifex export from being recursively re-included in a new archive, which would produce an archive-of-archives.
-				if ( self::is_pontifex_working_path( $relative_path ) ) {
-					if ( EntryHeader::KIND_DIRECTORY === $kind ) {
-						$walker->next();
-					}
-					continue;
-				}
-
-				if ( $this->exclusions->matches( $relative_path, $kind ) ) {
-					// If the excluded entry is a directory, do not descend into it.
-					if ( EntryHeader::KIND_DIRECTORY === $kind ) {
-						$walker->next();
-					}
-					continue;
-				}
-
-				$entries[] = self::build_scanned_entry( $kind, $relative_path, $absolute_path, $info );
+				$entries[] = self::build_scanned_entry(
+					self::classify( $info, $absolute_path ),
+					$relative_path,
+					$absolute_path,
+					$info
+				);
 
 				if ( null !== $on_progress ) {
 					$on_progress( count( $entries ) );
@@ -208,6 +240,36 @@ final class FileScanner {
 		);
 
 		return $entries;
+	}
+
+	/**
+	 * Re-root an absolute path onto the form the scan emits.
+	 *
+	 * Slices the scan root off the front, normalises directory separators to
+	 * forward slashes regardless of host OS, then prepends the configured path
+	 * prefix. The order matters and must not be rearranged: the prefix is applied
+	 * last, so the recursion guard and the exclusion patterns — both keyed on
+	 * "wp-content/..." — match identically whether this is a content-only scan
+	 * rooted at WP_CONTENT_DIR or a whole-site scan rooted at the WordPress root.
+	 *
+	 * Never returns an empty string for anything the walk yields:
+	 * RecursiveDirectoryIterator emits only the root's contents, never the root
+	 * itself, so the slice always leaves at least a filename. ExclusionRules
+	 * rejects an empty path, and this is the invariant that keeps it unreachable.
+	 *
+	 * @param string $absolute_path   Absolute path as reported by the iterator.
+	 * @param int    $root_prefix_len Byte length of the normalised scan root plus its separator.
+	 * @param string $path_prefix     Configured prefix, already right-trimmed of slashes; '' for none.
+	 * @return string The scan-emitted relative path for this item.
+	 */
+	private static function relative_path_for( string $absolute_path, int $root_prefix_len, string $path_prefix ): string {
+		$relative_path = str_replace( '\\', '/', substr( $absolute_path, $root_prefix_len ) );
+
+		if ( '' === $path_prefix ) {
+			return $relative_path;
+		}
+
+		return $path_prefix . '/' . $relative_path;
 	}
 
 	/**
@@ -277,6 +339,11 @@ final class FileScanner {
 	 * Throws RuntimeException if the item is not readable, since a
 	 * silently-skipped file would produce an incomplete archive.
 	 *
+	 * File entries carry a null media_type: it is determined later, at
+	 * write time, by EntryWriter — not here — because sniffing it costs
+	 * opening and reading the head of the file, and only the entries a
+	 * given tick actually writes need that cost paid.
+	 *
 	 * @param string      $kind          The classified entry kind.
 	 * @param string      $relative_path The scan-root-relative path.
 	 * @param string      $absolute_path The host-absolute path.
@@ -327,45 +394,10 @@ final class FileScanner {
 		$mode  = (int) ( $info->getPerms() & 07777 );
 		$mtime = (int) $info->getMTime();
 
-		// Files carry a media_type sniffed at scan time; directories do not.
-		$media_type = EntryHeader::KIND_FILE === $kind ? self::sniff_media_type( $absolute_path ) : null;
-
-		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null, $media_type );
-	}
-
-	/**
-	 * Sniff the MIME type of a file via finfo.
-	 *
-	 * Uses PHP's fileinfo extension. On detection failure (file is
-	 * empty, finfo cannot identify the bytes, finfo extension is
-	 * unavailable, or any other reason), returns the RFC 2046 safe
-	 * fallback 'application/octet-stream' — which signals "treat as
-	 * raw bytes" at restore time and never triggers special handling.
-	 *
-	 * @param string $absolute_path Absolute path to a regular file.
-	 * @return string A non-empty MIME-type string.
-	 */
-	private static function sniff_media_type( string $absolute_path ): string {
-		$fallback = 'application/octet-stream';
-
-		if ( ! function_exists( 'finfo_open' ) ) {
-			return $fallback;
-		}
-
-		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_open emits a warning when the magic database is unavailable; the warning is informational and we already handle the false return.
-		$handle = @finfo_open( FILEINFO_MIME_TYPE );
-		if ( false === $handle ) {
-			return $fallback;
-		}
-
-		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_file emits a warning on unreadable files; the warning is informational and we already handle the false return.
-		$detected = @finfo_file( $handle, $absolute_path );
-		// finfo_close() was deprecated in PHP 8.4; $handle is cleaned up by garbage collection when it goes out of scope at the end of this method.
-
-		if ( false === $detected || '' === $detected ) {
-			return $fallback;
-		}
-
-		return $detected;
+		// media_type is always null out of the scanner, for every kind. File
+		// entries have it filled in later, at write time, by EntryWriter (see
+		// this class's docblock for why); directory and symlink entries never
+		// carry one at all.
+		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null, null );
 	}
 }

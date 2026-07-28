@@ -351,17 +351,18 @@ final class ScheduleTest extends TestCase {
 		$job       = $job_store->create(
 			Job::KIND_EXPORT,
 			array(
-				'output'        => $this->content_dir . '/done.wpmig',
-				'temp'          => $this->content_dir . '/done.part',
-				'scan_root'     => $this->content_dir,
-				'path_prefix'   => 'wp-content',
-				'exclusions'    => array(),
-				'signed'        => false,
-				'reason'        => null,
-				'scope'         => null,
-				'phase'         => 'files',
-				'bytes_written' => 0,
-				'files_changed' => 0,
+				'output'                => $this->content_dir . '/done.wpmig',
+				'temp'                  => $this->content_dir . '/done.part',
+				'scan_root'             => $this->content_dir,
+				'path_prefix'           => 'wp-content',
+				'exclusions'            => array(),
+				'signed'                => false,
+				'reason'                => null,
+				'scope'                 => null,
+				'phase'                 => 'files',
+				'bytes_written'         => 0,
+				'files_changed'         => 0,
+				'media_type_unresolved' => 0,
 			),
 			1700000000
 		);
@@ -420,6 +421,111 @@ final class ScheduleTest extends TestCase {
 
 		$this->assertFileExists( $this->content_dir . '/done.wpmig', 'The completed archive must be renamed into place.' );
 		$this->assertNull( $job_store->get( $job->id() ), 'A finished job is deleted by finalise().' );
+	}
+
+	/**
+	 * The finalise() step must persist the completed job's media_type_unresolved
+	 * tally onto the saved counters, not drop it to zero.
+	 *
+	 * The regression test for the finding that a cron-driven (or a browser
+	 * request the cron tick completed on the app's behalf) export silently
+	 * threw the tally away: the resumable runner correctly accumulates the
+	 * count onto the job payload and it survives every tick, but finalise()
+	 * used to build its bump_counters() delta from bytes_written and
+	 * files_changed alone, so the run's real finding never reached the saved
+	 * option. Confirmed to fail against the unfixed finalise() (delta carried
+	 * no media_type_unresolved key, so the saved total stayed 0).
+	 *
+	 * @return void
+	 */
+	public function test_ticker_finalise_persists_the_media_type_unresolved_tally(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $job_store->create(
+			Job::KIND_EXPORT,
+			array(
+				'output'                => $this->content_dir . '/done.wpmig',
+				'temp'                  => $this->content_dir . '/done.part',
+				'scan_root'             => $this->content_dir,
+				'path_prefix'           => 'wp-content',
+				'exclusions'            => array(),
+				'signed'                => false,
+				'reason'                => null,
+				'scope'                 => null,
+				'phase'                 => 'files',
+				'bytes_written'         => 0,
+				'files_changed'         => 0,
+				'media_type_unresolved' => 7,
+			),
+			1700000000
+		);
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_VERSION' )->andReturn( false );
+		$environment->shouldReceive( 'php_version' )->andReturn( '8.3.0' );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once();
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+
+		// TransferHistory::record() also calls save_option(), under its own
+		// option key, so this stub must tolerate both calls and capture only
+		// the counters write.
+		$saved = null;
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $key, $value ) use ( &$saved ): void {
+				if ( 'pontifex_export_stats' === $key ) {
+					$saved = $value;
+				}
+			}
+		);
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\expect( 'wp_schedule_single_event' )->once()->with( Mockery::type( 'int' ), JobTicker::CRON_HOOK );
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( JobTicker::CRON_HOOK );
+		// No lock holder transient to clear: finalise()'s release_holder_if_backup() reads one.
+		Functions\when( 'get_transient' )->justReturn( false );
+
+		$ticker = new JobTicker(
+			$environment,
+			$context,
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			new NullLogger(),
+			static function (): ManifestBuilderInterface {
+				$builder = Mockery::mock( ManifestBuilderInterface::class );
+				$builder->shouldReceive( 'build' )->andReturnUsing(
+					static function (): ManifestStream {
+						$contents = 'alpha';
+						$plan     = new EntryPlan(
+							EntryHeader::for_file( 'wp-content/a.txt', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 ),
+							0,
+							str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+							static function () use ( $contents ) {
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+								$stream = fopen( 'php://memory', 'r+b' );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+								fwrite( $stream, $contents );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+								rewind( $stream );
+								return $stream;
+							}
+						);
+						return ManifestStream::from_plans( array( $plan ) );
+					}
+				);
+				return $builder;
+			}
+		);
+
+		$ticker->run();
+
+		$this->assertIsArray( $saved, 'bump_counters() must save the merged option.' );
+		$this->assertSame( 7, $saved['media_type_unresolved'] ?? null, 'The media_type_unresolved tally the run computed must survive finalise(), not be dropped to zero.' );
 	}
 
 	/**

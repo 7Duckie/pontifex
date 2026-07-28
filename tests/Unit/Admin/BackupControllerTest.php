@@ -128,6 +128,102 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A pre-existing files_changed / media_type_unresolved total survives an
+	 * admin backup's bump, and this run's own contribution is added onto it.
+	 *
+	 * The regression test for the finding that create()'s success path never
+	 * read either counter off the finished job payload, so an admin backup's
+	 * bump_counters() delta carried neither key: the accumulated CLI total
+	 * for both counters was frozen at whatever the last CLI export had left
+	 * it (never moved by an admin backup), and this run's own findings
+	 * (a file that changed mid-scan, an entry whose media_type could not be
+	 * sniffed) were silently thrown away rather than counted.
+	 *
+	 * Built directly against a hand-wired WordPressContext mock rather than
+	 * the shared {@see self::wordpress_context_mock()} helper, so
+	 * option_value()/save_option() can be asserted precisely without
+	 * fighting the shared mock's catch-all stub.
+	 *
+	 * @return void
+	 */
+	public function test_create_bump_counters_preserves_a_pre_existing_total_and_adds_this_runs_own(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$stored = array(
+			'attempted'             => 3,
+			'succeeded'             => 2,
+			'failed'                => 1,
+			'bytes_exported'        => 500,
+			'files_changed'         => 4,
+			'media_type_unresolved' => 9,
+		);
+
+		$environment = $this->environment_mock();
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'format_size' )->andReturnUsing(
+			static function ( int $bytes ): string {
+				return $bytes . ' B';
+			}
+		);
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
+		// TransferHistory::record() also reads/writes its own option key, so
+		// these need a tolerant catch-all before the counters' own exact
+		// expectation. A stable pre-existing total: every read sees the same
+		// stored figures, so the LAST save_option() call (the succeeded bump)
+		// is the one whose merged result proves both the survival and the
+		// addition.
+		$context->shouldReceive( 'option_value' )->with( 'pontifex_export_stats', Mockery::any() )->andReturn( $stored );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+
+		$saved = array();
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $key, $value ) use ( &$saved ): void {
+				if ( 'pontifex_export_stats' === $key ) {
+					$saved = $value;
+				}
+			}
+		);
+
+		// One ordinary entry, one that changed size between scan and write, and
+		// one whose media_type is left null over a php://memory source (never
+		// genuinely sniffable) — so this run itself tallies files_changed = 1
+		// and media_type_unresolved = 1.
+		$changed_header = EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 );
+		$changed_plan   = new EntryPlan( $changed_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( str_repeat( 'B', 400 ) ) );
+
+		$unresolved_header = EntryHeader::for_file( 'wp-content/mystery.bin', 5, 0o644, 1690000000, null, 0 );
+		$unresolved_plan   = new EntryPlan( $unresolved_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( 'alpha' ) );
+
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			$changed_plan,
+			$unresolved_plan,
+		);
+
+		$controller = new BackupController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger(),
+			$this->manifest_builder_returning( $plans )
+		);
+		$controller->create();
+
+		$this->assertTrue( $this->json['success'], 'The backup must still complete despite the changed file and the unsniffable entry.' );
+		$this->assertSame( 5, $saved['files_changed'] ?? null, 'The stored CLI total (4) must survive, plus this run\'s own one changed file.' );
+		$this->assertSame( 10, $saved['media_type_unresolved'] ?? null, 'The stored CLI total (9) must survive, plus this run\'s own one unresolved media_type.' );
+	}
+
+	/**
 	 * An admin backup records a content-only scope and the source table prefix.
 	 *
 	 * The admin Backup screen is always content-only (ADR 0008): a whole-site clone
@@ -221,6 +317,86 @@ final class BackupControllerTest extends TestCase {
 			$max_done = max( $max_done, (int) $write['bytes_done'] );
 		}
 		$this->assertGreaterThan( 0, $max_done, 'The byte callback must report bytes copied during the export.' );
+	}
+
+	/**
+	 * Once every file entry is read, the run reports a finalising phase — and
+	 * nothing reported afterwards can move it backwards.
+	 *
+	 * The database chunk after the file entry crosses the tick loop's
+	 * file/database boundary, which the controller observes on the job payload
+	 * and reports before the tick that reads the database chunk and writes the
+	 * manifest and footer runs. That tick re-walks the whole scan tree, as
+	 * every tick does (ADR 0015), so its own scan callback fires again after
+	 * finalising was already reported, and it still tallies bytes for the
+	 * database chunk it appends. The fake builder below fires its scan
+	 * callback on every build() call, exactly as the real scanner does through
+	 * ScanProgressManifestBuilder — the canned stub the other tests use never
+	 * invokes the callback at all, so it cannot exercise this — which is what
+	 * proves write_progress()'s phase-rank guard holds no matter which
+	 * callback fires, not merely that one particular call site happens to be
+	 * silent.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_a_finalising_phase_that_nothing_can_move_backwards(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$writes = array();
+		Functions\when( 'set_transient' )->alias(
+			static function ( string $key, $value ) use ( &$writes ): bool {
+				if ( 'pontifex_backup_progress' === $key ) {
+					$writes[] = $value;
+				}
+				return true;
+			}
+		);
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$plans = array(
+			$this->file_plan( 'a.txt', "alpha alpha alpha\n" ),
+			$this->db_plan( 0, 'wp_posts', "INSERT INTO wp_posts VALUES (1, 'hi');\n" ),
+		);
+
+		// Every tick's own scan (ADR 0015) reports scan progress on this
+		// builder, including the tick that runs after finalising has already
+		// been reported — the real regression this test exists to catch.
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->andReturnUsing(
+			static function ( string $root, ?callable $on_scan_progress = null ) use ( $plans ) {
+				if ( null !== $on_scan_progress ) {
+					$on_scan_progress( 2 );
+				}
+				return ManifestStream::from_plans( $plans );
+			}
+		);
+
+		$this->controller( $builder )->create();
+
+		$this->assertTrue( $this->json['success'], 'A backup with a database chunk should still succeed.' );
+
+		$phases = array_values(
+			array_filter(
+				array_map(
+					static function ( $write ) {
+						return ( is_array( $write ) && isset( $write['phase'] ) ) ? $write['phase'] : null;
+					},
+					$writes
+				)
+			)
+		);
+
+		$finalising_at = array_search( 'finalising', $phases, true );
+		$this->assertNotFalse( $finalising_at, 'The finalising phase must be reported once every file entry is done.' );
+
+		$after = array_slice( $phases, $finalising_at + 1 );
+		$this->assertSame(
+			array(),
+			$after,
+			'Nothing may be reported after finalising: the database tick\'s own re-scan and its byte tally must not move the phase back to scanning or copying.'
+		);
 	}
 
 	/**
@@ -829,6 +1005,46 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A dead request's job cursors re-attach as finalising once past the database boundary.
+	 *
+	 * Once the job's own phase cursor reads "database" the run has moved past the
+	 * byte-copy work into the uninterruptible database-and-footer pass; a page
+	 * that re-attaches after the writing request died must not fall back to
+	 * serving the job's last byte-copy cursors as though copying were still
+	 * under way — that is the same frozen-at-100% lie this phase exists to fix.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_finalising_for_a_dead_request_past_the_database_boundary(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 941568495,
+				'bytes_total' => 941568495,
+				'at'          => time() - 60,
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$jobs->create(
+			\Pontifex\Job\Job::KIND_EXPORT,
+			array(
+				'phase'             => 'database',
+				'source_bytes_done' => 941568495,
+				'total_bytes'       => 941568495,
+			),
+			time() - 120
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'finalising', $this->json['data']['phase'], 'A re-attach past the database boundary must report finalising, not a copying phase frozen at its last byte count.' );
+	}
+
+	/**
 	 * A freshly-refreshed transient is served as-is, with the start time attached.
 	 *
 	 * @return void
@@ -1259,6 +1475,19 @@ final class BackupControllerTest extends TestCase {
 	private function file_plan( string $path, string $contents ): EntryPlan {
 		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
 		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build a database-chunk EntryPlan with the given table and SQL statement.
+	 *
+	 * @param int    $chunk_index Zero-based chunk sequence index.
+	 * @param string $table_name  The table the chunk belongs to.
+	 * @param string $sql         The chunk's SQL statement text.
+	 * @return EntryPlan
+	 */
+	private function db_plan( int $chunk_index, string $table_name, string $sql ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( $chunk_index, $table_name, 1, strlen( $sql ), 0 );
+		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $sql ) );
 	}
 
 	/**

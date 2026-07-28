@@ -108,9 +108,10 @@ use Pontifex\WordPress\WordPressContext;
  *   destination can rebuild.
  *
  * [--no-defaults]
- * : Skip the curated default exclusion list (Pontifex's working dir
- *   and wp-content/cache). Use only patterns from `--exclude-file`,
- *   `--exclude`, and `--exclude-table`, if any.
+ * : Skip the curated default exclusion list (Pontifex's working dir,
+ *   wp-content/cache, and .git directories at any depth). Use only
+ *   patterns from `--exclude-file`, `--exclude`, and `--exclude-table`,
+ *   if any.
  *
  * [--yes]
  * : Skip the confirmation prompt and proceed immediately.
@@ -544,24 +545,27 @@ final class ExportCommand {
 				$this->progress->finish();
 
 				$this->print_changed_file_warnings( $result );
+				$this->print_media_type_warning( $result->media_type_unresolved_count() );
 
 				$bytes_written = $result->bytes_written();
 
 				$this->logger->info(
 					'Export complete.',
 					array(
-						'output'        => $output_path,
-						'entries'       => $result->entry_count(),
-						'bytes'         => $bytes_written,
-						'files_changed' => count( $result->changed_files() ),
+						'output'                => $output_path,
+						'entries'               => $result->entry_count(),
+						'bytes'                 => $bytes_written,
+						'files_changed'         => count( $result->changed_files() ),
+						'media_type_unresolved' => $result->media_type_unresolved_count(),
 					)
 				);
 
 				$this->bump_counters(
 					array(
-						'succeeded'      => 1,
-						'bytes_exported' => $bytes_written,
-						'files_changed'  => count( $result->changed_files() ),
+						'succeeded'             => 1,
+						'bytes_exported'        => $bytes_written,
+						'files_changed'         => count( $result->changed_files() ),
+						'media_type_unresolved' => $result->media_type_unresolved_count(),
 					)
 				);
 				TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
@@ -695,11 +699,12 @@ final class ExportCommand {
 			}
 			$this->progress->finish();
 
-			$finished      = $store->get( $job->id() );
-			$payload       = null !== $finished ? $finished->payload() : $job->payload();
-			$bytes_written = (int) ( $payload['bytes_written'] ?? 0 );
-			$files_changed = (int) ( $payload['files_changed'] ?? 0 );
-			$entry_count   = count( $store->progress_log( $job->id() )->read_all() );
+			$finished              = $store->get( $job->id() );
+			$payload               = null !== $finished ? $finished->payload() : $job->payload();
+			$bytes_written         = (int) ( $payload['bytes_written'] ?? 0 );
+			$files_changed         = (int) ( $payload['files_changed'] ?? 0 );
+			$media_type_unresolved = (int) ( $payload['media_type_unresolved'] ?? 0 );
+			$entry_count           = count( $store->progress_log( $job->id() )->read_all() );
 
 			// The job served its purpose; remove the record and its sidecar so the
 			// single-active slot and the jobs directory stay clean.
@@ -708,18 +713,20 @@ final class ExportCommand {
 			$this->logger->info(
 				'Export complete.',
 				array(
-					'output'        => $output_path,
-					'entries'       => $entry_count,
-					'bytes'         => $bytes_written,
-					'files_changed' => $files_changed,
-					'resumable'     => true,
+					'output'                => $output_path,
+					'entries'               => $entry_count,
+					'bytes'                 => $bytes_written,
+					'files_changed'         => $files_changed,
+					'media_type_unresolved' => $media_type_unresolved,
+					'resumable'             => true,
 				)
 			);
 			$this->bump_counters(
 				array(
-					'succeeded'      => 1,
-					'bytes_exported' => $bytes_written,
-					'files_changed'  => $files_changed,
+					'succeeded'             => 1,
+					'bytes_exported'        => $bytes_written,
+					'files_changed'         => $files_changed,
+					'media_type_unresolved' => $media_type_unresolved,
 				)
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
@@ -738,6 +745,7 @@ final class ExportCommand {
 					)
 				);
 			}
+			$this->print_media_type_warning( $media_type_unresolved );
 			$this->print_summary( $output_path, $entry_count, $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -1118,11 +1126,12 @@ final class ExportCommand {
 		$current = $this->wordpress_context->option_value(
 			self::STATS_OPTION,
 			array(
-				'attempted'      => 0,
-				'succeeded'      => 0,
-				'failed'         => 0,
-				'bytes_exported' => 0,
-				'files_changed'  => 0,
+				'attempted'             => 0,
+				'succeeded'             => 0,
+				'failed'                => 0,
+				'bytes_exported'        => 0,
+				'files_changed'         => 0,
+				'media_type_unresolved' => 0,
 			)
 		);
 
@@ -1131,11 +1140,11 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Combine the stored counters with a delta into a clean five-key set.
+	 * Combine the stored counters with a delta into a clean six-key set.
 	 *
 	 * Pure function. Tolerant of a missing, partial, or corrupt stored
 	 * value: every counter coerces through counter_int, so a garbage
-	 * option can never throw. Only the four known keys are returned.
+	 * option can never throw. Only the six known keys are returned.
 	 *
 	 * @param array<array-key, mixed> $current The counters as currently stored.
 	 * @param array<array-key, mixed> $delta   The amounts to add per key.
@@ -1143,7 +1152,7 @@ final class ExportCommand {
 	 */
 	private static function merge_counters( array $current, array $delta ): array {
 		$merged = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed' ) as $key ) {
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
 			$merged[ $key ] = self::counter_int( $current, $key ) + self::counter_int( $delta, $key );
 		}
 		return $merged;
@@ -1253,6 +1262,41 @@ final class ExportCommand {
 					'pontifex'
 				),
 				count( $changed_files )
+			)
+		);
+	}
+
+	/**
+	 * Warn when file entries' media type could not be genuinely determined.
+	 *
+	 * Sniffing failure (the fileinfo extension missing, an unreadable source, or
+	 * finfo itself failing) records the same generic fallback media_type a
+	 * genuinely unidentifiable file (a real .DS_Store, say) also legitimately
+	 * sniffs as — the two are otherwise indistinguishable after the fact. The
+	 * archive itself is entirely unaffected: every such entry still restores
+	 * its exact content, and the media type is metadata only. This warning
+	 * exists so a systemic failure — the whole host missing fileinfo, for
+	 * instance — is visible rather than silently reading as an ordinary run
+	 * of unremarkable, unrecognised files.
+	 *
+	 * @param int $unresolved_count Number of file entries whose media type could not be determined.
+	 * @return void
+	 */
+	private function print_media_type_warning( int $unresolved_count ): void {
+		if ( 0 === $unresolved_count ) {
+			return;
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of files whose media type could not be determined */
+				_n(
+					"%d file's media type could not be determined and was recorded as unknown. The archive is unaffected and restores normally.",
+					"%d files' media types could not be determined and were recorded as unknown. The archive is unaffected and restores normally.",
+					$unresolved_count,
+					'pontifex'
+				),
+				$unresolved_count
 			)
 		);
 	}

@@ -18,20 +18,31 @@ use Pontifex\Archive\Format\EntryHeader;
  * Pattern syntax (matched in this order — first match wins):
  *
  *  1. **Regex patterns** — patterns that start and end with "/" are
- *     treated as PCRE regular expressions. The slashes are stripped
- *     and the rest is passed to preg_match() with no modifiers added.
+ *     treated as PCRE regular expressions. The pattern is passed to
+ *     preg_match() whole, with its leading and trailing slashes kept
+ *     as the PCRE delimiters, and no modifiers are added.
  *     Example: "/\.tmp$/" matches any path ending in ".tmp".
  *  2. **Directory-tree patterns** — patterns ending with "/**" match
  *     the directory itself AND every path beneath it. Example:
  *     "wp-content/cache/**" matches "wp-content/cache",
  *     "wp-content/cache/foo.html", "wp-content/cache/sub/bar.css".
- *     This is the most commonly useful pattern type and is what
- *     {@see ExclusionRules::default_v010()} uses.
+ *     This is the most commonly useful pattern type and is what most
+ *     of {@see ExclusionRules::default_v010()} uses.
  *  3. **Glob patterns** — patterns containing "*" or "?" (but not
  *     "**") are matched with fnmatch() using FNM_PATHNAME, so "*"
- *     does not cross slashes. Example: "*.log" matches "foo.log" but
- *     not "sub/foo.log". For "match at any depth" use "**\/file.log"
- *     or a directory-tree pattern.
+ *     does not cross slashes. "**" is NOT a glob-star here: fnmatch()
+ *     has no globstar concept, so "**" is just two adjacent "*", and
+ *     FNM_PATHNAME still stops each one at a "/". Concretely,
+ *     "**\/file.log" does NOT match "a/b/file.log" — verified with
+ *     fnmatch() directly, not assumed. A directory-tree pattern
+ *     matches a fixed directory at any depth beneath it, but not a
+ *     directory whose own position varies; for that — "match this
+ *     name at any depth, wherever it occurs" — use a regex. This is
+ *     exactly why {@see ExclusionRules::default_v010()}'s `.git`
+ *     exclusion is the regex `/(^|\/)\.git(\/|$)/`, not a glob or a
+ *     directory-tree pattern: a `.git` directory can sit at the site
+ *     root, one level down, or inside any plugin or theme, and only a
+ *     regex matches it at all of those depths.
  *  4. **Exact strings** — patterns with no special characters are
  *     compared with strict equality against the relative path.
  *     Example: "wp-config-sample.php" matches only that file at the
@@ -55,13 +66,13 @@ use Pontifex\Archive\Format\EntryHeader;
  *  - {@see ExclusionRules::patterns()} — read-only patterns view.
  *
  * Default-vs-user-control philosophy: {@see ExclusionRules::default_v010()}
- * returns a deliberately small, defensible list — two categories of
- * exclusion where the rationale is clear (recursion prevention and
- * WordPress's own ephemeral cache). Everything else a site holds is the
- * owner's data, so Pontifex does not drop it on their behalf. Pontifex's
- * CLI surface (Phase 4) exposes the active exclusion list before
- * performing an export, so users always see what is being skipped and
- * can override with --no-defaults or --exclude-file.
+ * returns a deliberately small, defensible list — three categories of
+ * exclusion where the rationale is clear (recursion prevention, WordPress's
+ * own ephemeral cache, and version-control metadata that is not site content).
+ * Everything else a site holds is the owner's data, so Pontifex does not drop
+ * it on their behalf. Pontifex's CLI surface (Phase 4) exposes the active
+ * exclusion list before performing an export, so users always see what is
+ * being skipped and can override with --no-defaults or --exclude-file.
  *
  * The one exclusion that is NOT in the configurable list — Pontifex's
  * own working directory recursion prevention — is enforced
@@ -117,7 +128,7 @@ final class ExclusionRules {
 	/**
 	 * Build the curated default exclusion list for v0.1.0.
 	 *
-	 * Two categories of exclusion, each with a defensible rationale:
+	 * Three categories of exclusion, each with a defensible rationale:
 	 *
 	 *  1. Pontifex's own working directory — prevents recursive
 	 *     archive-of-archives nesting if a previous Pontifex export
@@ -128,6 +139,13 @@ final class ExclusionRules {
 	 *     convention, wp-content/cache/ holds regenerable cache data
 	 *     used by transient and page-cache plugins, so it is safe to
 	 *     skip and regenerates on the destination.
+	 *  3. Version-control metadata (`.git`, at any depth) — added in
+	 *     v0.9.3 (ADR 0008 amendment, 2026-07-16). Unlike categories 1
+	 *     and 2, this is not a fixed-position directory, so it is the
+	 *     one entry in this list that is a regex rather than a
+	 *     directory-tree pattern (see the class docblock's pattern-type
+	 *     note on why a glob or tree pattern cannot express "at any
+	 *     depth").
 	 *
 	 * The list is deliberately minimal: anything else a site holds —
 	 * including data other plugins have written — is the owner's data,
@@ -146,6 +164,11 @@ final class ExclusionRules {
 
 				// WordPress core ephemeral cache (regenerable by design).
 				'wp-content/cache/**',
+
+				// Version-control metadata at any depth: a git-deployed site's history is not
+				// site content, is regenerable from its remote, and would otherwise be carried
+				// into every archive (and back out again on a restore).
+				'/(^|\/)\.git(\/|$)/',
 			)
 		);
 	}

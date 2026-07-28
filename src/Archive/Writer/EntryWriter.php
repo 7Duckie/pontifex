@@ -39,25 +39,35 @@ use Pontifex\Archive\Integrity\Sha256;
  *
  * Algorithm:
  *
- *  1. Pre-encode the source payload to a php://temp buffer via the
+ *  1. For a file entry whose header has no media_type yet, sniff one
+ *     from the source's underlying path and build a corrected header
+ *     via with_media_type() — before anything else, simply because
+ *     this is where the header is finalised. The sniff opens its own
+ *     independent handle via finfo_file() on the recovered path; it
+ *     never reads from the source stream itself, so the source's seek
+ *     position is untouched by this step. A header that already
+ *     carries a media_type (a caller-supplied, authoritative value) is
+ *     left alone and not re-sniffed. See {@see self::sniff_media_type()}.
+ *
+ *  2. Pre-encode the source payload to a php://temp buffer via the
  *     codec. This is what tells us the encoded payload byte count,
  *     which the EntryHeader needs as `size_compressed` BEFORE the
  *     header is serialised to disk (the header sits in front of the
  *     payload on disk; the writer has to know payload length to
  *     declare it in the header).
  *
- *  2. Build a corrected EntryHeader using with_size_compressed() —
+ *  3. Build a corrected EntryHeader using with_size_compressed() —
  *     the immutable update method on EntryHeader. The caller passes
  *     in a "draft" header with any size_compressed value (typically
  *     0); we replace it with the actual encoded byte count.
  *
- *  3. Serialise the corrected header to bytes.
+ *  4. Serialise the corrected header to bytes.
  *
- *  4. Stream the record to disk in spec order: header bytes,
+ *  5. Stream the record to disk in spec order: header bytes,
  *     codec_id (2 B big-endian), nonce (12 B), payload (copied from
  *     the temp buffer), hash (32 B).
  *
- *  5. As bytes are written, feed them to a HashingStream so the
+ *  6. As bytes are written, feed them to a HashingStream so the
  *     accumulated SHA-256 covers everything except the trailing
  *     hash itself.
  *
@@ -120,7 +130,10 @@ final class EntryWriter {
 	 *                                   overwritten by the writer once the codec has run —
 	 *                                   it records the compression output, NOT the
 	 *                                   post-encryption stored size — so callers may pass a
-	 *                                   draft header with any value (typically 0).
+	 *                                   draft header with any value (typically 0). For a file
+	 *                                   entry, media_type may be left null; the writer sniffs
+	 *                                   it from the source before writing. A non-null
+	 *                                   media_type is trusted as-is and never re-sniffed.
 	 * @param int           $codec_id    Codec id for the payload. Low byte = compression
 	 *                                   codec (must be registered); high byte = encryption.
 	 * @param string        $nonce       Per-entry nonce; must be exactly NONCE_SIZE bytes.
@@ -142,7 +155,10 @@ final class EntryWriter {
 	 *                          source yielded a different byte count than the header declared
 	 *                          (the file changed between the caller's scan and this write),
 	 *                          the header is written with the actual captured size and the
-	 *                          result reports the discrepancy.
+	 *                          result reports the discrepancy. For a file entry whose
+	 *                          media_type had to be sniffed here, the result also reports
+	 *                          whether the sniff genuinely resolved one — see
+	 *                          {@see self::sniff_media_type()}.
 	 * @throws InvalidArgumentException If the encryption family is unknown, the compression
 	 *                                  codec is not registered, an encrypted codec is used
 	 *                                  without a cipher and key, the nonce is the wrong
@@ -192,6 +208,20 @@ final class EntryWriter {
 		}
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'EntryWriter: $destination must be a valid stream resource.' );
+		}
+
+		// A file entry with no media_type yet gets one sniffed here, from the
+		// source's underlying path. A header that already carries a media_type
+		// (set by a caller that already knows it) is trusted as-is and left
+		// alone — that also keeps a from-disk-adopted or hand-built header's
+		// value authoritative and avoids a pointless read. Only an entry that
+		// actually reaches the sniff can be counted as resolved or unresolved;
+		// a trusted header counts as neither.
+		$media_type_unresolved = false;
+		if ( $header->is_file() && null === $header->media_type() ) {
+			$sniffed               = self::sniff_media_type( $source );
+			$header                = $header->with_media_type( $sniffed['media_type'] );
+			$media_type_unresolved = ! $sniffed['resolved'];
 		}
 
 		$codec = $this->codec_registry->get( $compression_codec_id );
@@ -296,11 +326,110 @@ final class EntryWriter {
 				+ $payload_length
 				+ Sha256::DIGEST_SIZE;
 
-			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash, $declared_size, $actual_size );
+			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash, $declared_size, $actual_size, $media_type_unresolved );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the php://temp resource opened in this method; not a WP_Filesystem operation.
 			fclose( $temp );
 		}
+	}
+
+	/**
+	 * Sniff the MIME type of a file entry's source via finfo.
+	 *
+	 * Moved here from FileScanner (formerly sniff_media_type() there): the
+	 * scanner used to sniff every file it walked, which meant opening and
+	 * reading the head of every file on every scan — including a resumable
+	 * export's final tick, which writes no entries at all. Doing it here
+	 * instead means each file is sniffed once per backup, only for the
+	 * entry actually being written, and never for a tick that writes
+	 * nothing. This is the one implementation; nothing else in Pontifex
+	 * sniffs a media type.
+	 *
+	 * EntryWriter only ever receives an already-open source stream, never a
+	 * path, so the underlying filesystem path is recovered from the
+	 * stream's own metadata rather than reopened by the caller. That
+	 * recovery is trusted only when the reported uri actually resolves to
+	 * an existing, readable regular file — checked with is_file() and
+	 * is_readable() on the uri itself, through the same wrapper
+	 * resolution finfo_file() will use. A stream whose uri is empty, or
+	 * is a non-empty identifier that does not resolve to a real file (a
+	 * php://temp or php://memory buffer reports "php://temp" /
+	 * "php://memory" as its uri, for instance — a string, but not a
+	 * filesystem path anything can open), falls through to the fallback
+	 * instead of being handed to finfo_file(): finfo_file() opens
+	 * whatever string it is given as a brand-new, unrelated stream, so a
+	 * uri that merely looks path-shaped would not fail — it would sniff
+	 * and confidently return a media type describing something other
+	 * than the payload actually being written. This method never throws.
+	 *
+	 * There are four ways the sniff can fail to genuinely determine a media
+	 * type — the fileinfo extension is not loaded on this host, the source's
+	 * uri does not resolve to a real readable file, finfo_open() itself
+	 * fails (e.g. an unavailable magic database), or finfo_file() fails or
+	 * returns nothing — and every one of them falls back to the same
+	 * 'application/octet-stream' string a genuinely unidentifiable file
+	 * (a real .DS_Store, say) legitimately sniffs as too. Without a
+	 * separate signal, a caller cannot tell "correctly identified as
+	 * unknown" from "we failed and gave up" — and a systemic failure (the
+	 * fileinfo extension missing on a host, for instance) would silently
+	 * record every file in every archive as raw bytes with nothing
+	 * anywhere saying so. The 'resolved' flag exists purely to carry that
+	 * distinction back to the caller, which tallies it into a counter the
+	 * operator can see.
+	 *
+	 * @param resource $source The entry's payload source stream.
+	 * @return array{media_type: string, resolved: bool} The sniffed (or fallback)
+	 *                MIME-type string, and whether it was genuinely determined by
+	 *                finfo (true) rather than reached via one of the four fallback
+	 *                paths above (false).
+	 */
+	private static function sniff_media_type( $source ): array {
+		$fallback = 'application/octet-stream';
+
+		if ( ! function_exists( 'finfo_open' ) ) {
+			// The fileinfo extension is not loaded on this host.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
+		}
+
+		$meta          = stream_get_meta_data( $source );
+		$absolute_path = isset( $meta['uri'] ) ? (string) $meta['uri'] : '';
+		if ( '' === $absolute_path || ! is_file( $absolute_path ) || ! is_readable( $absolute_path ) ) {
+			// The source's reported uri does not resolve to a real, readable file.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
+		}
+
+		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_open emits a warning when the magic database is unavailable; the warning is informational and we already handle the false return.
+		$handle = @finfo_open( FILEINFO_MIME_TYPE );
+		if ( false === $handle ) {
+			// The fileinfo magic database could not be opened.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
+		}
+
+		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_file emits a warning on unreadable files; the warning is informational and we already handle the false return.
+		$detected = @finfo_file( $handle, $absolute_path );
+		// finfo_close() was deprecated in PHP 8.5; $handle is cleaned up by garbage collection when it goes out of scope at the end of this method.
+
+		if ( false === $detected || '' === $detected ) {
+			// finfo_file() itself failed, or returned nothing.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
+		}
+
+		return array(
+			'media_type' => $detected,
+			'resolved'   => true,
+		);
 	}
 
 	/**

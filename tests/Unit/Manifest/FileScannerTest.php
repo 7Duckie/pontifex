@@ -515,15 +515,126 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
-	 * Scanned file entries must carry a non-empty media_type.
+	 * The default .git exclusion must prevent the scanner from entering a .git
+	 * directory ITSELF, not merely omit its entries after the fact.
 	 *
-	 * The exact value depends on the host's finfo magic database, so
-	 * this test asserts only the structural invariant: every file
-	 * entry has a non-null, non-empty media_type string.
+	 * The .git directory ITSELF is made unreadable, at a nested depth (a plugin's
+	 * own repository — the depth a plain glob would miss, per ExclusionRules'
+	 * class docblock). A scanner that omits excluded entries only after the fact
+	 * still has to open that directory to walk it, and opening it raises the
+	 * UnexpectedValueException that scan() translates into a RuntimeException. A
+	 * scanner that prunes never opens it, so the scan completes. Completion is
+	 * therefore a property that post-hoc filtering cannot produce, which is what
+	 * makes this test able to fail.
+	 *
+	 * Note that making a FILE inside .git unreadable proves nothing: the
+	 * readability check lives in build_scanned_entry(), downstream of the
+	 * exclusion decision, so an excluded file is never checked either way.
+	 *
+	 * Skipped as root, for whom chmod 0000 does not block reads.
 	 *
 	 * @return void
 	 */
-	public function test_scanned_files_carry_non_empty_media_type(): void {
+	public function test_git_directory_is_pruned_not_walked(): void {
+		if ( 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test unreadable directories when running as root (chmod is not enforced).' );
+		}
+
+		$this->write_file( 'wp-content/uploads/keep.txt', 'site-content' );
+		$this->write_file( 'wp-content/plugins/demo/demo.php', '<?php // a real plugin file' );
+		$this->write_file( 'wp-content/plugins/demo/.git/objects/pack/pack-abc.pack', 'binary-ish' );
+		$locked_git = $this->fixture_root . '/wp-content/plugins/demo/.git';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; unreadability is how this test proves the nested .git directory was never opened.
+		chmod( $locked_git, 0o000 );
+
+		try {
+			$entries = ( new FileScanner( ExclusionRules::default_v010() ) )->scan( $this->fixture_root );
+			$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+			$this->assertContains( 'wp-content/uploads/keep.txt', $paths );
+			$this->assertContains( 'wp-content/plugins/demo/demo.php', $paths );
+			foreach ( $paths as $path ) {
+				$this->assertStringNotContainsString( '.git', $path );
+			}
+		} finally {
+			// Restore readability so teardown can clean up.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture cleanup.
+			chmod( $locked_git, 0o755 );
+		}
+	}
+
+	/**
+	 * An excluded directory must never consume the entry that follows it.
+	 *
+	 * The regression this pins: pruning used to be attempted by calling next() on
+	 * the walker from inside the foreach, which — on top of foreach's own
+	 * end-of-iteration next() — advanced twice. The entry immediately after an
+	 * excluded directory was consumed without ever being tested against the rules
+	 * and was silently dropped from the archive. When the excluded directory was
+	 * EMPTY, that entry was a real sibling, so real site files vanished with no
+	 * error and no warning, and verify still passed because the archive was
+	 * internally consistent — merely incomplete. A real "git init" creates four
+	 * empty directories, so a default .git exclusion made this routine.
+	 *
+	 * The fixture creates twelve EMPTY excluded directories interleaved with
+	 * twelve wanted files, each pair made one after the other (empty directory,
+	 * then its wanted neighbour), so an excluded directory always precedes a
+	 * wanted entry in creation order. That positioning matters because readdir
+	 * order is not lexicographic — it is not guaranteed to follow creation
+	 * order either — so the only reliable way to put a wanted entry directly
+	 * after an excluded one is to interleave them at the point of creation
+	 * rather than create every excluded directory in a block of its own. The
+	 * assertion checks the COMPLETE expected entry set rather than spot-checking
+	 * individual paths, so it is independent of whatever order the walk actually
+	 * visits entries in, and it catches a swallowed directory entry (whose
+	 * children would still otherwise survive) as readily as a swallowed file.
+	 *
+	 * @return void
+	 */
+	public function test_an_excluded_empty_directory_does_not_swallow_the_next_entry(): void {
+		$base = 'wp-content/plugins/demo';
+
+		$expected = array(
+			'wp-content',
+			'wp-content/plugins',
+			$base,
+			$base . '/keep-dir',
+			$base . '/keep-dir/inner.php',
+		);
+
+		$patterns = array();
+		foreach ( array( 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l' ) as $n => $suffix ) {
+			// Create the excluded empty directory, then immediately its wanted
+			// neighbour, so the two are adjacent in creation order.
+			$this->make_dir( $base . '/empty-' . $suffix );
+			$patterns[] = $base . '/empty-' . $suffix . '/**';
+
+			$relative   = sprintf( '%s/file-%02d.php', $base, $n + 1 );
+			$expected[] = $relative;
+			$this->write_file( $relative, '<?php // a real site file' );
+		}
+		$this->write_file( $base . '/keep-dir/inner.php', '<?php // a real site file' );
+
+		$entries = ( new FileScanner( new ExclusionRules( $patterns ) ) )->scan( $this->fixture_root );
+		$paths   = array_map( static fn( $e ) => $e->relative_path(), $entries );
+
+		sort( $expected, SORT_STRING );
+
+		$this->assertSame( $expected, $paths, 'Every non-excluded entry must survive the scan, and no excluded one may appear.' );
+	}
+
+	/**
+	 * Scanned file entries must carry a null media_type.
+	 *
+	 * Media type is no longer determined during the scan — sniffing it
+	 * costs opening and reading the head of every file, and only the
+	 * entries actually written on a given tick need that cost paid. It is
+	 * left to EntryWriter to sniff at write time instead (see
+	 * FileScanner's class docblock).
+	 *
+	 * @return void
+	 */
+	public function test_scanned_files_carry_null_media_type(): void {
 		$this->write_file( 'note.txt', 'plain text content' );
 		$this->write_file( 'wp-config.php', '<?php echo 1; ?>' );
 
@@ -531,8 +642,7 @@ final class FileScannerTest extends TestCase {
 
 		foreach ( $entries as $entry ) {
 			if ( EntryHeader::KIND_FILE === $entry->kind() ) {
-				$this->assertIsString( $entry->media_type() );
-				$this->assertNotSame( '', $entry->media_type() );
+				$this->assertNull( $entry->media_type() );
 			}
 		}
 	}

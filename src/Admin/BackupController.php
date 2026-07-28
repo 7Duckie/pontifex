@@ -97,11 +97,49 @@ final class BackupController {
 	private const PHASE_COPYING = 'copying';
 
 	/**
+	 * Progress phase: every file entry is written and the run is about to read
+	 * the database chunks and write the archive's manifest and footer.
+	 *
+	 * Reported before that work starts, not after: the database chunks are
+	 * still to be read, and still tally bytes through the same callback as
+	 * any file, but they are read inside one uninterruptible tick with no
+	 * per-entry total left to show a meaningful percentage against, so the
+	 * phase itself is what is reported rather than a determinate bar. A
+	 * forward transition from copying, never a fallback from scanning —
+	 * {@see self::write_progress()} is the single point every phase write
+	 * passes through, and it refuses to report an earlier phase once a later
+	 * one has already been reported this run.
+	 *
+	 * @var string
+	 */
+	private const PHASE_FINALISING = 'finalising';
+
+	/**
 	 * Progress phase reported when no backup is running (no progress transient set).
 	 *
 	 * @var string
 	 */
 	private const PHASE_IDLE = 'idle';
+
+	/**
+	 * Ordinal rank of each progress phase, used to keep the transient moving only forward.
+	 *
+	 * ADR 0015's resumable engine re-walks the whole scan tree at the top of
+	 * every tick — including the tick that runs right after finalising has
+	 * been reported — so a scanning callback (via the decorated manifest
+	 * builder) or a byte callback (via a database chunk's own read) can both
+	 * still fire after the run has already reported a later phase.
+	 * {@see self::write_progress()} uses this map to refuse a write whose
+	 * phase ranks lower than the highest already reported this run, so the
+	 * bar can never travel backwards no matter which callback fired.
+	 *
+	 * @var array<string, int>
+	 */
+	private const PHASE_RANK = array(
+		self::PHASE_SCANNING   => 0,
+		self::PHASE_COPYING    => 1,
+		self::PHASE_FINALISING => 2,
+	);
 
 	/**
 	 * Age, in seconds, past which a progress transient is distrusted while a job is live.
@@ -206,6 +244,18 @@ final class BackupController {
 	 * @var string|null
 	 */
 	private ?string $active_backup_path = null;
+
+	/**
+	 * Highest progress-phase rank written to the transient so far this run.
+	 *
+	 * Reset to -1 at the start of every {@see self::create()} run, so a
+	 * genuinely new run can always report scanning even if a previous run
+	 * left a later phase sitting in the transient. See {@see self::PHASE_RANK}
+	 * and {@see self::write_progress()}.
+	 *
+	 * @var int
+	 */
+	private int $progress_phase_rank = -1;
 
 	/**
 	 * Wall-clock budget per tick when this controller drives the job (seconds).
@@ -336,6 +386,9 @@ final class BackupController {
 		);
 
 		try {
+			// A fresh run always starts at scanning, whatever a previous run may
+			// have left behind (see self::$progress_phase_rank).
+			$this->progress_phase_rank = -1;
 			$this->set_scan_progress( 0 );
 
 			// The admin backup is always content-only: it scans wp-content and records
@@ -381,11 +434,14 @@ final class BackupController {
 			// One byte callback for the WHOLE run, so the reported count accumulates
 			// across ticks. A per-tick callback restarted its tally from zero every
 			// tick; the browser's never-go-backwards clamp masked that as a bar that
-			// stalled at the highest tick's count.
+			// stalled at the highest tick's count. It keeps tallying through the
+			// finalising tick's database chunks too — write_progress() is what stops
+			// those writes overwriting the finalising phase, not this callback.
 			$total_bytes = 0;
 			$byte_cb     = $this->accumulating_byte_callback( $job_store, $job->id(), $total_bytes );
 
-			$done = false;
+			$done                = false;
+			$finalising_reported = false;
 			while ( ! $done ) {
 				// The cancel sentinel is honoured at tick boundaries: the job is
 				// terminal-marked before cleanup so the active slot frees correctly.
@@ -402,14 +458,32 @@ final class BackupController {
 					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
 				}
 				$total_bytes = max( $total_bytes, $this->counter_int( $current->payload(), 'total_bytes' ) );
-				$done        = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
+
+				// The runner records the tick loop's own boundary once every FILE
+				// entry has been read: the "database" phase means the tick about to
+				// run will read the database chunks and write the manifest and
+				// footer in one uninterruptible pass. Report that as its own phase
+				// once, before the blocking tick runs. That tick still re-walks the
+				// whole scan tree and still tallies bytes for the chunks it appends
+				// (both routed through write_progress()), so this flag only stops
+				// this call site repeating itself — the phase-rank guard is what
+				// stops either of those later writes moving the bar back to
+				// scanning or copying.
+				if ( ! $finalising_reported && 'database' === (string) ( $current->payload()['phase'] ?? 'files' ) ) {
+					$finalising_reported = true;
+					$this->set_finalising_progress();
+				}
+
+				$done = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
 			}
 
-			$finished      = $job_store->get( $job->id() );
-			$job_payload   = null !== $finished ? $finished->payload() : array();
-			$bytes_written = (int) ( $job_payload['bytes_written'] ?? 0 );
-			$total_bytes   = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
-			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
+			$finished              = $job_store->get( $job->id() );
+			$job_payload           = null !== $finished ? $finished->payload() : array();
+			$bytes_written         = (int) ( $job_payload['bytes_written'] ?? 0 );
+			$files_changed         = (int) ( $job_payload['files_changed'] ?? 0 );
+			$media_type_unresolved = (int) ( $job_payload['media_type_unresolved'] ?? 0 );
+			$total_bytes           = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
+			$entry_count           = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
 			wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
@@ -422,8 +496,10 @@ final class BackupController {
 
 			$this->bump_counters(
 				array(
-					'succeeded'      => 1,
-					'bytes_exported' => $bytes_written,
+					'succeeded'             => 1,
+					'bytes_exported'        => $bytes_written,
+					'files_changed'         => $files_changed,
+					'media_type_unresolved' => $media_type_unresolved,
 				)
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
@@ -617,19 +693,34 @@ final class BackupController {
 		// the endpoint's behaviour never depends on wp_send_json_success halting.
 		if ( null !== $job && ( self::PHASE_IDLE === $phase || $transient_stale ) ) {
 			$payload = $job->payload();
-			// Source bytes so the bar speaks the same units as the live byte
-			// callback; older in-flight jobs without the cursor degrade to the
-			// compressed count rather than to zero.
-			$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
-			if ( 0 === $bytes_done ) {
-				$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+			// The job's own phase cursor survives a dead request just as the byte
+			// cursors do: once it reads "database" the run has moved past the file
+			// entries into the same uninterruptible database-and-footer pass a
+			// live poll reports as finalising, so a re-attach after that point
+			// must not fall back to serving its last, now-stale, byte-copy
+			// cursors as though copying were still under way.
+			if ( 'database' === (string) ( $payload['phase'] ?? 'files' ) ) {
+				$response = array(
+					'phase'       => self::PHASE_FINALISING,
+					'done'        => 0,
+					'bytes_done'  => 0,
+					'bytes_total' => 0,
+				);
+			} else {
+				// Source bytes so the bar speaks the same units as the live byte
+				// callback; older in-flight jobs without the cursor degrade to the
+				// compressed count rather than to zero.
+				$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
+				if ( 0 === $bytes_done ) {
+					$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+				}
+				$response = array(
+					'phase'       => self::PHASE_COPYING,
+					'done'        => 0,
+					'bytes_done'  => $bytes_done,
+					'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+				);
 			}
-			$response = array(
-				'phase'       => self::PHASE_COPYING,
-				'done'        => 0,
-				'bytes_done'  => $bytes_done,
-				'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
-			);
 		} elseif ( null === $job && $transient_stale ) {
 			// No active job and the transient has gone stale: the run that wrote it
 			// died without clearing it (a fatal kill leaves the transient behind).
@@ -971,6 +1062,12 @@ final class BackupController {
 	 * per chunk. The transient is refreshed at most once every
 	 * {@see self::PROGRESS_THROTTLE_SECONDS} to keep option writes bounded.
 	 *
+	 * This keeps tallying, and still checks for a cancel, straight through the
+	 * finalising tick's database chunks — it does not need to know the run has
+	 * reached finalising, because {@see self::write_progress()} is the single
+	 * point every phase write passes through and refuses on its own to let a
+	 * copying-phase write land once finalising has already been reported.
+	 *
 	 * @param JobStore $job_store   The job store the total is read from.
 	 * @param string   $job_id      The running job's id.
 	 * @param int      $total_bytes Reference to the caller's running total estimate.
@@ -1071,14 +1168,11 @@ final class BackupController {
 	 * @return void
 	 */
 	private function set_scan_progress( int $scanned ): void {
-		set_transient(
-			self::PROGRESS_TRANSIENT,
+		$this->write_progress(
 			array(
 				'phase' => self::PHASE_SCANNING,
 				'done'  => $scanned,
-				'at'    => time(),
-			),
-			self::PROGRESS_TTL
+			)
 		);
 	}
 
@@ -1094,16 +1188,63 @@ final class BackupController {
 	 * @return void
 	 */
 	private function set_copy_progress( int $bytes_done, int $bytes_total ): void {
-		set_transient(
-			self::PROGRESS_TRANSIENT,
+		$this->write_progress(
 			array(
 				'phase'       => self::PHASE_COPYING,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $bytes_total,
-				'at'          => time(),
-			),
-			self::PROGRESS_TTL
+			)
 		);
+	}
+
+	/**
+	 * Write the finalising-phase progress to the transient.
+	 *
+	 * Reported once every file entry has been read, before the database
+	 * chunks and the archive's manifest and footer are written: that work
+	 * still tallies bytes through the same callback as any file, but it runs
+	 * as one uninterruptible pass with no per-entry total left to show a
+	 * meaningful percentage against, so the phase itself is what is
+	 * reported. The browser renders it as a second indeterminate phase
+	 * rather than a determinate bar frozen at its last percentage.
+	 *
+	 * @return void
+	 */
+	private function set_finalising_progress(): void {
+		$this->write_progress(
+			array(
+				'phase' => self::PHASE_FINALISING,
+			)
+		);
+	}
+
+	/**
+	 * Write one progress-phase payload to the transient, refusing to move the phase backwards.
+	 *
+	 * ADR 0015's resumable engine re-walks the whole scan tree at the top of
+	 * every tick, so a scanning-phase callback (via the decorated manifest
+	 * builder) can still fire after the run has already reported copying or
+	 * finalising, and a database chunk still tallies bytes through the same
+	 * byte callback as any file once finalising has been reported. This is
+	 * the single point every phase write passes through, so the invariant
+	 * holds no matter which callback fired: once a phase of a given rank has
+	 * been reported this run, a write ranked lower is silently dropped
+	 * rather than overwriting it. {@see self::$progress_phase_rank} is reset
+	 * at the start of every run, so a genuinely new run always starts able
+	 * to report scanning.
+	 *
+	 * @param array<string, mixed> $payload The phase payload; must include a 'phase' key naming one of the PHASE_* constants.
+	 * @return void
+	 */
+	private function write_progress( array $payload ): void {
+		$phase = isset( $payload['phase'] ) && is_string( $payload['phase'] ) ? $payload['phase'] : self::PHASE_SCANNING;
+		$rank  = self::PHASE_RANK[ $phase ] ?? 0;
+		if ( $rank < $this->progress_phase_rank ) {
+			return;
+		}
+		$this->progress_phase_rank = $rank;
+		$payload['at']             = time();
+		set_transient( self::PROGRESS_TRANSIENT, $payload, self::PROGRESS_TTL );
 	}
 
 	/**
@@ -1130,10 +1271,12 @@ final class BackupController {
 	 */
 	private function bump_counters( array $delta ): void {
 		$defaults = array(
-			'attempted'      => 0,
-			'succeeded'      => 0,
-			'failed'         => 0,
-			'bytes_exported' => 0,
+			'attempted'             => 0,
+			'succeeded'             => 0,
+			'failed'                => 0,
+			'bytes_exported'        => 0,
+			'files_changed'         => 0,
+			'media_type_unresolved' => 0,
 		);
 
 		$current = $this->wordpress_context->option_value( self::STATS_OPTION, $defaults );
