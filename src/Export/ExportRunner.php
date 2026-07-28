@@ -151,7 +151,7 @@ final class ExportRunner {
 	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans Entries to write, in archive order; a plain array or a Countable ManifestStream. May be empty.
 	 * @param callable|null                                     $on_entry    Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null                                     $on_bytes    Optional byte-progress callback forwarded to the archive writer, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry.
-	 * @return ExportResult The bytes written, the entry count, and any files that changed while being read.
+	 * @return ExportResult The bytes written, the entry count, any files that changed while being read, and how many file entries' media_type could not be genuinely determined.
 	 * @throws Throwable If the temp destination cannot be opened (RuntimeException), writing an entry fails (whatever the archive writer raised, re-thrown), or the completed archive cannot be moved into place (RuntimeException). In every failure the temp file is discarded and any prior archive at the output path is left untouched.
 	 */
 	public function export( ExportOptions $options, iterable $entry_plans, ?callable $on_entry = null, ?callable $on_bytes = null ): ExportResult {
@@ -185,6 +185,16 @@ final class ExportRunner {
 			);
 		};
 
+		// Tally file entries whose media_type had to be sniffed and could not be
+		// genuinely determined (see EntryWriter::sniff_media_type()) — the archive
+		// itself is unaffected, but a systemic failure (fileinfo missing on this
+		// host, say) should be visible rather than silently indistinguishable
+		// from ordinary unidentifiable files.
+		$media_type_unresolved_count = 0;
+		$on_media_type_unresolved    = static function () use ( &$media_type_unresolved_count ): void {
+			++$media_type_unresolved_count;
+		};
+
 		try {
 			$bytes_written = self::build_archive_writer()->write_archive(
 				$provenance,
@@ -194,7 +204,8 @@ final class ExportRunner {
 				$options->encryption(),
 				$options->signing(),
 				$on_bytes,
-				$on_file_changed
+				$on_file_changed,
+				$on_media_type_unresolved
 			);
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the completed temp archive before moving it into place; not a WP_Filesystem operation.
 			fclose( $destination );
@@ -212,7 +223,7 @@ final class ExportRunner {
 		// complete one.
 		$this->move_into_place( $temp_path, $output_path );
 
-		return new ExportResult( $bytes_written, $entry_count, $changed_files );
+		return new ExportResult( $bytes_written, $entry_count, $changed_files, $media_type_unresolved_count );
 	}
 
 	/**

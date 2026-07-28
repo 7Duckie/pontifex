@@ -60,10 +60,14 @@ final class ResumableExportRunnerTest extends TestCase {
 	/**
 	 * Mutable plan specs the fake builder serves; tests mutate to simulate drift.
 	 *
-	 * Each spec is array{0: 'file'|'db', 1: string|int, 2: string} —
-	 * (kind, path-or-chunk-index, contents-or-sql).
+	 * Each spec is array{0: 'file'|'db', 1: string|int, 2: string, 3?: string|null} —
+	 * (kind, path-or-chunk-index, contents-or-sql, optional media_type). A file
+	 * spec's fourth element defaults to 'application/octet-stream' when absent;
+	 * passing null leaves the header's media_type unresolved so EntryWriter
+	 * sniffs it — over the php://memory source below, the sniff can never
+	 * resolve to a real path, so it always tallies as unresolved.
 	 *
-	 * @var array<int, array{0: string, 1: string|int, 2: string}>
+	 * @var array<int, array{0: string, 1: string|int, 2: string, 3?: string|null}>
 	 */
 	private array $specs;
 
@@ -139,7 +143,7 @@ final class ResumableExportRunnerTest extends TestCase {
 	/**
 	 * A ManifestBuilderInterface serving fresh plans from the given specs.
 	 *
-	 * @param array<int, array{0: string, 1: string|int, 2: string}> $specs The plan specs.
+	 * @param array<int, array{0: string, 1: string|int, 2: string, 3?: string|null}> $specs The plan specs.
 	 * @return ManifestBuilderInterface The fake builder.
 	 */
 	private function fake_builder( array $specs ): ManifestBuilderInterface {
@@ -149,7 +153,8 @@ final class ResumableExportRunnerTest extends TestCase {
 				$plans = array();
 				foreach ( $specs as $spec ) {
 					if ( 'file' === $spec[0] ) {
-						$header = EntryHeader::for_file( (string) $spec[1], strlen( $spec[2] ), 0644, 1690000000, 'application/octet-stream', 0 );
+						$media_type = array_key_exists( 3, $spec ) ? $spec[3] : 'application/octet-stream';
+						$header     = EntryHeader::for_file( (string) $spec[1], strlen( $spec[2] ), 0644, 1690000000, $media_type, 0 );
 					} else {
 						$header = EntryHeader::for_db_chunk( (int) $spec[1], 'wp_options', 1, strlen( $spec[2] ), 0 );
 					}
@@ -256,6 +261,73 @@ final class ResumableExportRunnerTest extends TestCase {
 		$runner->tick( $store->get( $job->id() ), 0.0 );
 		$after_two = (int) ( $store->get( $job->id() )->payload()['source_bytes_done'] ?? 0 );
 		$this->assertSame( $after_one + strlen( $this->specs[1][2] ), $after_two, 'The cursor accumulates across ticks rather than restarting.' );
+	}
+
+	/**
+	 * The unresolved-media_type tally accumulates across ticks rather than
+	 * restarting from zero each tick.
+	 *
+	 * Mirrors {@see self::test_ticks_persist_the_source_byte_cursor()} for the
+	 * media_type_unresolved cursor: that exact "restarts instead of
+	 * accumulating" bug class has bitten this codebase before (the
+	 * byte-progress callback), so the running total across several ticks —
+	 * not merely a non-zero final count — is what this test pins.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_unresolved_tally_accumulates_across_ticks(): void {
+		// Every entry's header carries a null media_type over a php://memory
+		// source, which EntryWriter's sniff can never resolve to a real
+		// filesystem path — each entry is guaranteed to tally as unresolved.
+		$this->specs = array(
+			array( 'file', 'wp-content/a.bin', 'alpha content', null ),
+			array( 'file', 'wp-content/b.bin', str_repeat( 'beta ', 200 ), null ),
+			array( 'file', 'wp-content/c.bin', 'gamma content', null ),
+		);
+
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$after_one = (int) ( $store->get( $job->id() )->payload()['media_type_unresolved'] ?? -1 );
+		$this->assertSame( 1, $after_one, 'The first tick tallies its one unsniffable entry.' );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$after_two = (int) ( $store->get( $job->id() )->payload()['media_type_unresolved'] ?? -1 );
+		$this->assertSame( 2, $after_two, 'The second tick adds to the running total rather than restarting it.' );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+		$final = (int) ( $store->get( $job->id() )->payload()['media_type_unresolved'] ?? -1 );
+		$this->assertSame( 3, $final, 'The tally keeps accumulating through to the finished job.' );
+	}
+
+	/**
+	 * A job payload missing the media_type_unresolved key entirely — an older
+	 * job started before this counter existed — still resumes and finishes
+	 * rather than fataling, and the tally is derived fresh from zero rather
+	 * than the tick throwing on a missing array key.
+	 *
+	 * @return void
+	 */
+	public function test_a_payload_missing_media_type_unresolved_still_resumes(): void {
+		$this->specs = array(
+			array( 'file', 'wp-content/a.bin', 'alpha content', null ),
+		);
+
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$stripped = $store->get( $job->id() );
+		$payload  = $stripped->payload();
+		unset( $payload['media_type_unresolved'] );
+		$stripped->set_payload( $payload );
+		$store->save( $stripped );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$finished = $store->get( $job->id() );
+		$this->assertSame( Job::STATUS_DONE, $finished->status(), 'A payload missing the counter key must still resume and finish, not fatal.' );
+		$this->assertSame( 1, (int) ( $finished->payload()['media_type_unresolved'] ?? -1 ), 'The tally is derived fresh from zero when the key was absent, and still counts the entry ticked after.' );
 	}
 
 	/**
