@@ -17,6 +17,73 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.9.4] — 2026-07-28 — Restore refuses an archive's stray SQL
+
+A security release. **If you ever restore or import an archive you did not
+create yourself — a backup from another site, a file someone sent you, the
+documented cross-server migration — upgrade before you do it again.**
+
+### Security
+
+- **A database chunk's SQL is confined to its own staged table.** Restoring an
+  archive replayed the SQL inside it against the live database almost verbatim:
+  only the single table identifier a chunk declared was rewritten to its staging
+  name, and every other statement ran as written — before the atomic cut-over,
+  and outside anything the abort path could undo, because that drops staging
+  tables and the damage was not in one. An archive carrying one extra statement
+  could set a user's password and take over the destination site's administrator
+  account. It needed no unusual database privilege, so it applied to any
+  installation.
+
+  Every statement must now begin, byte for byte, with one of a small set of
+  shapes composed from the staging identifier the restore built itself — a DROP
+  of that table, a CREATE TABLE of that table, or an INSERT into it. Nothing may
+  precede those bytes, so there is no comment to strip and no case to fold, and
+  therefore none of that to get wrong: reading a statement's leading keyword
+  cannot be made safe, because ordinary comments, conditional comments that
+  execute, unusual whitespace and a keyword split across a comment all defeat it.
+
+  Once a CREATE has run, and before anything else in that chunk does, the
+  database is asked what it actually built — the object's type, its storage
+  engine, its create options, the storage directories of any partitions, and its
+  row count. A statement can look entirely ordinary and still ask for a table
+  that is an alias onto a live one, or whose files are written to a path of the
+  archive's choosing, or that is populated from a table it should never read.
+  None of that is visible in a statement's opening bytes, and the server knows.
+
+  A semicolon outside a quoted span is refused, so an acceptable-looking
+  statement cannot carry a second one behind it. This no longer depends on the
+  database driver rejecting multiple statements — a behaviour the code neither
+  stated nor controlled.
+
+  **What this does not do:** two ways for an archive to read data it should not
+  remain, both inside an INSERT's values — a scalar subquery, and a file read on
+  the database server. Neither can be refused by a statement's shape without a
+  list of forbidden functions, which is the kind of list that gets worked around.
+  What they reach lands in the restored site rather than travelling back to
+  whoever supplied the archive. An archive from a source you do not trust still
+  should not be restored; this reduces the consequences, it does not remove them.
+  Both are recorded in [ADR 0019](docs/adr/0019-db-chunk-statement-containment.md)
+  and the threat model.
+
+### Added
+
+- **Files whose media type could not be determined are counted and reported.**
+  Determining a file's type can fail four ways — a missing extension on the host,
+  an unreadable source, a broken or absent magic database — and every one of them
+  produced exactly what a *successful* check produces for a file that genuinely
+  has no identifiable type. The two were indistinguishable, so a host-wide
+  failure would have recorded every file in every archive as raw bytes with
+  nothing anywhere saying so. An export now reports the count, and it is carried
+  on every path that can finish one, including the scheduled and admin backups
+  that run unattended. A file that is genuinely unidentifiable is not counted as
+  a failure, so an ordinary run reports nothing.
+
+### Fixed
+
+- Backups started from the admin screen no longer erase the changed-file tally
+  that command-line exports had accumulated in the stored statistics.
+
 ## [0.9.3] — 2026-07-28 — Operational hardening
 
 Four pieces of hardening around the operations the admin UI made easy to reach.
@@ -899,6 +966,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.0...HEAD
+[0.9.4]: https://github.com/7Duckie/pontifex/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/7Duckie/pontifex/compare/v0.9.0...v0.9.3
 [0.9.0]: https://github.com/7Duckie/pontifex/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/7Duckie/pontifex/compare/v0.7.0...v0.8.0

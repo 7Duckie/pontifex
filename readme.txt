@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.9.3
+Stable tag: 0.9.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.9.4 =
+* Security release. If you ever restore or import an archive you did not create yourself — a backup from another site, a file someone sent you, a migration between servers — upgrade before you do it again. Restoring an archive replayed the SQL inside it against the live database almost verbatim, so an archive carrying one extra statement could set a user's password and take over the destination site's administrator account, needing no unusual database privilege. Every statement in a database chunk must now match one of a small set of shapes naming that chunk's own staging table, a semicolon outside quoted text is refused so nothing can be smuggled behind an acceptable-looking statement, and once a table has been created the database is asked what it actually built rather than the archive being taken at its word. Two ways an archive can still read data it should not remain, both documented: an archive from a source you do not trust should not be restored, and this reduces the consequences rather than removing them. Also added: an export now reports how many files it could not determine a type for, so a host-wide failure is visible instead of silently recording every file as raw bytes. No breaking changes.
 
 = 0.9.3 =
 * Operational hardening, including a silent data-loss fix. The manifest scanner dropped the entry immediately after any excluded directory; when that directory was empty — as several inside every git checkout are — the lost entry was a real site file, missing from an archive that still verified as sound. If you run a site deployed from git, or exclude any directory that happens to be empty, re-take your backups after upgrading. Also: `.git` is now left out of backups by default at any depth (`.github`, `.gitignore` and friends stay in; `vendor` and `node_modules` are deliberately kept, since a restored site needs them); backup, restore and rollback share one lock across both the admin and the CLI, so they can no longer run against the site at the same time; backup lists show each archive's true source and real creation date read from its own provenance, rather than an uploaded file's upload time; and a backup no longer appears to hang at a full progress bar while it finishes, having also stopped re-reading every file on every pass. No breaking changes.
