@@ -477,6 +477,185 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Read a table's engine, create-options, and object type from information_schema.TABLES.
+	 *
+	 * Filtered to `TABLE_SCHEMA = DATABASE()` — the connection's own current
+	 * schema — never a schema name built from $table_name, so this can never
+	 * be pointed at a different database. `ENGINE` and `CREATE_OPTIONS` are
+	 * NULL in the catalogue for a view (a view has neither), so they are
+	 * reported as '' rather than making the whole call fail: the caller
+	 * still gets a truthful `table_type` of "VIEW" to refuse on.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return array{engine: string, create_options: string, table_type: string}|null The table's storage facts; null if no such table exists in the current schema.
+	 */
+	public function table_storage_facts( string $table_name ): ?array {
+		$sql = $this->wpdb->prepare(
+			'SELECT ENGINE, CREATE_OPTIONS, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
+			$table_name
+		);
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a post-CREATE containment check has no caching benefit and must see the connection's own current state.
+		$row = $this->wpdb->get_row( $sql, ARRAY_A );
+		if ( ! is_array( $row ) || ! isset( $row['TABLE_TYPE'] ) ) {
+			return null;
+		}
+		return array(
+			'engine'         => isset( $row['ENGINE'] ) ? (string) $row['ENGINE'] : '',
+			'create_options' => isset( $row['CREATE_OPTIONS'] ) ? (string) $row['CREATE_OPTIONS'] : '',
+			'table_type'     => (string) $row['TABLE_TYPE'],
+		);
+	}
+
+	/**
+	 * The pattern the STRUCTURAL text of a table's own CREATE TABLE definition must
+	 * NOT match to be free of a partition storage-directory clause.
+	 *
+	 * Matches the server's own canonical echo of a DATA DIRECTORY or INDEX
+	 * DIRECTORY clause — confirmed empirically against a live MariaDB server as
+	 * `DATA DIRECTORY = '/tmp'` / `INDEX DIRECTORY = '/tmp'`, upper case with
+	 * spaces around the "=", regardless of how the original CREATE statement
+	 * cased or spaced the clause (see {@see DatabaseAdapter::partition_storage_directory_present()}).
+	 * `\s*` around the "=" tolerates any whitespace variant a different server
+	 * version might use for the same canonical echo.
+	 *
+	 * Matched only against {@see \Pontifex\Manifest\SqlSpanScanner::strip_quoted_and_identifier_spans()}'s
+	 * output, never the raw definition — see that method's docblock for why.
+	 *
+	 * @var string
+	 */
+	private const PARTITION_DIRECTORY_PATTERN = '/(?:DATA|INDEX) DIRECTORY\s*=/';
+
+	/**
+	 * Whether the table's own CREATE TABLE definition names a DATA DIRECTORY or INDEX DIRECTORY on any partition.
+	 *
+	 * See {@see DatabaseAdapter::partition_storage_directory_present()} for why
+	 * `SHOW CREATE TABLE` is the only server-reported source for this fact —
+	 * `information_schema.PARTITIONS` carries no such column at all, confirmed
+	 * empirically against a live MariaDB server (12.3.2): a partition built
+	 * WITH a per-partition `DATA DIRECTORY`/`INDEX DIRECTORY` and one built
+	 * WITHOUT report the exact same set of columns, none of them named
+	 * `DATA_DIRECTORY` or `INDEX_DIRECTORY` (`SHOW COLUMNS FROM
+	 * information_schema.PARTITIONS` lists TABLE_ROWS, DATA_LENGTH,
+	 * INDEX_LENGTH and the like, but nothing that records a redirected storage
+	 * path); `information_schema.FILES` returns zero rows on the same server
+	 * for both. So the definition text is read once here, exactly as before.
+	 *
+	 * What changed is HOW that text is matched. The clause is real,
+	 * structural SQL syntax — a bare `DATA DIRECTORY = '...'` sitting outside
+	 * any quoting — but a table's COMMENT, a column's COMMENT or DEFAULT, a
+	 * partition's COMMENT, or even a column literally NAMED `` `DATA
+	 * DIRECTORY =` `` can all legitimately contain the same words as
+	 * ordinary DATA (a quoted string value or a backtick-quoted identifier),
+	 * confirmed empirically against a live MariaDB server for every one of
+	 * those five shapes. Matching {@see self::PARTITION_DIRECTORY_PATTERN}
+	 * against the raw definition text — as an earlier version of this method
+	 * did — refused all five as false positives: exactly the mistake this
+	 * whole design otherwise avoids, parsing untrusted-shaped SQL text
+	 * instead of asking a structural fact. {@see \Pontifex\Manifest\SqlSpanScanner::strip_quoted_and_identifier_spans()}
+	 * removes every single-quoted, double-quoted, and backtick-quoted span
+	 * from the definition first — which removes all five false-positive
+	 * shapes, since each one is itself a quoted string value or a
+	 * backtick-quoted identifier — while leaving a genuine, unquoted `DATA
+	 * DIRECTORY = '...'` clause's own keywords in place (only the path
+	 * argument inside it is quoted and stripped). The pattern below then only
+	 * ever matches real SQL syntax, never a mention inside a string or
+	 * identifier.
+	 *
+	 * The strip is escaping-aware via {@see \Pontifex\Manifest\SqlSpanScanner}
+	 * — it is NOT safe to assume `SHOW CREATE TABLE` always uses doubled-quote
+	 * escaping. Confirmed empirically against a live MariaDB server (12.3.2):
+	 * an ordinary table or column `COMMENT` containing a literal apostrophe is
+	 * echoed back doubled (`COMMENT='also it''s here'`), but a PARTITION-level
+	 * `COMMENT` in the exact same session, under the exact same sql_mode, is
+	 * echoed back with BACKSLASH escaping instead (`COMMENT = 'it\'s'`) —
+	 * MariaDB is not internally consistent about which convention its own DDL
+	 * printer uses for a given clause. A naive strip that never recognises a
+	 * backslash as an escape closes a backslash-escaped span one byte early,
+	 * at the escaped quote, which re-opens a bogus span over the text that
+	 * follows and can swallow a genuine, later `DATA DIRECTORY = '...'` clause
+	 * into it — a real, proven bypass this method exists to close (ADR 0019).
+	 * The connection's own current `sql_mode` is read fresh on every call and
+	 * passed through, on the same reasoning
+	 * {@see \Pontifex\Restore\DatabaseWriter::begin_staging()} already applies
+	 * to archive-supplied SQL: it is the best available server fact, even
+	 * though MariaDB's own inconsistency (just described) means no single
+	 * boolean can describe every clause of a definition with certainty — see
+	 * {@see \Pontifex\Manifest\SqlSpanScanner}'s docblock for why that residual
+	 * gap is bounded rather than unbounded. An unreadable sql_mode chooses the
+	 * STRICT interpretation (no backslash escaping assumed), the same safe
+	 * default {@see \Pontifex\Restore\DatabaseWriter::begin_staging()} chooses
+	 * and for the identical reason: the two wrong guesses are not equally
+	 * dangerous.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return bool True when the definition names a DATA DIRECTORY or INDEX DIRECTORY.
+	 * @throws RuntimeException If the definition could not be read, or the regular-expression engine fails.
+	 */
+	public function partition_storage_directory_present( string $table_name ): bool {
+		$sql = $this->wpdb->prepare( 'SHOW CREATE TABLE %i', $table_name );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a post-CREATE containment check has no caching benefit and must see the connection's own current state.
+		$row = $this->wpdb->get_row( $sql, ARRAY_N );
+
+		if ( null === $row || ! isset( $row[1] ) || '' === $row[1] ) {
+			$last_error = (string) $this->wpdb->last_error;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'WpdbAdapter: could not read the definition of "%s" to check for a partition storage-directory clause: %s', $table_name, $last_error ) );
+		}
+
+		$definition          = (string) $row[1];
+		$sql_mode            = $this->sql_mode();
+		$backslash_is_escape = null === $sql_mode ? false : ! str_contains( $sql_mode, 'NO_BACKSLASH_ESCAPES' );
+		$structural          = SqlSpanScanner::strip_quoted_and_identifier_spans( $definition, $backslash_is_escape );
+		$matched             = preg_match( self::PARTITION_DIRECTORY_PATTERN, $structural );
+		if ( false === $matched ) {
+			// A regex ENGINE failure must never be read as "no directory clause found" —
+			// see the identical reasoning in DatabaseWriter::refuse_unsanctioned_statements().
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name is reported verbatim and preg_last_error_msg() is the engine's own diagnostic text; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'WpdbAdapter: could not check "%s" for a partition storage-directory clause because the regular-expression engine failed (%s).', $table_name, preg_last_error_msg() ) );
+		}
+		return 1 === $matched;
+	}
+
+	/**
+	 * The exact number of rows the table currently holds, for the CURRENT connection's schema.
+	 *
+	 * See {@see DatabaseAdapter::table_row_count()} for why an exact
+	 * `SELECT COUNT(*)` is used rather than
+	 * `information_schema.TABLES.TABLE_ROWS`, and what was observed
+	 * empirically on this codebase's live MariaDB test target. `%i`
+	 * resolves an unqualified identifier against the CONNECTION's own
+	 * current database — the same current-schema scoping
+	 * {@see self::table_storage_facts()} enforces explicitly via
+	 * `TABLE_SCHEMA = DATABASE()`, with no separate filter needed here.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return int The exact row count.
+	 * @throws RuntimeException If the count could not be read.
+	 */
+	public function table_row_count( string $table_name ): int {
+		$sql = $this->wpdb->prepare( 'SELECT COUNT(*) FROM %i', $table_name );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; a post-CREATE containment check has no caching benefit and must see the connection's own current state.
+		$count = $this->wpdb->get_var( $sql );
+		if ( null === $count ) {
+			$last_error = (string) $this->wpdb->last_error;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'WpdbAdapter: could not read the row count for "%s": %s', $table_name, $last_error ) );
+		}
+		return (int) $count;
+	}
+
+	/**
+	 * Read the connection's own SESSION sql_mode.
+	 *
+	 * @return string|null The SESSION sql_mode; null if it could not be read.
+	 */
+	public function sql_mode(): ?string {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- A static session-scoped read with no inputs; no caching or preparation dimension.
+		$mode = $this->wpdb->get_var( 'SELECT @@SESSION.sql_mode' );
+		return is_string( $mode ) ? $mode : null;
+	}
+
+	/**
 	 * Build the ORDER BY clause that makes a table's row dumps deterministic.
 	 *
 	 * Resolved once per table and cached: the primary-key columns in key order,

@@ -477,11 +477,13 @@ final class BackupController {
 				$done = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
 			}
 
-			$finished      = $job_store->get( $job->id() );
-			$job_payload   = null !== $finished ? $finished->payload() : array();
-			$bytes_written = (int) ( $job_payload['bytes_written'] ?? 0 );
-			$total_bytes   = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
-			$entry_count   = count( $job_store->progress_log( $job->id() )->read_all() );
+			$finished              = $job_store->get( $job->id() );
+			$job_payload           = null !== $finished ? $finished->payload() : array();
+			$bytes_written         = (int) ( $job_payload['bytes_written'] ?? 0 );
+			$files_changed         = (int) ( $job_payload['files_changed'] ?? 0 );
+			$media_type_unresolved = (int) ( $job_payload['media_type_unresolved'] ?? 0 );
+			$total_bytes           = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
+			$entry_count           = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
 			wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
@@ -494,8 +496,10 @@ final class BackupController {
 
 			$this->bump_counters(
 				array(
-					'succeeded'      => 1,
-					'bytes_exported' => $bytes_written,
+					'succeeded'             => 1,
+					'bytes_exported'        => $bytes_written,
+					'files_changed'         => $files_changed,
+					'media_type_unresolved' => $media_type_unresolved,
 				)
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
@@ -1267,10 +1271,12 @@ final class BackupController {
 	 */
 	private function bump_counters( array $delta ): void {
 		$defaults = array(
-			'attempted'      => 0,
-			'succeeded'      => 0,
-			'failed'         => 0,
-			'bytes_exported' => 0,
+			'attempted'             => 0,
+			'succeeded'             => 0,
+			'failed'                => 0,
+			'bytes_exported'        => 0,
+			'files_changed'         => 0,
+			'media_type_unresolved' => 0,
 		);
 
 		$current = $this->wordpress_context->option_value( self::STATS_OPTION, $defaults );

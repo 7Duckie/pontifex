@@ -89,6 +89,7 @@ final class ArchiveWriter {
 	 * @param SigningContext|null    $signing          Signing inputs (signer, secret key, key id); when supplied the header's signed flag is set and a 100-byte Ed25519 signature block over the SHA-256 of every byte through the footer is appended. Requires a seekable, readable destination. null produces an unsigned archive.
 	 * @param callable|null          $on_bytes_read    Optional byte-progress callback forwarded to each entry's codec, called as `( int $bytes ): void` with each chunk's raw source byte count, so a caller can report progress within a large entry as well as between entries.
 	 * @param callable|null          $on_file_changed  Optional callback run when a file entry's source yielded a different byte count than its header declared (the file changed between the caller's scan and the write), called as `( string $path, int $declared_size, int $actual_size ): void`. The entry is written with the actual captured size; this callback lets the caller warn the user.
+	 * @param callable|null          $on_media_type_unresolved Optional callback run when a file entry's media_type had to be sniffed and could not be genuinely determined (see EntryWriter::sniff_media_type()), called as `(): void`. The entry is still written, with the generic fallback recorded; this callback lets the caller tally how many entries this happened for.
 	 * @return int Total bytes written to the destination during this call. A RuntimeException
 	 *             propagates from the incremental writer if any block fails to serialise, any
 	 *             write fails, a nonce cannot be generated, or signing fails.
@@ -96,7 +97,7 @@ final class ArchiveWriter {
 	 *                                  of $entry_plans is not an EntryPlan, or signing was requested
 	 *                                  but the destination is not seekable and readable.
 	 */
-	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null, ?callable $on_file_changed = null ): int {
+	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null, ?callable $on_file_changed = null, ?callable $on_media_type_unresolved = null ): int {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		if ( ! is_resource( $destination ) ) {
 			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
@@ -120,7 +121,7 @@ final class ArchiveWriter {
 				);
 			}
 
-			$writer->append_entry( $plan, $on_bytes_read, $on_file_changed );
+			$writer->append_entry( $plan, $on_bytes_read, $on_file_changed, $on_media_type_unresolved );
 
 			if ( null !== $on_entry_written ) {
 				$on_entry_written( $index + 1, $total );

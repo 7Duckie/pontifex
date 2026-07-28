@@ -13,6 +13,7 @@ use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Manifest\DatabaseAdapter;
+use Pontifex\Manifest\SqlSpanScanner;
 
 /**
  * Replays db_chunk entries into staging tables, then installs them atomically.
@@ -87,9 +88,50 @@ use Pontifex\Manifest\DatabaseAdapter;
  *     the recorded statement_count from the entry header. A
  *     mismatch indicates either a payload truncation or a bug in
  *     the writer, and is fatal.
- *  3. Each statement is executed individually. If any one throws,
+ *  3. Every parsed statement's leading bytes must match one of a small
+ *     set of sanctioned shapes — a DROP/CREATE/INSERT naming the
+ *     chunk's own staged table and nothing else — before any statement
+ *     executes; see {@see self::refuse_unsanctioned_statements()}. A
+ *     hostile archive cannot smuggle a statement against a different
+ *     table (an UPDATE against a live table, say) past a benign-looking
+ *     chunk, because every statement in the chunk is checked up front.
+ *  4. Each statement is executed individually. If any one throws,
  *     the rest are not attempted — and because every statement ran
  *     against staging tables, the live database is unchanged.
+ *  5. Immediately after a chunk's CREATE TABLE statement has executed,
+ *     and before any later statement in the same chunk runs, the
+ *     object it just built is confirmed to be an ordinary local table;
+ *     see {@see self::assert_staged_table_is_ordinary()}. The CREATE
+ *     shape check in point 3 anchors only the statement's opening
+ *     bytes and never inspects the body — a real table can
+ *     legitimately carry a FOREIGN KEY reference or a PARTITION BY
+ *     clause there — so the body is free to name a storage engine
+ *     (MySQL's MERGE engine, say) that turns the "staged" table into a
+ *     writable alias for a live one, entirely through bytes the shape
+ *     check never looks at (ADR 0019). Asking the server what it
+ *     actually built, rather than parsing what the payload asked it to
+ *     build, is the same shift from parsing SQL text to trusting
+ *     server-reported facts that already makes the shape check itself
+ *     safer than extracting a statement's verb.
+ *  6. That same post-CREATE moment also confirms the object holds no
+ *     rows — or, for a MariaDB SEQUENCE, no more than the single state
+ *     row a bare `CREATE ... SEQUENCE=1` legitimately seeds on its own
+ *     (confirmed empirically against a live MariaDB server, 12.3.2).
+ *     The CREATE shape check's mandatory `" ("` anchor requires a
+ *     column list, but says nothing about what follows the list's
+ *     closing paren: `CREATE TABLE `<staged>` (`c` INT) SELECT ... FROM
+ *     `wp_users`` — with or without the `AS` keyword, and with no
+ *     executable semicolon anywhere in the statement — still satisfies
+ *     that anchor while populating the table from an arbitrary source
+ *     in the very same statement, entirely through bytes the shape
+ *     check never inspects; the object it builds is an entirely
+ *     ordinary local table, so point 5's engine/create-options/
+ *     table-type checks see nothing wrong with it either. Reading the
+ *     table's actual row count via {@see DatabaseAdapter::table_row_count()}
+ *     is the same server-fact shift point 5 already makes, applied to
+ *     the one remaining question neither check answers: not just what
+ *     kind of table did the CREATE build, but did it already hold data
+ *     the moment it existed (ADR 0019).
  */
 final class DatabaseWriter {
 
@@ -127,6 +169,26 @@ final class DatabaseWriter {
 	 * @var string
 	 */
 	private const STATEMENT_DELIMITER = ";\n";
+
+	/**
+	 * Regex fragment matching one backtick-quoted column identifier.
+	 *
+	 * A column name may contain any byte except a backtick, or a doubled
+	 * backtick escaping a literal one — the same escaping
+	 * {@see self::escape_identifier()} applies, so a real column named
+	 * (for example) `wei``rd` is matched correctly.
+	 *
+	 * The run-then-escape form with possessive quantifiers is deliberate and
+	 * load-bearing. The obvious alternation `(?:[^`]|``)+` costs the regex
+	 * engine one backtrackable stack frame per matched CHARACTER, so a table
+	 * with a wide column list — around eight thousand bytes of identifier text,
+	 * which a plugin table with a few hundred columns reaches easily — exhausts
+	 * the JIT stack and makes preg_match fail. Matching whole runs, and
+	 * refusing to keep backtracking positions for them, keeps the cost linear.
+	 *
+	 * @var string
+	 */
+	private const COLUMN_IDENTIFIER_PATTERN = '`[^`]*+(?:``[^`]*+)*+`';
 
 	/**
 	 * The database adapter that executes individual statements.
@@ -188,6 +250,27 @@ final class DatabaseWriter {
 	private bool $replay_charset_set = false;
 
 	/**
+	 * Whether a backslash inside a quoted literal is an escape character, for {@see \Pontifex\Manifest\SqlSpanScanner::has_executable_semicolon()}.
+	 *
+	 * Read once per restore, in {@see self::begin_staging()}, from the
+	 * destination connection's own SESSION sql_mode — the interpretation that
+	 * matters is the one the DESTINATION SERVER will actually apply when it
+	 * executes the statement, which is a server fact (ADR 0019), not
+	 * something this code should assume. True unless the reported sql_mode
+	 * contains `NO_BACKSLASH_ESCAPES`.
+	 *
+	 * Defaults to true (the ordinary MySQL/MariaDB default) so that a test
+	 * exercising {@see self::write_entry()} alone, without first bracketing
+	 * it in {@see self::begin_staging()}, keeps today's behaviour; production
+	 * replay always goes through begin_staging() first (see the class
+	 * docblock), which overwrites this with the real server fact before any
+	 * statement is scanned.
+	 *
+	 * @var bool
+	 */
+	private bool $backslash_is_escape = true;
+
+	/**
 	 * Reset for a new restore and sweep leftovers from a crashed earlier run.
 	 *
 	 * A restore that died without reaching commit or abort leaves
@@ -203,6 +286,54 @@ final class DatabaseWriter {
 	 * content restored over a differently-configured connection is silently
 	 * transcoded to mojibake. The charset comes from the archive and is
 	 * untrusted, so a malformed one refuses the restore before any write.
+	 *
+	 * Also reads the destination connection's own SESSION sql_mode once, to
+	 * decide for the whole restore whether a backslash inside a quoted
+	 * literal is an escape character (see {@see self::$backslash_is_escape}).
+	 * When the mode cannot be read at all, this chooses the STRICT
+	 * interpretation — `NO_BACKSLASH_ESCAPES` assumed active, so a backslash
+	 * is treated as an ordinary character, never an escape — rather than the
+	 * permissive one, because the two wrong guesses are not equally
+	 * dangerous: wrongly assuming a backslash escapes when the server does
+	 * not honour that can make the scan believe it remains inside a quoted
+	 * literal past the point the server itself would have closed it,
+	 * masking genuinely executable bytes — including a stacked statement's
+	 * own semicolon — as opaque literal content (a bypass); wrongly assuming
+	 * a backslash does NOT escape when the server does only closes the
+	 * scan's belief in a literal earlier than the server would, which can
+	 * over-refuse a legitimate statement but never masks executable bytes as
+	 * inert.
+	 *
+	 * Known limit — the connection character set (ADR 0019): {@see \Pontifex\Manifest\SqlSpanScanner}
+	 * reads sql_mode as a server fact, but it does NOT read the destination
+	 * connection's own character set, and it assumes that charset is
+	 * single-byte-safe or UTF-8 — one where a multibyte sequence can never
+	 * contain the byte 0x5C ('\') or a quote byte as a TRAILING byte of a
+	 * valid character, so those bytes are always read correctly on their
+	 * own. That assumption does not hold for every charset MySQL/MariaDB
+	 * support: under a legacy multibyte charset such as `gbk`, a two-byte
+	 * character can legitimately end in a byte that reads as `\` or `'` to a
+	 * byte-at-a-time scan, letting a crafted byte pair inside a quoted
+	 * literal swallow the character that should have closed or escaped it
+	 * and desynchronise the scan from what the server will actually parse.
+	 * $source_charset is untrusted, from the archive, and drives the
+	 * `SET NAMES` this method issues before any chunk is scanned, so a
+	 * hostile archive can choose the very charset its own bytes are parsed
+	 * under. This is a real gap in what the scan's model of "one statement"
+	 * can prove, not a hypothetical: it was found by deliberately
+	 * constructing such a byte pair under `SET NAMES gbk` and observing the
+	 * scan desynchronise exactly as described. It is NOT currently
+	 * exploitable on this stack, for reasons independent of the scan: wpdb's
+	 * own invalid-byte-sequence validation rejected the crafted payload
+	 * before executing it, the restore failed loudly with the canary row
+	 * untouched and no staging residue, and the destination driver only
+	 * ever executes one statement per call regardless. Those are the
+	 * remaining protections against this gap, not the scan itself — a
+	 * multibyte-aware version (tracking character boundaries under the
+	 * archive's own charset, not just bytes) would close it properly, but is
+	 * deliberately not attempted here: recording the limit honestly is worth
+	 * more than a scanner whose completeness cannot actually be demonstrated
+	 * for every charset MySQL/MariaDB support.
 	 *
 	 * @param string $source_charset Optional. The archive's database character set (from provenance); '' skips the charset switch.
 	 * @return void
@@ -220,6 +351,8 @@ final class DatabaseWriter {
 			$this->adapter->set_session_charset( $source_charset );
 			$this->replay_charset_set = true;
 		}
+		$sql_mode                  = $this->adapter->sql_mode();
+		$this->backslash_is_escape = null === $sql_mode ? false : ! str_contains( $sql_mode, 'NO_BACKSLASH_ESCAPES' );
 		foreach ( array( self::STAGING_PREFIX, self::OLD_PREFIX ) as $prefix ) {
 			foreach ( $this->adapter->list_tables_by_prefix( $prefix ) as $leftover ) {
 				$this->drop_table_best_effort( $leftover );
@@ -252,7 +385,7 @@ final class DatabaseWriter {
 	 *
 	 * @param EntryReadResult $result A decoded entry whose header is a db_chunk.
 	 * @throws InvalidArgumentException If $result is not a db_chunk entry.
-	 * @throws RuntimeException         If the chunk has no table name, the staged name would be over-long, statement_count disagrees with the parsed count, or any adapter call fails.
+	 * @throws RuntimeException         If the chunk has no table name, the staged name would be over-long, statement_count disagrees with the parsed count, a statement fails the shape/containment checks, the object a CREATE built is not an ordinary local table or already held rows the moment it existed (ADR 0019), or any adapter call fails.
 	 */
 	public function write_entry( EntryReadResult $result ): void {
 		$header = $result->header();
@@ -278,7 +411,8 @@ final class DatabaseWriter {
 		// whose creation failed half-way through its first chunk.
 		$this->staged_tables[ $dest_table ] = true;
 
-		$payload        = $this->rewrite_table_identifier( $source_table, self::STAGING_PREFIX . $dest_table, $result->payload() );
+		$staged_table   = self::STAGING_PREFIX . $dest_table;
+		$payload        = $this->rewrite_table_identifier( $source_table, $staged_table, $result->payload() );
 		$statements     = self::split_statements( $payload );
 		$declared_count = (int) $header->statement_count();
 		$parsed_count   = count( $statements );
@@ -290,9 +424,396 @@ final class DatabaseWriter {
 			);
 		}
 
+		$this->refuse_unsanctioned_statements( $statements, $source_table, $staged_table, $header->chunk_index() );
+
+		// Only the CREATE for THIS chunk's own staged table can match this exact
+		// prefix — refuse_unsanctioned_statements() has already confirmed every
+		// statement in $statements does, so a match here is never a false trigger
+		// on an unrelated statement.
+		$create_prefix = 'CREATE TABLE `' . self::escape_identifier( $staged_table ) . '` (';
+
 		foreach ( $statements as $statement ) {
 			$this->adapter->execute_sql( $statement );
+			if ( str_starts_with( $statement, $create_prefix ) ) {
+				// Runs immediately after execution and before any later statement in
+				// this chunk (an INSERT that would populate whatever the CREATE just
+				// built) — see the class docblock's Verification point 5 and ADR 0019.
+				$this->assert_staged_table_is_ordinary( $staged_table );
+			}
 		}
+	}
+
+	/**
+	 * Refuse a chunk whose statements do not match a sanctioned shape.
+	 *
+	 * Runs on the EXACT array {@see self::write_entry()} then executes — never
+	 * a re-split or re-normalised copy, because a validator that parses the
+	 * payload differently from the executor is the standard way to defeat this
+	 * kind of guard. Every statement is checked before any one of them
+	 * executes, so a hostile chunk is refused whole: a benign-looking first
+	 * statement never buys a later one a free pass.
+	 *
+	 * Only a statement's LEADING bytes are inspected, anchored at offset 0,
+	 * byte-exact and case-sensitive. Real row data can legitimately contain
+	 * text that reads like SQL (a post's content is free-form), so scanning a
+	 * whole statement for forbidden words would refuse ordinary backups —
+	 * the shape check never looks past the point it needs to. A statement
+	 * against the chunk's own staged table may only be:
+	 *
+	 *  - the exact `DROP TABLE IF EXISTS` for the staged table, and nothing
+	 *    else on the line;
+	 *  - a `CREATE TABLE` for the staged table, immediately followed by
+	 *    `" ("`. The body is not inspected — it is `SHOW CREATE TABLE`
+	 *    output copied verbatim, so it can legitimately span real newlines
+	 *    and carry a `FOREIGN KEY` reference to another table;
+	 *  - an `INSERT INTO` the staged table, with or without a column list,
+	 *    immediately followed by `"VALUES ("`. This anchor refuses the
+	 *    `INSERT ... SELECT` and `INSERT ... SET` statement FORMS — an
+	 *    `INSERT` opening with `SELECT` or `SET` instead of `VALUES (` never
+	 *    matches this shape — but it does not, and cannot, inspect what a
+	 *    matched `VALUES` expression itself contains: a scalar subquery
+	 *    inside `VALUES` (for example `VALUES ((SELECT user_pass FROM
+	 *    `wp_users` ORDER BY ID LIMIT 1))`) still matches this shape and
+	 *    still executes, reading another table's data into the staged
+	 *    table. That is a recorded residual risk this check does not close,
+	 *    not a gap in what it claims to do; see ADR 0019.
+	 *
+	 * A `CREATE VIEW` naming the staged table is refused with its own
+	 * message: a view could later be written through by an ordinary-looking
+	 * statement that writes to the live table it names, and Pontifex never
+	 * restores views. Anything else is refused with a generic message.
+	 *
+	 * @param string[] $statements     The statements about to be executed, in order.
+	 * @param string   $declared_table The chunk's own table name, from the entry header, for the refusal message only.
+	 * @param string   $staged_table   The staging-prefixed table name every statement must target.
+	 * @param int|null $chunk_index    The chunk's index, for the refusal message; null when the entry carries none.
+	 * @return void
+	 * @throws RuntimeException If any statement does not match a sanctioned shape.
+	 */
+	private function refuse_unsanctioned_statements( array $statements, string $declared_table, string $staged_table, ?int $chunk_index ): void {
+		$quoted         = '`' . self::escape_identifier( $staged_table ) . '`';
+		$quoted_pattern = preg_quote( $quoted, '/' );
+
+		$drop_shape          = 'DROP TABLE IF EXISTS ' . $quoted;
+		$create_shape        = 'CREATE TABLE ' . $quoted . ' (';
+		$insert_no_columns   = 'INSERT INTO ' . $quoted . ' VALUES (';
+		$insert_with_columns = '/\AINSERT INTO ' . $quoted_pattern . ' \(' . self::COLUMN_IDENTIFIER_PATTERN . '(?:, ' . self::COLUMN_IDENTIFIER_PATTERN . ')*\) VALUES \(/';
+
+		foreach ( $statements as $index => $statement ) {
+			$position = $index + 1;
+			$location = null === $chunk_index
+				? sprintf( 'an unknown chunk, statement %d', $position )
+				: sprintf( 'chunk %d, statement %d', $chunk_index, $position );
+
+			// The shapes anchor a statement's OPENING bytes; they say nothing
+			// about what follows. A payload may therefore carry a sanctioned
+			// opening and then a second statement after a semicolon — the split
+			// on ";\n" leaves "; " untouched — so the opening check alone would
+			// hand "INSERT INTO `staged` VALUES (1); UPDATE `wp_users` ..." to
+			// the database intact. Refusing an executable semicolon closes that,
+			// and closes it here rather than relying on the driver to reject
+			// stacked statements, which is a behaviour this code neither states
+			// nor controls.
+			if ( SqlSpanScanner::has_executable_semicolon( $statement, $this->backslash_is_escape ) ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+					sprintf( 'DatabaseWriter: table "%s" (%s) carries more than one statement; refusing to replay it against the live database.', $declared_table, $location )
+				);
+			}
+
+			if ( $drop_shape === $statement ) {
+				continue;
+			}
+			if ( str_starts_with( $statement, $create_shape ) ) {
+				continue;
+			}
+			if ( str_starts_with( $statement, $insert_no_columns ) ) {
+				continue;
+			}
+
+			// A regex ENGINE failure must never be read as "this shape did not
+			// match". preg_match returns false on failure and 0 on no-match, and
+			// conflating the two would condemn a perfectly valid archive because
+			// of a limit on the host — refusing the user's backup and blaming
+			// their file. Fail loudly and truthfully instead.
+			$insert_matched = preg_match( $insert_with_columns, $statement );
+			if ( false === $insert_matched ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The regex engine's own error text and the table name are reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+					sprintf( 'DatabaseWriter: could not check the statements for table "%s" because the regular-expression engine failed (%s); refusing to replay them against the live database.', $declared_table, preg_last_error_msg() )
+				);
+			}
+			if ( 1 === $insert_matched ) {
+				continue;
+			}
+
+			if ( self::declares_a_view( $statement ) ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+					sprintf( 'DatabaseWriter: table "%s" (%s) declares a CREATE VIEW, which Pontifex does not restore; refusing to replay it against the live database.', $declared_table, $location )
+				);
+			}
+
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+				sprintf( 'DatabaseWriter: table "%s" (%s) contains a statement that does not match a sanctioned shape; refusing to replay it against the live database.', $declared_table, $location )
+			);
+		}
+	}
+
+	/**
+	 * Storage engines an ordinary local table may report (ADR 0019).
+	 *
+	 * These hold only their own rows, on local disk, and expose no
+	 * cross-table, cross-connection, or file-path clause: the row-store
+	 * engines MySQL/MariaDB ship built in (InnoDB, MyISAM, Aria, MEMORY),
+	 * plus the ordinary LOCAL row-store engines a real WordPress install can
+	 * be running as a compiled-in storage-engine plugin — MyRocks/RocksDB,
+	 * TokuDB, and ColumnStore all hold their own rows on local disk exactly
+	 * like the built-in four, so refusing them would refuse a site
+	 * restoring its own, entirely legitimate backup, with no route forward
+	 * for the operator; a false refusal like that is worse than the
+	 * vulnerability this list defends against. Compared case-insensitively
+	 * against {@see self::assert_staged_table_is_ordinary()}'s lower-cased
+	 * reading of the server's own ENGINE column: MySQL/MariaDB report engine
+	 * names in mixed case ("InnoDB", "MyISAM"), and a hostile CREATE could
+	 * deliberately vary case to try to dodge an exact-case check. Every
+	 * other engine — including MRG_MyISAM (a MERGE table is a writable
+	 * alias for OTHER tables, not local storage of its own), FEDERATED,
+	 * CONNECT, and SPIDER (all reach a remote server), and
+	 * CSV/ARCHIVE/BLACKHOLE (plain-file or no-storage engines) — is refused.
+	 *
+	 * This is an allow-list, never a deny-list (ADR 0019's central design
+	 * choice), so an engine that is not one of the specifically-named
+	 * cross-table/remote/file engines above is refused too, deliberately,
+	 * the moment it is not on this list. A deny-list can only ever enumerate
+	 * the engines already known to be dangerous; a storage engine not yet
+	 * considered here — a future MySQL/MariaDB addition, or a third-party
+	 * engine plugin nobody has reviewed — would sail straight past a
+	 * deny-list with no warning at all. An allow-list instead requires a new
+	 * engine to be positively reviewed and added here, with the same
+	 * "ordinary local row-store, no cross-table/remote/file-path clause"
+	 * standard the four named above meet, before a restore may use it — the
+	 * safer default when the alternative is silently trusting an unknown.
+	 *
+	 * @var string[]
+	 */
+	private const ALLOWED_ENGINES = array( 'innodb', 'myisam', 'aria', 'memory', 'rocksdb', 'tokudb', 'columnstore' );
+
+	/**
+	 * TABLE_TYPE values an ordinary local table may report (ADR 0019).
+	 *
+	 * A plain 'BASE TABLE' is the ordinary case. MariaDB 10.3+ additionally
+	 * reports a table created `WITH SYSTEM VERSIONING` as TABLE_TYPE
+	 * 'SYSTEM VERSIONED' — confirmed empirically against a live MariaDB
+	 * server (12.3.2): `information_schema.TABLES.TABLE_TYPE` for such a
+	 * table reads exactly `SYSTEM VERSIONED`, never `BASE TABLE`. This is
+	 * still ordinary local storage — the server merely keeps an extra
+	 * historical row version alongside the current one, on the same local
+	 * disk, with no cross-table, cross-connection, or file-path capability
+	 * — so refusing it here would refuse a site restoring its own,
+	 * perfectly legitimate backup.
+	 *
+	 * MariaDB additionally reports a `CREATE SEQUENCE` object's TABLE_TYPE
+	 * as 'SEQUENCE' — also confirmed empirically against a live MariaDB
+	 * server (12.3.2): `CREATE SEQUENCE x START WITH 1 INCREMENT BY 1`
+	 * reads `TABLE_TYPE = 'SEQUENCE'`, `ENGINE = 'InnoDB'` (already
+	 * allow-listed), `CREATE_OPTIONS = ''`. Pontifex's own DatabaseScanner
+	 * already exports a sequence as an ordinary db_chunk — `SHOW TABLES`
+	 * lists it alongside real tables, and `SHOW CREATE TABLE` returns a
+	 * plain `CREATE TABLE ... SEQUENCE=1` statement over eight ordinary
+	 * bigint columns — and replaying that SQL against a fresh connection
+	 * rebuilds a working sequence (`SELECT NEXTVAL(...)` succeeds). A
+	 * sequence is local, single-table storage with no cross-table,
+	 * cross-connection, or file-path capability of its own — the same
+	 * standard SYSTEM VERSIONED meets above — so refusing it here would
+	 * make any site with so much as one sequence anywhere unable to
+	 * restore its own backup at all, since restore is all-or-nothing (the
+	 * same defect class SYSTEM VERSIONED closed; this sibling was missed
+	 * the first time). Anything else this column can report (`VIEW`,
+	 * `SYSTEM VIEW`) is refused, as before.
+	 *
+	 * @var string[]
+	 */
+	private const ALLOWED_TABLE_TYPES = array( 'BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE' );
+
+	/**
+	 * CREATE_OPTIONS fragments that mark a table as reading or writing
+	 * through something other than its own ordinary local storage (ADR
+	 * 0019): a MERGE table's UNION of other tables, a FEDERATED/CONNECT
+	 * table's remote CONNECTION, or a table redirected to an arbitrary
+	 * filesystem path via DATA DIRECTORY / INDEX DIRECTORY. Matched as plain
+	 * substrings against a CREATE_OPTIONS value {@see self::normalise_create_options()}
+	 * has already folded to lower case with every underscore and run of
+	 * whitespace collapsed to a single space, so this list only needs the
+	 * words themselves — not "union=" or "data_directory=" — to match every
+	 * spacing and casing variant a server might report. Confirmed empirically
+	 * against a live MariaDB server (see the class docblock and ADR 0019):
+	 * `DATA DIRECTORY='/tmp/'` and `INDEX DIRECTORY='/tmp/'` are what that
+	 * server actually reports, verbatim, for any engine that accepts the
+	 * clause — including InnoDB and MyISAM, both on the engine allow-list
+	 * above, so this check is the ONLY thing standing between a
+	 * DATA/INDEX DIRECTORY attack and an otherwise-ordinary engine. That
+	 * same server left CREATE_OPTIONS empty for a MERGE table's UNION — the
+	 * engine allow-list is what actually refuses MRG_MyISAM there — but
+	 * "union"/"connection" are kept here too as defence in depth for any
+	 * server that does report them.
+	 *
+	 * @var string[]
+	 */
+	private const FORBIDDEN_CREATE_OPTION_FRAGMENTS = array( 'union', 'connection', 'data directory', 'index directory' );
+
+	/**
+	 * Refuse a staged table whose actual storage facts are not an ordinary local table.
+	 *
+	 * Called by {@see self::write_entry()} immediately after a chunk's CREATE
+	 * TABLE statement has executed, and before any later statement in the
+	 * same chunk (an INSERT that would populate whatever the CREATE just
+	 * built) runs. The CREATE shape check in
+	 * {@see self::refuse_unsanctioned_statements()} anchors only the
+	 * statement's opening bytes — up to and including the opening `" ("` —
+	 * and deliberately never inspects the body, because the body is
+	 * legitimately `SHOW CREATE TABLE` output that can carry a FOREIGN KEY
+	 * reference, a CHECK constraint, or a PARTITION BY clause. That silence
+	 * is exactly what a storage-engine clause can exploit: naming MySQL's
+	 * MERGE engine (or FEDERATED/CONNECT, where the server compiles them in)
+	 * in the body turns the staged identifier into a writable alias for a
+	 * table the chunk never declared, a connection to a remote server, or a
+	 * local file — entirely through bytes the shape check never looks at,
+	 * and entirely compatible with a subsequent INSERT of the same staged
+	 * identifier that satisfies the ordinary shape check on its own merits.
+	 * Parsing the CREATE body to catch this would be the same losing game
+	 * the shape check already avoids for the rest of the statement — every
+	 * defence tried against parsing a statement's VERB was defeated by some
+	 * comment or casing variant (ADR 0019), and a body-clause deny-list
+	 * would face the same fate against an engine or option not yet
+	 * considered. Instead this asks the server what it actually built and
+	 * allow-lists the answer: the same shift from parsing SQL text to
+	 * trusting server-reported facts that already makes shape anchoring
+	 * itself safer than extracting a statement's verb.
+	 *
+	 * A table refused here has never been written to (it was just CREATEd,
+	 * empty, and no INSERT for it has run) and is dropped, along with every
+	 * other table this restore staged, by {@see RestoreRunner}'s
+	 * catch(Throwable) calling {@see self::abort_staging()} — including when
+	 * the "table" is a MERGE alias for a live one: dropping a MERGE table
+	 * removes only its own definition, never the underlying tables it
+	 * unions, so the live database stays untouched.
+	 *
+	 * @param string $staged_table The staging-prefixed table name just created.
+	 * @return void
+	 * @throws RuntimeException If the table's storage facts could not be read at all, its TABLE_TYPE is not on the allow-list, its engine is not on the allow-list, its CREATE_OPTIONS names a unioned table list, a remote connection, or a data/index directory, a partitioned table names a data/index directory on one of its partitions, its row count could not be read, or it already held rows (more than the single state row a MariaDB SEQUENCE's own CREATE legitimately seeds) the moment it existed.
+	 */
+	private function assert_staged_table_is_ordinary( string $staged_table ): void {
+		$facts = $this->adapter->table_storage_facts( $staged_table );
+
+		if ( null === $facts ) {
+			throw new RuntimeException(
+				'DatabaseWriter: could not read the storage facts for a just-created staged table; refusing to continue this restore.'
+			);
+		}
+
+		if ( ! in_array( $facts['table_type'], self::ALLOWED_TABLE_TYPES, true ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $facts['table_type'] is the server's own information_schema.TABLES.TABLE_TYPE value, reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+				sprintf( 'DatabaseWriter: a staged CREATE built a "%s", not an ordinary table; refusing to replay it against the live database.', $facts['table_type'] )
+			);
+		}
+
+		$engine = strtolower( $facts['engine'] );
+		if ( ! in_array( $engine, self::ALLOWED_ENGINES, true ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $facts['engine'] is the server's own information_schema.TABLES.ENGINE value (a storage-engine name), never the statement's own bytes; exception path, not HTML output.
+				sprintf( 'DatabaseWriter: a staged CREATE built a table using the "%s" storage engine, which is not an ordinary local table; Pontifex restores only ordinary local tables — never one that reaches other tables, a remote server, or an arbitrary file — so this table cannot be restored; refusing to replay it against the live database.', $facts['engine'] )
+			);
+		}
+
+		$normalised_options = self::normalise_create_options( $facts['create_options'] );
+		foreach ( self::FORBIDDEN_CREATE_OPTION_FRAGMENTS as $fragment ) {
+			if ( str_contains( $normalised_options, $fragment ) ) {
+				throw new RuntimeException(
+					'DatabaseWriter: a staged CREATE carries table options that point outside its own local storage; refusing to replay it against the live database.'
+				);
+			}
+		}
+
+		// CREATE_OPTIONS reports only the single word "partitioned" for a
+		// partitioned table, with no per-partition detail — a DATA DIRECTORY or
+		// INDEX DIRECTORY written on an individual PARTITION clause, rather than
+		// on the table itself, is invisible to the check above and must be read
+		// a second way; see DatabaseAdapter::partition_storage_directory_present().
+		if ( str_contains( $normalised_options, 'partitioned' ) && $this->adapter->partition_storage_directory_present( $staged_table ) ) {
+			throw new RuntimeException(
+				'DatabaseWriter: a staged CREATE names a DATA DIRECTORY or INDEX DIRECTORY on one of its partitions; refusing to replay it against the live database.'
+			);
+		}
+
+		// A bare `CREATE ... SEQUENCE=1` legitimately seeds its own single state
+		// row as an intrinsic part of the CREATE itself — confirmed empirically
+		// against a live MariaDB server (12.3.2) — so a SEQUENCE may hold exactly
+		// one row here; every other allowed table_type must hold none. Read AFTER
+		// every check above has already passed, never before: an engine this
+		// class is about to refuse anyway (FEDERATED/CONNECT, reaching a remote
+		// server) must never have a query issued against it first.
+		$max_seeded_rows = ( 'SEQUENCE' === $facts['table_type'] ) ? 1 : 0;
+		if ( $this->adapter->table_row_count( $staged_table ) > $max_seeded_rows ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $staged_table is the identifier this class composed itself, reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
+				sprintf( 'DatabaseWriter: a staged CREATE for table "%s" produced rows; refusing to replay it against the live database.', $staged_table )
+			);
+		}
+	}
+
+	/**
+	 * Normalise a CREATE_OPTIONS value before matching it against the forbidden-fragment list.
+	 *
+	 * MySQL/MariaDB report this column with varying case and spacing
+	 * depending on server and version — this codebase has directly observed
+	 * `DATA DIRECTORY='/tmp/'` (upper case, a literal space between the two
+	 * words) from a live MariaDB server, and the wider MySQL/MariaDB
+	 * ecosystem is documented elsewhere to also use forms such as
+	 * `data_directory=/tmp` (lower case, an underscore) — see the class
+	 * docblock. Folding to lower case and collapsing every underscore and
+	 * run of whitespace to a single space makes
+	 * {@see self::FORBIDDEN_CREATE_OPTION_FRAGMENTS}'s plain-word matches hit
+	 * regardless of which form the server used, without the fragment list
+	 * itself needing to enumerate every spacing variant.
+	 *
+	 * @param string $create_options The raw value from information_schema.TABLES.CREATE_OPTIONS.
+	 * @return string The normalised value.
+	 */
+	private static function normalise_create_options( string $create_options ): string {
+		$lower     = strtolower( $create_options );
+		$unified   = str_replace( '_', ' ', $lower );
+		$collapsed = preg_replace( '/\s+/', ' ', $unified );
+		// preg_replace returns null only on a PCRE engine failure; falling back to
+		// the unified-but-uncollapsed string still matches every fragment above
+		// correctly (collapsing whitespace only removes false NEGATIVES from
+		// repeated spaces, never introduces a false negative of its own), so a
+		// transient engine failure here degrades safely rather than throwing.
+		return null === $collapsed ? $unified : $collapsed;
+	}
+
+	/**
+	 * Whether a refused statement is a database view, for the refusal message.
+	 *
+	 * Only reached once a statement has already failed every sanctioned shape,
+	 * so this decides the wording rather than the verdict. It is deliberately
+	 * not a match on a leading "CREATE VIEW": a real server does not emit that
+	 * form. It writes the view's full definition —
+	 * `CREATE ALGORITHM=UNDEFINED DEFINER=`someone`@`somewhere` SQL SECURITY
+	 * DEFINER VIEW `name` AS ...` — so a check for the literal opening would
+	 * never fire on an archive taken from an actual site, and the operator
+	 * would be told only that something unrecognised was found.
+	 *
+	 * @param string $statement One statement that has already been refused.
+	 * @return bool True if the statement defines a view.
+	 */
+	private static function declares_a_view( string $statement ): bool {
+		if ( ! str_starts_with( $statement, 'CREATE ' ) ) {
+			return false;
+		}
+		return str_contains( $statement, ' VIEW `' );
 	}
 
 	/**

@@ -353,24 +353,27 @@ final class JobTicker {
 			@chmod( $output, 0600 );
 		}
 
-		$bytes_written = isset( $payload['bytes_written'] ) ? (int) $payload['bytes_written'] : 0;
-		$files_changed = isset( $payload['files_changed'] ) ? (int) $payload['files_changed'] : 0;
+		$bytes_written         = isset( $payload['bytes_written'] ) ? (int) $payload['bytes_written'] : 0;
+		$files_changed         = isset( $payload['files_changed'] ) ? (int) $payload['files_changed'] : 0;
+		$media_type_unresolved = isset( $payload['media_type_unresolved'] ) ? (int) $payload['media_type_unresolved'] : 0;
 		$this->job_store->delete( $job_id );
 		$this->release_holder_if_backup();
 
 		$this->bump_counters(
 			array(
-				'succeeded'      => 1,
-				'bytes_exported' => $bytes_written,
-				'files_changed'  => $files_changed,
+				'succeeded'             => 1,
+				'bytes_exported'        => $bytes_written,
+				'files_changed'         => $files_changed,
+				'media_type_unresolved' => $media_type_unresolved,
 			)
 		);
 		TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 		$this->logger->info(
 			'Cron-driven backup complete.',
 			array(
-				'output' => $output,
-				'bytes'  => $bytes_written,
+				'output'                => $output,
+				'bytes'                 => $bytes_written,
+				'media_type_unresolved' => $media_type_unresolved,
 			)
 		);
 
@@ -436,7 +439,7 @@ final class JobTicker {
 		$current = $this->wordpress_context->option_value( 'pontifex_export_stats', array() );
 		$current = is_array( $current ) ? $current : array();
 		$merged  = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed' ) as $key ) {
+		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
 			$stored         = isset( $current[ $key ] ) && is_numeric( $current[ $key ] ) ? (int) $current[ $key ] : 0;
 			$merged[ $key ] = $stored + (int) ( $delta[ $key ] ?? 0 );
 		}
