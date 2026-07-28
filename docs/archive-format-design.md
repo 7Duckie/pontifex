@@ -222,6 +222,8 @@ Databases should be exported as standard SQL dump streams, split into chunks of 
 
 JPEG, PNG, MP4, and similar media are already compressed. Re-running them through gzip or zstd wastes CPU for negligible size gain (often producing slightly *larger* output). Writers should detect these by media type or by sampling-based heuristic, and emit them with codec `0x0000` (or `0x0100` for encryption-only) rather than `0x0001/0x0002/0x0101/0x0102`.
 
+In the PHP reference implementation, the media type is determined at write time rather than at plan time — it is sniffed only once an entry's payload stream is actually open, not while the entry is still being planned, so that sniffing costs nothing for entries a resumable export never gets to write. The codec id, by contrast, is fixed on the plan before that point. A media-type-based skip-recompression route therefore cannot be keyed off the plan's codec id as this section implies; any future writer that wants to skip recompression by media type has to decide the codec at write time too, alongside the sniff, not at plan time.
+
 ## 7. Implementation guidance for readers
 
 ### 7.1 Defensive limits

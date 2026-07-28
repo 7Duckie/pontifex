@@ -624,15 +624,17 @@ final class FileScannerTest extends TestCase {
 	}
 
 	/**
-	 * Scanned file entries must carry a non-empty media_type.
+	 * Scanned file entries must carry a null media_type.
 	 *
-	 * The exact value depends on the host's finfo magic database, so
-	 * this test asserts only the structural invariant: every file
-	 * entry has a non-null, non-empty media_type string.
+	 * Media type is no longer determined during the scan — sniffing it
+	 * costs opening and reading the head of every file, and only the
+	 * entries actually written on a given tick need that cost paid. It is
+	 * left to EntryWriter to sniff at write time instead (see
+	 * FileScanner's class docblock).
 	 *
 	 * @return void
 	 */
-	public function test_scanned_files_carry_non_empty_media_type(): void {
+	public function test_scanned_files_carry_null_media_type(): void {
 		$this->write_file( 'note.txt', 'plain text content' );
 		$this->write_file( 'wp-config.php', '<?php echo 1; ?>' );
 
@@ -640,8 +642,7 @@ final class FileScannerTest extends TestCase {
 
 		foreach ( $entries as $entry ) {
 			if ( EntryHeader::KIND_FILE === $entry->kind() ) {
-				$this->assertIsString( $entry->media_type() );
-				$this->assertNotSame( '', $entry->media_type() );
+				$this->assertNull( $entry->media_type() );
 			}
 		}
 	}

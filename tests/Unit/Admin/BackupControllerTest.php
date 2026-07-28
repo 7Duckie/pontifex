@@ -224,6 +224,86 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * Once every file entry is read, the run reports a finalising phase — and
+	 * nothing reported afterwards can move it backwards.
+	 *
+	 * The database chunk after the file entry crosses the tick loop's
+	 * file/database boundary, which the controller observes on the job payload
+	 * and reports before the tick that reads the database chunk and writes the
+	 * manifest and footer runs. That tick re-walks the whole scan tree, as
+	 * every tick does (ADR 0015), so its own scan callback fires again after
+	 * finalising was already reported, and it still tallies bytes for the
+	 * database chunk it appends. The fake builder below fires its scan
+	 * callback on every build() call, exactly as the real scanner does through
+	 * ScanProgressManifestBuilder — the canned stub the other tests use never
+	 * invokes the callback at all, so it cannot exercise this — which is what
+	 * proves write_progress()'s phase-rank guard holds no matter which
+	 * callback fires, not merely that one particular call site happens to be
+	 * silent.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_a_finalising_phase_that_nothing_can_move_backwards(): void {
+		$this->authorise();
+		$this->stub_json();
+
+		$writes = array();
+		Functions\when( 'set_transient' )->alias(
+			static function ( string $key, $value ) use ( &$writes ): bool {
+				if ( 'pontifex_backup_progress' === $key ) {
+					$writes[] = $value;
+				}
+				return true;
+			}
+		);
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$plans = array(
+			$this->file_plan( 'a.txt', "alpha alpha alpha\n" ),
+			$this->db_plan( 0, 'wp_posts', "INSERT INTO wp_posts VALUES (1, 'hi');\n" ),
+		);
+
+		// Every tick's own scan (ADR 0015) reports scan progress on this
+		// builder, including the tick that runs after finalising has already
+		// been reported — the real regression this test exists to catch.
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->andReturnUsing(
+			static function ( string $root, ?callable $on_scan_progress = null ) use ( $plans ) {
+				if ( null !== $on_scan_progress ) {
+					$on_scan_progress( 2 );
+				}
+				return ManifestStream::from_plans( $plans );
+			}
+		);
+
+		$this->controller( $builder )->create();
+
+		$this->assertTrue( $this->json['success'], 'A backup with a database chunk should still succeed.' );
+
+		$phases = array_values(
+			array_filter(
+				array_map(
+					static function ( $write ) {
+						return ( is_array( $write ) && isset( $write['phase'] ) ) ? $write['phase'] : null;
+					},
+					$writes
+				)
+			)
+		);
+
+		$finalising_at = array_search( 'finalising', $phases, true );
+		$this->assertNotFalse( $finalising_at, 'The finalising phase must be reported once every file entry is done.' );
+
+		$after = array_slice( $phases, $finalising_at + 1 );
+		$this->assertSame(
+			array(),
+			$after,
+			'Nothing may be reported after finalising: the database tick\'s own re-scan and its byte tally must not move the phase back to scanning or copying.'
+		);
+	}
+
+	/**
 	 * A failed backup is logged and leaves no partial archive behind.
 	 *
 	 * @return void
@@ -829,6 +909,46 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A dead request's job cursors re-attach as finalising once past the database boundary.
+	 *
+	 * Once the job's own phase cursor reads "database" the run has moved past the
+	 * byte-copy work into the uninterruptible database-and-footer pass; a page
+	 * that re-attaches after the writing request died must not fall back to
+	 * serving the job's last byte-copy cursors as though copying were still
+	 * under way — that is the same frozen-at-100% lie this phase exists to fix.
+	 *
+	 * @return void
+	 */
+	public function test_progress_reports_finalising_for_a_dead_request_past_the_database_boundary(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			array(
+				'phase'       => 'copying',
+				'bytes_done'  => 941568495,
+				'bytes_total' => 941568495,
+				'at'          => time() - 60,
+			)
+		);
+
+		$jobs = new \Pontifex\Job\JobStore( $this->base );
+		$jobs->create(
+			\Pontifex\Job\Job::KIND_EXPORT,
+			array(
+				'phase'             => 'database',
+				'source_bytes_done' => 941568495,
+				'total_bytes'       => 941568495,
+			),
+			time() - 120
+		);
+
+		$this->controller()->progress();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'finalising', $this->json['data']['phase'], 'A re-attach past the database boundary must report finalising, not a copying phase frozen at its last byte count.' );
+	}
+
+	/**
 	 * A freshly-refreshed transient is served as-is, with the start time attached.
 	 *
 	 * @return void
@@ -1259,6 +1379,19 @@ final class BackupControllerTest extends TestCase {
 	private function file_plan( string $path, string $contents ): EntryPlan {
 		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
 		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build a database-chunk EntryPlan with the given table and SQL statement.
+	 *
+	 * @param int    $chunk_index Zero-based chunk sequence index.
+	 * @param string $table_name  The table the chunk belongs to.
+	 * @param string $sql         The chunk's SQL statement text.
+	 * @return EntryPlan
+	 */
+	private function db_plan( int $chunk_index, string $table_name, string $sql ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( $chunk_index, $table_name, 1, strlen( $sql ), 0 );
+		return new EntryPlan( $header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( $sql ) );
 	}
 
 	/**

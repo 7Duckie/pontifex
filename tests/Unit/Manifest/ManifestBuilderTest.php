@@ -387,11 +387,15 @@ final class ManifestBuilderTest extends TestCase {
 	}
 
 	/**
-	 * The media_type captured by FileScanner must propagate through ManifestBuilder into the resulting EntryHeader.
+	 * The null media_type FileScanner leaves on a file entry must propagate through ManifestBuilder into the resulting EntryHeader.
+	 *
+	 * Media type is no longer determined at scan/build time — it is
+	 * sniffed later, at write time, by EntryWriter — so the plan's draft
+	 * header must carry a null media_type, not a sniffed value.
 	 *
 	 * @return void
 	 */
-	public function test_media_type_propagates_through_to_entry_header(): void {
+	public function test_null_media_type_propagates_through_to_entry_header(): void {
 		$this->write_file( 'note.txt', 'plain text content' );
 
 		$plans = iterator_to_array( self::default_builder()->build( $this->fixture_root ) );
@@ -404,7 +408,6 @@ final class ManifestBuilderTest extends TestCase {
 		}
 
 		$this->assertCount( 1, $file_plans );
-		$this->assertIsString( $file_plans[0]->header()->media_type() );
-		$this->assertNotSame( '', $file_plans[0]->header()->media_type() );
+		$this->assertNull( $file_plans[0]->header()->media_type() );
 	}
 }
