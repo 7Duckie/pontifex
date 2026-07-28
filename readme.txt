@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.9.0
+Stable tag: 0.9.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.9.3 =
+* Operational hardening, including a silent data-loss fix. The manifest scanner dropped the entry immediately after any excluded directory; when that directory was empty — as several inside every git checkout are — the lost entry was a real site file, missing from an archive that still verified as sound. If you run a site deployed from git, or exclude any directory that happens to be empty, re-take your backups after upgrading. Also: `.git` is now left out of backups by default at any depth (`.github`, `.gitignore` and friends stay in; `vendor` and `node_modules` are deliberately kept, since a restored site needs them); backup, restore and rollback share one lock across both the admin and the CLI, so they can no longer run against the site at the same time; backup lists show each archive's true source and real creation date read from its own provenance, rather than an uploaded file's upload time; and a backup no longer appears to hang at a full progress bar while it finishes, having also stopped re-reading every file on every pass. No breaking changes.
 
 = 0.9.0 =
 * Admin legibility. A sound verify now shows a full proof panel — verdict, entry count, size, what the archive contains, created date, format version, and a link to the published format specification — instead of a single line. Every backup list gains a "Contains" column, the Verify screen re-attaches to a running check after a page reload, and selecting a backup taken on another site hints that its links can be rewritten to this one. Fixes: a fatal-killed backup no longer shows as "running"; a restore that signs you out now reports honestly and reloads once you log back in, instead of freezing; and the backup list no longer shows phantom rows for stray files. No breaking changes.

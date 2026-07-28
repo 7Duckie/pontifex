@@ -2,26 +2,26 @@
 # This file is distributed under the GPL-2.0-or-later.
 msgid ""
 msgstr ""
-"Project-Id-Version: Pontifex 0.9.0\n"
+"Project-Id-Version: Pontifex 0.9.3\n"
 "Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/pontifex\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-07-14T19:30:39+00:00\n"
+"POT-Creation-Date: 2026-07-28T09:42:57+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
 
 #. Plugin Name of the plugin
 #: pontifex.php
-#: src/Admin/BackupPage.php:89
+#: src/Admin/BackupPage.php:83
 #: src/Admin/Menu.php:125
 #: src/Admin/Menu.php:126
 #: src/Admin/OverviewPage.php:119
-#: src/Admin/RestorePage.php:103
-#: src/Admin/VerifyPage.php:92
+#: src/Admin/RestorePage.php:111
+#: src/Admin/VerifyPage.php:87
 msgid "Pontifex"
 msgstr ""
 
@@ -55,55 +55,69 @@ msgstr ""
 msgid "Pontifex is missing its Composer dependencies. Run `composer install` from the plugin directory."
 msgstr ""
 
+#: src/Admin/ArchiveFacts.php:124
+#: src/Admin/ArchiveFacts.php:155
+#: src/Admin/ArchiveFacts.php:158
+#: src/Admin/VerifyController.php:456
+#: src/Admin/VerifyController.php:469
+#: src/Archive/ScopeSummary.php:99
+msgid "Unknown"
+msgstr ""
+
+#: src/Admin/ArchiveFacts.php:127
+msgid "This site"
+msgstr ""
+
 #. translators: %s: the exclusion pattern that could not be understood
-#: src/Admin/BackupController.php:315
-#: src/Admin/BackupController.php:780
+#: src/Admin/BackupController.php:355
+#: src/Admin/BackupController.php:859
 #, php-format
 msgid "That exclusion pattern is not valid: %s. Fix or remove it and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:326
-msgid "A backup is already running. Please wait for it to finish."
-msgstr ""
-
-#: src/Admin/BackupController.php:716
+#: src/Admin/BackupController.php:795
 msgid "That backup could not be deleted."
 msgstr ""
 
-#: src/Admin/BackupController.php:791
-#: src/Admin/Menu.php:327
+#: src/Admin/BackupController.php:870
+#: src/Admin/Menu.php:328
 msgid "The schedule could not be saved. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:900
+#: src/Admin/BackupController.php:979
 msgid "You do not have permission to download this backup."
 msgstr ""
 
-#: src/Admin/BackupController.php:909
+#: src/Admin/BackupController.php:988
 msgid "You do not have permission to manage backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:923
-#: src/Admin/Menu.php:322
+#: src/Admin/BackupController.php:1003
+msgid "A restore or rollback is currently running. Please wait for it to finish before starting a backup."
+msgstr ""
+
+#: src/Admin/BackupController.php:1005
+msgid "A backup is already running. Please wait for it to finish."
+msgstr ""
+
+#: src/Admin/BackupController.php:1019
+#: src/Admin/Menu.php:323
 msgid "The backup could not be completed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/BackupPage.php:82
+#: src/Admin/BackupPage.php:76
 #: src/Admin/OverviewPage.php:112
-#: src/Admin/RestorePage.php:96
-#: src/Admin/VerifyPage.php:85
+#: src/Admin/RestorePage.php:104
+#: src/Admin/VerifyPage.php:80
 msgid "You do not have permission to access Pontifex."
 msgstr ""
 
-#: src/Admin/BackupPage.php:90
-#: src/Admin/BackupPage.php:214
+#: src/Admin/BackupPage.php:84
 #: src/Admin/Menu.php:146
-#: src/Admin/RestorePage.php:192
-#: src/Admin/VerifyPage.php:164
 msgid "Backup"
 msgstr ""
 
-#: src/Admin/BackupPage.php:91
+#: src/Admin/BackupPage.php:85
 msgid "Create a full backup of this site and download it."
 msgstr ""
 
@@ -116,7 +130,7 @@ msgid "A backup packs every file and the whole database into one .wpmig archive,
 msgstr ""
 
 #: src/Admin/BackupPage.php:138
-#: src/Admin/BackupPage.php:312
+#: src/Admin/BackupPage.php:363
 msgid "Also leave out (one pattern per line)"
 msgstr ""
 
@@ -136,7 +150,7 @@ msgid "Create backup"
 msgstr ""
 
 #: src/Admin/BackupPage.php:152
-#: src/Admin/Menu.php:318
+#: src/Admin/Menu.php:319
 msgid "Cancel backup"
 msgstr ""
 
@@ -144,100 +158,116 @@ msgstr ""
 msgid "Backup progress"
 msgstr ""
 
-#: src/Admin/BackupPage.php:177
+#: src/Admin/BackupPage.php:178
 msgid "This backup covers your content — everything in wp-content — and the whole database. (Whole-site backups, including WordPress core, are a command-line operation.)"
 msgstr ""
 
-#: src/Admin/BackupPage.php:185
+#: src/Admin/BackupPage.php:186
 msgid "Always left out:"
 msgstr ""
 
-#: src/Admin/BackupPage.php:201
-#: src/Admin/RestorePage.php:177
-#: src/Admin/VerifyPage.php:149
+#: src/Admin/BackupPage.php:211
+msgid ".git directories (version-control history)"
+msgstr ""
+
+#: src/Admin/BackupPage.php:224
+#: src/Admin/RestorePage.php:191
+#: src/Admin/VerifyPage.php:150
 msgid "Your backups"
 msgstr ""
 
-#: src/Admin/BackupPage.php:204
+#: src/Admin/BackupPage.php:227
 msgid "No backups yet. Create one above and it will appear here to download."
 msgstr ""
 
-#: src/Admin/BackupPage.php:215
-#: src/Admin/Menu.php:375
-#: src/Admin/OverviewPage.php:304
-#: src/Admin/RestorePage.php:193
+#: src/Admin/BackupPage.php:237
+#: src/Admin/RestorePage.php:206
 #: src/Admin/VerifyPage.php:165
+msgid "Source"
+msgstr ""
+
+#: src/Admin/BackupPage.php:238
+#: src/Admin/Menu.php:376
+#: src/Admin/OverviewPage.php:304
+#: src/Admin/RestorePage.php:207
+#: src/Admin/VerifyPage.php:166
 msgid "Created"
 msgstr ""
 
-#: src/Admin/BackupPage.php:216
+#: src/Admin/BackupPage.php:239
 #: src/Admin/OverviewPage.php:276
-#: src/Admin/RestorePage.php:194
-#: src/Admin/VerifyPage.php:166
+#: src/Admin/RestorePage.php:208
+#: src/Admin/VerifyPage.php:167
 msgid "Size"
 msgstr ""
 
-#: src/Admin/BackupPage.php:217
-#: src/Admin/Menu.php:374
-#: src/Admin/RestorePage.php:195
-#: src/Admin/VerifyPage.php:167
+#: src/Admin/BackupPage.php:240
+#: src/Admin/Menu.php:375
+#: src/Admin/RestorePage.php:209
+#: src/Admin/VerifyPage.php:168
 msgid "Contains"
 msgstr ""
 
-#: src/Admin/BackupPage.php:218
+#: src/Admin/BackupPage.php:241
 msgid "Actions"
 msgstr ""
 
-#: src/Admin/BackupPage.php:239
+#: src/Admin/BackupPage.php:262
 msgid "Download"
 msgstr ""
 
-#: src/Admin/BackupPage.php:241
+#: src/Admin/BackupPage.php:264
 msgid "Delete"
 msgstr ""
 
-#: src/Admin/BackupPage.php:264
+#: src/Admin/BackupPage.php:285
+#: src/Admin/RestorePage.php:252
+#: src/Admin/VerifyPage.php:211
+msgid "Another site"
+msgstr ""
+
+#: src/Admin/BackupPage.php:315
 msgid "Scheduled backups"
 msgstr ""
 
-#: src/Admin/BackupPage.php:267
+#: src/Admin/BackupPage.php:318
 msgid "Back up this site automatically on a schedule. Scheduled backups appear in the list above, and older ones are pruned so only the newest are kept. The time is in UTC, not your site's display timezone."
 msgstr ""
 
-#: src/Admin/BackupPage.php:275
+#: src/Admin/BackupPage.php:326
 msgid "Back up automatically"
 msgstr ""
 
-#: src/Admin/BackupPage.php:278
+#: src/Admin/BackupPage.php:329
 msgid "Frequency"
 msgstr ""
 
-#: src/Admin/BackupPage.php:281
+#: src/Admin/BackupPage.php:332
 msgid "Daily"
 msgstr ""
 
-#: src/Admin/BackupPage.php:282
+#: src/Admin/BackupPage.php:333
 msgid "Weekly"
 msgstr ""
 
-#: src/Admin/BackupPage.php:293
+#: src/Admin/BackupPage.php:344
 msgid "Time (UTC)"
 msgstr ""
 
-#: src/Admin/BackupPage.php:305
+#: src/Admin/BackupPage.php:356
 msgid "Backups to keep"
 msgstr ""
 
-#: src/Admin/BackupPage.php:320
+#: src/Admin/BackupPage.php:371
 msgid "Save schedule"
 msgstr ""
 
-#: src/Admin/BackupPage.php:350
+#: src/Admin/BackupPage.php:401
 msgid "This schedule is switched on, but WordPress has no pending event for it — the automatic backup will not run until you save the schedule again. A plugin that clears scheduled events, or a manual change, can cause this."
 msgstr ""
 
 #. translators: %s: the next scheduled run time in UTC, e.g. "2026-07-14 03:00 UTC"
-#: src/Admin/BackupPage.php:359
+#: src/Admin/BackupPage.php:410
 #, php-format
 msgid "Next automatic backup: %s."
 msgstr ""
@@ -260,8 +290,8 @@ msgid "Pontifex — Verify"
 msgstr ""
 
 #: src/Admin/Menu.php:155
-#: src/Admin/VerifyPage.php:93
-#: src/Admin/VerifyPage.php:208
+#: src/Admin/VerifyPage.php:88
+#: src/Admin/VerifyPage.php:237
 msgid "Verify"
 msgstr ""
 
@@ -270,8 +300,8 @@ msgid "Pontifex — Restore"
 msgstr ""
 
 #: src/Admin/Menu.php:164
-#: src/Admin/RestorePage.php:104
-#: src/Admin/RestorePage.php:154
+#: src/Admin/RestorePage.php:112
+#: src/Admin/RestorePage.php:168
 msgid "Restore"
 msgstr ""
 
@@ -285,179 +315,183 @@ msgstr ""
 msgid "Scanning files… %s"
 msgstr ""
 
+#: src/Admin/Menu.php:306
+msgid "Finishing the backup…"
+msgstr ""
+
 #. translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes
-#: src/Admin/Menu.php:307
-#: src/Admin/Menu.php:363
-#: src/Admin/Menu.php:418
-#: src/Admin/Menu.php:472
+#: src/Admin/Menu.php:308
+#: src/Admin/Menu.php:364
+#: src/Admin/Menu.php:419
+#: src/Admin/Menu.php:473
 #, php-format
 msgid "%1$s of %2$s"
 msgstr ""
 
 #. translators: %s: elapsed time, e.g. 0:48
-#: src/Admin/Menu.php:309
-#: src/Admin/Menu.php:365
-#: src/Admin/Menu.php:420
+#: src/Admin/Menu.php:310
+#: src/Admin/Menu.php:366
+#: src/Admin/Menu.php:421
 #, php-format
 msgid "Time elapsed - %s"
 msgstr ""
 
 #. translators: 1: elapsed time, 2: estimated time remaining
-#: src/Admin/Menu.php:311
+#: src/Admin/Menu.php:312
 #, php-format
 msgid "Time elapsed - %1$s with about %2$s left"
 msgstr ""
 
 #. translators: 1: the finished backup's size, 2: the source data size it was compressed from
-#: src/Admin/Menu.php:313
+#: src/Admin/Menu.php:314
 #, php-format
 msgid "Backup created — %1$s (compressed from %2$s)"
 msgstr ""
 
-#: src/Admin/Menu.php:314
+#: src/Admin/Menu.php:315
 msgid "Backup created."
 msgstr ""
 
-#: src/Admin/Menu.php:315
+#: src/Admin/Menu.php:316
 msgid "A backup is running — re-attached to its progress."
 msgstr ""
 
 #. translators: shown after re-attaching to a backup that then finished
-#: src/Admin/Menu.php:317
+#: src/Admin/Menu.php:318
 msgid "The running backup finished."
 msgstr ""
 
-#: src/Admin/Menu.php:319
+#: src/Admin/Menu.php:320
 msgid "Cancelling…"
 msgstr ""
 
-#: src/Admin/Menu.php:320
+#: src/Admin/Menu.php:321
 msgid "Backup cancelled."
 msgstr ""
 
-#: src/Admin/Menu.php:321
+#: src/Admin/Menu.php:322
 msgid "Cancel this backup? The progress so far will be lost."
 msgstr ""
 
-#: src/Admin/Menu.php:323
+#: src/Admin/Menu.php:324
 msgid "Delete this backup? This cannot be undone."
 msgstr ""
 
 #. translators: %s: the next scheduled run time, e.g. "2026-07-14 03:00 UTC"
-#: src/Admin/Menu.php:325
+#: src/Admin/Menu.php:326
 #, php-format
 msgid "Schedule saved. Next backup at %s."
 msgstr ""
 
-#: src/Admin/Menu.php:326
+#: src/Admin/Menu.php:327
 msgid "Schedule saved. Scheduled backups are off."
 msgstr ""
 
-#: src/Admin/Menu.php:361
+#: src/Admin/Menu.php:362
 msgid "Verifying…"
 msgstr ""
 
-#: src/Admin/Menu.php:366
+#: src/Admin/Menu.php:367
 msgid "A verification is running — re-attached to its progress."
 msgstr ""
 
 #. translators: shown after re-attaching to a verification that then finished; the verdict went to the tab that started it
-#: src/Admin/Menu.php:368
+#: src/Admin/Menu.php:369
 msgid "The running verification finished. Its result was shown in the tab that started it."
 msgstr ""
 
-#: src/Admin/Menu.php:369
+#: src/Admin/Menu.php:370
 msgid "The verification could not be completed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/Menu.php:370
+#: src/Admin/Menu.php:371
 msgid "Verified — this backup is intact."
 msgstr ""
 
-#: src/Admin/Menu.php:371
+#: src/Admin/Menu.php:372
 msgid "Not verified — this backup is broken."
 msgstr ""
 
-#: src/Admin/Menu.php:372
+#: src/Admin/Menu.php:373
 msgid "Entries checked"
 msgstr ""
 
-#: src/Admin/Menu.php:373
+#: src/Admin/Menu.php:374
 msgid "Total size"
 msgstr ""
 
-#: src/Admin/Menu.php:376
+#: src/Admin/Menu.php:377
 msgid "Format version"
 msgstr ""
 
-#: src/Admin/Menu.php:377
+#: src/Admin/Menu.php:378
 msgid "Every file and database chunk was re-read and its SHA-256 hash re-checked against the value recorded when the backup was made."
 msgstr ""
 
-#: src/Admin/Menu.php:378
+#: src/Admin/Menu.php:379
 msgid "The .wpmig format is publicly documented, so this backup is never hostage to this plugin — it can be read, verified, or recovered without Pontifex."
 msgstr ""
 
-#: src/Admin/Menu.php:379
+#: src/Admin/Menu.php:380
 msgid "Read the format specification"
 msgstr ""
 
-#: src/Admin/Menu.php:412
+#: src/Admin/Menu.php:413
 msgid "Starting…"
 msgstr ""
 
-#: src/Admin/Menu.php:413
+#: src/Admin/Menu.php:414
 msgid "Verifying the backup…"
 msgstr ""
 
-#: src/Admin/Menu.php:414
+#: src/Admin/Menu.php:415
 msgid "Backing up your content…"
 msgstr ""
 
-#: src/Admin/Menu.php:415
+#: src/Admin/Menu.php:416
 msgid "Restoring…"
 msgstr ""
 
-#: src/Admin/Menu.php:416
+#: src/Admin/Menu.php:417
 msgid "Rolling back…"
 msgstr ""
 
-#: src/Admin/Menu.php:421
+#: src/Admin/Menu.php:422
 msgid "The restore could not be completed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/Menu.php:422
+#: src/Admin/Menu.php:423
 msgid "The connection was lost, so the result is unknown — the operation may have completed or may still be running. Wait a moment, then reload this page to check; if the site looks wrong, run a rollback. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/Menu.php:423
+#: src/Admin/Menu.php:424
 msgid "If pages ask you to log in again, your session was reset by the restore."
 msgstr ""
 
 #. translators: shown after re-attaching to an operation that then finished; the verdict went to the request that started it
-#: src/Admin/Menu.php:425
+#: src/Admin/Menu.php:426
 msgid "The running operation finished. Reload this page to see the result, and check the Overview screen or the Pontifex log for its outcome."
 msgstr ""
 
-#: src/Admin/Menu.php:426
+#: src/Admin/Menu.php:427
 msgid "The restore reached its final stage and reset your session — this is expected. Log in again to continue; the Overview screen and the Pontifex log will show the outcome."
 msgstr ""
 
-#: src/Admin/Menu.php:470
+#: src/Admin/Menu.php:471
 msgid "Uploading…"
 msgstr ""
 
-#: src/Admin/Menu.php:473
+#: src/Admin/Menu.php:474
 msgid "Upload complete."
 msgstr ""
 
-#: src/Admin/Menu.php:474
+#: src/Admin/Menu.php:475
 #: src/Admin/UploadController.php:273
 msgid "The upload could not be completed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/Menu.php:475
-#: src/Admin/RestorePage.php:254
+#: src/Admin/Menu.php:476
+#: src/Admin/RestorePage.php:296
 msgid "No file chosen"
 msgstr ""
 
@@ -533,162 +567,165 @@ msgstr ""
 msgid "Archive"
 msgstr ""
 
-#: src/Admin/RestoreController.php:296
+#: src/Admin/RestoreController.php:292
 #: src/Admin/VerifyController.php:213
 msgid "That backup could not be found."
 msgstr ""
 
-#: src/Admin/RestoreController.php:305
-#: src/Admin/RestoreController.php:515
-msgid "A restore is already running. Please wait for it to finish."
-msgstr ""
-
-#: src/Admin/RestoreController.php:327
+#: src/Admin/RestoreController.php:323
 msgid "This backup is encrypted. Restore it with the WP-CLI command: wp pontifex import."
 msgstr ""
 
-#: src/Admin/RestoreController.php:340
+#: src/Admin/RestoreController.php:336
 msgid "This is a whole-site backup (it includes WordPress core and wp-config.php). The admin restore is content-only; restore a whole-site backup with the WP-CLI command: wp pontifex import --whole-site."
 msgstr ""
 
-#: src/Admin/RestoreController.php:361
+#: src/Admin/RestoreController.php:357
 msgid "Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details."
 msgstr ""
 
 #. translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten
-#: src/Admin/RestoreController.php:418
+#: src/Admin/RestoreController.php:414
 #, php-format
 msgid "Restored and relinked — %1$d entries (%2$s) written, then the backup's links were rewritten to this site across %3$d database rows."
 msgstr ""
 
 #. translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: the backup filename
-#: src/Admin/RestoreController.php:425
+#: src/Admin/RestoreController.php:421
 #, php-format
 msgid "Restored — %1$d entries (%2$s) written from %3$s. Your site now matches that backup."
 msgstr ""
 
-#: src/Admin/RestoreController.php:509
+#: src/Admin/RestoreController.php:505
 msgid "There is no safety archive to roll back to. One is written automatically before each restore."
 msgstr ""
 
-#: src/Admin/RestoreController.php:546
+#: src/Admin/RestoreController.php:542
 msgid "Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details."
 msgstr ""
 
 #. translators: %d: number of entries restored from the safety archive
-#: src/Admin/RestoreController.php:577
+#: src/Admin/RestoreController.php:573
 #, php-format
 msgid "Rolled back — %d entries restored from the most recent safety archive. Your last restore has been undone."
 msgstr ""
 
-#: src/Admin/RestoreController.php:608
+#: src/Admin/RestoreController.php:604
 msgid "The rollback could not be completed. Your site may be partially rolled back — restore a backup to recover. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/RestoreController.php:1046
+#: src/Admin/RestoreController.php:1027
 msgid "You do not have permission to restore backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/RestoreController.php:1066
+#: src/Admin/RestoreController.php:1041
+msgid "A backup is currently running. Please wait for it to finish before restoring or rolling back."
+msgstr ""
+
+#: src/Admin/RestoreController.php:1043
+msgid "A restore is already running. Please wait for it to finish."
+msgstr ""
+
+#: src/Admin/RestoreController.php:1063
 msgid "The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/RestoreController.php:1069
+#: src/Admin/RestoreController.php:1066
 msgid "The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/RestoreController.php:1071
+#: src/Admin/RestoreController.php:1068
 msgid "The restore could not be completed; your site was not changed. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/RestorePage.php:105
+#: src/Admin/RestorePage.php:113
 msgid "Restore your site from a backup, or roll back the last restore."
 msgstr ""
 
-#: src/Admin/RestorePage.php:146
+#: src/Admin/RestorePage.php:160
 msgid "Restore or roll back"
 msgstr ""
 
 #. translators: %1$s: the emphasised command word "Restore"; %2$s: the emphasised command word "Rollback".
-#: src/Admin/RestorePage.php:153
+#: src/Admin/RestorePage.php:167
 #, php-format
 msgid "%1$s replaces this site's content with the backup you select. %2$s returns the site to the safety archive Pontifex takes before your most recent restore. Choose a backup below, then type the action at the bottom to confirm and run it."
 msgstr ""
 
-#: src/Admin/RestorePage.php:155
+#: src/Admin/RestorePage.php:169
 msgid "Rollback"
 msgstr ""
 
-#: src/Admin/RestorePage.php:180
+#: src/Admin/RestorePage.php:194
 msgid "No backups yet. Create one on the Backup screen and it will appear here to restore."
 msgstr ""
 
-#: src/Admin/RestorePage.php:187
+#: src/Admin/RestorePage.php:201
 msgid "Choose a backup to restore"
 msgstr ""
 
-#: src/Admin/RestorePage.php:236
+#: src/Admin/RestorePage.php:278
 msgid "Upload a backup from another site"
 msgstr ""
 
-#: src/Admin/RestorePage.php:240
+#: src/Admin/RestorePage.php:282
 msgid "Have a .wpmig backup made on another server? Upload it here and it joins the list above, ready to restore."
 msgstr ""
 
-#: src/Admin/RestorePage.php:250
+#: src/Admin/RestorePage.php:292
 msgid "Choose backup file"
 msgstr ""
 
-#: src/Admin/RestorePage.php:260
+#: src/Admin/RestorePage.php:302
 msgid "Upload"
 msgstr ""
 
-#: src/Admin/RestorePage.php:265
+#: src/Admin/RestorePage.php:307
 msgid "Upload progress"
 msgstr ""
 
-#: src/Admin/RestorePage.php:283
+#: src/Admin/RestorePage.php:325
 msgid "This backup came from another site — rewrite its links to this site's address"
 msgstr ""
 
-#: src/Admin/RestorePage.php:287
+#: src/Admin/RestorePage.php:329
 msgid "This backup was taken on a different site, so its links point at that address. Tick the box above before you restore to rewrite them to this site."
 msgstr ""
 
-#: src/Admin/RestorePage.php:292
+#: src/Admin/RestorePage.php:334
 msgid "Type an action"
 msgstr ""
 
-#: src/Admin/RestorePage.php:296
+#: src/Admin/RestorePage.php:338
 msgid "restore or rollback"
 msgstr ""
 
-#: src/Admin/RestorePage.php:300
+#: src/Admin/RestorePage.php:342
 msgid "Run"
 msgstr ""
 
-#: src/Admin/RestorePage.php:305
+#: src/Admin/RestorePage.php:347
 msgid "Restore progress"
 msgstr ""
 
-#: src/Admin/RestorePage.php:321
+#: src/Admin/RestorePage.php:363
 msgid "Roll back"
 msgstr ""
 
-#: src/Admin/RestorePage.php:327
+#: src/Admin/RestorePage.php:369
 msgid "No safety archive is available to roll back to. Pontifex writes one automatically before each restore, so a restore can always be undone."
 msgstr ""
 
-#: src/Admin/RestorePage.php:337
+#: src/Admin/RestorePage.php:379
 msgid "Safety archive"
 msgstr ""
 
-#: src/Admin/RestorePage.php:337
+#: src/Admin/RestorePage.php:379
 msgid "Taken"
 msgstr ""
 
 #. translators: %s: the date and time the safety archive was taken, e.g. "08:45 on 25-06-2026"
-#: src/Admin/RestorePage.php:347
+#: src/Admin/RestorePage.php:389
 #, php-format
 msgid "The safety archive above is the one available to roll back to — it was taken at %s, just before your most recent restore. To undo that restore, type rollback below. Confirm that date is the point you mean to return to; if you are unsure, back up your site and download that backup before rolling back."
 msgstr ""
@@ -745,36 +782,31 @@ msgstr ""
 msgid "Broken — this backup did not verify. Check the Pontifex log for details."
 msgstr ""
 
-#: src/Admin/VerifyController.php:456
-#: src/Admin/VerifyController.php:469
-msgid "unknown"
-msgstr ""
-
 #: src/Admin/VerifyController.php:509
 msgid "You do not have permission to verify backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/VerifyPage.php:94
+#: src/Admin/VerifyPage.php:89
 msgid "Check a backup's integrity without restoring it."
 msgstr ""
 
-#: src/Admin/VerifyPage.php:133
+#: src/Admin/VerifyPage.php:134
 msgid "Verify a backup"
 msgstr ""
 
-#: src/Admin/VerifyPage.php:136
+#: src/Admin/VerifyPage.php:137
 msgid "Verifying re-reads a backup and checks every hash, without changing your site or its database. Choose a backup below, then verify it; its result appears at the bottom. Encrypted backups can only be verified with the WP-CLI command."
 msgstr ""
 
-#: src/Admin/VerifyPage.php:152
+#: src/Admin/VerifyPage.php:153
 msgid "No backups yet. Create one on the Backup screen and it will appear here to verify."
 msgstr ""
 
-#: src/Admin/VerifyPage.php:159
+#: src/Admin/VerifyPage.php:160
 msgid "Choose a backup to verify"
 msgstr ""
 
-#: src/Admin/VerifyPage.php:212
+#: src/Admin/VerifyPage.php:241
 msgid "Verification progress"
 msgstr ""
 
@@ -820,10 +852,6 @@ msgstr ""
 
 #: src/Archive/ScopeSummary.php:85
 msgid "Content and database"
-msgstr ""
-
-#: src/Archive/ScopeSummary.php:99
-msgid "Unknown"
 msgstr ""
 
 #: src/Cli/DestinationCommand.php:155
@@ -1025,67 +1053,75 @@ msgstr ""
 msgid "Summary: %1$d OK, %2$d warning(s), %3$d failure(s), %4$d informational."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:304
+#: src/Cli/ExportCommand.php:357
 msgid "Pass either --resumable (start a resumable export) or --resume (continue one), not both."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:322
+#: src/Cli/ExportCommand.php:375
 msgid "Choose at most one of --whole-site, --files-only, or --db-only."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:332
+#: src/Cli/ExportCommand.php:385
 msgid "An encrypted export cannot be resumable: the derived key exists only for one run and is never stored. Drop --resumable/--resume, or export without encryption."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:336
+#: src/Cli/ExportCommand.php:389
 msgid "A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or pull the finished archive later with `wp pontifex destination`."
 msgstr ""
 
+#. translators: %s: the kind of operation currently running
+#: src/Cli/ExportCommand.php:403
+#: src/Cli/ImportCommand.php:422
+#: src/Cli/RollbackCommand.php:255
+#, php-format
+msgid "Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry."
+msgstr ""
+
 #. translators: %s: the output file path
-#: src/Cli/ExportCommand.php:375
+#: src/Cli/ExportCommand.php:445
 #, php-format
 msgid "Export to %s?"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:385
+#: src/Cli/ExportCommand.php:455
 msgid "There is no passphrase recovery: if you lose this passphrase, the archive cannot be decrypted."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:403
+#: src/Cli/ExportCommand.php:473
 msgid "--sign requires --signing-key=<path> (the secret-key file from \"wp pontifex keygen\")."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:568
+#: src/Cli/ExportCommand.php:641
 msgid "No interrupted resumable export found to resume."
 msgstr ""
 
 #. translators: %s: the output path the interrupted export writes to
-#: src/Cli/ExportCommand.php:572
+#: src/Cli/ExportCommand.php:645
 #, php-format
 msgid "This resumable export writes to %s; --output cannot change on resume."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:577
+#: src/Cli/ExportCommand.php:650
 msgid "This resumable export was started with different signing settings; resume with the same --sign/--signing-key flags it began with."
 msgstr ""
 
 #. translators: %s: the output path
-#: src/Cli/ExportCommand.php:583
+#: src/Cli/ExportCommand.php:656
 #, php-format
 msgid "Resuming the interrupted export to %s."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:597
+#: src/Cli/ExportCommand.php:670
 msgid "This export is resumable: if it is interrupted, continue it with `wp pontifex export --resume`."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:617
+#: src/Cli/ExportCommand.php:690
 msgid "Writing archive"
 msgstr ""
 
 #. translators: %d: number of files that changed during the export
-#: src/Cli/ExportCommand.php:659
-#: src/Cli/ExportCommand.php:1177
+#: src/Cli/ExportCommand.php:732
+#: src/Cli/ExportCommand.php:1250
 #, php-format
 msgid "%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file."
 msgid_plural "%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files."
@@ -1093,162 +1129,162 @@ msgstr[0] ""
 msgstr[1] ""
 
 #. translators: %s: the destination name
-#: src/Cli/ExportCommand.php:702
+#: src/Cli/ExportCommand.php:775
 #, php-format
 msgid "No destination named \"%s\" is configured. Add one with `wp pontifex destination`."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:746
+#: src/Cli/ExportCommand.php:819
 msgid "Uploading an unencrypted archive to the destination — anyone who can read the destination can read this backup. Consider --encrypt."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:749
+#: src/Cli/ExportCommand.php:822
 msgid "Uploading the archive to the destination…"
 msgstr ""
 
 #. translators: 1: the failure reason, 2: the local archive path
-#: src/Cli/ExportCommand.php:753
+#: src/Cli/ExportCommand.php:826
 #, php-format
 msgid "The upload to the destination failed: %1$s The local archive is still at %2$s."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:756
+#: src/Cli/ExportCommand.php:829
 msgid "Uploaded the archive to the destination."
 msgstr ""
 
 #. translators: %s: the remote archive name that was deleted
-#: src/Cli/ExportCommand.php:762
+#: src/Cli/ExportCommand.php:835
 #, php-format
 msgid "Pruned old archive from the destination: %s"
 msgstr ""
 
 #. translators: %s: the failure reason
-#: src/Cli/ExportCommand.php:766
+#: src/Cli/ExportCommand.php:839
 #, php-format
 msgid "The archive uploaded successfully, but pruning old archives at the destination failed: %s"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:783
+#: src/Cli/ExportCommand.php:856
 msgid "--output=<path> is required."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1112
+#: src/Cli/ExportCommand.php:1185
 msgid "Scope: whole-site (the entire WordPress root, including core and wp-config.php)."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1116
+#: src/Cli/ExportCommand.php:1189
 msgid "Scope: files-only (wp-content, no database). Its restore writes only files."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1120
+#: src/Cli/ExportCommand.php:1193
 msgid "Scope: database-only (the full database, no files). Its restore writes only the database."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1123
+#: src/Cli/ExportCommand.php:1196
 msgid "Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1135
+#: src/Cli/ExportCommand.php:1208
 msgid "No exclusion patterns are active."
 msgstr ""
 
 #. translators: %d: number of active exclusion patterns
-#: src/Cli/ExportCommand.php:1138
+#: src/Cli/ExportCommand.php:1211
 #, php-format
 msgid "Active exclusion patterns (%d):"
 msgstr ""
 
 #. translators: 1: file path, 2: byte count recorded at scan time, 3: byte count actually captured
-#: src/Cli/ExportCommand.php:1166
+#: src/Cli/ExportCommand.php:1239
 #, php-format
 msgid "%1$s changed while it was being read (the scan recorded %2$d bytes; %3$d were captured). The archive records the captured content."
 msgstr ""
 
 #. translators: 1: number of entries, 2: human-readable size, 3: the output file path
-#: src/Cli/ExportCommand.php:1200
+#: src/Cli/ExportCommand.php:1273
 #, php-format
 msgid "Exported %1$d entries (%2$s) to %3$s"
 msgstr ""
 
 #. translators: %s: the archive path
-#: src/Cli/ImportCommand.php:334
+#: src/Cli/ImportCommand.php:387
 #, php-format
 msgid "Restore %s over the current site?"
 msgstr ""
 
-#: src/Cli/ImportCommand.php:446
+#: src/Cli/ImportCommand.php:517
 msgid "The import failed, so your site was automatically rolled back to its state before the import."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:448
+#: src/Cli/ImportCommand.php:519
 msgid "The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:474
+#: src/Cli/ImportCommand.php:548
 msgid "An archive path is required: wp pontifex import <archive>."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:494
+#: src/Cli/ImportCommand.php:568
 msgid "--url requires a new site URL, e.g. --url=https://new-site.example."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:863
+#: src/Cli/ImportCommand.php:937
 msgid "This archive includes WordPress core and wp-config.php (it is a whole-site or legacy archive). A default restore is content-only and will not overwrite them. Re-run with --whole-site to restore the entire site — only onto a fresh, empty destination."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:937
+#: src/Cli/ImportCommand.php:1011
 msgid "A trusted public key was supplied, but this archive is NOT signed — and a stripped signature looks exactly like this. The signature is the only tamper defence (integrity hashes detect corruption, not tampering), so this restore is refused. If you trust this archive, re-run without --public-key (and without a PONTIFEX_PUBLIC_KEY pin); to make backups verifiable, sign exports with --sign."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:943
+#: src/Cli/ImportCommand.php:1017
 msgid "This archive is signed, but its signature was NOT verified (no --public-key supplied). Proceeding with the restore."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:948
+#: src/Cli/ImportCommand.php:1022
 msgid "The Ed25519 signature did not verify against the supplied public key; refusing to restore (wrong key, or the archive was modified after signing)."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:951
+#: src/Cli/ImportCommand.php:1025
 #: src/Cli/VerifyCommand.php:488
 msgid "Signature verified against the supplied public key."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1030
+#: src/Cli/ImportCommand.php:1104
 msgid "Restoring to the same site URL; no URL rewriting."
 msgstr ""
 
 #. translators: %s: the target site URL
-#: src/Cli/ImportCommand.php:1033
+#: src/Cli/ImportCommand.php:1107
 #, php-format
 msgid "Restoring, then migrating the site URL to %s."
 msgstr ""
 
 #. translators: 1: the source URL, 2: the target URL
-#: src/Cli/ImportCommand.php:1071
+#: src/Cli/ImportCommand.php:1145
 #, php-format
 msgid "Migrating URLs from %1$s to %2$s."
 msgstr ""
 
 #. translators: 1: source URL, 2: target URL, 3: values rewritten, 4: rows changed, 5: tables skipped, 6: values kept unchanged
-#: src/Cli/ImportCommand.php:1086
+#: src/Cli/ImportCommand.php:1160
 #, php-format
 msgid "Migrated %1$s to %2$s: rewrote %3$d value(s) across %4$d row(s); %5$d table(s) skipped (no single-column key); %6$d value(s) kept unchanged for safety."
 msgstr ""
 
 #. translators: 1: number of entries, 2: human-readable size, 3: the archive path
-#: src/Cli/ImportCommand.php:1109
+#: src/Cli/ImportCommand.php:1183
 #, php-format
 msgid "Restored %1$d entries (%2$s) from %3$s"
 msgstr ""
 
 #. translators: %s: the target site URL
-#: src/Cli/ImportCommand.php:1128
+#: src/Cli/ImportCommand.php:1202
 #, php-format
 msgid "The site URL would be migrated to %s after a real restore."
 msgstr ""
 
 #. translators: 1: number of entries, 2: the archive path, 3: optional migration note
-#: src/Cli/ImportCommand.php:1133
+#: src/Cli/ImportCommand.php:1207
 #, php-format
 msgid "Dry run complete: %1$d entries verified in %2$s. No changes were made.%3$s"
 msgstr ""
@@ -1278,30 +1314,30 @@ msgid "--%s=<path> is required."
 msgstr ""
 
 #. translators: %s: the safety archive path
-#: src/Cli/RollbackCommand.php:182
+#: src/Cli/RollbackCommand.php:235
 #, php-format
 msgid "Restore the safety archive %s over the current site? This undoes your most recent import."
 msgstr ""
 
 #. translators: %s: the safety archive path
-#: src/Cli/RollbackCommand.php:392
+#: src/Cli/RollbackCommand.php:483
 #, php-format
 msgid "Rolling back to the most recent safety archive: %s"
 msgstr ""
 
 #. translators: %s: the safety archive path
-#: src/Cli/RollbackCommand.php:393
+#: src/Cli/RollbackCommand.php:484
 msgid "Restoring to the same site URL only; no URL rewriting."
 msgstr ""
 
 #. translators: 1: number of entries restored, 2: the archive path
-#: src/Cli/RollbackCommand.php:405
+#: src/Cli/RollbackCommand.php:496
 #, php-format
 msgid "Rolled back %1$d entries from %2$s"
 msgstr ""
 
 #. translators: 1: number of entries verified, 2: the archive path
-#: src/Cli/RollbackCommand.php:418
+#: src/Cli/RollbackCommand.php:509
 #, php-format
 msgid "Dry run complete: %1$d entries verified in %2$s. No changes were made."
 msgstr ""
