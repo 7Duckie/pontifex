@@ -365,10 +365,11 @@ sentence on faith.
   UI does not do today; a follow-up once there is a concrete need for
   that level of detail.
 
-## v0.9.1 – v0.9.3 — Operational hardening
+## v0.9.3 — Operational hardening
 
-Three small, closely-related patches on top of v0.9.0, each closing a gap the
-admin UI's growth exposed rather than adding a feature.
+Four small, closely-related patches on top of v0.9.0, released together as
+v0.9.3, each closing a gap the admin UI's growth exposed rather than adding a
+feature. One of them turned out to be a silent data-loss defect.
 
 ### What ships
 
@@ -393,6 +394,21 @@ admin UI's growth exposed rather than adding a feature.
   already excluded; `vendor` and `node_modules` remain deliberately excluded
   from the exclusions, because both are required at runtime and dropping them
   would produce a restored site that fatals.
+- **A silent scanner data-loss fix**, uncovered by the `.git` default above —
+  the walk was advanced twice for every excluded directory, so the entry
+  immediately following one was consumed without ever being tested against the
+  exclusion rules. Where that directory was empty, as several inside every git
+  checkout are, the lost entry was a real site file, absent from an archive
+  that still verified as sound because it was internally consistent and merely
+  incomplete. Excluded directories are now pruned inside the recursive walk, so
+  one is never opened at all — which the class had always claimed but could not
+  do, since advancing a recursive iterator by hand cannot skip a subtree.
+- **The backup no longer stalls at a full progress bar.** Every pass of a
+  resumable export rebuilt its whole manifest, and sniffing each file's media
+  type — which opens and reads the head of every file — was roughly nine tenths
+  of that walk, so the final pass paid seconds of it while writing nothing at
+  all. Media types are now determined when an entry is written, and the screen
+  reports the finishing phase instead of implying the work is over.
 
 ### What is deliberately deferred
 
