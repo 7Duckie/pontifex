@@ -55,7 +55,13 @@
 	 */
 	function setText( id, text ) {
 		var el = document.getElementById( id );
-		if ( el ) {
+		// Several of these elements are aria-live="polite" regions, polled and
+		// rewritten roughly once a second while a backup runs; writing the same
+		// text again re-announces it to a screen reader even though nothing
+		// changed (e.g. the finalising phase's label sits unchanged for however
+		// long that pass takes). Skipping a no-op write announces a phase only
+		// when it actually changes.
+		if ( el && el.textContent !== text ) {
 			el.textContent = text;
 		}
 	}
@@ -250,6 +256,22 @@
 				var data = res.data;
 				var elapsed = ( Date.now() - startedAt ) / 1000;
 
+				if ( 'finalising' === data.phase ) {
+					// Finalising phase: every file entry is written and the database
+					// snapshot and the archive's manifest and footer are being written —
+					// an indeterminate bar plus a phase label, not a determinate bar
+					// frozen at its last percentage, because that pass has no per-entry
+					// total left to show a percentage against. This is a forward
+					// transition from copying, so it also counts as "seen copying" for
+					// the guard below: a later poll must never fall back to rendering
+					// the scanning phase.
+					seenCopying = true;
+					setIndeterminate( true );
+					setText( 'pontifex-backup-progress', cfg.strings.finalising );
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( elapsed ) ) );
+					return;
+				}
+
 				if ( 'copying' !== data.phase && ! seenCopying ) {
 					// Scanning phase: total unknown, so a sliding bar plus the climbing count.
 					setIndeterminate( true );
@@ -264,9 +286,17 @@
 				// single large file and not only at file boundaries; it never runs backwards,
 				// with elapsed and an estimate of time left. Once seen, never revert to scanning.
 				seenCopying = true;
+				var bytesTotal = data.bytes_total;
+				if ( ! ( bytesTotal > 0 ) ) {
+					// Defensive: a copying-phase poll must carry a real total to drive a
+					// determinate bar. A zero or missing total must not render a 0% bar,
+					// a stale "0 B of 0 B" label, or an aria-valuenow of "0" — hold the
+					// last rendered state and wait for a poll that actually has one.
+					setText( 'pontifex-backup-timing', cfg.strings.elapsed.replace( '%s', fmtDuration( elapsed ) ) );
+					return;
+				}
 				var bytesDone = Math.max( data.bytes_done, lastBytes );
 				lastBytes = bytesDone;
-				var bytesTotal = data.bytes_total;
 				setIndeterminate( false );
 				setBar( bytesDone, bytesTotal );
 				setText(
@@ -470,6 +500,13 @@
 						startedAt = r.data.started_at;
 					}
 					showElapsed();
+					if ( 'finalising' === r.data.phase ) {
+						// The byte-copy work is over; nothing left to drive a determinate
+						// bar with, so show the same indeterminate phase a live poll would.
+						setIndeterminate( true );
+						setText( 'pontifex-backup-progress', cfg.strings.finalising );
+						return;
+					}
 					if ( r.data.bytes_total > 0 ) {
 						setIndeterminate( false );
 						setBar( r.data.bytes_done, r.data.bytes_total );

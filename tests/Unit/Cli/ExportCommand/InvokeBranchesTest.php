@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
+use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Scope;
@@ -18,6 +19,8 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
@@ -479,6 +482,16 @@ final class InvokeBranchesTest extends TestCase {
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
+		// The shared single-runner lock: free by default so __invoke's new lock
+		// acquisition does not need a dedicated stub in every test. The named
+		// lock is granted through the context mock above; the holder transient
+		// OperationLock reads/writes directly via the global WordPress transient
+		// functions, stubbed here to a plain "nothing is running" default.
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
 		return $mock;
 	}
 
@@ -496,5 +509,74 @@ final class InvokeBranchesTest extends TestCase {
 		$mock = Mockery::mock( ManifestBuilderInterface::class );
 		$mock->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
 		return $mock;
+	}
+
+	/**
+	 * The shutdown backstop releases a lock this command still holds.
+	 *
+	 * Mirrors ImportCommand's and RollbackCommand's own shutdown-handler tests:
+	 * a leaked "backup" holder is always reclaimable (see
+	 * OperationLock::is_reclaimable()), so this is defence in depth rather than
+	 * the reorder fix those two commands needed — but the handler must still
+	 * behave identically here. A second call afterwards must be a no-op, proving
+	 * the idempotent release() guard: the transient is cleared exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_releases_a_held_lock(): void {
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		$delete_transient_calls = 0;
+		Functions\when( 'delete_transient' )->alias(
+			static function () use ( &$delete_transient_calls ): bool {
+				++$delete_transient_calls;
+				return true;
+			}
+		);
+
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$lock_context->shouldReceive( 'release_named_lock' )->once();
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-export-lock-test-' . uniqid( '', true ) ) );
+		$this->assertTrue( $lock->acquire( OperationLock::OP_BACKUP ), 'The lock must be genuinely held before the shutdown handler runs.' );
+
+		$command = new ExportCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A held lock must be released at shutdown, clearing the holder transient.' );
+		$this->assertFalse( $lock->is_held(), 'The lock must no longer be held once the shutdown handler has released it.' );
+
+		// A second shutdown call must not clear another operation's transient a second time.
+		$command->release_lock_on_shutdown();
+		$this->assertSame( 1, $delete_transient_calls, 'A second shutdown call after a clean release must be a no-op.' );
+	}
+
+	/**
+	 * The shutdown backstop is a no-op when the lock was never acquired (or was
+	 * already released cleanly through the normal finally).
+	 *
+	 * @return void
+	 */
+	public function test_release_lock_on_shutdown_is_a_no_op_when_the_lock_is_not_held(): void {
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldNotReceive( 'acquire_named_lock' );
+		$lock_context->shouldNotReceive( 'release_named_lock' );
+
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-export-lock-test-' . uniqid( '', true ) ) );
+
+		$command = new ExportCommand(
+			logger: new NullLogger(),
+			progress: new NullProgressBar(),
+			lock: $lock
+		);
+
+		$command->release_lock_on_shutdown();
+
+		$this->assertFalse( $lock->is_held(), 'A lock that was never held must still report unheld after the no-op shutdown call.' );
 	}
 }

@@ -134,7 +134,7 @@ The schema of the JSON object:
     "includes_core": false,
     "includes_wp_config": false,
     "includes_database": true,
-    "excluded_paths": ["wp-content/pontifex/**", "wp-content/cache/**"]
+    "excluded_paths": ["wp-content/pontifex/**", "wp-content/cache/**", "/(^|\\/)\\.git(\\/|$)/"]
   },
   "encryption_disabled_reason": null
 }

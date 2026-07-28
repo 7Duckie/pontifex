@@ -21,6 +21,7 @@ use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ScanProgressManifestBuilder;
@@ -72,21 +73,6 @@ final class BackupController {
 	private const PROGRESS_TRANSIENT = 'pontifex_backup_progress';
 
 	/**
-	 * The transient key marking that a backup is currently running.
-	 *
-	 * The secondary single-runner guard: the primary is an atomic named
-	 * database lock (this constant doubles as its logical name), and this
-	 * transient is checked only while that lock is held — see
-	 * {@see self::acquire_lock()}. create() refuses a second backup while
-	 * either guard is engaged, so two concurrent exports can never fight
-	 * over the progress transient. Carries a TTL so a crash that skips the
-	 * shutdown handler still self-heals.
-	 *
-	 * @var string
-	 */
-	private const LOCK_TRANSIENT = 'pontifex_backup_lock';
-
-	/**
 	 * How long the progress transient lives, in seconds (15 minutes).
 	 *
 	 * A literal rather than MINUTE_IN_SECONDS so the class is testable without
@@ -111,11 +97,49 @@ final class BackupController {
 	private const PHASE_COPYING = 'copying';
 
 	/**
+	 * Progress phase: every file entry is written and the run is about to read
+	 * the database chunks and write the archive's manifest and footer.
+	 *
+	 * Reported before that work starts, not after: the database chunks are
+	 * still to be read, and still tally bytes through the same callback as
+	 * any file, but they are read inside one uninterruptible tick with no
+	 * per-entry total left to show a meaningful percentage against, so the
+	 * phase itself is what is reported rather than a determinate bar. A
+	 * forward transition from copying, never a fallback from scanning —
+	 * {@see self::write_progress()} is the single point every phase write
+	 * passes through, and it refuses to report an earlier phase once a later
+	 * one has already been reported this run.
+	 *
+	 * @var string
+	 */
+	private const PHASE_FINALISING = 'finalising';
+
+	/**
 	 * Progress phase reported when no backup is running (no progress transient set).
 	 *
 	 * @var string
 	 */
 	private const PHASE_IDLE = 'idle';
+
+	/**
+	 * Ordinal rank of each progress phase, used to keep the transient moving only forward.
+	 *
+	 * ADR 0015's resumable engine re-walks the whole scan tree at the top of
+	 * every tick — including the tick that runs right after finalising has
+	 * been reported — so a scanning callback (via the decorated manifest
+	 * builder) or a byte callback (via a database chunk's own read) can both
+	 * still fire after the run has already reported a later phase.
+	 * {@see self::write_progress()} uses this map to refuse a write whose
+	 * phase ranks lower than the highest already reported this run, so the
+	 * bar can never travel backwards no matter which callback fired.
+	 *
+	 * @var array<string, int>
+	 */
+	private const PHASE_RANK = array(
+		self::PHASE_SCANNING   => 0,
+		self::PHASE_COPYING    => 1,
+		self::PHASE_FINALISING => 2,
+	);
 
 	/**
 	 * Age, in seconds, past which a progress transient is distrusted while a job is live.
@@ -222,6 +246,18 @@ final class BackupController {
 	private ?string $active_backup_path = null;
 
 	/**
+	 * Highest progress-phase rank written to the transient so far this run.
+	 *
+	 * Reset to -1 at the start of every {@see self::create()} run, so a
+	 * genuinely new run can always report scanning even if a previous run
+	 * left a later phase sitting in the transient. See {@see self::PHASE_RANK}
+	 * and {@see self::write_progress()}.
+	 *
+	 * @var int
+	 */
+	private int $progress_phase_rank = -1;
+
+	/**
 	 * Wall-clock budget per tick when this controller drives the job (seconds).
 	 *
 	 * Every tick pays the resume contract's fixed overhead — a fresh scan and
@@ -248,14 +284,15 @@ final class BackupController {
 	private ?Job $active_job = null;
 
 	/**
-	 * Whether this request holds the single-runner backup lock.
+	 * The shared single-runner lock, contended with restore and rollback.
 	 *
-	 * Set when create() acquires the lock and cleared when it releases it, so the
-	 * shutdown handler knows whether a fatal left the lock (and a partial) behind.
+	 * Optional in the constructor: when null, a default OperationLock over this
+	 * controller's own context and job store is built. Tests inject a fake or a
+	 * real one over mocked collaborators.
 	 *
-	 * @var bool
+	 * @var OperationLock
 	 */
-	private bool $lock_held = false;
+	private OperationLock $lock;
 
 	/**
 	 * Construct the controller around its collaborators.
@@ -265,19 +302,22 @@ final class BackupController {
 	 * @param BackupStore                   $store             The backups directory.
 	 * @param LoggerInterface               $logger            Records a failed backup's real cause.
 	 * @param ManifestBuilderInterface|null $manifest_builder  Optional. When null, a default scanner-backed builder is used.
+	 * @param OperationLock|null            $lock              Optional. When null, a default OperationLock over this controller's own context and job store is built.
 	 */
 	public function __construct(
 		Environment $environment,
 		WordPressContext $wordpress_context,
 		BackupStore $store,
 		LoggerInterface $logger,
-		?ManifestBuilderInterface $manifest_builder = null
+		?ManifestBuilderInterface $manifest_builder = null,
+		?OperationLock $lock = null
 	) {
 		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
 		$this->logger            = $logger;
 		$this->manifest_builder  = $manifest_builder;
+		$this->lock              = $lock ?? new OperationLock( $this->wordpress_context, $this->jobs_store() );
 	}
 
 	/**
@@ -320,10 +360,12 @@ final class BackupController {
 			);
 		}
 
-		// Single-runner lock: refuse a second backup while one is already running, so
-		// two concurrent exports can never fight over the shared progress transient.
-		if ( ! $this->acquire_lock() ) {
-			wp_send_json_error( array( 'message' => __( 'A backup is already running. Please wait for it to finish.', 'pontifex' ) ), 409 );
+		// Single-runner lock: refuse a second backup while any site-mutating
+		// operation — a backup, restore, or rollback, admin or CLI — is already
+		// running, so two of them can never fight over the site or the shared
+		// progress transient.
+		if ( ! $this->lock->acquire( OperationLock::OP_BACKUP ) ) {
+			wp_send_json_error( array( 'message' => $this->lock_busy_message() ), 409 );
 		}
 
 		$this->extend_time_limit();
@@ -344,6 +386,9 @@ final class BackupController {
 		);
 
 		try {
+			// A fresh run always starts at scanning, whatever a previous run may
+			// have left behind (see self::$progress_phase_rank).
+			$this->progress_phase_rank = -1;
 			$this->set_scan_progress( 0 );
 
 			// The admin backup is always content-only: it scans wp-content and records
@@ -389,11 +434,14 @@ final class BackupController {
 			// One byte callback for the WHOLE run, so the reported count accumulates
 			// across ticks. A per-tick callback restarted its tally from zero every
 			// tick; the browser's never-go-backwards clamp masked that as a bar that
-			// stalled at the highest tick's count.
+			// stalled at the highest tick's count. It keeps tallying through the
+			// finalising tick's database chunks too — write_progress() is what stops
+			// those writes overwriting the finalising phase, not this callback.
 			$total_bytes = 0;
 			$byte_cb     = $this->accumulating_byte_callback( $job_store, $job->id(), $total_bytes );
 
-			$done = false;
+			$done                = false;
+			$finalising_reported = false;
 			while ( ! $done ) {
 				// The cancel sentinel is honoured at tick boundaries: the job is
 				// terminal-marked before cleanup so the active slot frees correctly.
@@ -410,7 +458,23 @@ final class BackupController {
 					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
 				}
 				$total_bytes = max( $total_bytes, $this->counter_int( $current->payload(), 'total_bytes' ) );
-				$done        = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
+
+				// The runner records the tick loop's own boundary once every FILE
+				// entry has been read: the "database" phase means the tick about to
+				// run will read the database chunks and write the manifest and
+				// footer in one uninterruptible pass. Report that as its own phase
+				// once, before the blocking tick runs. That tick still re-walks the
+				// whole scan tree and still tallies bytes for the chunks it appends
+				// (both routed through write_progress()), so this flag only stops
+				// this call site repeating itself — the phase-rank guard is what
+				// stops either of those later writes moving the bar back to
+				// scanning or copying.
+				if ( ! $finalising_reported && 'database' === (string) ( $current->payload()['phase'] ?? 'files' ) ) {
+					$finalising_reported = true;
+					$this->set_finalising_progress();
+				}
+
+				$done = $runner->tick( $current, self::TICK_BUDGET_SECONDS, null, null, null, $byte_cb );
 			}
 
 			$finished      = $job_store->get( $job->id() );
@@ -425,7 +489,7 @@ final class BackupController {
 			$this->secure_file( $path );
 			$this->clear_progress();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->store->clear_cancel();
 
 			$this->bump_counters(
@@ -452,7 +516,7 @@ final class BackupController {
 			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			wp_send_json_success( array( 'cancelled' => true ) );
@@ -461,7 +525,7 @@ final class BackupController {
 			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;
-			$this->release_lock();
+			$this->lock->release();
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			$this->bump_counters( array( 'failed' => 1 ) );
@@ -533,7 +597,7 @@ final class BackupController {
 	 * @return void
 	 */
 	public function handle_shutdown(): void {
-		if ( ! $this->lock_held ) {
+		if ( ! $this->lock->is_held() ) {
 			return;
 		}
 
@@ -565,7 +629,7 @@ final class BackupController {
 		}
 		$this->delete_partial_backup();
 		$this->active_backup_path = null;
-		$this->release_lock();
+		$this->lock->release();
 		$this->clear_progress();
 		$this->store->clear_cancel();
 	}
@@ -625,19 +689,34 @@ final class BackupController {
 		// the endpoint's behaviour never depends on wp_send_json_success halting.
 		if ( null !== $job && ( self::PHASE_IDLE === $phase || $transient_stale ) ) {
 			$payload = $job->payload();
-			// Source bytes so the bar speaks the same units as the live byte
-			// callback; older in-flight jobs without the cursor degrade to the
-			// compressed count rather than to zero.
-			$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
-			if ( 0 === $bytes_done ) {
-				$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+			// The job's own phase cursor survives a dead request just as the byte
+			// cursors do: once it reads "database" the run has moved past the file
+			// entries into the same uninterruptible database-and-footer pass a
+			// live poll reports as finalising, so a re-attach after that point
+			// must not fall back to serving its last, now-stale, byte-copy
+			// cursors as though copying were still under way.
+			if ( 'database' === (string) ( $payload['phase'] ?? 'files' ) ) {
+				$response = array(
+					'phase'       => self::PHASE_FINALISING,
+					'done'        => 0,
+					'bytes_done'  => 0,
+					'bytes_total' => 0,
+				);
+			} else {
+				// Source bytes so the bar speaks the same units as the live byte
+				// callback; older in-flight jobs without the cursor degrade to the
+				// compressed count rather than to zero.
+				$bytes_done = $this->counter_int( $payload, 'source_bytes_done' );
+				if ( 0 === $bytes_done ) {
+					$bytes_done = $this->counter_int( $payload, 'bytes_written' );
+				}
+				$response = array(
+					'phase'       => self::PHASE_COPYING,
+					'done'        => 0,
+					'bytes_done'  => $bytes_done,
+					'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
+				);
 			}
-			$response = array(
-				'phase'       => self::PHASE_COPYING,
-				'done'        => 0,
-				'bytes_done'  => $bytes_done,
-				'bytes_total' => $this->counter_int( $payload, 'total_bytes' ),
-			);
 		} elseif ( null === $job && $transient_stale ) {
 			// No active job and the transient has gone stale: the run that wrote it
 			// died without clearing it (a fatal kill leaves the transient behind).
@@ -910,6 +989,23 @@ final class BackupController {
 	}
 
 	/**
+	 * The message returned when the shared single-runner lock refuses a backup.
+	 *
+	 * Names whichever kind of operation is actually holding the lock, so an
+	 * operator refused because a restore or rollback is running is not told
+	 * (misleadingly) that a backup is already running.
+	 *
+	 * @return string A human-readable refusal message.
+	 */
+	private function lock_busy_message(): string {
+		$holder = $this->lock->current_holder();
+		if ( OperationLock::OP_RESTORE === $holder || OperationLock::OP_ROLLBACK === $holder ) {
+			return __( 'A restore or rollback is currently running. Please wait for it to finish before starting a backup.', 'pontifex' );
+		}
+		return __( 'A backup is already running. Please wait for it to finish.', 'pontifex' );
+	}
+
+	/**
 	 * The message returned when an export fails.
 	 *
 	 * The underlying error is recorded in the log via the export path; the
@@ -961,6 +1057,12 @@ final class BackupController {
 	 * the throttle cadence — a bounded handful of small file reads, never one
 	 * per chunk. The transient is refreshed at most once every
 	 * {@see self::PROGRESS_THROTTLE_SECONDS} to keep option writes bounded.
+	 *
+	 * This keeps tallying, and still checks for a cancel, straight through the
+	 * finalising tick's database chunks — it does not need to know the run has
+	 * reached finalising, because {@see self::write_progress()} is the single
+	 * point every phase write passes through and refuses on its own to let a
+	 * copying-phase write land once finalising has already been reported.
 	 *
 	 * @param JobStore $job_store   The job store the total is read from.
 	 * @param string   $job_id      The running job's id.
@@ -1062,14 +1164,11 @@ final class BackupController {
 	 * @return void
 	 */
 	private function set_scan_progress( int $scanned ): void {
-		set_transient(
-			self::PROGRESS_TRANSIENT,
+		$this->write_progress(
 			array(
 				'phase' => self::PHASE_SCANNING,
 				'done'  => $scanned,
-				'at'    => time(),
-			),
-			self::PROGRESS_TTL
+			)
 		);
 	}
 
@@ -1085,16 +1184,63 @@ final class BackupController {
 	 * @return void
 	 */
 	private function set_copy_progress( int $bytes_done, int $bytes_total ): void {
-		set_transient(
-			self::PROGRESS_TRANSIENT,
+		$this->write_progress(
 			array(
 				'phase'       => self::PHASE_COPYING,
 				'bytes_done'  => $bytes_done,
 				'bytes_total' => $bytes_total,
-				'at'          => time(),
-			),
-			self::PROGRESS_TTL
+			)
 		);
+	}
+
+	/**
+	 * Write the finalising-phase progress to the transient.
+	 *
+	 * Reported once every file entry has been read, before the database
+	 * chunks and the archive's manifest and footer are written: that work
+	 * still tallies bytes through the same callback as any file, but it runs
+	 * as one uninterruptible pass with no per-entry total left to show a
+	 * meaningful percentage against, so the phase itself is what is
+	 * reported. The browser renders it as a second indeterminate phase
+	 * rather than a determinate bar frozen at its last percentage.
+	 *
+	 * @return void
+	 */
+	private function set_finalising_progress(): void {
+		$this->write_progress(
+			array(
+				'phase' => self::PHASE_FINALISING,
+			)
+		);
+	}
+
+	/**
+	 * Write one progress-phase payload to the transient, refusing to move the phase backwards.
+	 *
+	 * ADR 0015's resumable engine re-walks the whole scan tree at the top of
+	 * every tick, so a scanning-phase callback (via the decorated manifest
+	 * builder) can still fire after the run has already reported copying or
+	 * finalising, and a database chunk still tallies bytes through the same
+	 * byte callback as any file once finalising has been reported. This is
+	 * the single point every phase write passes through, so the invariant
+	 * holds no matter which callback fired: once a phase of a given rank has
+	 * been reported this run, a write ranked lower is silently dropped
+	 * rather than overwriting it. {@see self::$progress_phase_rank} is reset
+	 * at the start of every run, so a genuinely new run always starts able
+	 * to report scanning.
+	 *
+	 * @param array<string, mixed> $payload The phase payload; must include a 'phase' key naming one of the PHASE_* constants.
+	 * @return void
+	 */
+	private function write_progress( array $payload ): void {
+		$phase = isset( $payload['phase'] ) && is_string( $payload['phase'] ) ? $payload['phase'] : self::PHASE_SCANNING;
+		$rank  = self::PHASE_RANK[ $phase ] ?? 0;
+		if ( $rank < $this->progress_phase_rank ) {
+			return;
+		}
+		$this->progress_phase_rank = $rank;
+		$payload['at']             = time();
+		set_transient( self::PROGRESS_TRANSIENT, $payload, self::PROGRESS_TTL );
 	}
 
 	/**
@@ -1104,80 +1250,6 @@ final class BackupController {
 	 */
 	private function clear_progress(): void {
 		delete_transient( self::PROGRESS_TRANSIENT );
-	}
-
-	/**
-	 * Acquire the single-runner backup lock, or report that a backup is already running.
-	 *
-	 * Two independent guards, and both must pass. The primary is a named
-	 * database lock ({@see WordPressContext::acquire_named_lock()}): the
-	 * server grants it atomically, so two simultaneous requests can never
-	 * both acquire — closing the check-then-set race a transient alone
-	 * cannot — and it vanishes with the connection if the request crashes.
-	 * The transient stays as a second, independent guard behind it, checked
-	 * only while the named lock is held: it still refuses a job-backed run
-	 * between cron ticks (the named lock is not held between ticks) or a
-	 * synchronous run actively writing progress (the rare case a runner's
-	 * named lock is silently lost mid-operation, e.g. on old MySQL, other
-	 * code taking its own named lock on the same connection releases ours),
-	 * but a dead run's lock transient — {@see self::backup_is_live()} finds
-	 * no live signal — is reclaimed rather than blocking the next backup for
-	 * the transient's full TTL.
-	 *
-	 * @return bool True if the lock was acquired; false if a backup is already running.
-	 */
-	private function acquire_lock(): bool {
-		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_TRANSIENT ) ) {
-			return false;
-		}
-		if ( false !== get_transient( self::LOCK_TRANSIENT ) && $this->backup_is_live() ) {
-			// A concurrent runner, or a crashed run's transient still inside its
-			// TTL: refuse, and hand back the named lock just taken.
-			$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-			return false;
-		}
-		set_transient( self::LOCK_TRANSIENT, time(), self::PROGRESS_TTL );
-		$this->lock_held = true;
-		return true;
-	}
-
-	/**
-	 * Whether a backup is genuinely running right now.
-	 *
-	 * A job-backed export between cron ticks has released the DB-level named lock
-	 * but is still live (its job is active); a synchronous run is live while it is
-	 * still writing fresh progress. Anything else — a crashed run's leftover lock
-	 * transient with no active job and stale (or no) progress — is dead and its
-	 * lock is reclaimable, so a killed backup never blocks the next one for the
-	 * transient's full TTL.
-	 *
-	 * @return bool True when a backup is currently running.
-	 */
-	private function backup_is_live(): bool {
-		$job = ( $this->jobs_store() )->active_job();
-		if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
-			return true;
-		}
-		$progress = get_transient( self::PROGRESS_TRANSIENT );
-		if ( ! is_array( $progress ) ) {
-			return false;
-		}
-		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
-		if ( self::PHASE_IDLE === $phase ) {
-			return false;
-		}
-		return ( time() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
-	}
-
-	/**
-	 * Release the single-runner backup lock held by this request.
-	 *
-	 * @return void
-	 */
-	private function release_lock(): void {
-		delete_transient( self::LOCK_TRANSIENT );
-		$this->wordpress_context->release_named_lock( self::LOCK_TRANSIENT );
-		$this->lock_held = false;
 	}
 
 	// -------------------------------------------------------------------------
@@ -1226,11 +1298,18 @@ final class BackupController {
 	/**
 	 * Stream a resolved backup file to the client as an attachment, then exit.
 	 *
+	 * The downloaded filename is a friendly '<source host>-<created date>.wpmig'
+	 * built from the archive's own provenance where one can be built safely
+	 * (see {@see ArchiveFacts::download_name()}); the file actually stored on
+	 * disk keeps its `pontifex-backup-<UTC>.wpmig` name always — only the
+	 * `Content-Disposition` header changes.
+	 *
 	 * @param string $path Absolute path of a backup already validated by the store.
 	 * @return void
 	 */
 	private function stream_download( string $path ): void {
-		$filename = basename( $path );
+		$facts    = ArchiveFactsReader::facts( $path );
+		$filename = $facts->download_name() ?? basename( $path );
 
 		nocache_headers();
 		header( 'Content-Type: application/octet-stream' );

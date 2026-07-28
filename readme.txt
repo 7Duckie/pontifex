@@ -85,6 +85,10 @@ Yes. `wp pontifex destination add` configures a named SFTP destination on a serv
 
 No. An offsite upload is a plain SFTP connection to the server you configured, using credentials you supply — Pontifex runs no service in between and holds none of your data. It only connects when you run an export with `--destination` or pull an archive back; it never connects on its own.
 
+= Does a backup include my .git directory? =
+
+No. A `.git` directory — at the site root, in `wp-content`, or inside any plugin or theme — is left out of every backup by default, because it is version-control metadata rather than site content: it is regenerable from the same remote the working copy was cloned from, and carrying it into an archive means also carrying its full commit history everywhere that archive travels. Pass `--no-defaults` to `wp pontifex export` if you specifically want it included.
+
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
