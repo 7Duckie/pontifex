@@ -303,6 +303,7 @@ final class Menu {
 					'starting'          => __( 'Starting backup…', 'pontifex' ),
 					/* translators: %s: number of files found so far */
 					'scanning'          => __( 'Scanning files… %s', 'pontifex' ),
+					'finalising'        => __( 'Finishing the backup…', 'pontifex' ),
 					/* translators: 1: bytes processed so far, 2: total bytes, both as human-readable sizes */
 					'progress'          => __( '%1$s of %2$s', 'pontifex' ),
 					/* translators: %s: elapsed time, e.g. 0:48 */

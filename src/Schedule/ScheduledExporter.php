@@ -18,6 +18,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
@@ -29,10 +30,19 @@ use Psr\Log\LoggerInterface;
  * the backup store, marked as schedule-originated so completion prunes to
  * the retention count — and then hands the ticking to {@see JobTicker},
  * the one place cron-driven work runs. If another operation is already
- * running (the single-runner lock is held, or an active job exists), the
+ * running — an active job exists, or the shared {@see OperationLock} is held
+ * by a backup, restore, or rollback anywhere else (admin or CLI) — the
  * scheduled run skips with a log line rather than queueing: the next
  * occurrence will try again, which for a periodic backup is the honest
  * behaviour.
+ *
+ * The shared lock is held only long enough to start the job, not for the
+ * whole run: once the job is active, {@see OperationLock}'s own
+ * backup-liveness check protects it across every cron tick that follows, the
+ * same way a request-driven admin backup's job survives between ticks. The
+ * ticker that then drives the job to completion takes its own, per-tick
+ * named lock, so releasing here before calling it avoids the two ever
+ * contending for the same lock within one invocation.
  */
 final class ScheduledExporter {
 
@@ -113,6 +123,16 @@ final class ScheduledExporter {
 			return;
 		}
 
+		// The shared single-runner lock: refuses to start while a restore or
+		// rollback is running anywhere (admin or CLI), not only another backup.
+		// Released again below, as soon as the job exists — see the class
+		// docblock for why this instance does not hold it for the whole run.
+		$lock = $this->operation_lock();
+		if ( ! $lock->acquire( OperationLock::OP_BACKUP ) ) {
+			$this->logger->info( 'Scheduled backup skipped: another operation is already running.' );
+			return;
+		}
+
 		try {
 			$this->backup_store->ensure_directory();
 			// The scheduled backup applies the same exclusions the operator configured,
@@ -140,9 +160,20 @@ final class ScheduledExporter {
 			$this->logger->error( 'Scheduled backup could not start.', array( 'exception' => $error ) );
 			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
 			return;
+		} finally {
+			$lock->release();
 		}
 
 		$this->ticker->run();
+	}
+
+	/**
+	 * Build the shared OperationLock over this exporter's own collaborators.
+	 *
+	 * @return OperationLock The lock to acquire before starting the job.
+	 */
+	private function operation_lock(): OperationLock {
+		return new OperationLock( $this->wordpress_context, $this->job_store );
 	}
 
 	/**

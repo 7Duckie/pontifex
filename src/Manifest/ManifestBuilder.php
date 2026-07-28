@@ -256,7 +256,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 					$entry->size(),
 					$entry->mode(),
 					$entry->mtime(),
-					(string) $entry->media_type(),
+					$entry->media_type(),
 					0
 				);
 			case EntryHeader::KIND_DIRECTORY:

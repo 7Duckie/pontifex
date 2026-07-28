@@ -202,14 +202,17 @@ final class EntryHeader {
 	private ?string $target;
 
 	/**
-	 * MIME type sniffed at scan time; present on file entries only.
+	 * MIME type; meaningful for file entries only.
 	 *
-	 * Captured at scan time by FileScanner via finfo_file() and
-	 * passed through ManifestBuilder. Used at restore time for
-	 * type-confusion defense (the reader can refuse to write an
-	 * executable PHP file if the original was sniffed as
-	 * something else) and to support future selective-restore
-	 * filters (e.g. wp pontifex import --only=images).
+	 * Sniffed at write time by EntryWriter via finfo_file(), not at scan
+	 * time — sniffing costs opening and reading the head of every file, so
+	 * it happens only for the entry actually being written. A draft file
+	 * header may therefore carry a null media_type; to_bytes() refuses to
+	 * serialise a file entry whose media_type is still null. Used at
+	 * restore time for type-confusion defence (the reader can refuse to
+	 * write an executable PHP file if the original was sniffed as
+	 * something else) and to support future selective-restore filters
+	 * (e.g. wp pontifex import --only=images).
 	 *
 	 * Defaults to 'application/octet-stream' (RFC 2046's standard
 	 * "treat as raw bytes" fallback) when MIME detection fails or
@@ -287,16 +290,19 @@ final class EntryHeader {
 	/**
 	 * Build an EntryHeader for a regular file entry.
 	 *
-	 * @param string $path            Relative path from the archive root; must be non-empty.
-	 * @param int    $size            Original byte size before any codec encoding; must be non-negative.
-	 * @param int    $mode            POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
-	 * @param int    $mtime           Unix modification timestamp; must be non-negative.
-	 * @param string $media_type      MIME type sniffed at scan time; must be non-empty. Use 'application/octet-stream' as the safe default for unsniffable bytes.
-	 * @param int    $size_compressed Encoded payload byte count on disk; must be non-negative.
+	 * @param string      $path            Relative path from the archive root; must be non-empty.
+	 * @param int         $size            Original byte size before any codec encoding; must be non-negative.
+	 * @param int         $mode            POSIX mode bits; must be in the range 0 to MAX_POSIX_MODE inclusive.
+	 * @param int         $mtime           Unix modification timestamp; must be non-negative.
+	 * @param string|null $media_type      MIME type; null means not yet determined — EntryWriter sniffs it at write
+	 *                                     time via with_media_type() before the header is serialised. When
+	 *                                     supplied here it must be non-empty; use 'application/octet-stream' as
+	 *                                     the safe default for unsniffable bytes.
+	 * @param int         $size_compressed Encoded payload byte count on disk; must be non-negative.
 	 * @return self A file-kind EntryHeader.
 	 * @throws InvalidArgumentException If any argument is out of range or empty.
 	 */
-	public static function for_file( string $path, int $size, int $mode, int $mtime, string $media_type, int $size_compressed ): self {
+	public static function for_file( string $path, int $size, int $mode, int $mtime, ?string $media_type, int $size_compressed ): self {
 		if ( '' === $path ) {
 			throw new InvalidArgumentException( 'EntryHeader::for_file: path must not be empty.' );
 		}
@@ -522,10 +528,11 @@ final class EntryHeader {
 	/**
 	 * Return the MIME type, or null for non-file entries.
 	 *
-	 * Sniffed at scan time. For file entries this is always
-	 * non-null (defaults to 'application/octet-stream' when
-	 * detection fails). For db_chunk, directory, and symlink
-	 * entries this is always null.
+	 * Sniffed at write time by EntryWriter (defaults to
+	 * 'application/octet-stream' when detection fails), so a draft file
+	 * header may return null here before EntryWriter fills it in via
+	 * with_media_type(). For db_chunk, directory, and symlink entries
+	 * this is always null.
 	 *
 	 * @return string|null The MIME type.
 	 */
@@ -659,6 +666,36 @@ final class EntryHeader {
 	}
 
 	/**
+	 * Return a copy of this EntryHeader with the media type updated.
+	 *
+	 * Immutable PSR-7-style update, the sibling of {@see self::with_size()} and
+	 * {@see self::with_size_compressed()}. Used by EntryWriter to record the
+	 * media type sniffed at write time — sniffing costs opening and reading
+	 * the head of the file, so a caller may build the draft header with
+	 * media_type left null and let EntryWriter fill it in for exactly the
+	 * entry it is about to write, rather than every entry a scan enumerates.
+	 *
+	 * @param string $media_type New MIME type; must be non-empty.
+	 * @return self A new EntryHeader instance with the updated media_type and all other fields preserved.
+	 * @throws InvalidArgumentException If this is not a file entry or media_type is empty.
+	 */
+	public function with_media_type( string $media_type ): self {
+		if ( ! $this->is_file() ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->kind is a validated KIND_* constant; exception path, not HTML output.
+				sprintf( 'EntryHeader::with_media_type: media_type applies to file entries only; this is a "%s" entry.', $this->kind )
+			);
+		}
+		if ( '' === $media_type ) {
+			throw new InvalidArgumentException( 'EntryHeader::with_media_type: media_type must not be empty.' );
+		}
+
+		$copy             = clone $this;
+		$copy->media_type = $media_type;
+		return $copy;
+	}
+
+	/**
 	 * Whether this entry is a regular file.
 	 *
 	 * @return bool True if the kind is KIND_FILE.
@@ -701,13 +738,46 @@ final class EntryHeader {
 	 * then kind-specific fields in fixed order) and prepends a
 	 * 4-byte big-endian length prefix.
 	 *
+	 * A file entry whose media_type is still null (not yet sniffed by
+	 * EntryWriter) is refused here rather than written with a missing or
+	 * placeholder value: a file header must never reach the archive without
+	 * a media type, so a caller that forgot to sniff fails loudly and
+	 * immediately instead of producing a silently wrong archive.
+	 *
 	 * @return string LENGTH_PREFIX_SIZE + N bytes, where N is the JSON payload length.
+	 * @throws InvalidArgumentException If this is a file entry whose media_type is still null.
 	 * @throws JsonException If JSON encoding fails (should not happen for the validated fields).
 	 */
 	public function to_bytes(): string {
+		$this->refuse_unserialisable_file();
+
 		$payload = $this->encode_canonical_json();
 
 		return ByteOrder::pack_uint32( strlen( $payload ) ) . $payload;
+	}
+
+	/**
+	 * Refuse to serialise a file entry whose media_type has not yet been determined.
+	 *
+	 * Called from both {@see self::to_bytes()} and {@see self::to_canonical_data()},
+	 * the two points every serialisation path — the on-disk write and any
+	 * caller that reads this header's data shape directly — goes through, so
+	 * a caller that forgot to sniff a media type fails loudly and immediately
+	 * here rather than the header silently reaching the archive record with a
+	 * missing or placeholder value. Neither the resumable progress log nor
+	 * the archive manifest currently nests an EntryHeader — both store
+	 * ManifestEntry's own canonical data, which carries no media type — but
+	 * the guard sits behind to_canonical_data() as well as to_bytes() so that
+	 * a future caller taking this header's canonical shape directly cannot
+	 * do so silently either.
+	 *
+	 * @return void
+	 * @throws InvalidArgumentException If this is a file entry whose media_type is still null.
+	 */
+	private function refuse_unserialisable_file(): void {
+		if ( self::KIND_FILE === $this->kind && null === $this->media_type ) {
+			throw new InvalidArgumentException( 'EntryHeader: a file entry must have its media_type determined before serialisation.' );
+		}
 	}
 
 	/**
@@ -766,13 +836,22 @@ final class EntryHeader {
 	 *
 	 * Produces the same data the canonical JSON encoder serialises:
 	 * the "kind" field first, then the kind-specific fields in a
-	 * fixed order. Other classes (notably ArchiveManifest) use this
-	 * to nest an EntryHeader inside their own JSON without going
-	 * through string serialisation and back.
+	 * fixed order. Available to any caller that needs this header's
+	 * data shape directly rather than going through string
+	 * serialisation and back.
+	 *
+	 * Refuses a file entry whose media_type is still null, the same
+	 * guard {@see self::to_bytes()} applies: a draft header must never
+	 * be handed out as data — canonical or on-disk — before it has been
+	 * sniffed, so this is refused here too rather than silently exposing
+	 * a missing value.
 	 *
 	 * @return array<string, mixed> The canonical data array.
+	 * @throws InvalidArgumentException If this is a file entry whose media_type is still null.
 	 */
 	public function to_canonical_data(): array {
+		$this->refuse_unserialisable_file();
+
 		$data = array( 'kind' => $this->kind );
 
 		switch ( $this->kind ) {

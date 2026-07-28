@@ -126,11 +126,21 @@ final class AdminBootstrapTest extends TestCase {
 	/**
 	 * A real RestoreController over mocked dependencies.
 	 *
+	 * Unlike BackupController's Environment (never touched — its default
+	 * OperationLock derives its job store from the BackupStore, not
+	 * Environment), RestoreController's constructor now builds its own
+	 * default OperationLock via resolve_content_root(), so this Environment
+	 * mock needs WP_CONTENT_DIR stubbed.
+	 *
 	 * @return RestoreController
 	 */
 	private function restore_controller(): RestoreController {
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'WP_CONTENT_DIR' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->with( 'WP_CONTENT_DIR' )->andReturn( sys_get_temp_dir() );
+
 		return new RestoreController(
-			Mockery::mock( Environment::class ),
+			$environment,
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() ),
 			Mockery::mock( RollbackStoreInterface::class ),

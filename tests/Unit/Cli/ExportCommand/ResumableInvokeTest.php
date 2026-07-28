@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
+use Brain\Monkey\Functions;
 use Mockery;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
@@ -277,6 +278,16 @@ final class ResumableInvokeTest extends TestCase {
 		$mock->shouldReceive( 'format_size' )->andReturn( '1 KB' );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
+		// The shared single-runner lock: free by default so __invoke's new lock
+		// acquisition does not need a dedicated stub in every test. The named
+		// lock is granted through the context mock above; the holder transient
+		// OperationLock reads/writes directly via the global WordPress transient
+		// functions, stubbed here to a plain "nothing is running" default.
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
 		return $mock;
 	}
 }

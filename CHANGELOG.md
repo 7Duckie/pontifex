@@ -17,6 +17,69 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.9.3] — 2026-07-28 — Operational hardening
+
+Four pieces of hardening around the operations the admin UI made easy to reach.
+One of them, found while adding a new default exclusion, was a silent data-loss
+defect in the manifest scanner: **if you run a site deployed from git, or exclude
+any directory that happens to be empty, re-take your backups after upgrading.**
+
+### Fixed
+
+- **The manifest scanner silently dropped the entry after an excluded
+  directory.** The walk was advanced twice for every excluded directory, so the
+  next entry was consumed without ever being tested against the exclusion rules.
+  When the excluded directory was empty — as several inside every git checkout
+  are — the dropped entry was a real site file, lost with no error and no
+  warning, in an archive that still verified as sound because it was internally
+  consistent and merely incomplete. Excluded directories are now pruned inside
+  the recursive walk, so one is never opened at all.
+- **Backup, restore and rollback now share one lock, across both surfaces.**
+  They previously took different locks and so did not exclude one another, which
+  allowed a restore to replace the database while a backup was reading it; the
+  CLI took no lock at all. A CLI export, import or rollback now refuses and exits
+  non-zero, naming the operation already running. Verify keeps its own lock,
+  since it only reads an archive and cannot clash with work on the live site.
+- **The admin lists told the truth about where a backup came from.** An uploaded
+  archive showed its upload time and no origin, even when it had been taken on
+  another site entirely. Each backup now leads with its true source and real
+  creation date, read from the archive's own recorded provenance. Downloads offer
+  a friendly source-and-date filename; the file stored on disk keeps its exact
+  name.
+- **A backup no longer appears to hang as it finishes.** It ended by sitting at
+  the complete byte count with zero seconds remaining while the database snapshot
+  and the archive's manifest and footer were still being written. The finishing
+  phase is now reported, and a phase can no longer travel backwards, which is
+  what stopped the bar collapsing to zero at the database boundary.
+
+### Added
+
+- **`.git` is left out of backups by default, at any depth.** A version-control
+  history is not site content: it is regenerable from the same remote the working
+  copy came from, it can silently rewind a live git-deployed directory when
+  restored over it, and it makes an archive carry every secret ever committed
+  wherever that archive travels. `.github`, `.gitignore`, `.gitattributes` and
+  `.gitkeep` are ordinary content and stay in. `vendor` and `node_modules` are
+  deliberately **not** excluded — both are required by a running site, so
+  dropping them would produce sites that restore and then fail. Use
+  `--no-defaults` to opt out of the curated defaults entirely.
+
+### Changed
+
+- **Backups spend far less time scanning.** Media types are now determined when
+  an entry is written rather than when it is scanned, so a resumable export
+  sniffs each file once across the whole backup instead of once per request, and
+  its final pass — which writes nothing — sniffs nothing. On a tree of roughly
+  18,600 entries a scan drops from 7.41 seconds to 0.795.
+- An exclusion pattern naming a directory without also matching its children now
+  leaves out that whole subtree, rather than omitting the directory while keeping
+  its contents. The built-in defaults are unaffected.
+- An unreadable file or directory inside an excluded subtree no longer aborts an
+  export, because nothing inside an excluded subtree is opened.
+- A resumable export that was in progress before this upgrade will refuse to
+  resume and must be started again, because the repaired scan correctly finds
+  entries the old one skipped.
+
 ## [0.9.0] — 2026-07-14 — Admin legibility
 
 The release that makes the engine's trustworthiness and each archive's contents
@@ -836,6 +899,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.0...HEAD
+[0.9.3]: https://github.com/7Duckie/pontifex/compare/v0.9.0...v0.9.3
 [0.9.0]: https://github.com/7Duckie/pontifex/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/7Duckie/pontifex/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/7Duckie/pontifex/compare/v0.6.0...v0.7.0

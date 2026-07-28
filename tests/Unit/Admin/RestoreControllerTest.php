@@ -26,6 +26,9 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Job\Job;
+use Pontifex\Job\JobStore;
+use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\RestoreRunnerInterface;
@@ -658,7 +661,12 @@ final class RestoreControllerTest extends TestCase {
 		Functions\when( 'delete_transient' )->justReturn( true );
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_restore_lock' === $key ? time() : false;
+				return OperationLock::LOCK_NAME === $key
+					? array(
+						'kind' => OperationLock::OP_RESTORE,
+						'at'   => time(),
+					)
+					: false;
 			}
 		);
 
@@ -703,7 +711,7 @@ final class RestoreControllerTest extends TestCase {
 		Functions\when( 'get_transient' )->justReturn( false );
 
 		$context = Mockery::mock( WordPressContext::class );
-		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_restore_lock' )->andReturn( false );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( false );
 		$context->shouldNotReceive( 'release_named_lock' );
 
 		$store = new BackupStore( $this->base );
@@ -753,13 +761,18 @@ final class RestoreControllerTest extends TestCase {
 		Functions\when( 'delete_transient' )->justReturn( true );
 		Functions\when( 'get_transient' )->alias(
 			static function ( string $key ) {
-				return 'pontifex_restore_lock' === $key ? time() : false;
+				return OperationLock::LOCK_NAME === $key
+					? array(
+						'kind' => OperationLock::OP_RESTORE,
+						'at'   => time(),
+					)
+					: false;
 			}
 		);
 
 		$context = Mockery::mock( WordPressContext::class );
-		$context->shouldReceive( 'acquire_named_lock' )->once()->with( 'pontifex_restore_lock' )->andReturn( true );
-		$context->shouldReceive( 'release_named_lock' )->once()->with( 'pontifex_restore_lock' );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once()->with( OperationLock::LOCK_NAME );
 
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
