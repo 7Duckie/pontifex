@@ -97,11 +97,13 @@ final class ScannedEntry {
 	private ?string $target;
 
 	/**
-	 * MIME type sniffed at scan time; non-null for files only.
+	 * MIME type; null unless the caller already knows it.
 	 *
-	 * Captured by FileScanner via finfo_file() and passed through
-	 * ManifestBuilder to EntryHeader::for_file(). For directory and
-	 * symlink entries this is always null.
+	 * FileScanner leaves this null for every file entry it produces —
+	 * media type is determined later, at write time, by EntryWriter, not
+	 * during the scan (see FileScanner's class docblock for why). Passed
+	 * through ManifestBuilder to EntryHeader::for_file(), which also
+	 * accepts null. For directory and symlink entries this is always null.
 	 *
 	 * @var string|null
 	 */
@@ -117,7 +119,7 @@ final class ScannedEntry {
 	 * @param int         $mode          POSIX mode bits; must be in 0..EntryHeader::MAX_POSIX_MODE inclusive.
 	 * @param int         $mtime         Unix modification timestamp; must be non-negative.
 	 * @param string|null $target        Symlink target; must be non-null and non-empty for KIND_SYMLINK; must be null for other kinds.
-	 * @param string|null $media_type    MIME type; must be non-null and non-empty for KIND_FILE; must be null for other kinds.
+	 * @param string|null $media_type    MIME type; for KIND_FILE may be null (not yet determined) or a non-empty string; must be null for other kinds.
 	 * @throws InvalidArgumentException If any argument is out of range, empty, or inconsistent with the kind.
 	 */
 	public function __construct(
@@ -169,8 +171,8 @@ final class ScannedEntry {
 			);
 		}
 		if ( EntryHeader::KIND_FILE === $kind ) {
-			if ( null === $media_type || '' === $media_type ) {
-				throw new InvalidArgumentException( 'ScannedEntry: file entries must have a non-empty media_type.' );
+			if ( '' === $media_type ) {
+				throw new InvalidArgumentException( 'ScannedEntry: file entries may carry a null media_type, but not an empty one.' );
 			}
 		} elseif ( null !== $media_type ) {
 			throw new InvalidArgumentException(
@@ -253,12 +255,13 @@ final class ScannedEntry {
 	}
 
 	/**
-	 * Return the MIME type, or null for non-file entries.
+	 * Return the MIME type, or null when not yet determined.
 	 *
-	 * Captured at scan time by FileScanner; non-null for file
-	 * entries and null for directory and symlink entries.
+	 * FileScanner always leaves this null for file entries — media type
+	 * is determined later, at write time, by EntryWriter. Always null
+	 * for directory and symlink entries.
 	 *
-	 * @return string|null The MIME type for file entries; null otherwise.
+	 * @return string|null The MIME type for file entries when known; null otherwise.
 	 */
 	public function media_type(): ?string {
 		return $this->media_type;

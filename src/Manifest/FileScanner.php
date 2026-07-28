@@ -24,7 +24,13 @@ use Pontifex\Archive\Format\EntryHeader;
  * Returns a list of {@see ScannedEntry} value objects, one per file,
  * directory, or symlink found, after applying {@see ExclusionRules}.
  * Does NOT read file contents; only stats them. Reading happens later
- * at archive-write time inside ArchiveWriter / EntryWriter.
+ * at archive-write time inside ArchiveWriter / EntryWriter — and so
+ * does determining a file entry's media type: every file entry this
+ * scanner produces carries a null media_type, sniffed only later by
+ * EntryWriter for the entries actually written. Sniffing costs opening
+ * and reading the head of every file, so doing it here would pay that
+ * cost on every scan of a resumable export's every tick, including the
+ * final tick that writes no entries at all.
  *
  * The scanner is deterministic: two scans of the same tree return
  * identical ScannedEntry lists in the same order. Sort order is
@@ -333,6 +339,11 @@ final class FileScanner {
 	 * Throws RuntimeException if the item is not readable, since a
 	 * silently-skipped file would produce an incomplete archive.
 	 *
+	 * File entries carry a null media_type: it is determined later, at
+	 * write time, by EntryWriter — not here — because sniffing it costs
+	 * opening and reading the head of the file, and only the entries a
+	 * given tick actually writes need that cost paid.
+	 *
 	 * @param string      $kind          The classified entry kind.
 	 * @param string      $relative_path The scan-root-relative path.
 	 * @param string      $absolute_path The host-absolute path.
@@ -383,45 +394,10 @@ final class FileScanner {
 		$mode  = (int) ( $info->getPerms() & 07777 );
 		$mtime = (int) $info->getMTime();
 
-		// Files carry a media_type sniffed at scan time; directories do not.
-		$media_type = EntryHeader::KIND_FILE === $kind ? self::sniff_media_type( $absolute_path ) : null;
-
-		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null, $media_type );
-	}
-
-	/**
-	 * Sniff the MIME type of a file via finfo.
-	 *
-	 * Uses PHP's fileinfo extension. On detection failure (file is
-	 * empty, finfo cannot identify the bytes, finfo extension is
-	 * unavailable, or any other reason), returns the RFC 2046 safe
-	 * fallback 'application/octet-stream' — which signals "treat as
-	 * raw bytes" at restore time and never triggers special handling.
-	 *
-	 * @param string $absolute_path Absolute path to a regular file.
-	 * @return string A non-empty MIME-type string.
-	 */
-	private static function sniff_media_type( string $absolute_path ): string {
-		$fallback = 'application/octet-stream';
-
-		if ( ! function_exists( 'finfo_open' ) ) {
-			return $fallback;
-		}
-
-		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_open emits a warning when the magic database is unavailable; the warning is informational and we already handle the false return.
-		$handle = @finfo_open( FILEINFO_MIME_TYPE );
-		if ( false === $handle ) {
-			return $fallback;
-		}
-
-		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_file emits a warning on unreadable files; the warning is informational and we already handle the false return.
-		$detected = @finfo_file( $handle, $absolute_path );
-		// finfo_close() was deprecated in PHP 8.4; $handle is cleaned up by garbage collection when it goes out of scope at the end of this method.
-
-		if ( false === $detected || '' === $detected ) {
-			return $fallback;
-		}
-
-		return $detected;
+		// media_type is always null out of the scanner, for every kind. File
+		// entries have it filled in later, at write time, by EntryWriter (see
+		// this class's docblock for why); directory and symlink entries never
+		// carry one at all.
+		return new ScannedEntry( $kind, $relative_path, $absolute_path, $size, $mode, $mtime, null, null );
 	}
 }

@@ -209,17 +209,19 @@ final class ScannedEntryTest extends TestCase {
 	}
 
 	/**
-	 * The constructor must reject a file entry with null media_type.
+	 * The constructor must accept a file entry with a null media_type.
 	 *
-	 * File entries require a non-null, non-empty media_type so the
-	 * downstream EntryHeader::for_file() factory can always be called.
+	 * Media type is no longer determined at scan time — it is sniffed
+	 * later, at write time, by EntryWriter — so FileScanner never has a
+	 * value to hand ScannedEntry for a file entry. The downstream
+	 * EntryHeader::for_file() factory accepts null for the same reason.
 	 *
 	 * @return void
 	 */
-	public function test_constructor_rejects_file_with_null_media_type(): void {
-		$this->expectException( InvalidArgumentException::class );
+	public function test_constructor_accepts_file_with_null_media_type(): void {
+		$entry = new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, null );
 
-		new ScannedEntry( EntryHeader::KIND_FILE, 'a.txt', '/a.txt', 0, 0644, 0, null, null );
+		$this->assertNull( $entry->media_type() );
 	}
 
 	/**

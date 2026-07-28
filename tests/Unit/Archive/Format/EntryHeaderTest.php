@@ -236,6 +236,20 @@ final class EntryHeaderTest extends TestCase {
 	}
 
 	/**
+	 * The for_file factory must accept a null media_type.
+	 *
+	 * Null means "not yet determined" — EntryWriter sniffs it at write
+	 * time via with_media_type() before the header is serialised.
+	 *
+	 * @return void
+	 */
+	public function test_for_file_accepts_null_media_type(): void {
+		$entry = EntryHeader::for_file( 'wp-config.php', 1234, 0644, 1690000000, null, 0 );
+
+		$this->assertNull( $entry->media_type() );
+	}
+
+	/**
 	 * The media_type accessor must return the value supplied to the factory.
 	 *
 	 * @return void
@@ -1062,5 +1076,85 @@ final class EntryHeaderTest extends TestCase {
 		$this->expectException( InvalidArgumentException::class );
 
 		$file->with_size( -1 );
+	}
+
+	/**
+	 * The with_media_type method must return an updated copy and leave the original unchanged.
+	 *
+	 * The same immutable-update contract as with_size and with_size_compressed:
+	 * EntryWriter uses it to record the media_type sniffed at write time.
+	 *
+	 * @return void
+	 */
+	public function test_with_media_type_returns_updated_copy_and_preserves_original(): void {
+		$original = EntryHeader::for_file( 'a.txt', 1000, 0644, 1690000000, null, 0 );
+		$copy     = $original->with_media_type( 'image/png' );
+
+		$this->assertNotSame( $original, $copy );
+		$this->assertSame( 'image/png', $copy->media_type() );
+		$this->assertNull( $original->media_type() );
+		$this->assertSame( 'a.txt', $copy->path(), 'Every other field must be preserved on the copy.' );
+		$this->assertSame( 1690000000, $copy->mtime() );
+	}
+
+	/**
+	 * The with_media_type method must reject a non-file entry — media_type is a file-only field.
+	 *
+	 * @return void
+	 */
+	public function test_with_media_type_rejects_a_non_file_entry(): void {
+		$db_chunk = EntryHeader::for_db_chunk( 0, 'wp_options', 5, 4096, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$db_chunk->with_media_type( 'application/octet-stream' );
+	}
+
+	/**
+	 * The with_media_type method must reject an empty media_type.
+	 *
+	 * @return void
+	 */
+	public function test_with_media_type_rejects_an_empty_media_type(): void {
+		$file = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, null, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$file->with_media_type( '' );
+	}
+
+	/**
+	 * The to_bytes method must refuse to serialise a file entry whose media_type is still null.
+	 *
+	 * A file header must never reach the archive without a media type: this
+	 * converts a caller forgetting to sniff from a silent wrong value into an
+	 * immediate, obvious failure.
+	 *
+	 * @return void
+	 */
+	public function test_to_bytes_rejects_a_file_entry_with_null_media_type(): void {
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, null, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$entry->to_bytes();
+	}
+
+	/**
+	 * The to_canonical_data method must also refuse a file entry whose media_type is still null.
+	 *
+	 * The to_bytes() and to_canonical_data() methods are two separate serialisation
+	 * paths (on-disk bytes vs. a caller-facing data array), so the guard
+	 * has to be applied to both; a caller reading canonical data directly
+	 * must not see a draft header's missing media_type silently exposed.
+	 *
+	 * @return void
+	 */
+	public function test_to_canonical_data_rejects_a_file_entry_with_null_media_type(): void {
+		$entry = EntryHeader::for_file( 'a.txt', 1000, 0644, 0, null, 0 );
+
+		$this->expectException( InvalidArgumentException::class );
+
+		$entry->to_canonical_data();
 	}
 }
