@@ -170,4 +170,43 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	public function restore_session_charset(): void {
 		$this->inner->restore_session_charset();
 	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return array{engine: string, create_options: string, table_type: string}|null
+	 */
+	public function table_storage_facts( string $table_name ): ?array {
+		return $this->inner->table_storage_facts( $table_name );
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return bool True when the table's own CREATE TABLE definition names a DATA DIRECTORY or INDEX DIRECTORY on any partition.
+	 */
+	public function partition_storage_directory_present( string $table_name ): bool {
+		return $this->inner->partition_storage_directory_present( $table_name );
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @return string|null The SESSION sql_mode; null if it could not be read.
+	 */
+	public function sql_mode(): ?string {
+		return $this->inner->sql_mode();
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @param string $table_name The exact table name to inspect.
+	 * @return int The exact row count.
+	 */
+	public function table_row_count( string $table_name ): int {
+		return $this->inner->table_row_count( $table_name );
+	}
 }

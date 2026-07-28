@@ -362,6 +362,173 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Canned storage facts, keyed by table name; overrides the default answer.
+	 *
+	 * A registered null means "report the table as not found"; an array
+	 * means "report exactly these facts". A table name with no entry here
+	 * falls back to the ordinary-InnoDB-base-table default in
+	 * {@see self::table_storage_facts()}.
+	 *
+	 * @var array<string, array{engine: string, create_options: string, table_type: string}|null>
+	 */
+	private array $storage_facts = array();
+
+	/**
+	 * Register the storage facts table_storage_facts() must report for a table name.
+	 *
+	 * @param string $name           Table name, as passed to table_storage_facts().
+	 * @param string $engine         The reported ENGINE value.
+	 * @param string $create_options The reported CREATE_OPTIONS value.
+	 * @param string $table_type     Optional. The reported TABLE_TYPE value; default 'BASE TABLE'.
+	 * @return void
+	 */
+	public function set_table_storage_facts( string $name, string $engine, string $create_options, string $table_type = 'BASE TABLE' ): void {
+		$this->storage_facts[ $name ] = array(
+			'engine'         => $engine,
+			'create_options' => $create_options,
+			'table_type'     => $table_type,
+		);
+	}
+
+	/**
+	 * Register that table_storage_facts() must report the table as not found.
+	 *
+	 * @param string $name Table name.
+	 * @return void
+	 */
+	public function deny_table_storage_facts( string $name ): void {
+		$this->storage_facts[ $name ] = null;
+	}
+
+	/**
+	 * Report canned storage facts for a table.
+	 *
+	 * Defaults to an ordinary InnoDB base table for any name not registered
+	 * via {@see self::set_table_storage_facts()} or
+	 * {@see self::deny_table_storage_facts()}, so every existing DatabaseWriter
+	 * test — none of which cares about storage-engine containment — keeps
+	 * passing unmodified; only a test that opts in exercises a refusal.
+	 *
+	 * @param string $table_name The table name to look up.
+	 * @return array{engine: string, create_options: string, table_type: string}|null
+	 */
+	public function table_storage_facts( string $table_name ): ?array {
+		$this->maybe_fail( __FUNCTION__ );
+		if ( array_key_exists( $table_name, $this->storage_facts ) ) {
+			return $this->storage_facts[ $table_name ];
+		}
+		return array(
+			'engine'         => 'InnoDB',
+			'create_options' => '',
+			'table_type'     => 'BASE TABLE',
+		);
+	}
+
+	/**
+	 * Canned row-count answers, keyed by table name; overrides the default of 0.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $row_counts = array();
+
+	/**
+	 * Register the row count table_row_count() must report for a table name.
+	 *
+	 * @param string $name  Table name, as passed to table_row_count().
+	 * @param int    $count The row count to report.
+	 * @return void
+	 */
+	public function set_table_row_count( string $name, int $count ): void {
+		$this->row_counts[ $name ] = $count;
+	}
+
+	/**
+	 * Report the canned row count for a table, defaulting to 0 — an ordinary
+	 * CREATE builds an empty table — so every existing DatabaseWriter test
+	 * keeps passing unmodified; only a test that opts in exercises a refusal.
+	 *
+	 * @param string $table_name The table name to look up.
+	 * @return int
+	 */
+	public function table_row_count( string $table_name ): int {
+		$this->maybe_fail( __FUNCTION__ );
+		return $this->row_counts[ $table_name ] ?? 0;
+	}
+
+	/**
+	 * Canned partition storage-directory answers, keyed by table name.
+	 *
+	 * A table name with no entry here defaults to false — no partition names a
+	 * DATA DIRECTORY or INDEX DIRECTORY — so every existing DatabaseWriter test
+	 * keeps passing unmodified; only a test that opts in exercises a refusal.
+	 *
+	 * @var array<string, bool>
+	 */
+	private array $partition_storage_directory = array();
+
+	/**
+	 * Register the answer partition_storage_directory_present() must report for a table name.
+	 *
+	 * @param string $name    Table name, as passed to partition_storage_directory_present().
+	 * @param bool   $present Whether a partition should be reported as naming a storage directory.
+	 * @return void
+	 */
+	public function set_partition_storage_directory_present( string $name, bool $present ): void {
+		$this->partition_storage_directory[ $name ] = $present;
+	}
+
+	/**
+	 * Report the canned partition storage-directory answer for a table, defaulting to false.
+	 *
+	 * @param string $table_name The table name to look up.
+	 * @return bool
+	 */
+	public function partition_storage_directory_present( string $table_name ): bool {
+		$this->maybe_fail( __FUNCTION__ );
+		return $this->partition_storage_directory[ $table_name ] ?? false;
+	}
+
+	/**
+	 * The canned SESSION sql_mode; null denies it (reports "could not be read").
+	 *
+	 * Defaults to '' — the ordinary MySQL/MariaDB default, no special modes set
+	 * — so every existing test keeps behaving as before backslash-escape
+	 * handling became sql_mode-aware; only a test that opts in exercises
+	 * NO_BACKSLASH_ESCAPES or an unreadable sql_mode.
+	 *
+	 * @var string|null
+	 */
+	private ?string $sql_mode = '';
+
+	/**
+	 * Register the SESSION sql_mode sql_mode() must report.
+	 *
+	 * @param string $mode The sql_mode string to report, e.g. "NO_BACKSLASH_ESCAPES".
+	 * @return void
+	 */
+	public function set_sql_mode( string $mode ): void {
+		$this->sql_mode = $mode;
+	}
+
+	/**
+	 * Register that sql_mode() must report the mode as unreadable (null).
+	 *
+	 * @return void
+	 */
+	public function deny_sql_mode(): void {
+		$this->sql_mode = null;
+	}
+
+	/**
+	 * Report the canned SESSION sql_mode.
+	 *
+	 * @return string|null
+	 */
+	public function sql_mode(): ?string {
+		return $this->sql_mode;
+	}
+
+	/**
 	 * List known tables (registered or marked existing) beginning with the prefix.
 	 *
 	 * @param string $prefix The literal name prefix to match; must not be empty.
