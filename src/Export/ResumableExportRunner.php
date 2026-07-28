@@ -145,17 +145,18 @@ final class ResumableExportRunner {
 		}
 
 		$payload = array(
-			'output'        => $options->output_path(),
-			'temp'          => $options->output_path() . '.' . uniqid( 'pontifex-job-', true ) . '.part',
-			'scan_root'     => $scan_root,
-			'path_prefix'   => $path_prefix,
-			'exclusions'    => array_values( $exclusions ),
-			'signed'        => null !== $options->signing(),
-			'reason'        => $options->encryption_disabled_reason(),
-			'scope'         => null !== $options->scope() ? $options->scope()->to_array() : null,
-			'phase'         => 'files',
-			'bytes_written' => 0,
-			'files_changed' => 0,
+			'output'                => $options->output_path(),
+			'temp'                  => $options->output_path() . '.' . uniqid( 'pontifex-job-', true ) . '.part',
+			'scan_root'             => $scan_root,
+			'path_prefix'           => $path_prefix,
+			'exclusions'            => array_values( $exclusions ),
+			'signed'                => null !== $options->signing(),
+			'reason'                => $options->encryption_disabled_reason(),
+			'scope'                 => null !== $options->scope() ? $options->scope()->to_array() : null,
+			'phase'                 => 'files',
+			'bytes_written'         => 0,
+			'files_changed'         => 0,
+			'media_type_unresolved' => 0,
 		);
 
 		return $this->job_store->create( Job::KIND_EXPORT, $payload, $now );
@@ -264,12 +265,13 @@ final class ResumableExportRunner {
 				$writer->adopt( $destination, $adopted['bytes'], $adopted['entries'], $signing );
 			}
 
-			$done          = $writer->next_index();
-			$files_changed = (int) ( $payload['files_changed'] ?? 0 );
-			$deadline      = (float) $clock() + $budget_seconds;
-			$index         = 0;
-			$finished      = false;
-			$saw_db        = false;
+			$done                  = $writer->next_index();
+			$files_changed         = (int) ( $payload['files_changed'] ?? 0 );
+			$media_type_unresolved = (int) ( $payload['media_type_unresolved'] ?? 0 );
+			$deadline              = (float) $clock() + $budget_seconds;
+			$index                 = 0;
+			$finished              = false;
+			$saw_db                = false;
 
 			// Tally raw source bytes alongside the caller's own byte callback. The
 			// tally is persisted on the payload so a progress surface answering
@@ -315,6 +317,9 @@ final class ResumableExportRunner {
 					// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- The closure must match the on_file_changed callback contract; only the tally is needed here.
 					static function ( string $path, int $declared, int $actual ) use ( &$files_changed ): void {
 						++$files_changed;
+					},
+					static function () use ( &$media_type_unresolved ): void {
+						++$media_type_unresolved;
 					}
 				);
 				$log->append( $manifest_entry->to_canonical_data() );
@@ -325,7 +330,7 @@ final class ResumableExportRunner {
 				}
 				if ( 0 === $writer->next_index() % self::JOB_SAVE_CADENCE ) {
 					$payload['source_bytes_done'] = $source_done;
-					$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, (int) $clock() );
+					$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, $media_type_unresolved, (int) $clock() );
 				}
 				// File phase honours the budget; the database phase, once begun,
 				// runs to the end so the snapshot stays within this request.
@@ -340,7 +345,7 @@ final class ResumableExportRunner {
 			}
 
 			$payload['source_bytes_done'] = $source_done;
-			$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, (int) $clock() );
+			$this->save_progress( $job, $payload, $writer->bytes_written(), $files_changed, $media_type_unresolved, (int) $clock() );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp archive stream between ticks; not a WP_Filesystem operation.
 			fclose( $destination );
@@ -489,16 +494,18 @@ final class ResumableExportRunner {
 	/**
 	 * Persist the advisory cursors onto the job record.
 	 *
-	 * @param Job                  $job           The running job.
-	 * @param array<string, mixed> $payload       The payload being maintained (phase, cursors).
-	 * @param int                  $bytes_written Bytes the archive holds so far.
-	 * @param int                  $files_changed Changed-file tally so far.
-	 * @param int                  $now           Unix timestamp.
+	 * @param Job                  $job                   The running job.
+	 * @param array<string, mixed> $payload               The payload being maintained (phase, cursors).
+	 * @param int                  $bytes_written         Bytes the archive holds so far.
+	 * @param int                  $files_changed         Changed-file tally so far.
+	 * @param int                  $media_type_unresolved Unresolved-media_type tally so far.
+	 * @param int                  $now                   Unix timestamp.
 	 * @return void
 	 */
-	private function save_progress( Job $job, array &$payload, int $bytes_written, int $files_changed, int $now ): void {
-		$payload['bytes_written'] = $bytes_written;
-		$payload['files_changed'] = $files_changed;
+	private function save_progress( Job $job, array &$payload, int $bytes_written, int $files_changed, int $media_type_unresolved, int $now ): void {
+		$payload['bytes_written']         = $bytes_written;
+		$payload['files_changed']         = $files_changed;
+		$payload['media_type_unresolved'] = $media_type_unresolved;
 		$job->set_payload( $payload );
 		$job->touch( $now );
 		$this->job_store->save( $job );

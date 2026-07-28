@@ -128,6 +128,102 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A pre-existing files_changed / media_type_unresolved total survives an
+	 * admin backup's bump, and this run's own contribution is added onto it.
+	 *
+	 * The regression test for the finding that create()'s success path never
+	 * read either counter off the finished job payload, so an admin backup's
+	 * bump_counters() delta carried neither key: the accumulated CLI total
+	 * for both counters was frozen at whatever the last CLI export had left
+	 * it (never moved by an admin backup), and this run's own findings
+	 * (a file that changed mid-scan, an entry whose media_type could not be
+	 * sniffed) were silently thrown away rather than counted.
+	 *
+	 * Built directly against a hand-wired WordPressContext mock rather than
+	 * the shared {@see self::wordpress_context_mock()} helper, so
+	 * option_value()/save_option() can be asserted precisely without
+	 * fighting the shared mock's catch-all stub.
+	 *
+	 * @return void
+	 */
+	public function test_create_bump_counters_preserves_a_pre_existing_total_and_adds_this_runs_own(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$stored = array(
+			'attempted'             => 3,
+			'succeeded'             => 2,
+			'failed'                => 1,
+			'bytes_exported'        => 500,
+			'files_changed'         => 4,
+			'media_type_unresolved' => 9,
+		);
+
+		$environment = $this->environment_mock();
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'format_size' )->andReturnUsing(
+			static function ( int $bytes ): string {
+				return $bytes . ' B';
+			}
+		);
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
+		// TransferHistory::record() also reads/writes its own option key, so
+		// these need a tolerant catch-all before the counters' own exact
+		// expectation. A stable pre-existing total: every read sees the same
+		// stored figures, so the LAST save_option() call (the succeeded bump)
+		// is the one whose merged result proves both the survival and the
+		// addition.
+		$context->shouldReceive( 'option_value' )->with( 'pontifex_export_stats', Mockery::any() )->andReturn( $stored );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+
+		$saved = array();
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $key, $value ) use ( &$saved ): void {
+				if ( 'pontifex_export_stats' === $key ) {
+					$saved = $value;
+				}
+			}
+		);
+
+		// One ordinary entry, one that changed size between scan and write, and
+		// one whose media_type is left null over a php://memory source (never
+		// genuinely sniffable) — so this run itself tallies files_changed = 1
+		// and media_type_unresolved = 1.
+		$changed_header = EntryHeader::for_file( 'wp-content/moving.log', 1000, 0o644, 1690000000, 'application/octet-stream', 0 );
+		$changed_plan   = new EntryPlan( $changed_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( str_repeat( 'B', 400 ) ) );
+
+		$unresolved_header = EntryHeader::for_file( 'wp-content/mystery.bin', 5, 0o644, 1690000000, null, 0 );
+		$unresolved_plan   = new EntryPlan( $unresolved_header, 0, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $this->memory_stream( 'alpha' ) );
+
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			$changed_plan,
+			$unresolved_plan,
+		);
+
+		$controller = new BackupController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			new NullLogger(),
+			$this->manifest_builder_returning( $plans )
+		);
+		$controller->create();
+
+		$this->assertTrue( $this->json['success'], 'The backup must still complete despite the changed file and the unsniffable entry.' );
+		$this->assertSame( 5, $saved['files_changed'] ?? null, 'The stored CLI total (4) must survive, plus this run\'s own one changed file.' );
+		$this->assertSame( 10, $saved['media_type_unresolved'] ?? null, 'The stored CLI total (9) must survive, plus this run\'s own one unresolved media_type.' );
+	}
+
+	/**
 	 * An admin backup records a content-only scope and the source table prefix.
 	 *
 	 * The admin Backup screen is always content-only (ADR 0008): a whole-site clone

@@ -256,13 +256,14 @@ final class IncrementalArchiveWriter {
 	/**
 	 * Append one entry record and return its manifest entry.
 	 *
-	 * @param EntryPlan     $plan            The entry to write.
-	 * @param callable|null $on_bytes_read   Optional byte-progress callback forwarded to the codec.
-	 * @param callable|null $on_file_changed Optional callback for a file whose size changed between scan and write (ADR 0013), called as `( string $path, int $declared_size, int $actual_size ): void`.
+	 * @param EntryPlan     $plan                     The entry to write.
+	 * @param callable|null $on_bytes_read            Optional byte-progress callback forwarded to the codec.
+	 * @param callable|null $on_file_changed          Optional callback for a file whose size changed between scan and write (ADR 0013), called as `( string $path, int $declared_size, int $actual_size ): void`.
+	 * @param callable|null $on_media_type_unresolved Optional callback for a file entry whose media_type had to be sniffed and could not be genuinely determined, called as `(): void`.
 	 * @return ManifestEntry The recorded entry, also retained for finish().
 	 * @throws RuntimeException If called before begin()/adopt() or after finish(), a nonce cannot be generated, or the write fails.
 	 */
-	public function append_entry( EntryPlan $plan, ?callable $on_bytes_read = null, ?callable $on_file_changed = null ): ManifestEntry {
+	public function append_entry( EntryPlan $plan, ?callable $on_bytes_read = null, ?callable $on_file_changed = null, ?callable $on_media_type_unresolved = null ): ManifestEntry {
 		$this->assert_writable();
 
 		$offset_before = $this->bytes_written;
@@ -309,6 +310,14 @@ final class IncrementalArchiveWriter {
 		// captured size by EntryWriter.
 		if ( $result->size_was_corrected() && null !== $on_file_changed ) {
 			$on_file_changed( (string) $plan->header()->path(), (int) $result->declared_size(), (int) $result->actual_size() );
+		}
+
+		// Report a file entry whose media_type had to be sniffed and could not be
+		// genuinely determined (see EntryWriter::sniff_media_type()), so a caller
+		// can tally how many entries recorded the fallback as a failure rather
+		// than a real identification.
+		if ( $result->media_type_was_unresolved() && null !== $on_media_type_unresolved ) {
+			$on_media_type_unresolved();
 		}
 
 		$manifest_entry = self::build_manifest_entry(

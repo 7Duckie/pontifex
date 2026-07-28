@@ -155,7 +155,10 @@ final class EntryWriter {
 	 *                          source yielded a different byte count than the header declared
 	 *                          (the file changed between the caller's scan and this write),
 	 *                          the header is written with the actual captured size and the
-	 *                          result reports the discrepancy.
+	 *                          result reports the discrepancy. For a file entry whose
+	 *                          media_type had to be sniffed here, the result also reports
+	 *                          whether the sniff genuinely resolved one — see
+	 *                          {@see self::sniff_media_type()}.
 	 * @throws InvalidArgumentException If the encryption family is unknown, the compression
 	 *                                  codec is not registered, an encrypted codec is used
 	 *                                  without a cipher and key, the nonce is the wrong
@@ -211,9 +214,14 @@ final class EntryWriter {
 		// source's underlying path. A header that already carries a media_type
 		// (set by a caller that already knows it) is trusted as-is and left
 		// alone — that also keeps a from-disk-adopted or hand-built header's
-		// value authoritative and avoids a pointless read.
+		// value authoritative and avoids a pointless read. Only an entry that
+		// actually reaches the sniff can be counted as resolved or unresolved;
+		// a trusted header counts as neither.
+		$media_type_unresolved = false;
 		if ( $header->is_file() && null === $header->media_type() ) {
-			$header = $header->with_media_type( self::sniff_media_type( $source ) );
+			$sniffed               = self::sniff_media_type( $source );
+			$header                = $header->with_media_type( $sniffed['media_type'] );
+			$media_type_unresolved = ! $sniffed['resolved'];
 		}
 
 		$codec = $this->codec_registry->get( $compression_codec_id );
@@ -318,7 +326,7 @@ final class EntryWriter {
 				+ $payload_length
 				+ Sha256::DIGEST_SIZE;
 
-			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash, $declared_size, $actual_size );
+			return new EntryWriteResult( $payload_length, $total_entry_length, $entry_hash, $declared_size, $actual_size, $media_type_unresolved );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the php://temp resource opened in this method; not a WP_Filesystem operation.
 			fclose( $temp );
@@ -354,28 +362,56 @@ final class EntryWriter {
 	 * and confidently return a media type describing something other
 	 * than the payload actually being written. This method never throws.
 	 *
+	 * There are four ways the sniff can fail to genuinely determine a media
+	 * type — the fileinfo extension is not loaded on this host, the source's
+	 * uri does not resolve to a real readable file, finfo_open() itself
+	 * fails (e.g. an unavailable magic database), or finfo_file() fails or
+	 * returns nothing — and every one of them falls back to the same
+	 * 'application/octet-stream' string a genuinely unidentifiable file
+	 * (a real .DS_Store, say) legitimately sniffs as too. Without a
+	 * separate signal, a caller cannot tell "correctly identified as
+	 * unknown" from "we failed and gave up" — and a systemic failure (the
+	 * fileinfo extension missing on a host, for instance) would silently
+	 * record every file in every archive as raw bytes with nothing
+	 * anywhere saying so. The 'resolved' flag exists purely to carry that
+	 * distinction back to the caller, which tallies it into a counter the
+	 * operator can see.
+	 *
 	 * @param resource $source The entry's payload source stream.
-	 * @return string A non-empty MIME-type string; 'application/octet-stream'
-	 *                unless the source's reported uri resolves to a genuinely
-	 *                existing, readable file.
+	 * @return array{media_type: string, resolved: bool} The sniffed (or fallback)
+	 *                MIME-type string, and whether it was genuinely determined by
+	 *                finfo (true) rather than reached via one of the four fallback
+	 *                paths above (false).
 	 */
-	private static function sniff_media_type( $source ): string {
+	private static function sniff_media_type( $source ): array {
 		$fallback = 'application/octet-stream';
 
 		if ( ! function_exists( 'finfo_open' ) ) {
-			return $fallback;
+			// The fileinfo extension is not loaded on this host.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
 		}
 
 		$meta          = stream_get_meta_data( $source );
 		$absolute_path = isset( $meta['uri'] ) ? (string) $meta['uri'] : '';
 		if ( '' === $absolute_path || ! is_file( $absolute_path ) || ! is_readable( $absolute_path ) ) {
-			return $fallback;
+			// The source's reported uri does not resolve to a real, readable file.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
 		}
 
 		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_open emits a warning when the magic database is unavailable; the warning is informational and we already handle the false return.
 		$handle = @finfo_open( FILEINFO_MIME_TYPE );
 		if ( false === $handle ) {
-			return $fallback;
+			// The fileinfo magic database could not be opened.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
 		}
 
 		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- finfo_file emits a warning on unreadable files; the warning is informational and we already handle the false return.
@@ -383,10 +419,17 @@ final class EntryWriter {
 		// finfo_close() was deprecated in PHP 8.5; $handle is cleaned up by garbage collection when it goes out of scope at the end of this method.
 
 		if ( false === $detected || '' === $detected ) {
-			return $fallback;
+			// finfo_file() itself failed, or returned nothing.
+			return array(
+				'media_type' => $fallback,
+				'resolved'   => false,
+			);
 		}
 
-		return $detected;
+		return array(
+			'media_type' => $detected,
+			'resolved'   => true,
+		);
 	}
 
 	/**

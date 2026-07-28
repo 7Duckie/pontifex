@@ -119,6 +119,10 @@ What follows from this choice — positive, negative, and neutral?
   Files-only and db-only backups: two booleans, includes_files emit-only-when-false, restore fails closed on a self-contradicting archive.
 - [ADR 0017](./0017-offsite-destination-adapters.md) —
   Offsite destinations: a DestinationAdapter seam uploads a finished archive to the user's own SFTP/S3 storage; CLI-first, host-key pinned, credentials by env-var reference, put paired with pull.
+- ADR 0018 — Reserved. The number is deliberately held for a decision not
+  yet written; it is not a gap in the record and is not available for reuse.
+- [ADR 0019](./0019-db-chunk-statement-containment.md) —
+  db_chunk statements are anchored to the engine's own staging identifier by exact allow-listed shape, not by parsing a verb; CREATE VIEW is refused.
 
 ## Further reading
 

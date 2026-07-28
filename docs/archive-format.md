@@ -230,6 +230,165 @@ The `kind` field is one of:
 - `symlink` — the link target lives in the **header JSON** as a `target`
   field (`path`, `target`, `size_compressed`); the payload is zero-length.
 
+**db_chunk payload containment.** A restoring reader executes the SQL a
+`db_chunk` carries, so its payload is a direct code-execution surface against
+whatever database the reader is writing to (see
+[ADR 0019](./adr/0019-db-chunk-statement-containment.md) for the vulnerability
+this closes and why simpler defences do not hold). Readers performing a
+restore MUST validate every one of a chunk's `;\n`-terminated statements — the
+same split points `statement_count` above already counts — against the
+destination table identifier **the reader itself constructs** for that chunk,
+never an identifier read from the chunk's header or payload, before executing
+any statement in the chunk. Each statement MUST begin, at byte offset 0, with
+one of:
+
+- `DROP TABLE IF EXISTS` followed by the reader's backtick-quoted destination
+  identifier;
+- `CREATE TABLE` followed by the reader's backtick-quoted destination
+  identifier;
+- `INSERT INTO` followed by the reader's backtick-quoted destination
+  identifier, in either of its two legitimate forms — with an explicit column
+  list, or going straight to `VALUES` with none.
+
+The match MUST be byte-exact and case-sensitive: readers MUST NOT strip
+comments, normalise whitespace, or fold case before matching, because each of
+those transformations is itself a step an attacker can subvert. A statement
+matching none of the permitted shapes MUST cause the reader to refuse the
+**whole chunk** before executing any statement in it — refusing only the
+offending statement after earlier ones in the same chunk have already run
+would leave the destination in a state the archive never actually described.
+`CREATE VIEW` is deliberately not a permitted shape. This check is independent
+of, and additional to, the `statement_count` check above: `statement_count`
+catches a chunk whose payload was split into a different number of statements
+than declared; shape containment catches a chunk whose statements target
+something other than the identifier the reader itself is writing to. This
+check is a restore-time obligation only — `wp pontifex verify` and equivalent
+structural verification never execute a chunk's SQL, so a chunk violating this
+rule still verifies as structurally sound and is refused only when a restore
+is actually attempted.
+
+**Server-fact check on the created object, independent of the shape check
+above.** The permitted `CREATE TABLE` shape anchors only the statement's
+opening bytes, up to and including the `" ("` that begins the column
+definitions; everything after that — the column and constraint list, and any
+trailing table options — is `SHOW CREATE TABLE` output copied verbatim, and a
+reader MUST NOT parse it, because a real table can legitimately carry a
+`FOREIGN KEY` reference there. That silence is also a route a hostile chunk
+can use: a storage-engine clause naming MySQL's built-in `MERGE` engine (or
+`FEDERATED`/`CONNECT`, where the server compiles them in) can make the staged
+identifier a writable alias for a table the chunk never declared, a
+connection to a remote server, or a local file — entirely through bytes the
+opening-shape check never inspects, and entirely compatible with a subsequent
+`INSERT INTO` of the same staged identifier that satisfies the ordinary shape
+check on its own merits. A `DATA DIRECTORY` or `INDEX DIRECTORY` clause in
+the same body is the same route again, pointing the table's on-disk storage
+at an arbitrary path the database process can reach — a write, not a read,
+despite living inside a `CREATE TABLE`. That same clause can also be
+attached to a single partition rather than to the table as a whole; a
+partitioned table's `CREATE_OPTIONS` reports only the single word
+`partitioned`, saying nothing about where any individual partition's data
+lives, so a reader that inspects `CREATE_OPTIONS` alone cannot see a
+per-partition `DATA DIRECTORY` or `INDEX DIRECTORY` clause at all — a
+distinct route to the same write, proven separately against real MariaDB.
+
+Readers performing a restore MUST therefore, once a chunk's `CREATE TABLE`
+statement has executed, query the server's own catalogue (for example
+`INFORMATION_SCHEMA.TABLES`) for the exact staged identifier just created,
+and MUST refuse the whole restore, before any further statement for that
+table executes, unless all of the following hold:
+
+- the reported storage engine is on the reader's allow-list of ordinary
+  local row-store engines — engines that hold only their own rows, on local
+  disk, and expose no cross-table, cross-connection, or file-path clause
+  (for example InnoDB, MyISAM, MariaDB's Aria, and MEMORY; every engine
+  outside that list is refused, including MySQL's `MERGE` engine,
+  `FEDERATED`, `CONNECT`, and file-backed or storage-less engines such as
+  `CSV`, `ARCHIVE`, and `BLACKHOLE`);
+- the reported `CREATE_OPTIONS` name none of a unioned table list, a remote
+  connection, a data directory, or an index directory;
+- the same staged identifier's own partitions, read separately (for example
+  from `INFORMATION_SCHEMA.PARTITIONS`, because `CREATE_OPTIONS` alone
+  reports a partitioned table only as `partitioned`), name no data
+  directory or index directory of their own;
+- the catalogue reports the object as an ordinary base table, not a view or
+  any other kind of object a `CREATE TABLE` statement can be made to
+  produce; and
+- the just-created object holds no rows, checked with an exact row count
+  read directly from the table itself (for example `SELECT COUNT(*)`) —
+  never `INFORMATION_SCHEMA.TABLES.TABLE_ROWS`, which MySQL/MariaDB document
+  as an approximation for InnoDB, refreshed asynchronously in the background
+  rather than by the write that has just happened, and so is not guaranteed
+  to reflect it. The mandatory `" ("` anchor in the shape check above
+  requires a column list but says nothing about what follows the list's
+  closing paren, so `CREATE TABLE `<staged>` (`c` INT) SELECT ... FROM
+  `wp_users`` — with or without the `AS` keyword, and with no executable
+  semicolon anywhere in the statement — satisfies that anchor while
+  populating the table from an arbitrary source in the very same statement;
+  the object it builds passes every other check in this list, so only the
+  row count catches it. The one documented exception is a MariaDB
+  `SEQUENCE`: a bare `CREATE ... SEQUENCE` statement legitimately seeds
+  exactly one state row of its own as an intrinsic part of the `CREATE`, so
+  a reader MUST permit that single row for a `SEQUENCE` and refuse any other
+  object on this list that holds even one.
+
+This check exists because the shape check above is, by design, blind to
+everything after the sanctioned opening bytes; it is not optional hardening
+layered on an already-sufficient shape check, and a reader that omits it
+reopens the storage-engine and storage-location routes described above —
+including the per-partition form of the directory route, which the
+table-level `CREATE_OPTIONS` check alone does not see — and, if the row-count
+bullet specifically is omitted, the `CREATE ... SELECT` route: a table built
+with an allow-listed engine and no disallowed `CREATE_OPTIONS` passes every
+other bullet on its shape alone, while the `SELECT` clause the shape check
+never inspects populates it wholesale from another table. Like the shape
+check, this is a restore-time obligation only: `wp pontifex verify` never
+executes a chunk's SQL, so the `CREATE TABLE` statement this check inspects
+never runs during verification, and a chunk carrying a disallowed engine,
+`CREATE_OPTIONS`, per-partition directory clause, or rows it should not hold
+still verifies as structurally sound.
+
+**Executable-semicolon refusal, independent of the checks above.** The
+permitted shapes anchor only a statement's opening bytes; a `;\n`-terminated
+statement can still carry a semicolon partway through it that is not
+immediately followed by a newline — an embedded `; ` the split above does not
+treat as a statement boundary. Readers performing a restore MUST additionally
+scan every statement, before executing it, for a semicolon that lies outside
+a quoted literal or a comment, and is followed by further non-whitespace
+content, and MUST refuse the **whole chunk** if one is found. Without this
+check, a payload whose opening bytes satisfy a permitted shape can continue
+past that semicolon into a second, unrelated statement, which a database
+driver limited to one statement per call executes as readily as the first.
+Readers MUST NOT rely on their database driver to reject a multi-statement
+query on their behalf: some drivers do, but splitting the payload on `;\n`
+above already reduces every call to a single statement before it reaches the
+driver, so a driver-side refusal never has the opportunity to engage.
+
+The scan MUST track quoted literals (single-quoted, double-quoted, or
+backtick-quoted, with a backslash recognised as an escape inside single- and
+double-quoted literals) exactly as before, and MUST additionally track SQL's
+comment forms — a `-- ` or `#` line comment running to the next newline, and
+a `/* ... */` block comment — treating a quote-like byte inside any of them
+as opaque rather than as the start of a literal. A scan that tracks quoting
+alone can be desynchronised by placing an unbalanced quote-like byte inside a
+comment: the scanner is left believing it remains inside a literal for the
+rest of the statement, so a semicolon that follows is read as opaque content
+instead of a statement boundary, and the second statement it introduces
+executes unchecked. Readers MUST NOT treat MySQL's conditional-execution
+comment syntax, `/*! ... */` (optionally carrying a version number
+immediately after the `!`, as in `/*!50700 ... */`), nor MariaDB's own
+equivalent marker, `/*M! ... */` (optionally carrying a version number the
+same way, as in `/*M!100108 ... */`), as a comment for this purpose:
+neither server treats its own marker as one — the bytes either encloses
+are ordinary SQL the server executes whenever the version condition is
+met — so a semicolon inside either form MUST be scanned exactly as if the
+surrounding markers were not present.
+
+This scan is a lexical pass over statement bytes, tracking quoting and
+comment state as it goes; it is not a SQL parser, and implementers should not
+read either this section or
+[ADR 0019](./adr/0019-db-chunk-statement-containment.md) as a claim that it
+is.
+
 The per-entry hash is the foundation of **corruption detection**: any modification to any byte of any entry — header, codec, nonce, or payload — changes the hash. The manifest records the expected hash for each entry; a reader verifies hashes before any further processing. These hashes are unkeyed, so they detect accidents (bit rot, truncation, a bad transfer), not attackers — anyone who can modify the file can recompute them. Tamper detection is the signature's job (section 12).
 
 ## 7. Compression codecs
@@ -544,6 +703,7 @@ What conforming implementations must always do. These are behavioural, not struc
 - Readers must verify the provenance hash before parsing the provenance JSON content.
 - Readers must verify the manifest hash before trusting any offset or length value in the manifest.
 - Readers must verify each entry's hash before decrypting or decompressing its payload.
+- Readers performing a restore must validate every `db_chunk` statement against the reader's own destination identifier by exact, allow-listed shape before executing it, covering both legitimate `INSERT INTO` forms (with an explicit column list, or straight to `VALUES` with none); must, once a chunk's `CREATE TABLE` statement has executed, verify the created object's storage engine, `CREATE_OPTIONS`, and table type against the server's own catalogue, and — separately, because `CREATE_OPTIONS` alone reports a partitioned table only as `partitioned` — verify that none of its own partitions name a data or index directory of their own; must independently refuse any statement carrying an executable semicolon outside a quoted literal or a comment (tracking SQL's comment forms, and treating both MySQL's `/*! ... */` and MariaDB's `/*M! ... */` as executable rather than as a comment); and must refuse the whole restore on any statement or object that fails any of these checks (§6, [ADR 0019](./adr/0019-db-chunk-statement-containment.md)).
 - Readers must log integrity-failure events to the `pontifex_integrity_log` option in the destination WordPress instance, append-only.
 - Readers offering an override mechanism (e.g., `--force`) must record the override in the audit log and leave a persistent admin notice in the destination instance.
 - Implementations must never silently drop unknown future-version fields when re-emitting an archive (e.g., during conversion).
