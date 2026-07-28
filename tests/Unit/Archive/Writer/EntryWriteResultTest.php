@@ -183,4 +183,37 @@ final class EntryWriteResultTest extends TestCase {
 
 		new EntryWriteResult( 1, 1, self::placeholder_hash(), -1, 400 );
 	}
+
+	/**
+	 * Without an explicit value, media_type_was_unresolved must default to false.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_unresolved_defaults_to_false(): void {
+		$result = new EntryWriteResult( 1, 1, self::placeholder_hash() );
+
+		$this->assertFalse( $result->media_type_was_unresolved() );
+	}
+
+	/**
+	 * An explicit true media_type_unresolved must round-trip through the accessor.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_unresolved_round_trips_true(): void {
+		$result = new EntryWriteResult( 1, 1, self::placeholder_hash(), null, null, true );
+
+		$this->assertTrue( $result->media_type_was_unresolved() );
+	}
+
+	/**
+	 * An explicit false media_type_unresolved must round-trip through the accessor.
+	 *
+	 * @return void
+	 */
+	public function test_media_type_unresolved_round_trips_false(): void {
+		$result = new EntryWriteResult( 1, 1, self::placeholder_hash(), null, null, false );
+
+		$this->assertFalse( $result->media_type_was_unresolved() );
+	}
 }
