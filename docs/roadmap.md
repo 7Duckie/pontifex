@@ -365,6 +365,39 @@ sentence on faith.
   UI does not do today; a follow-up once there is a concrete need for
   that level of detail.
 
+## v0.9.4 — Restore refuses an archive's stray SQL
+
+The first release to treat an archive as genuinely untrusted input rather than as
+something Pontifex itself produced.
+
+### What ships
+
+- **Database chunk containment** (amends the staging restore in
+  [ADR 0009](./adr/0009-atomic-staging-table-restore.md); recorded in
+  [ADR 0019](./adr/0019-db-chunk-statement-containment.md)) — a restore replayed
+  a chunk's SQL against the live database almost verbatim, rewriting only the one
+  table identifier the chunk declared. An archive carrying a single extra
+  statement could take over the destination site's administrator account with no
+  unusual database privilege. Statements are now confined to a small set of exact
+  shapes naming the chunk's own staged table, a semicolon outside quoted text is
+  refused, and after a CREATE the server is asked what it actually built — object
+  type, storage engine, create options, partition storage directories and row
+  count — rather than the archive being taken at its word.
+- **Unresolvable media types are counted** — determining a file's type can fail
+  several ways, and every one of them produced what a successful check produces
+  for a genuinely unidentifiable file. A host-wide failure could therefore record
+  every file in every archive as raw bytes with nothing saying so. The count is
+  reported on every path that can finish an export.
+
+### What is deliberately deferred
+
+- **Closing the two remaining read channels** — a scalar subquery and a
+  database-server file read, both inside an INSERT's values. Neither can be
+  refused by a statement's shape without a list of forbidden functions, which is
+  the kind of list that gets worked around. What they reach lands in the restored
+  site rather than travelling back to whoever supplied the archive. Recorded as
+  residual risk in ADR 0019 and the threat model rather than left to be found.
+
 ## v0.9.3 — Operational hardening
 
 Four small, closely-related patches on top of v0.9.0, released together as
