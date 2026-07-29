@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.9.4
+Stable tag: 0.9.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -92,6 +92,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 0.9.5 =
+* Security release. If you ever restore or import an archive you did not create yourself, upgrade before you do it again. A restored symbolic link could point outside your site: a backup could plant a file under uploads that pointed at wp-config.php, and because web servers follow such links, an ordinary web request then returned your database password and authentication salts. Measured before the fix, eight of ten hostile shapes were written and five of them handed the secret back. Links are now resolved the way the operating system resolves them, across the whole backup, before anything is written; layouts that legitimately point outside wp-content, such as Composer-managed sites, keep working. A forged backup can also no longer write into Pontifex's own folder, where your safety archives and the rule keeping database backups off the web live. **Breaking:** if your site pins a trusted signing key in PONTIFEX_PUBLIC_KEY, an uploaded backup must now be signed with it — unsigned or differently-signed uploads are refused. A site with no key configured is unaffected. Also: a backup too large for this installation to read back is refused before it is written rather than after; a restore that would run out of disk is stopped before it changes anything; a force-killed backup can be resumed again; opening a large backup no longer dies without explanation; and the scheduler no longer records failures that never happened.
 
 = 0.9.4 =
 * Security release. If you ever restore or import an archive you did not create yourself — a backup from another site, a file someone sent you, a migration between servers — upgrade before you do it again. Restoring an archive replayed the SQL inside it against the live database almost verbatim, so an archive carrying one extra statement could set a user's password and take over the destination site's administrator account, needing no unusual database privilege. Every statement in a database chunk must now match one of a small set of shapes naming that chunk's own staging table, a semicolon outside quoted text is refused so nothing can be smuggled behind an acceptable-looking statement, and once a table has been created the database is asked what it actually built rather than the archive being taken at its word. Two ways an archive can still read data it should not remain, both documented: an archive from a source you do not trust should not be restored, and this reduces the consequences rather than removing them. Also added: an export now reports how many files it could not determine a type for, so a host-wide failure is visible instead of silently recording every file as raw bytes. No breaking changes.
