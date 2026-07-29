@@ -704,24 +704,34 @@ final class ArchiveReaderTest extends TestCase {
 	 * @return void
 	 */
 	#[RunInSeparateProcess]
-	public function test_a_decode_within_the_refusal_threshold_still_raises_the_limit(): void {
-		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] provides; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
+	public function test_a_decode_within_the_refusal_threshold_still_asks_for_more_memory(): void {
+		// The guard reads the runtime's real ceiling, so the child process this
+		// attribute provides is given one low enough for the arithmetic below to
+		// mean something.
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, inside the isolated child process; the production path no longer touches ini_set at all.
 		ini_set( 'memory_limit', '64M' );
-		$limit = 67108864;
 
-		// 3x this is 24 MB and fits inside 64 MB; 12x is 96 MB and does not.
+		// 3x this is 24 MB and fits inside that 64 MB; 12x is 96 MB and does not.
+		// The only way the raiser is reached is if the decision to ask for headroom
+		// uses the raise threshold rather than the refusal one.
 		$declared = 8388608;
+		$limit    = 67108864;
 
-		$reader = new ArchiveReader( self::build_sample_archive_stream(), $limit );
-		$guard  = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
+		$asked  = false;
+		$reader = new ArchiveReader(
+			self::build_sample_archive_stream(),
+			$limit,
+			static function () use ( &$asked ): void {
+				$asked = true;
+			}
+		);
+
+		$guard = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
 		$guard->invoke( $reader, $declared );
 
-		$applied = (int) $this->parse_shorthand_bytes( (string) ini_get( 'memory_limit' ) );
-
-		$this->assertGreaterThan(
-			$limit,
-			$applied,
-			'The guard must raise on the raise threshold, not skip the raise because the refusal threshold happened to fit.'
+		$this->assertTrue(
+			$asked,
+			'The guard must ask for more memory on the raise threshold, not skip asking because the refusal threshold happened to fit.'
 		);
 	}
 
