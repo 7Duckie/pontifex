@@ -627,7 +627,7 @@ final class ArchiveReader {
 
 		throw new RuntimeException(
 			sprintf(
-				'ArchiveReader: this archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server, or run the restore with WP-CLI, where memory is usually unlimited.',
+				'ArchiveReader: this archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server; the admin screens usually have less memory available than WP-CLI does.',
 				(int) ceil( $required / 1048576 ),
 				(int) floor( max( 0, $applied - memory_get_usage( true ) ) / 1048576 ),
 				(int) floor( $applied / 1048576 )
