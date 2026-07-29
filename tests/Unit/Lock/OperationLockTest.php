@@ -289,6 +289,76 @@ final class OperationLockTest extends TestCase {
 		$this->assertFalse( $rollback_lock->acquire( OperationLock::OP_ROLLBACK ), 'An active export job must refuse a rollback regardless of the holder transient.' );
 	}
 
+	/**
+	 * A resume may take the lock from the export job it is about to adopt.
+	 *
+	 * A backup killed outright leaves its job active and its holder transient
+	 * set, because a SIGKILL runs no shutdown handler. Without this exemption
+	 * the lock guarding that dead job refused the one command able to finish
+	 * it, while the error told the operator to resume it — advising the action
+	 * it was blocking.
+	 *
+	 * @return void
+	 */
+	public function test_a_resume_may_adopt_the_active_export_job_that_blocks_it(): void {
+		$this->jobs()->create( Job::KIND_EXPORT, array(), 1_700_000_000 );
+		$this->transients[ OperationLock::LOCK_NAME ] = array(
+			'kind' => OperationLock::OP_BACKUP,
+			'at'   => 1_700_000_000,
+		);
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 0 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertTrue(
+			$lock->acquire( OperationLock::OP_BACKUP, true ),
+			'A resume must be able to take the lock held by the very job it is adopting.'
+		);
+	}
+
+	/**
+	 * Without the resume flag, that same state still refuses.
+	 *
+	 * The twin of the test above, and the reason it means anything: the
+	 * exemption must be something a caller asks for explicitly, not the new
+	 * default for every backup.
+	 *
+	 * @return void
+	 */
+	public function test_an_ordinary_backup_is_still_refused_by_the_same_active_job(): void {
+		$this->jobs()->create( Job::KIND_EXPORT, array(), 1_700_000_000 );
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 1 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertFalse(
+			$lock->acquire( OperationLock::OP_BACKUP ),
+			'A new backup must still be refused while an export job is active.'
+		);
+	}
+
+	/**
+	 * The exemption cannot be used to barge past a restore or rollback.
+	 *
+	 * With no export job there is nothing to adopt, so the flag must change
+	 * nothing — otherwise it would be a way to start a second site-mutating
+	 * operation while one is already running, which is the whole point of the
+	 * lock.
+	 *
+	 * @return void
+	 */
+	public function test_the_resume_exemption_does_not_bypass_a_restore_holder(): void {
+		$this->transients[ OperationLock::LOCK_NAME ] = array(
+			'kind' => OperationLock::OP_RESTORE,
+			'at'   => 1_700_000_000,
+		);
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 1 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertFalse(
+			$lock->acquire( OperationLock::OP_BACKUP, true ),
+			'With no export job to adopt, the resume flag must not bypass a restore holder.'
+		);
+	}
+
 	// -------------------------------------------------------------------------
 	// The named lock itself.
 	// -------------------------------------------------------------------------
