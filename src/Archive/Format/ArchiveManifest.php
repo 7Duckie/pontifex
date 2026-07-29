@@ -122,11 +122,20 @@ final class ArchiveManifest {
 	 * then unavoidable) decode has already happened.
 	 *
 	 * {@see self::project_payload_bytes()} uses this constant as a starting
-	 * baseline only, not as the final per-entry charge: it layers a measured
-	 * (not assumed) path-encoding term on top for path-bearing entries, and a
-	 * measured chunk_index digit width plus a provable numeric-field margin
-	 * on top for db_chunk entries, so that method's own guarantee holds
-	 * regardless of path content or archive size.
+	 * baseline only, not as the final per-entry charge: it layers measured (not
+	 * assumed) terms on top — the real JSON-encoded path length and real kind
+	 * width for path-bearing entries, the real chunk_index digit width for
+	 * db_chunk entries — plus a provable margin, shared by every kind, for the
+	 * entry separator and the four numeric fields no EntryHeader carries. That
+	 * is what makes the method's own guarantee hold regardless of path content,
+	 * entry kind, or archive size.
+	 *
+	 * Note that the floor quoted above (145 bytes) is a `file` entry's. The
+	 * other kinds' floors are higher, purely because their kind strings are
+	 * longer: `symlink` 148, `directory` 150, `db_chunk` 154. This constant sits
+	 * above all four, but the difference is not uniform, which is exactly why
+	 * project_payload_bytes() charges the kind width rather than leaning on the
+	 * cushion to absorb it.
 	 *
 	 * @var int
 	 */
@@ -175,20 +184,76 @@ final class ArchiveManifest {
 	private const MAX_INT_DIGITS = 19;
 
 	/**
-	 * Count of a db_chunk manifest entry's numeric fields that this
-	 * projection cannot see before the entry is written: index, offset, and
-	 * length.
+	 * Byte cost of the single `,` that separates one entry from the next inside
+	 * the manifest's `entries` array.
 	 *
-	 * None of the three live on EntryHeader — offset and length are only
-	 * known once the entry's real encoded size and position in the finished
-	 * archive exist, and index is likewise assigned only once the entry is
-	 * actually appended. (chunk_index is different: EntryHeader::for_db_chunk()
-	 * always carries it, so {@see self::project_payload_bytes()} charges its
-	 * real digit width exactly instead of guessing at it too.)
+	 * ENTRIES_JSON_WRAPPER_BYTES accounts for the array's brackets, which occur
+	 * once; the separators occur once per entry beyond the first, and nothing
+	 * else in this projection charges for them. {@see self::project_payload_bytes()}
+	 * therefore charges this for EVERY entry — one byte more than the N-1
+	 * separators a real manifest carries. That deliberate one-byte-per-manifest
+	 * over-charge keeps the per-entry arithmetic uniform (no special case for
+	 * the first entry) and errs in the only safe direction.
 	 *
 	 * @var int
 	 */
-	private const DB_CHUNK_UNSEEN_NUMERIC_FIELDS = 3;
+	private const ENTRY_SEPARATOR_BYTES = 1;
+
+	/**
+	 * Decimal digit width of {@see ManifestEntry::MAX_CODEC_ID} (0xFFFF = 65535).
+	 *
+	 * The codec_id field is chosen at write time (it travels on an EntryPlan,
+	 * not an EntryHeader), so this projection cannot see an entry's codec. It is
+	 * bounded, though: ManifestEntry rejects any codec_id above MAX_CODEC_ID,
+	 * so no entry that can exist in a valid manifest prints more digits than
+	 * this — a far tighter bound than MAX_INT_DIGITS, and just as provable.
+	 * Pinned against ManifestEntry::MAX_CODEC_ID by
+	 * {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest} so it
+	 * cannot drift if that ceiling ever moves.
+	 *
+	 * @var int
+	 */
+	private const MAX_CODEC_ID_DIGITS = 5;
+
+	/**
+	 * Provable upper bound on the digit width of a manifest entry's `index`.
+	 *
+	 * The index field is assigned only once an entry is appended, so no
+	 * EntryHeader carries it — but unlike offset and length it needs no blunt
+	 * MAX_INT_DIGITS margin, because the format's own ceiling bounds it:
+	 * {@see self::project_payload_bytes()} charges every entry at least
+	 * MIN_ENTRY_PAYLOAD_BYTES, so whenever a caller's guard approves an export
+	 * (projection at or below MAX_PAYLOAD_SIZE) the entry count cannot exceed
+	 * (MAX_PAYLOAD_SIZE - HEADER_SIZE - ENTRIES_JSON_WRAPPER_BYTES) /
+	 * MIN_ENTRY_PAYLOAD_BYTES = 99,273 — a largest index of 99,272, five
+	 * digits. An export the guard REFUSES is never written, so its indices
+	 * never exist to be under-counted; the bound is therefore not circular.
+	 *
+	 * Deliberately a bound and not the loop position: charging the real
+	 * position would be a byte or two cheaper, but it would silently make this
+	 * method's guarantee depend on every caller passing the complete entry list
+	 * in write order. A caller that projected a subset — a resumed export's
+	 * remaining entries, say — would then under-count with no failing test to
+	 * show for it. Pinned by
+	 * {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest}.
+	 *
+	 * @var int
+	 */
+	private const MAX_INDEX_DIGITS = 5;
+
+	/**
+	 * Count of a manifest entry's numeric fields that this projection can
+	 * neither see nor bound below PHP's own integer ceiling: offset and length.
+	 *
+	 * Neither lives on EntryHeader — both are known only once the entry's real
+	 * encoded size and its position in the finished archive exist — and neither
+	 * has a format-level maximum the way index and codec_id do, because both
+	 * scale with the archive's total byte size. Each is therefore charged the
+	 * full MAX_INT_DIGITS margin.
+	 *
+	 * @var int
+	 */
+	private const UNBOUNDED_NUMERIC_FIELDS = 2;
 
 	/**
 	 * Maximum nesting depth when decoding the canonical-JSON payload (PHP's default).
@@ -285,25 +350,36 @@ final class ArchiveManifest {
 	 * escaped, so measuring the encoded form (not the raw one) is what makes
 	 * this exact rather than approximate.
 	 *
+	 * A path-bearing entry's `kind` is charged exactly too. MIN_ENTRY_PAYLOAD_BYTES
+	 * assumes the shortest kind string, `file`; `symlink` costs three bytes more
+	 * and `directory` five, so the difference against KIND_FILE is added back
+	 * rather than left to be absorbed by the constant's cushion.
+	 *
 	 * A db_chunk entry carries no path. Its chunk_index is known from the
 	 * header, so — the same swap-the-assumed-digit approach as the path
 	 * term — its real digit width is charged exactly in place of the single
-	 * digit MIN_ENTRY_PAYLOAD_BYTES assumes. Its other three manifest-only
-	 * numeric fields (index, offset, length; see
-	 * DB_CHUNK_UNSEEN_NUMERIC_FIELDS) are not knowable at all from an
-	 * EntryHeader, so each is instead charged a fixed margin at
-	 * MAX_INT_DIGITS — the most digits any PHP int can ever print as. That
-	 * margin is a proven bound, not a guess, so the projection stays an
-	 * over-estimate at any archive size, right up to PHP's own integer
-	 * ceiling; the trade-off is a markedly higher flat cost per db_chunk
-	 * entry than the pre-fix estimate assumed.
+	 * digit MIN_ENTRY_PAYLOAD_BYTES assumes.
+	 *
+	 * Every entry of every kind then takes the same
+	 * {@see self::unseen_numeric_margin_bytes()} charge for what no EntryHeader
+	 * can carry: the entry separator, plus index, offset, length and codec_id.
+	 * Each of those four is bounded provably rather than guessed — index by the
+	 * format's own entry ceiling (MAX_INDEX_DIGITS), codec_id by
+	 * ManifestEntry::MAX_CODEC_ID (MAX_CODEC_ID_DIGITS), and offset and length,
+	 * which scale with archive size and so have no format-level maximum, by
+	 * MAX_INT_DIGITS: the most digits any PHP int can ever print as. The
+	 * projection therefore stays an over-estimate at any archive size, right up
+	 * to PHP's own integer ceiling. The trade-off is a markedly higher flat cost
+	 * per entry than the pre-fix estimate assumed, which lowers how many entries
+	 * fit under MAX_PAYLOAD_SIZE; that is the honest ceiling, where the previous
+	 * one permitted archives this installation's own reader would refuse.
 	 *
 	 * Lets a caller (the export engine) refuse an oversized backup BEFORE
 	 * writing a single byte, rather than discovering only after a
 	 * multi-hour export completes that the reader will refuse the result.
 	 *
 	 * @param iterable<int, EntryHeader> $entry_headers The archive's entry headers, in the order they will be written.
-	 * @return int The projected manifest payload size in bytes. Proven never an under-estimate against real writer output: the path term now measures the real JSON-encoded length instead of assuming no byte needs escaping, and the db_chunk term charges chunk_index exactly plus a provable worst-case margin for the three numeric fields an EntryHeader cannot carry — see {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest} for the empirical proof, including at PHP_INT_MAX.
+	 * @return int The projected manifest payload size in bytes. Proven never an under-estimate against real writer output: the path term measures the real JSON-encoded length instead of assuming no byte needs escaping, the kind and chunk_index terms are charged exactly, and every entry carries a provable worst-case margin for the separator and the four numeric fields an EntryHeader cannot carry — see {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest} for the empirical proof, including at PHP_INT_MAX for all four kinds.
 	 * @throws JsonException If a path cannot be JSON-encoded (e.g. it contains invalid UTF-8 byte sequences) — the same failure the real manifest encoder would hit later, surfaced here instead, before a single byte has been written.
 	 * @throws InvalidArgumentException If a db_chunk header is somehow missing its chunk_index (structurally unreachable: EntryHeader::for_db_chunk() always sets it).
 	 */
@@ -315,7 +391,11 @@ final class ArchiveManifest {
 			$path = $header->path();
 
 			if ( null !== $path ) {
-				$total += self::MIN_ENTRY_PAYLOAD_BYTES - self::MINIMAL_PATH_JSON_BYTES + strlen( self::encode_json_string( $path ) );
+				$total += self::MIN_ENTRY_PAYLOAD_BYTES
+					- self::MINIMAL_PATH_JSON_BYTES
+					+ strlen( self::encode_json_string( $path ) )
+					+ ( strlen( $header->kind() ) - strlen( EntryHeader::KIND_FILE ) )
+					+ self::unseen_numeric_margin_bytes();
 				continue;
 			}
 
@@ -323,10 +403,34 @@ final class ArchiveManifest {
 
 			$total += self::MIN_ENTRY_PAYLOAD_BYTES
 				+ ( strlen( (string) $chunk_index ) - 1 )
-				+ self::DB_CHUNK_UNSEEN_NUMERIC_FIELDS * ( self::MAX_INT_DIGITS - 1 );
+				+ self::unseen_numeric_margin_bytes();
 		}
 
 		return $total;
+	}
+
+	/**
+	 * Worst-case bytes an entry's manifest-only fields can add beyond what
+	 * MIN_ENTRY_PAYLOAD_BYTES already assumes for them.
+	 *
+	 * Shared by every kind, because every kind carries exactly these fields and
+	 * an EntryHeader carries none of them. MIN_ENTRY_PAYLOAD_BYTES assumes a
+	 * single digit for each of the four numeric fields, so each contributes its
+	 * bound MINUS that already-assumed digit; the separator is additional to
+	 * anything the constant assumes, so it contributes in full.
+	 *
+	 * Bounding index and codec_id at their real format maximums rather than at
+	 * MAX_INT_DIGITS is what keeps this from needlessly shrinking the entry
+	 * ceiling: the blunt margin would cost 28 more bytes on every entry of
+	 * every archive, to defend against digit widths neither field can reach.
+	 *
+	 * @return int The per-entry margin in bytes; a proven upper bound, not an estimate.
+	 */
+	private static function unseen_numeric_margin_bytes(): int {
+		return self::ENTRY_SEPARATOR_BYTES
+			+ ( self::MAX_INDEX_DIGITS - 1 )
+			+ ( self::MAX_CODEC_ID_DIGITS - 1 )
+			+ self::UNBOUNDED_NUMERIC_FIELDS * ( self::MAX_INT_DIGITS - 1 );
 	}
 
 	/**
