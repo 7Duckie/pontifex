@@ -470,7 +470,17 @@ final class ResumableExportRunner {
 					throw new RuntimeException( 'ResumableExportRunner: could not truncate the partial archive to its verified length.' );
 				}
 			}
-			$log->truncate_to( count( $entries ) );
+			// Only rewrite the log when entries were actually dropped above.
+			// $entries is built from $records, so it can only ever be shorter;
+			// when the two match, truncate_to() would re-read the whole log
+			// (a second file_get_contents plus one json_decode per record),
+			// re-encode every record and rewrite the file, to arrive at
+			// exactly the bytes already on disk. On a large site that no-op
+			// is the single most expensive thing a clean resume tick does,
+			// and it is where the tick runs out of memory first.
+			if ( count( $records ) > count( $entries ) ) {
+				$log->truncate_to( count( $entries ) );
+			}
 			return array(
 				'bytes'   => $end,
 				'entries' => $entries,
