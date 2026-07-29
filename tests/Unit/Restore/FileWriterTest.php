@@ -698,6 +698,593 @@ final class FileWriterTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------
+	// Whole-archive symlink preflight (assert_symlink_targets_confined())
+	//
+	// The corpus below is the evidence for the preflight, and it is split
+	// deliberately into hostile shapes that MUST refuse and legitimate ones
+	// that MUST be permitted. The second half matters as much as the first:
+	// an earlier attempt at this guard refused a Composer-managed site's own
+	// backup, which makes that site's backup unrestorable with no attacker
+	// anywhere, and it had to be reverted. Every legitimate shape here is
+	// therefore also WRITTEN after the preflight passes, so the test proves
+	// the link really lands rather than merely that no exception was thrown.
+	// -------------------------------------------------------------------
+
+	/**
+	 * Create a directory inside the fixture root, with parents.
+	 *
+	 * @param string $relative_path Path relative to the fixture root.
+	 * @return string The absolute path created.
+	 */
+	private function make_fixture_directory( string $relative_path ): string {
+		$path = $this->fixture_root . '/' . $relative_path;
+		if ( ! is_dir( $path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+			mkdir( $path, 0o755, true );
+		}
+		return $path;
+	}
+
+	/**
+	 * Plant a wp-config.php in the fixture root with recognisable contents.
+	 *
+	 * Stands in for the real file a site keeps its database password and
+	 * authentication salts in. The contents are a sentinel so a test can prove
+	 * a leak by reading them back through a hostile link, rather than merely
+	 * asserting that a link exists.
+	 *
+	 * @return string The sentinel contents written.
+	 */
+	private function plant_wp_config(): string {
+		$secret = "<?php define( 'DB_PASSWORD', 'sentinel-database-password' );";
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $this->fixture_root . '/wp-config.php', $secret );
+		return $secret;
+	}
+
+	/**
+	 * The proven attack: an intermediate hop link makes a textual check permit a leak of wp-config.php.
+	 *
+	 * Entry 1 points at the parent directory; entry 2's target reads, as text,
+	 * as though its "hop/.." cancels out and leaves it inside uploads. The
+	 * kernel follows "hop" first, so the ".." after it climbs one level HIGHER
+	 * than the text suggests, and the link lands on the site's wp-config.php.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_the_proven_hop_attack(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/hop'      => '..',
+				'wp-content/uploads/leak.txt' => 'hop/../wp-config.php',
+			)
+		);
+	}
+
+	/**
+	 * The same attack refuses when the consumer link is declared FIRST.
+	 *
+	 * This is the case that must never be dropped for looking redundant. A
+	 * guard that judged each link as it was written would let this one through:
+	 * at the moment leak.txt is written, "hop" does not exist yet, so nothing
+	 * about it looks wrong — and the kernel joins the two up the moment the
+	 * second entry lands. Only a check that reasons over the archive's WHOLE
+	 * declared set is independent of the order entries arrive in.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_the_hop_attack_declared_in_the_other_order(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/leak.txt' => 'hop/../wp-config.php',
+				'wp-content/uploads/hop'      => '..',
+			)
+		);
+	}
+
+	/**
+	 * A hop spelled in a different case is still recognised as the hop.
+	 *
+	 * Both macOS and Windows treat "HOP" and "hop" as one file. A lookup that only
+	 * matched the exact bytes would miss this — and nothing is on disk during
+	 * the preflight, so asking the filesystem would miss it too — leaving the
+	 * component to resolve harmlessly on paper while the kernel joins the two
+	 * links at write time. This is node-tar's CVE-2021-37701 in miniature, and
+	 * the fold is the same fix.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_hop_spelled_in_a_different_case(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/hop'      => '..',
+				'wp-content/uploads/leak.txt' => 'HOP/../wp-config.php',
+			)
+		);
+	}
+
+	/**
+	 * Two declared links whose paths differ only in case, with different targets, refuse rather than guess.
+	 *
+	 * On a case-folding destination these two entries are the same file and
+	 * only one of them survives; which one depends on write order, so what the
+	 * kernel would eventually follow genuinely cannot be established here.
+	 * An unknown in a containment guard is refused, never guessed.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_case_colliding_declarations_with_different_targets(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'differing only in letter case' );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/Hop'      => '..',
+				'wp-content/uploads/hOp'      => 'somewhere',
+				'wp-content/uploads/leak.txt' => 'HOP/wp-config.php',
+			)
+		);
+	}
+
+	/**
+	 * A consumer whose own target contains no parent segment at all is still refused.
+	 *
+	 * Worth its own case because it defeats any rule phrased as "refuse targets
+	 * containing '..'". The whole climb lives in the FIRST link, which is
+	 * perfectly legitimate on its own account (it lands on wp-content, a strict
+	 * descendant of the site); the second target is a plain, innocent-looking
+	 * relative path with no traversal in it anywhere, and it still reaches the
+	 * directory holding every backup this site has taken.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_consumer_whose_target_has_no_parent_segment(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "inside Pontifex's own working directory" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/hop'        => '..',
+				'wp-content/uploads/leak.wpmig' => 'hop/pontifex/rollback/safety.wpmig',
+			)
+		);
+	}
+
+	/**
+	 * A chain of three links that only escapes at its very end is refused.
+	 *
+	 * Each individual link in the chain stays inside the site; the escape is
+	 * assembled out of all of them. Nothing short of following the chain the
+	 * way the kernel does can see it.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_three_link_chain_that_escapes_at_the_end(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'is not inside the restore root' );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/a'    => 'b',
+				'wp-content/uploads/b'    => 'c',
+				'wp-content/uploads/c'    => '../../..',
+				'wp-content/uploads/leak' => 'a/etc/passwd',
+			)
+		);
+	}
+
+	/**
+	 * Two links pointing at each other are refused rather than resolved forever.
+	 *
+	 * Each is individually "inside the site", so a containment rule alone never
+	 * fires; without the hop counter the resolver would substitute one for the
+	 * other endlessly. A hang on a hostile archive would be a denial of service
+	 * on a live site, so terminating is itself a safety property.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_mutual_symlink_loop(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'passed through more than 40 symlinks' );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/a' => 'b',
+				'wp-content/uploads/b' => 'a',
+			)
+		);
+	}
+
+	/**
+	 * A target that resolves to the site root ITSELF is refused, not merely one above it.
+	 *
+	 * Containment is strict descent. A link that is the root would redirect
+	 * everything beneath it — every path a later entry writes would land
+	 * wherever that link pointed instead.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_target_that_is_the_site_root_itself(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'is not inside the restore root' );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../..' ) );
+	}
+
+	/**
+	 * A target that climbs above the site root is refused.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_target_above_the_site_root(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'is not inside the restore root' );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../../../etc/passwd' ) );
+	}
+
+	/**
+	 * An absolute target is refused, because it is not measured against the site at all.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_an_absolute_target(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'is an absolute path' );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '/etc/passwd' ) );
+	}
+
+	/**
+	 * A plain, direct link to wp-config.php is refused, with no hop involved.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_direct_link_to_wp_config(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => '../../wp-config.php' ) );
+	}
+
+	/**
+	 * The wp-config.php refusal fires even when the file is not there yet.
+	 *
+	 * A migration onto a fresh destination has no wp-config.php at the moment
+	 * the archive is checked. The refusal must not depend on the file's
+	 * presence, or the very restore that most needs the guard would not get it.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_link_to_wp_config_that_does_not_exist_yet(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-config.php', 'precondition: the destination has no wp-config.php yet' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => '../../wp-config.php' ) );
+	}
+
+	/**
+	 * A link into Pontifex's own working directory is refused.
+	 *
+	 * That directory holds this site's stored backups and safety archives, each
+	 * one a copy of the whole database. A link to it from uploads would publish
+	 * every backup the site has to anyone who can fetch a URL.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_link_into_the_pontifex_working_directory(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "inside Pontifex's own working directory" );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.wpmig' => '../pontifex/rollback/safety.wpmig' ) );
+	}
+
+	/**
+	 * A link that escapes through a symlink ALREADY on the destination is refused.
+	 *
+	 * The archive index cannot see this one: the intermediate link is not in
+	 * the archive at all, it is simply already on the site — left by an earlier
+	 * restore, or by the site's own owner. This is the case the live-filesystem
+	 * fallback exists for, and it is the cross-archive form recorded in
+	 * CVE-2023-37460's advisory.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_target_escaping_through_a_link_already_on_disk(): void {
+		$writer  = new FileWriter( $this->fixture_root );
+		$uploads = $this->make_fixture_directory( 'wp-content/uploads' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; the pre-existing link is the subject under test.
+		symlink( '../..', $uploads . '/existing' );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => 'existing/wp-config.php' ) );
+	}
+
+	/**
+	 * A refusal writes nothing at all: the destination is untouched.
+	 *
+	 * The whole point of deciding before the walk starts is that a hostile
+	 * archive leaves the site exactly as it was. This test uses a captured
+	 * exception rather than expectException() because it has to assert
+	 * something AFTER the throw, which expectException() cannot do; there is
+	 * deliberately no self::fail() inside the try, since PHPUnit's own failure
+	 * exception would be swallowed by the catch.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_writes_nothing_when_it_refuses(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/hop'      => '..',
+					'wp-content/uploads/leak.txt' => 'hop/../wp-config.php',
+				)
+			);
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$this->assertStringContainsString( "this site's own wp-config.php", $thrown->getMessage() );
+		$remaining = array_values( array_diff( scandir( $this->fixture_root ), array( '.', '..' ) ) );
+		$this->assertSame( array(), $remaining, 'a refused preflight must leave the destination byte-identical to its pre-restore state' );
+	}
+
+	/**
+	 * The refusal names the link, its raw target, and the place it actually resolves to.
+	 *
+	 * An operator reading "resolves to /…/wp-config.php" needs no explanation
+	 * of why the restore stopped; "a symlink was refused" would need several.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refusal_reports_the_link_target_and_where_it_resolves(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/hop'      => '..',
+					'wp-content/uploads/leak.txt' => 'hop/../wp-config.php',
+				)
+			);
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( 'wp-content/uploads/leak.txt', $message );
+		$this->assertStringContainsString( 'hop/../wp-config.php', $message );
+		$this->assertStringContainsString( realpath( $this->fixture_root ) . '/wp-config.php', $message );
+	}
+
+	/**
+	 * The attack is real: with --allow-unsafe-symlinks the preflight steps aside and the leak happens.
+	 *
+	 * This is the kernel's own verdict rather than the guard's. Both links are
+	 * written, and reading the uploads file returns the planted wp-config.php
+	 * contents — proving the corpus above is guarding against something that
+	 * genuinely works, not against a theory. It also pins the escape hatch:
+	 * the operator override must continue to waive the whole preflight.
+	 *
+	 * @return void
+	 */
+	public function test_allow_unsafe_symlinks_bypasses_the_preflight_and_the_kernel_then_leaks(): void {
+		$writer = new FileWriter( $this->fixture_root, true );
+		$secret = $this->plant_wp_config();
+		$links  = array(
+			'wp-content/uploads/hop'      => '..',
+			'wp-content/uploads/leak.txt' => 'hop/../wp-config.php',
+		);
+
+		$writer->assert_symlink_targets_confined( $links );
+		foreach ( $links as $path => $target ) {
+			$writer->write_entry( self::symlink_result( $path, $target ) );
+		}
+
+		$leak = $this->fixture_root . '/wp-content/uploads/leak.txt';
+		$this->assertTrue( is_link( $leak ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against an on-disk fixture; reading THROUGH the link is the point.
+		$this->assertSame( $secret, file_get_contents( $leak ), 'the kernel really does follow the hop and hand back wp-config.php' );
+	}
+
+	/**
+	 * A Composer-managed site's mu-plugins autoloader link is permitted and written.
+	 *
+	 * Composer keeps a WordPress install's dependencies in a vendor/ directory
+	 * beside wp-content, not inside it, and reaches them by link. Refusing this
+	 * shape makes that site's own backup unrestorable with no attacker
+	 * involved; it is the false refusal that reverted an earlier attempt at
+	 * this guard, and it is why containment is rooted at the site rather than
+	 * at wp-content.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_the_composer_mu_plugins_autoload_link(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$link   = 'wp-content/mu-plugins/autoload.php';
+		$target = '../../vendor/acme/lib/autoload.php';
+
+		$writer->assert_symlink_targets_confined( array( $link => $target ) );
+		$writer->write_entry( self::symlink_result( $link, $target ) );
+
+		$this->assertTrue( is_link( $this->fixture_root . '/' . $link ) );
+		$this->assertSame( $target, readlink( $this->fixture_root . '/' . $link ) );
+	}
+
+	/**
+	 * The wp-content/languages link out to a sibling languages directory is permitted and written.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_the_languages_link(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$link   = 'wp-content/languages';
+		$target = '../languages';
+
+		$writer->assert_symlink_targets_confined( array( $link => $target ) );
+		$writer->write_entry( self::symlink_result( $link, $target ) );
+
+		$this->assertTrue( is_link( $this->fixture_root . '/' . $link ) );
+		$this->assertSame( $target, readlink( $this->fixture_root . '/' . $link ) );
+	}
+
+	/**
+	 * A plugin linked to a working copy outside wp-content but inside the site is permitted and written.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_a_plugin_linked_to_a_directory_beside_wp_content(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$link   = 'wp-content/plugins/myplugin';
+		$target = '../../dev/myplugin';
+
+		$writer->assert_symlink_targets_confined( array( $link => $target ) );
+		$writer->write_entry( self::symlink_result( $link, $target ) );
+
+		$this->assertTrue( is_link( $this->fixture_root . '/' . $link ) );
+		$this->assertSame( $target, readlink( $this->fixture_root . '/' . $link ) );
+	}
+
+	/**
+	 * Ordinary links that never leave wp-content are permitted and written.
+	 *
+	 * An uploads alias, a theme reaching into uploads, and a plugin reaching a
+	 * sibling — the everyday shapes a real site accumulates.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_ordinary_links_inside_wp_content(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$links  = array(
+			'wp-content/uploads/alias'        => '2026',
+			'wp-content/themes/mytheme/img'   => '../../uploads/img',
+			'wp-content/plugins/alpha/shared' => '../beta/shared',
+		);
+
+		$writer->assert_symlink_targets_confined( $links );
+		foreach ( $links as $path => $target ) {
+			$writer->write_entry( self::symlink_result( $path, $target ) );
+			$this->assertSame( $target, readlink( $this->fixture_root . '/' . $path ) );
+		}
+	}
+
+	/**
+	 * A chain of links that stays inside the site all the way through is permitted.
+	 *
+	 * The hop machinery must not treat "resolved through another link" as
+	 * suspicious in itself — only where the chain finally lands matters.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_a_chain_of_links_that_stays_inside(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$links  = array(
+			'wp-content/uploads/first'  => 'second',
+			'wp-content/uploads/second' => '../themes/mytheme',
+		);
+
+		$writer->assert_symlink_targets_confined( $links );
+		foreach ( $links as $path => $target ) {
+			$writer->write_entry( self::symlink_result( $path, $target ) );
+			$this->assertSame( $target, readlink( $this->fixture_root . '/' . $path ) );
+		}
+	}
+
+	/**
+	 * A link whose target does not exist yet is permitted.
+	 *
+	 * A link may legitimately dangle when it is written and be satisfied later
+	 * — by a subsequent entry, by a `composer install` after the restore, or
+	 * never. The rule asks WHERE a target resolves, never whether it is there,
+	 * which is also what makes migration onto an empty destination work at all.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_permits_a_target_that_does_not_exist_yet(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$link   = 'wp-content/uploads/link';
+		$target = 'not-here-yet/file.txt';
+
+		$writer->assert_symlink_targets_confined( array( $link => $target ) );
+		$writer->write_entry( self::symlink_result( $link, $target ) );
+
+		$this->assertTrue( is_link( $this->fixture_root . '/' . $link ) );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-content/uploads/not-here-yet/file.txt' );
+	}
+
+	/**
+	 * A link entry whose own PATH is hostile is left to write_entry(), not silently indexed.
+	 *
+	 * The preflight judges TARGETS. An entry path carrying a parent-directory
+	 * segment is a different guard's business, and write_entry() refuses it
+	 * with its own message when the walk reaches it — so it is dropped from the
+	 * index here rather than being allowed to act as an intermediate hop for
+	 * some other link. The assertion below is that the preflight neither
+	 * refuses on its account nor lets it redirect anything.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_ignores_a_link_whose_own_path_is_refused_elsewhere(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/../hop'   => '..',
+				'wp-content/uploads/safe.txt' => 'hop/notes.txt',
+			)
+		);
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+
+		$writer->write_entry( self::symlink_result( 'wp-content/uploads/../hop', '..' ) );
+	}
+
+	// -------------------------------------------------------------------
 	// Case-sensitivity probe (destination_is_case_sensitive())
 	// -------------------------------------------------------------------
 

@@ -1113,4 +1113,108 @@ final class RestoreRunnerTest extends TestCase {
 
 		$this->assertFalse( $disk_space_was_consulted, 'verify() must never consult the disk-space reader.' );
 	}
+
+	// -------------------------------------------------------------------
+	// The whole-archive symlink preflight, driven through a real archive
+	// -------------------------------------------------------------------
+
+	/**
+	 * The entry plans for the proven wp-config.php leak, with an ordinary file in front of them.
+	 *
+	 * The file entry comes first on purpose. It is what makes "the preflight ran
+	 * before the walk" observable: if the symlink decision were still being made
+	 * entry by entry, this file would already be on disk by the time the archive
+	 * was refused, and the site would be part-restored.
+	 *
+	 * @return EntryPlan[] The plans, in archive order.
+	 */
+	private static function hostile_symlink_plans(): array {
+		return array(
+			self::file_plan( 'wp-content/uploads/innocent.txt', 'written before any refusal?' ),
+			self::symlink_plan( 'wp-content/uploads/hop', '..' ),
+			self::symlink_plan( 'wp-content/uploads/leak.txt', 'hop/../wp-config.php' ),
+		);
+	}
+
+	/**
+	 * A restore of the hop-pair archive is refused with the destination completely untouched.
+	 *
+	 * The end-to-end proof of the preflight: a real archive, built by the real
+	 * writer, read by the real reader. The refusal must arrive before the walk
+	 * starts, so neither the hostile links nor the innocent file that precedes
+	 * them in the archive may appear on disk. This test captures the exception
+	 * rather than using expectException() because it asserts about the
+	 * filesystem AFTER the throw; there is deliberately no self::fail() inside
+	 * the try, since PHPUnit's own failure exception would be swallowed by the
+	 * catch.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_the_hop_attack_before_writing_anything(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$thrown = null;
+
+		try {
+			$runner->restore( self::build_archive_stream( self::hostile_symlink_plans() ) );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$this->assertStringContainsString( "this site's own wp-config.php", $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-content/uploads/innocent.txt', 'The refusal must come before the walk writes anything at all.' );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/hop' ) );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/leak.txt' ) );
+		$this->assertSame( array(), $db->executed_statements(), 'A refused archive must not execute any SQL.' );
+	}
+
+	/**
+	 * The verify() walk never runs the symlink preflight, because it writes nothing.
+	 *
+	 * Verify's job is to answer "are these bytes intact", and it creates no
+	 * links, so there is no target to confine. Running the preflight there would
+	 * turn a read-only integrity check into a refusal, telling an operator their
+	 * archive is broken when what it actually is is hostile — a different
+	 * question, answered by attempting the restore.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_run_the_symlink_preflight(): void {
+		$runner = $this->make_runner();
+
+		$runner->verify( self::build_archive_stream( self::hostile_symlink_plans() ) );
+
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-content/uploads/innocent.txt', 'verify() must write nothing.' );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/leak.txt' ), 'verify() must create no links.' );
+	}
+
+	/**
+	 * A Composer-shaped site's own archive restores, links intact, with no flag and no warning.
+	 *
+	 * The false-refusal gate, end to end. A Composer-managed WordPress keeps its
+	 * dependencies beside wp-content and reaches them by link, and the scanner
+	 * records those links verbatim — so this is what that site's OWN backup
+	 * looks like. Refusing it would make the site's backup unrestorable with no
+	 * attacker involved, which is what reverted an earlier attempt at this
+	 * guard. The targets deliberately do not exist on the destination, which is
+	 * also the migration case: the rule asks where a target resolves, never
+	 * whether it is already there.
+	 *
+	 * @return void
+	 */
+	public function test_restore_permits_a_composer_shaped_symlink_layout(): void {
+		$runner = $this->make_runner();
+		$plans  = array(
+			self::symlink_plan( 'wp-content/languages', '../languages' ),
+			self::symlink_plan( 'wp-content/mu-plugins/autoload.php', '../../vendor/acme/lib/autoload.php' ),
+			self::symlink_plan( 'wp-content/uploads/alias', '2026' ),
+		);
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( '../languages', readlink( $this->fixture_root . '/wp-content/languages' ) );
+		$this->assertSame( '../../vendor/acme/lib/autoload.php', readlink( $this->fixture_root . '/wp-content/mu-plugins/autoload.php' ) );
+		$this->assertSame( '2026', readlink( $this->fixture_root . '/wp-content/uploads/alias' ) );
+	}
 }
