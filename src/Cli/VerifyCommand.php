@@ -507,7 +507,16 @@ final class VerifyCommand {
 	 * @throws RuntimeException If the archive's header, footer, or manifest will not parse.
 	 */
 	private function print_list( $source, string $format ): void {
-		$reader = new ArchiveReader( $source );
+		// The memory limit travels with the reader here as it does on the restore
+		// path: this is the one verify surface that decodes the whole manifest,
+		// and decoding a large one without a budget exhausts memory as an
+		// uncatchable fatal. Listing a backup's contents is exactly what an
+		// operator reaches for when they are already worried about it, so it is
+		// the last place that should die without an explanation.
+		$reader = new ArchiveReader(
+			$source,
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+		);
 		$rows   = self::manifest_rows( $reader->manifest()->entries() );
 		\WP_CLI\Utils\format_items( $format, $rows, array( 'index', 'kind', 'name', 'codec', 'size', 'hash' ) );
 	}
