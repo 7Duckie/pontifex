@@ -98,26 +98,33 @@ final class ArchiveReader {
 	/**
 	 * Multiple of the declared manifest length below which a decode is refused.
 	 *
-	 * Sits below the measured floor of peak-memory-to-payload-bytes (roughly
-	 * 4.1x), so the refusal fires only when even the most memory-efficient
-	 * archive could not fit. See
-	 * {@see self::assert_manifest_decode_fits_in_memory()} for why the two
+	 * Must sit BELOW the real floor of peak-memory-to-declared-bytes, so the
+	 * refusal fires only when even the most memory-efficient archive this format
+	 * can express could not fit. Measured across path lengths from 1 to 2,000
+	 * bytes, the headroom-relative ratio ranges from 3.08x (very long paths, few
+	 * entries) to 9.54x (single-character paths, many entries). Three is below
+	 * that floor; four was not, and over-refused a decode that fit.
+	 *
+	 * See {@see self::assert_manifest_decode_fits_in_memory()} for why the two
 	 * factors differ and why this one must under-estimate.
 	 *
 	 * @var int
 	 */
-	private const REFUSAL_MEMORY_FACTOR = 4;
+	private const REFUSAL_MEMORY_FACTOR = 3;
 
 	/**
 	 * Multiple of the declared manifest length aimed at when raising the limit.
 	 *
-	 * Sits above the measured maximum (roughly 9.0x at degenerate short paths),
-	 * so a successful raise leaves enough headroom for the decode to finish
-	 * rather than fatalling just past the new ceiling.
+	 * Must sit ABOVE the real ceiling (measured 9.54x at single-character paths),
+	 * so a raise that succeeds leaves enough headroom for the decode to finish
+	 * rather than fatalling just past the new limit. Twelve gives roughly a
+	 * quarter's margin; ten cleared the measured ceiling by only five per cent,
+	 * which is not a margin at all once a different PHP build or allocator is in
+	 * play.
 	 *
 	 * @var int
 	 */
-	private const RAISE_MEMORY_FACTOR = 10;
+	private const RAISE_MEMORY_FACTOR = 12;
 
 	/**
 	 * The readable, seekable stream the archive is read from.
@@ -557,9 +564,9 @@ final class ArchiveReader {
 	 *
 	 * Two different multipliers, deliberately, because the two decisions fail
 	 * in opposite directions. Measured against this codebase, peak decode
-	 * memory divided by declared payload bytes ranges from roughly 4.1x (very
-	 * long paths, about 1,150 bytes per entry) to roughly 9.0x (degenerate
-	 * single-character paths, about 160 bytes per entry).
+	 * memory divided by declared payload bytes ranges from 3.08x (very long
+	 * paths, about 2,000 bytes per entry) to 9.54x (single-character paths,
+	 * about 158 bytes per entry), measured against real archives.
 	 *
 	 *  - The REFUSAL uses REFUSAL_MEMORY_FACTOR, which sits BELOW the measured
 	 *    floor, so it fires only when even the most memory-efficient archive
@@ -577,6 +584,24 @@ final class ArchiveReader {
 	 * actually applied rather than trusting the setter's return value, because
 	 * a host may forbid the change outright or clamp it.
 	 *
+	 * There are therefore three outcomes, and the third is a deliberate gap
+	 * rather than an oversight:
+	 *
+	 *  1. The raise succeeds — the decode proceeds with generous headroom. This
+	 *     is the common case and the one worth optimising for.
+	 *  2. The raise is impossible AND even the optimistic estimate cannot fit —
+	 *     refused cleanly, with the megabytes named. A catchable error instead
+	 *     of a fatal that would skip safety-archive recovery.
+	 *  3. The raise is impossible but the optimistic estimate DOES fit, while
+	 *     the real decode may still not — the decode is attempted anyway, and
+	 *     may still fatal. Nothing better is available here: the true cost per
+	 *     declared byte varies threefold with path length and cannot be known
+	 *     before decoding, so refusing on the pessimistic figure would refuse
+	 *     archives that open perfectly well. Attempting is no worse than the
+	 *     behaviour before this guard existed; a false refusal would be worse,
+	 *     because it locks an operator out of a recovery that would have
+	 *     succeeded. That trade is chosen deliberately and in that direction.
+	 *
 	 * @param int $length The declared manifest block length in bytes.
 	 * @return void
 	 * @throws RuntimeException If the decode cannot fit even after attempting to raise the limit.
@@ -586,42 +611,44 @@ final class ArchiveReader {
 			return;
 		}
 
-		$required = $length * self::REFUSAL_MEMORY_FACTOR;
-		if ( $required <= ( $this->memory_limit_bytes - memory_get_usage( true ) ) ) {
+		$applied = $this->applied_memory_limit_bytes();
+		if ( 0 === $applied ) {
+			// The runtime reports no ceiling at all; nothing can fatal on a limit.
 			return;
 		}
 
-		// Best-effort lift, then re-read. Two rules make this safe:
+		// Raise on the RAISE threshold, not the refusal one. Deciding whether to
+		// raise from REFUSAL_MEMORY_FACTOR was a real defect: a decode needing
+		// 8.3x its declared length sailed past a 4x check with room to spare, so
+		// no raise was attempted, and it then died on the very fatal this method
+		// exists to prevent. The two thresholds answer different questions —
+		// "should I ask for more headroom?" must use the pessimistic figure, and
+		// only the final refusal may use the optimistic one.
 		//
-		// - Only ever RAISE. The target is computed from current usage, so on
-		// a process that already has a higher ceiling it would come out
-		// LOWER — and applying it would shrink the very budget we are
-		// trying to protect, turning this guard into the cause of the fatal
-		// it exists to prevent. Take the larger of the two, always.
-		// - Re-read afterwards rather than trusting the setter: ini_set
-		// reports success even where a host clamps or forbids the change,
-		// so the applied value is the only truth worth acting on.
-		$applied_before = $this->applied_memory_limit_bytes();
-		if ( 0 === $applied_before ) {
-			// The runtime reports no ceiling at all; nothing to raise, and
-			// nothing that can fatal on a limit.
-			return;
-		}
-
-		$target = memory_get_usage( true ) + ( $length * self::RAISE_MEMORY_FACTOR );
+		// Only ever RAISE. The target is computed from current usage, so on a
+		// process that already has a higher ceiling it would come out LOWER, and
+		// applying it would shrink the very budget being protected.
+		//
 		// function_exists() first: a host that lists ini_set in disable_functions
 		// — precisely the locked-down shared hosting this guard exists for —
 		// makes the call throw Error ("Call to undefined function"), which the
-		// silencing operator does NOT suppress. Calling it blind would replace a
-		// clean refusal with the very fatal we are here to prevent.
-		if ( $target > $applied_before && function_exists( 'ini_set' ) ) {
+		// silencing operator does NOT suppress.
+		$target = memory_get_usage( true ) + ( $length * self::RAISE_MEMORY_FACTOR );
+		if ( $target > $applied && function_exists( 'ini_set' ) ) {
 			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed,WordPress.PHP.NoSilencedErrors.Discouraged -- WPCS points at wp_raise_memory_limit(), but the archive layer is deliberately WordPress-free (decisions D6/D8) and is exercised by unit tests with no WordPress loaded. Raising this request's own ceiling is the alternative to an uncatchable fatal that skips safety-archive recovery, lock release and job cleanup; a host that forbids the change is handled by re-reading the applied value below, not by a warning.
 			@ini_set( 'memory_limit', (string) $target );
+
+			// Re-read rather than trusting the setter: ini_set reports success
+			// even where a host clamps or forbids the change, so the applied
+			// value is the only truth worth acting on.
+			$applied = $this->applied_memory_limit_bytes();
+			if ( 0 === $applied ) {
+				return;
+			}
 		}
 
-		$applied = $this->applied_memory_limit_bytes();
-
-		if ( 0 === $applied || $required <= ( $applied - memory_get_usage( true ) ) ) {
+		$required = $length * self::REFUSAL_MEMORY_FACTOR;
+		if ( $required <= ( $applied - memory_get_usage( true ) ) ) {
 			return;
 		}
 

@@ -631,6 +631,65 @@ final class ArchiveReaderTest extends TestCase {
 	}
 
 	/**
+	 * A decode that fits the refusal threshold but not the real cost must still
+	 * raise the limit.
+	 *
+	 * The regression test for a real defect. The guard originally decided whether
+	 * to raise using the REFUSAL threshold, so a decode needing eight times its
+	 * declared length sailed past the optimistic check with room to spare, no
+	 * raise was attempted, and it then died on the uncatchable fatal this whole
+	 * method exists to prevent. The two thresholds answer different questions:
+	 * "should I ask for more headroom?" must use the pessimistic figure.
+	 *
+	 * Chooses a declared length whose refusal estimate fits the starting limit
+	 * comfortably while the raise target does not, so the only way the assertion
+	 * can pass is if the raise decision ignores the refusal threshold.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_a_decode_within_the_refusal_threshold_still_raises_the_limit(): void {
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] provides; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
+		ini_set( 'memory_limit', '64M' );
+		$limit = 67108864;
+
+		// 3x this is 24 MB and fits inside 64 MB; 12x is 96 MB and does not.
+		$declared = 8388608;
+
+		$reader = new ArchiveReader( self::build_sample_archive_stream(), $limit );
+		$guard  = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
+		$guard->invoke( $reader, $declared );
+
+		$applied = (int) $this->parse_shorthand_bytes( (string) ini_get( 'memory_limit' ) );
+
+		$this->assertGreaterThan(
+			$limit,
+			$applied,
+			'The guard must raise on the raise threshold, not skip the raise because the refusal threshold happened to fit.'
+		);
+	}
+
+	/**
+	 * Convert PHP's memory shorthand to bytes, for assertions.
+	 *
+	 * @param string $value A memory_limit value such as "96M".
+	 * @return int The value in bytes.
+	 */
+	private function parse_shorthand_bytes( string $value ): int {
+		$number = (int) $value;
+		switch ( strtolower( substr( trim( $value ), -1 ) ) ) {
+			case 'g':
+				return $number * 1073741824;
+			case 'm':
+				return $number * 1048576;
+			case 'k':
+				return $number * 1024;
+			default:
+				return $number;
+		}
+	}
+
+	/**
 	 * The raise target must always clear the refusal threshold.
 	 *
 	 * The algorithm only terminates sensibly if a SUCCESSFUL raise is
