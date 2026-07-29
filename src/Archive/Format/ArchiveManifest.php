@@ -92,13 +92,18 @@ final class ArchiveManifest {
 	public const MAX_PAYLOAD_SIZE = 16777216;
 
 	/**
-	 * Conservative bytes-per-entry threshold used to (a) estimate an upper
-	 * bound on entry count from a manifest's declared byte length alone,
-	 * before it is read or decoded (the pre-decode guard in
-	 * {@see \Pontifex\Archive\Reader\ArchiveReader}), and (b) project the
-	 * manifest size a pending export would produce from the real entries
-	 * about to be written, before a single byte reaches disk (see
-	 * {@see self::project_payload_bytes()}).
+	 * Conservative bytes-per-entry threshold used to estimate an upper bound on
+	 * entry count from a manifest's declared byte length alone, before it is
+	 * read or decoded (the pre-decode guard in
+	 * {@see \Pontifex\Archive\Reader\ArchiveReader}).
+	 *
+	 * Read-path only. {@see self::project_payload_bytes()} deliberately does NOT
+	 * use this constant: a write-side projection knows each entry's real kind and
+	 * identifier, so it charges that kind's exact structural floor
+	 * ({@see self::minimal_entry_bytes()}) and adds provable terms on top. Reusing
+	 * this deliberately-inflated read-side threshold there would have spent 24
+	 * bytes of unexplained slack on every entry, refusing legitimate exports for
+	 * no stated reason.
 	 *
 	 * This is deliberately NOT the format's absolute theoretical floor.
 	 * That floor is lower: a hand-forged, maximally degenerate entry (the
@@ -121,25 +126,61 @@ final class ArchiveManifest {
 	 * is defence in depth for exactly that case, catching it once the (by
 	 * then unavoidable) decode has already happened.
 	 *
-	 * {@see self::project_payload_bytes()} uses this constant as a starting
-	 * baseline only, not as the final per-entry charge: it layers measured (not
-	 * assumed) terms on top — the real JSON-encoded path length and real kind
-	 * width for path-bearing entries, the real chunk_index digit width for
-	 * db_chunk entries — plus a provable margin, shared by every kind, for the
-	 * entry separator and the four numeric fields no EntryHeader carries. That
-	 * is what makes the method's own guarantee hold regardless of path content,
-	 * entry kind, or archive size.
-	 *
-	 * Note that the floor quoted above (145 bytes) is a `file` entry's. The
-	 * other kinds' floors are higher, purely because their kind strings are
-	 * longer: `symlink` 148, `directory` 150, `db_chunk` 154. This constant sits
-	 * above all four, but the difference is not uniform, which is exactly why
-	 * project_payload_bytes() charges the kind width rather than leaning on the
-	 * cushion to absorb it.
+	 * Note that the floor quoted above (145 bytes) is a `file` entry's. The other
+	 * kinds' floors are higher, purely because their kind strings are longer:
+	 * `symlink` 148, `directory` 150, `db_chunk` 154. This constant sits above
+	 * all four, but the difference is not uniform — which is exactly why the
+	 * write-side projection charges each kind's own floor instead.
 	 *
 	 * @var int
 	 */
 	public const MIN_ENTRY_PAYLOAD_BYTES = 169;
+
+	/**
+	 * Structural floor of a `file` manifest entry: its canonical JSON with a
+	 * 1-character path and every numeric field at a single digit.
+	 *
+	 * This is the format's true minimum, measured rather than reasoned about, and
+	 * pinned by {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest}.
+	 * {@see self::project_payload_bytes()} builds each entry's charge up from the
+	 * floor of that entry's own kind, so nothing is left to be absorbed by an
+	 * unstated cushion.
+	 *
+	 * @var int
+	 */
+	private const MINIMAL_FILE_ENTRY_BYTES = 145;
+
+	/**
+	 * Structural floor of a `symlink` manifest entry (see MINIMAL_FILE_ENTRY_BYTES).
+	 *
+	 * Three bytes above a file's, entirely because `symlink` is three characters
+	 * longer than `file`; the fields are otherwise identical.
+	 *
+	 * @var int
+	 */
+	private const MINIMAL_SYMLINK_ENTRY_BYTES = 148;
+
+	/**
+	 * Structural floor of a `directory` manifest entry (see MINIMAL_FILE_ENTRY_BYTES).
+	 *
+	 * Five bytes above a file's, entirely because `directory` is five characters
+	 * longer than `file`. The narrowest-margin kind, and the first to break when
+	 * a projection assumes the `file` floor for every path-bearing entry.
+	 *
+	 * @var int
+	 */
+	private const MINIMAL_DIRECTORY_ENTRY_BYTES = 150;
+
+	/**
+	 * Structural floor of a `db_chunk` manifest entry (see MINIMAL_FILE_ENTRY_BYTES).
+	 *
+	 * Nine bytes above a file's: four for the longer kind string, and five more
+	 * because it carries `"chunk_index":0` where a path-bearing entry carries the
+	 * shorter `"path":"a"`.
+	 *
+	 * @var int
+	 */
+	private const MINIMAL_DB_CHUNK_ENTRY_BYTES = 154;
 
 	/**
 	 * Fixed byte cost of the manifest's JSON array wrapper (`{"entries":[` + `]}`),
@@ -158,13 +199,13 @@ final class ArchiveManifest {
 	 * JSON-encoded byte length of the shortest possible path value: the two
 	 * quote characters plus one unescaped character, e.g. `"a"`.
 	 *
-	 * MIN_ENTRY_PAYLOAD_BYTES already assumes exactly this text cost for a
-	 * path-bearing entry's path field (see its own docblock: "a 1-character
-	 * path"). {@see self::project_payload_bytes()} swaps that assumption for
-	 * a path's real canonical-JSON-encoded length (quotes and any escaping
-	 * included), so it must subtract this constant — not the raw 1-character
-	 * count — to avoid double-charging the two quote bytes that were already
-	 * folded into MIN_ENTRY_PAYLOAD_BYTES.
+	 * Every path-bearing kind's structural floor
+	 * ({@see self::minimal_entry_bytes()}) assumes exactly this text cost for the
+	 * entry's path field. {@see self::project_payload_bytes()} swaps that
+	 * assumption for a path's real canonical-JSON-encoded length (quotes and any
+	 * escaping included), so it must subtract this constant — not the raw
+	 * 1-character count — to avoid double-charging the two quote bytes the floor
+	 * already folded in.
 	 *
 	 * @var int
 	 */
@@ -220,26 +261,30 @@ final class ArchiveManifest {
 	 *
 	 * The index field is assigned only once an entry is appended, so no
 	 * EntryHeader carries it — but unlike offset and length it needs no blunt
-	 * MAX_INT_DIGITS margin, because the format's own ceiling bounds it:
-	 * {@see self::project_payload_bytes()} charges every entry at least
-	 * MIN_ENTRY_PAYLOAD_BYTES, so whenever a caller's guard approves an export
-	 * (projection at or below MAX_PAYLOAD_SIZE) the entry count cannot exceed
-	 * (MAX_PAYLOAD_SIZE - HEADER_SIZE - ENTRIES_JSON_WRAPPER_BYTES) /
-	 * MIN_ENTRY_PAYLOAD_BYTES = 99,273 — a largest index of 99,272, five
-	 * digits. An export the guard REFUSES is never written, so its indices
-	 * never exist to be under-counted; the bound is therefore not circular.
+	 * MAX_INT_DIGITS margin, because the FORMAT bounds it. An entry's true
+	 * marginal cost is 146 bytes (its structural floor plus the separator;
+	 * pinned by {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest}),
+	 * so a payload within MAX_PAYLOAD_SIZE cannot hold more than
+	 * (MAX_PAYLOAD_SIZE - ENTRIES_JSON_WRAPPER_BYTES) / 146 = 114,912 entries —
+	 * a largest index of 114,911, six digits. Any manifest with a wider index
+	 * exceeds the cap and is refused by from_bytes() whatever this projection
+	 * said, so no such entry can exist in an archive this code both writes and
+	 * reads back.
 	 *
-	 * Deliberately a bound and not the loop position: charging the real
-	 * position would be a byte or two cheaper, but it would silently make this
-	 * method's guarantee depend on every caller passing the complete entry list
-	 * in write order. A caller that projected a subset — a resumed export's
-	 * remaining entries, say — would then under-count with no failing test to
-	 * show for it. Pinned by
-	 * {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest}.
+	 * Deliberately derived from the format's own floor rather than from this
+	 * method's per-entry charge. Deriving it from the charge would be circular —
+	 * the charge includes this very constant — and would yield a tighter five
+	 * digits that only holds while some other term happens to leave slack to
+	 * absorb the difference. Six is provable without reference to the charge at
+	 * all, and costs one byte per entry to be so.
+	 *
+	 * Deliberately a bound and not the loop position: charging the real position
+	 * would be a byte or two cheaper, but it would make this method's guarantee
+	 * depend on every caller passing the complete entry list in write order.
 	 *
 	 * @var int
 	 */
-	private const MAX_INDEX_DIGITS = 5;
+	private const MAX_INDEX_DIGITS = 6;
 
 	/**
 	 * Count of a manifest entry's numeric fields that this projection can
@@ -336,10 +381,10 @@ final class ArchiveManifest {
 	 * entries than a flat-path one, and a large archive's own offsets need
 	 * more digits than a small one's.
 	 *
-	 * Every path-bearing entry is charged (MIN_ENTRY_PAYLOAD_BYTES -
-	 * MINIMAL_PATH_JSON_BYTES) bytes of fixed overhead plus the path's own
-	 * canonical-JSON-encoded length, quotes included — MINIMAL_PATH_JSON_BYTES
-	 * is exactly what MIN_ENTRY_PAYLOAD_BYTES already assumes for a
+	 * Every path-bearing entry is charged its own kind's structural floor
+	 * ({@see self::minimal_entry_bytes()}) less MINIMAL_PATH_JSON_BYTES, plus the
+	 * path's own canonical-JSON-encoded length, quotes included —
+	 * MINIMAL_PATH_JSON_BYTES is exactly what that floor already assumes for a
 	 * 1-character path (`"a"`), so the subtraction swaps that assumption for
 	 * the path's real encoded byte count, measured with
 	 * {@see self::JSON_ENCODE_FLAGS} (the same flags the manifest itself
@@ -350,15 +395,17 @@ final class ArchiveManifest {
 	 * escaped, so measuring the encoded form (not the raw one) is what makes
 	 * this exact rather than approximate.
 	 *
-	 * A path-bearing entry's `kind` is charged exactly too. MIN_ENTRY_PAYLOAD_BYTES
-	 * assumes the shortest kind string, `file`; `symlink` costs three bytes more
-	 * and `directory` five, so the difference against KIND_FILE is added back
-	 * rather than left to be absorbed by the constant's cushion.
+	 * The `kind` costs nothing extra to charge, because the floor is selected BY
+	 * kind: `file` 145, `symlink` 148, `directory` 150, `db_chunk` 154, differing
+	 * only by the width of the kind string (and db_chunk's longer identifier
+	 * field). Charging one kind's floor for all four — as a single conservative
+	 * baseline does — under-charges every kind but the shortest, and it was
+	 * `directory`, the widest, that broke first.
 	 *
 	 * A db_chunk entry carries no path. Its chunk_index is known from the
 	 * header, so — the same swap-the-assumed-digit approach as the path
 	 * term — its real digit width is charged exactly in place of the single
-	 * digit MIN_ENTRY_PAYLOAD_BYTES assumes.
+	 * digit its floor assumes.
 	 *
 	 * Every entry of every kind then takes the same
 	 * {@see self::unseen_numeric_margin_bytes()} charge for what no EntryHeader
@@ -369,10 +416,22 @@ final class ArchiveManifest {
 	 * which scale with archive size and so have no format-level maximum, by
 	 * MAX_INT_DIGITS: the most digits any PHP int can ever print as. The
 	 * projection therefore stays an over-estimate at any archive size, right up
-	 * to PHP's own integer ceiling. The trade-off is a markedly higher flat cost
-	 * per entry than the pre-fix estimate assumed, which lowers how many entries
-	 * fit under MAX_PAYLOAD_SIZE; that is the honest ceiling, where the previous
-	 * one permitted archives this installation's own reader would refuse.
+	 * to PHP's own integer ceiling.
+	 *
+	 * Because every term is either measured or provably bounded, the result is
+	 * exact rather than cushioned: at the worst case the format permits — an
+	 * entry at the largest index a 16 MiB manifest can hold, with offset and
+	 * length at PHP_INT_MAX and codec_id at ManifestEntry::MAX_CODEC_ID — the
+	 * projection lands EXACTLY on the real byte count, never under it. There is
+	 * deliberately no slack left over: unexplained slack is refused exports for
+	 * no stated reason, and every input to the arithmetic is pinned by
+	 * {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest} so a format
+	 * change cannot erode the bound silently.
+	 *
+	 * The cost is still a markedly higher flat charge per entry than the pre-fix
+	 * estimate assumed, which lowers how many entries fit under MAX_PAYLOAD_SIZE;
+	 * that is the honest ceiling, where the previous one permitted archives this
+	 * installation's own reader would refuse.
 	 *
 	 * Lets a caller (the export engine) refuse an oversized backup BEFORE
 	 * writing a single byte, rather than discovering only after a
@@ -391,17 +450,16 @@ final class ArchiveManifest {
 			$path = $header->path();
 
 			if ( null !== $path ) {
-				$total += self::MIN_ENTRY_PAYLOAD_BYTES
+				$total += self::minimal_entry_bytes( $header->kind() )
 					- self::MINIMAL_PATH_JSON_BYTES
 					+ strlen( self::encode_json_string( $path ) )
-					+ ( strlen( $header->kind() ) - strlen( EntryHeader::KIND_FILE ) )
 					+ self::unseen_numeric_margin_bytes();
 				continue;
 			}
 
 			$chunk_index = self::require_db_chunk_index( $header );
 
-			$total += self::MIN_ENTRY_PAYLOAD_BYTES
+			$total += self::minimal_entry_bytes( $header->kind() )
 				+ ( strlen( (string) $chunk_index ) - 1 )
 				+ self::unseen_numeric_margin_bytes();
 		}
@@ -410,18 +468,43 @@ final class ArchiveManifest {
 	}
 
 	/**
-	 * Worst-case bytes an entry's manifest-only fields can add beyond what
-	 * MIN_ENTRY_PAYLOAD_BYTES already assumes for them.
+	 * The structural floor of one manifest entry of the given kind.
+	 *
+	 * Each kind's floor is its canonical JSON with a 1-character path (or
+	 * chunk_index 0) and every numeric field at a single digit. The floors
+	 * differ only by the width of the kind string itself, plus db_chunk's
+	 * longer identifier field — see the MINIMAL_*_ENTRY_BYTES constants.
+	 *
+	 * @param string $kind One of the EntryHeader::KIND_* constants.
+	 * @return int The kind's structural floor in bytes.
+	 * @throws InvalidArgumentException If the kind is not one of EntryHeader::ALL_KINDS.
+	 */
+	private static function minimal_entry_bytes( string $kind ): int {
+		return match ( $kind ) {
+			EntryHeader::KIND_FILE      => self::MINIMAL_FILE_ENTRY_BYTES,
+			EntryHeader::KIND_SYMLINK   => self::MINIMAL_SYMLINK_ENTRY_BYTES,
+			EntryHeader::KIND_DIRECTORY => self::MINIMAL_DIRECTORY_ENTRY_BYTES,
+			EntryHeader::KIND_DB_CHUNK  => self::MINIMAL_DB_CHUNK_ENTRY_BYTES,
+			default                     => throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind comes from a validated EntryHeader; exception path, not HTML output.
+				sprintf( 'ArchiveManifest::project_payload_bytes: unknown entry kind "%s".', $kind )
+			),
+		};
+	}
+
+	/**
+	 * Worst-case bytes an entry's manifest-only fields can add beyond what its
+	 * kind's structural floor already assumes for them.
 	 *
 	 * Shared by every kind, because every kind carries exactly these fields and
-	 * an EntryHeader carries none of them. MIN_ENTRY_PAYLOAD_BYTES assumes a
+	 * an EntryHeader carries none of them. Each kind's structural floor assumes a
 	 * single digit for each of the four numeric fields, so each contributes its
 	 * bound MINUS that already-assumed digit; the separator is additional to
-	 * anything the constant assumes, so it contributes in full.
+	 * anything a floor assumes, so it contributes in full.
 	 *
 	 * Bounding index and codec_id at their real format maximums rather than at
 	 * MAX_INT_DIGITS is what keeps this from needlessly shrinking the entry
-	 * ceiling: the blunt margin would cost 28 more bytes on every entry of
+	 * ceiling: the blunt margin would cost 27 more bytes on every entry of
 	 * every archive, to defend against digit widths neither field can reach.
 	 *
 	 * @return int The per-entry margin in bytes; a proven upper bound, not an estimate.

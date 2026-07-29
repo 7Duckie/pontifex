@@ -429,13 +429,13 @@ final class ArchiveManifestTest extends TestCase {
 	}
 
 	/**
-	 * The project_payload_bytes() method must charge (MIN_ENTRY_PAYLOAD_BYTES - 1)
-	 * plus the real path length for every path-bearing entry, plus that entry's
-	 * real kind width and the shared unseen-numeric margin.
+	 * The project_payload_bytes() method must charge each path-bearing entry its
+	 * OWN kind's structural floor (less the 1-character path that floor assumes)
+	 * plus the real path length and the shared unseen-numeric margin.
 	 *
-	 * The kind term matters: MIN_ENTRY_PAYLOAD_BYTES assumes the shortest kind
-	 * string (`file`), so a `directory` entry — five bytes longer — would be
-	 * under-charged without it.
+	 * The per-kind floor matters: a single baseline for all kinds under-charges
+	 * every kind but the shortest, and `directory` — five bytes above `file`
+	 * purely because its kind string is longer — is the one that broke first.
 	 *
 	 * @return void
 	 */
@@ -448,31 +448,31 @@ final class ArchiveManifestTest extends TestCase {
 		$margin = self::EXPECTED_UNSEEN_MARGIN;
 
 		$expected = 50
-			+ ( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( 'wp-content/uploads/photo.jpg' ) + 0 + $margin )
-			+ ( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( 'wp-content/uploads' ) + 5 + $margin );
+			+ ( self::FLOOR_FILE - 1 + strlen( 'wp-content/uploads/photo.jpg' ) + $margin )
+			+ ( self::FLOOR_DIRECTORY - 1 + strlen( 'wp-content/uploads' ) + $margin );
 
 		$this->assertSame( $expected, ArchiveManifest::project_payload_bytes( $headers ) );
 	}
 
 	/**
-	 * The project_payload_bytes() method must charge a db_chunk entry
-	 * MIN_ENTRY_PAYLOAD_BYTES plus its chunk_index's own real digit width
-	 * (known from the header) plus the shared margin for the separator and the
-	 * numeric fields the header cannot carry at all — no longer a flat
-	 * MIN_ENTRY_PAYLOAD_BYTES regardless of chunk_index, now that db_chunk digit
-	 * growth is measured exactly where it can be and margined honestly where it
-	 * cannot (see {@see ArchiveManifest::project_payload_bytes()}).
+	 * The project_payload_bytes() method must charge a db_chunk entry its own
+	 * structural floor plus its chunk_index's real digit width (known from the
+	 * header) plus the shared margin for the separator and the numeric fields the
+	 * header cannot carry at all — no longer a flat baseline regardless of
+	 * chunk_index, now that db_chunk digit growth is measured exactly where it
+	 * can be and margined honestly where it cannot (see
+	 * {@see ArchiveManifest::project_payload_bytes()}).
 	 *
 	 * @return void
 	 */
 	public function test_project_payload_bytes_charges_measured_estimate_for_db_chunk(): void {
 		$margin = self::EXPECTED_UNSEEN_MARGIN;
 
-		// chunk_index 0: a single digit, the same width MIN_ENTRY_PAYLOAD_BYTES
-		// already assumes, so only the shared unseen-field margin applies on top.
+		// chunk_index 0: a single digit, the same width the floor already assumes,
+		// so only the shared unseen-field margin applies on top.
 		$single_digit_headers = array( EntryHeader::for_db_chunk( 0, 'wp_posts', 10, 5000, 0 ) );
 		$this->assertSame(
-			50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES + $margin,
+			50 + self::FLOOR_DB_CHUNK + $margin,
 			ArchiveManifest::project_payload_bytes( $single_digit_headers )
 		);
 
@@ -480,8 +480,122 @@ final class ArchiveManifestTest extends TestCase {
 		// charge the four digits beyond the single-digit baseline.
 		$five_digit_headers = array( EntryHeader::for_db_chunk( 12345, 'wp_posts', 10, 5000, 0 ) );
 		$this->assertSame(
-			50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES + 4 + $margin,
+			50 + self::FLOOR_DB_CHUNK + 4 + $margin,
 			ArchiveManifest::project_payload_bytes( $five_digit_headers )
+		);
+	}
+
+	/**
+	 * Every kind's structural floor must be exactly what the real encoder
+	 * produces for that kind's most degenerate entry.
+	 *
+	 * The projection now builds each entry's charge up from these floors with no
+	 * cushion above them, so a floor that drifts from the real format is an
+	 * immediate under-count rather than something an inflated baseline would
+	 * absorb. Measured against to_bytes() rather than restated.
+	 *
+	 * @return void
+	 */
+	public function test_per_kind_structural_floors_match_the_real_encoder(): void {
+		$hash = str_repeat( "\x00", Sha256::DIGEST_SIZE );
+
+		$floors = array(
+			'file'      => array( self::FLOOR_FILE, ManifestEntry::for_file( 0, 0, 0, 'a', 0, $hash ) ),
+			'symlink'   => array( self::FLOOR_SYMLINK, ManifestEntry::for_symlink( 0, 0, 0, 'a', 0, $hash ) ),
+			'directory' => array( self::FLOOR_DIRECTORY, ManifestEntry::for_directory( 0, 0, 0, 'a', 0, $hash ) ),
+			'db_chunk'  => array( self::FLOOR_DB_CHUNK, ManifestEntry::for_db_chunk( 0, 0, 0, 0, 0, $hash ) ),
+		);
+
+		foreach ( $floors as $kind => $case ) {
+			[$expected, $entry] = $case;
+
+			$this->assertSame(
+				$expected,
+				strlen( ( new ArchiveManifest( array( $entry ) ) )->to_bytes() ) - 50,
+				sprintf( 'The structural floor of a "%s" entry must be exactly %d bytes.', $kind, $expected )
+			);
+		}
+	}
+
+	/**
+	 * At the worst case the format permits, the projection must sit EXACTLY one
+	 * byte above the real byte count — never under it, and never further over.
+	 *
+	 * Every term is now measured or provably bounded, with no cushion above the
+	 * structural floor, so the two meet as tightly as the arithmetic allows when
+	 * an entry is pushed to the widest values that can actually occur: the
+	 * largest index a 16 MiB manifest can hold, offset and length at
+	 * PHP_INT_MAX, codec_id at its own ceiling.
+	 *
+	 * The single remaining byte is ENTRY_SEPARATOR_BYTES' deliberate uniformity:
+	 * the projection charges one separator per entry, where a manifest of N
+	 * entries carries N-1. That surplus is one byte for the WHOLE manifest, not
+	 * per entry, so it is asserted at two different entry counts here — if it
+	 * ever scaled with N it would be a per-entry over-charge costing real
+	 * entries, which is precisely what this rebase onto per-kind floors set out
+	 * to eliminate.
+	 *
+	 * Anything below zero is the under-count the fix exists to remove; anything
+	 * above one is unexplained slack.
+	 *
+	 * @return void
+	 */
+	public function test_projection_meets_the_real_bytes_exactly_at_the_format_worst_case(): void {
+		$hash  = str_repeat( "\x5a", Sha256::DIGEST_SIZE );
+		$path  = 'wp-content/uploads/2026/07/photo.jpg';
+		$index = self::LARGEST_POSSIBLE_INDEX;
+		$max   = ManifestEntry::MAX_CODEC_ID;
+
+		$cases = array(
+			'file'      => array( EntryHeader::for_file( $path, 1024, 0644, 1690000000, 'image/jpeg', 0 ), ManifestEntry::for_file( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'symlink'   => array( EntryHeader::for_symlink( $path, '/var/www/t', 0 ), ManifestEntry::for_symlink( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'directory' => array( EntryHeader::for_directory( $path, 0755, 0 ), ManifestEntry::for_directory( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'db_chunk'  => array( EntryHeader::for_db_chunk( 999999, 'wp_postmeta', 4000, 6000000, 0 ), ManifestEntry::for_db_chunk( $index, PHP_INT_MAX, PHP_INT_MAX, 999999, $max, $hash ) ),
+		);
+
+		foreach ( $cases as $kind => $case ) {
+			[$header, $entry] = $case;
+
+			foreach ( array( 1, 3 ) as $count ) {
+				$headers = array_fill( 0, $count, $header );
+				$entries = array_fill( 0, $count, $entry );
+
+				$this->assertSame(
+					strlen( ( new ArchiveManifest( $entries ) )->to_bytes() ) + 1,
+					ArchiveManifest::project_payload_bytes( $headers ),
+					sprintf(
+						'The projection for %d "%s" entries must sit exactly one byte above the real bytes at the format\'s worst case.',
+						$count,
+						$kind
+					)
+				);
+			}
+		}
+	}
+
+	/**
+	 * The largest index bound must follow from the format's own structural cap.
+	 *
+	 * MAX_INDEX_DIGITS is derived from this, and with no cushion left above the
+	 * floors it is load-bearing: an entry costs at least its floor plus one
+	 * separator (146 bytes, pinned above), so a payload within MAX_PAYLOAD_SIZE
+	 * cannot hold more entries than that divides into. This pins the derivation
+	 * so a change to the cap or the floor cannot invalidate it silently.
+	 *
+	 * @return void
+	 */
+	public function test_largest_possible_index_follows_from_the_payload_cap(): void {
+		$minimal       = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+		$marginal_cost = strlen( ( new ArchiveManifest( array( $minimal, $minimal ) ) )->to_bytes() )
+			- strlen( ( new ArchiveManifest( array( $minimal ) ) )->to_bytes() );
+		$wrapper       = (int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'ENTRIES_JSON_WRAPPER_BYTES' ) )->getValue();
+		$largest_index = intdiv( ArchiveManifest::MAX_PAYLOAD_SIZE - $wrapper, $marginal_cost ) - 1;
+
+		$this->assertSame( self::LARGEST_POSSIBLE_INDEX, $largest_index, 'The largest structurally possible index must match the pinned value.' );
+		$this->assertSame(
+			strlen( (string) $largest_index ),
+			(int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_INDEX_DIGITS' ) )->getValue(),
+			'MAX_INDEX_DIGITS must equal the digit width of the largest structurally possible index.'
 		);
 	}
 
@@ -498,20 +612,57 @@ final class ArchiveManifestTest extends TestCase {
 	 * see on an EntryHeader:
 	 *
 	 *   entry separator (the `,` between entries)                     =  1
-	 *   index    — bounded at MAX_INDEX_DIGITS (5), less the 1 digit
-	 *              MIN_ENTRY_PAYLOAD_BYTES already assumes             =  4
-	 *   codec_id — bounded at MAX_CODEC_ID_DIGITS (5), same less-one    =  4
-	 *   offset   — MAX_INT_DIGITS (19), same less-one                   = 18
-	 *   length   — MAX_INT_DIGITS (19), same less-one                   = 18
-	 *                                                                   ----
-	 *                                                                     45
+	 *   index    — bounded at MAX_INDEX_DIGITS (6), less the 1 digit each
+	 *              kind's structural floor already assumes               =  5
+	 *   codec_id — bounded at MAX_CODEC_ID_DIGITS (5), same less-one     =  4
+	 *   offset   — MAX_INT_DIGITS (19), same less-one                    = 18
+	 *   length   — MAX_INT_DIGITS (19), same less-one                    = 18
+	 *                                                                    ----
+	 *                                                                      46
 	 *
 	 * A deliberate change to any of those constants must update this literal;
 	 * that failure is the point.
 	 *
 	 * @var int
 	 */
-	private const EXPECTED_UNSEEN_MARGIN = 45;
+	private const EXPECTED_UNSEEN_MARGIN = 46;
+
+	/**
+	 * Structural floor of a `file` manifest entry, pinned independently of the
+	 * class's own constant so the two cannot drift together.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_FILE = 145;
+
+	/**
+	 * Structural floor of a `symlink` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_SYMLINK = 148;
+
+	/**
+	 * Structural floor of a `directory` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_DIRECTORY = 150;
+
+	/**
+	 * Structural floor of a `db_chunk` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_DB_CHUNK = 154;
+
+	/**
+	 * The largest index an entry can carry in a manifest that fits the format's
+	 * 16 MiB payload cap, at the true 146-byte marginal cost per entry.
+	 *
+	 * @var int
+	 */
+	private const LARGEST_POSSIBLE_INDEX = 114911;
 
 	/**
 	 * MAX_CODEC_ID_DIGITS must stay pinned to the real digit width of
@@ -528,37 +679,6 @@ final class ArchiveManifestTest extends TestCase {
 			strlen( (string) ManifestEntry::MAX_CODEC_ID ),
 			(int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_CODEC_ID_DIGITS' ) )->getValue(),
 			'MAX_CODEC_ID_DIGITS must equal the digit width of ManifestEntry::MAX_CODEC_ID.'
-		);
-	}
-
-	/**
-	 * MAX_INDEX_DIGITS must genuinely bound the largest index any export the
-	 * guard approves can reach.
-	 *
-	 * The bound is derived, not assumed: project_payload_bytes() charges every
-	 * entry at least MIN_ENTRY_PAYLOAD_BYTES, so an approved projection (one at
-	 * or below MAX_PAYLOAD_SIZE) cannot span more entries than the framing
-	 * budget divided by that floor. This pins the derivation so a change to
-	 * either constant cannot silently invalidate it.
-	 *
-	 * @return void
-	 */
-	public function test_max_index_digits_bounds_every_approvable_entry_count(): void {
-		$framing_budget = ArchiveManifest::MAX_PAYLOAD_SIZE
-			- ArchiveManifest::HEADER_SIZE
-			- (int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'ENTRIES_JSON_WRAPPER_BYTES' ) )->getValue();
-
-		$max_entries = intdiv( $framing_budget, ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES );
-		$max_index   = $max_entries - 1;
-
-		$this->assertSame(
-			strlen( (string) $max_index ),
-			(int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_INDEX_DIGITS' ) )->getValue(),
-			sprintf(
-				'MAX_INDEX_DIGITS must cover the largest approvable index (%d entries, largest index %d).',
-				$max_entries,
-				$max_index
-			)
 		);
 	}
 
@@ -731,9 +851,9 @@ final class ArchiveManifestTest extends TestCase {
 			'file at a 7e12 offset (a real multi-terabyte archive)' => array( 'file', $path, 75000, 7000000000000, 104857600, 1 ),
 			'directory at a 7e12 offset (the narrowest margin of the three)' => array( 'directory', $path, 75000, 7000000000000, 137, 0 ),
 			'symlink at a 7e12 offset' => array( 'symlink', $path, 75000, 7000000000000, 166, 0 ),
-			'file with everything at PHP_INT_MAX and codec_id maxed' => array( 'file', $path, PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
-			'directory with everything at PHP_INT_MAX and codec_id maxed' => array( 'directory', $path, PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
-			'symlink with everything at PHP_INT_MAX and codec_id maxed' => array( 'symlink', $path, PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'file at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'file', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'directory at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'directory', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'symlink at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'symlink', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
 			'file whose path needs JSON escaping, at a large offset' => array( 'file', 'wp-content/uploads/say "hello"\\here.jpg', 75000, 7000000000000, 104857600, 1 ),
 		);
 	}
@@ -784,7 +904,7 @@ final class ArchiveManifestTest extends TestCase {
 		return array(
 			'offset around 2e9 (a real multi-gigabyte archive)'                        => array( 50000, 2000000000, 6000000, 12345, 1 ),
 			'offset around 9e11 (a real multi-hundred-gigabyte archive)'                => array( 90000, 900000000000, 6000000, 45000, 1 ),
-			'index, offset and length all at PHP_INT_MAX, chunk_index and codec_id maxed' => array( PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, 999999, ManifestEntry::MAX_CODEC_ID ),
+			'largest possible index, offset and length at PHP_INT_MAX, chunk_index and codec_id maxed' => array( self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, 999999, ManifestEntry::MAX_CODEC_ID ),
 		);
 	}
 
