@@ -148,6 +148,18 @@ final class ArchiveReader {
 	private int $memory_limit_bytes;
 
 	/**
+	 * Asks the runtime for more memory; a no-op where nothing can grant it.
+	 *
+	 * Injected so the archive layer stays free of WordPress symbols and the unit
+	 * suite can drive both outcomes deterministically. The default asks
+	 * wp_raise_memory_limit() when WordPress is loaded and does nothing when it is
+	 * not — a plain script has no policy to consult and no reviewer to satisfy.
+	 *
+	 * @var callable
+	 */
+	private $raise_memory_limit;
+
+	/**
 	 * The parsed Header, populated eagerly at construction time.
 	 *
 	 * @var Header
@@ -200,11 +212,12 @@ final class ArchiveReader {
 	 * readers when the stream is too short, when a seek fails, or when
 	 * the bytes do not parse as a valid Header or Footer.
 	 *
-	 * @param resource $source             A readable, seekable stream resource.
-	 * @param int|null $memory_limit_bytes The runtime PHP memory limit in bytes (null or non-positive for unlimited, matching {@see \Pontifex\Restore\RestoreRunner}'s convention). When set, a manifest whose decode would not fit is refused rather than allowed to fatal.
+	 * @param resource      $source             A readable, seekable stream resource.
+	 * @param int|null      $memory_limit_bytes The runtime PHP memory limit in bytes (null or non-positive for unlimited, matching {@see \Pontifex\Restore\RestoreRunner}'s convention). When set, a manifest whose decode would not fit is refused rather than allowed to fatal.
+	 * @param callable|null $raise_memory_limit Optional. Asks the runtime for more memory when a decode needs it; null uses WordPress's own wp_raise_memory_limit() where WordPress is loaded, and does nothing where it is not.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
 	 */
-	public function __construct( $source, ?int $memory_limit_bytes = null ) {
+	public function __construct( $source, ?int $memory_limit_bytes = null, ?callable $raise_memory_limit = null ) {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'ArchiveReader: $source must be a valid stream resource.' );
 		}
@@ -217,6 +230,11 @@ final class ArchiveReader {
 
 		$this->source             = $source;
 		$this->memory_limit_bytes = ( null !== $memory_limit_bytes && 0 < $memory_limit_bytes ) ? $memory_limit_bytes : 0;
+		$this->raise_memory_limit = $raise_memory_limit ?? static function (): void {
+			if ( function_exists( 'wp_raise_memory_limit' ) ) {
+				wp_raise_memory_limit( 'admin' );
+			}
+		};
 		$this->header             = $this->read_header();
 		// A signed archive ends with a 100-byte signature block; read it first so
 		// the footer is then located 64 bytes before it rather than at end of file.
@@ -629,18 +647,20 @@ final class ArchiveReader {
 		// process that already has a higher ceiling it would come out LOWER, and
 		// applying it would shrink the very budget being protected.
 		//
-		// function_exists() first: a host that lists ini_set in disable_functions
-		// — precisely the locked-down shared hosting this guard exists for —
-		// makes the call throw Error ("Call to undefined function"), which the
-		// silencing operator does NOT suppress.
+		// The raise goes through WordPress rather than ini_set. Changing server
+		// configuration from a plugin is the thing the platform tells plugins not
+		// to do, and a directory review flags a bare ini_set on sight;
+		// wp_raise_memory_limit() is the sanctioned route and respects the site's
+		// own WP_MAX_MEMORY_LIMIT policy rather than overriding it. WordPress
+		// decides how far to raise, so RAISE_MEMORY_FACTOR no longer sets a target
+		// — it decides only WHETHER more headroom is worth asking for.
 		$target = memory_get_usage( true ) + ( $length * self::RAISE_MEMORY_FACTOR );
-		if ( $target > $applied && function_exists( 'ini_set' ) ) {
-			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed,WordPress.PHP.NoSilencedErrors.Discouraged -- WPCS points at wp_raise_memory_limit(), but the archive layer is deliberately WordPress-free (decisions D6/D8) and is exercised by unit tests with no WordPress loaded. Raising this request's own ceiling is the alternative to an uncatchable fatal that skips safety-archive recovery, lock release and job cleanup; a host that forbids the change is handled by re-reading the applied value below, not by a warning.
-			@ini_set( 'memory_limit', (string) $target );
+		if ( $target > $applied ) {
+			( $this->raise_memory_limit )();
 
-			// Re-read rather than trusting the setter: ini_set reports success
-			// even where a host clamps or forbids the change, so the applied
-			// value is the only truth worth acting on.
+			// Re-read rather than trusting the raiser: a host may forbid the change
+			// outright or clamp it, and WordPress caps at its own configured
+			// ceiling, so the applied value is the only truth worth acting on.
 			$applied = $this->applied_memory_limit_bytes();
 			if ( 0 === $applied ) {
 				return;
