@@ -126,15 +126,25 @@ final class ScaleRoundTripTest extends TestCase {
 	 * Build a RestoreRunner wired for a read-only verify() pass under the
 	 * given limits.
 	 *
-	 * @param ArchiveLimits $limits The limits to enforce.
+	 * $memory_limit_bytes is a required, not optional, parameter deliberately:
+	 * RestoreRunner treats a null/0 value as "unlimited" and switches its own
+	 * per-entry decode budget AND the ArchiveReader memory guard it opens off
+	 * entirely (see both classes' constructors) — exactly the silent gap this
+	 * helper used to have, at exactly the two entry counts (60,000 and 90,000)
+	 * where that guard matters most. Forcing every caller to pass a real value
+	 * means a future call site cannot reintroduce the gap by omission.
+	 *
+	 * @param ArchiveLimits $limits             The limits to enforce.
+	 * @param int           $memory_limit_bytes The runtime PHP memory limit in bytes the guard should reckon against; must be a real, positive value — see the two callers' docblocks for why each chooses the number it does.
 	 * @return RestoreRunner Ready to call verify() on.
 	 */
-	private function make_verifying_runner( ArchiveLimits $limits ): RestoreRunner {
+	private function make_verifying_runner( ArchiveLimits $limits, int $memory_limit_bytes ): RestoreRunner {
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
 			new FileWriter( sys_get_temp_dir() ),
 			new DatabaseWriter( new FakeDbAdapter() ),
-			$limits
+			$limits,
+			$memory_limit_bytes
 		);
 	}
 
@@ -152,11 +162,30 @@ final class ScaleRoundTripTest extends TestCase {
 	 * this manifest is megabytes, so a single fread() call genuinely needs
 	 * more than that. A fresh process has never loaded Patchwork.
 	 *
+	 * The memory limit passed to make_verifying_runner() is 512 MiB — this
+	 * test does not override phpunit.xml.dist's ambient memory_limit ini
+	 * setting, so 512 MiB is the real ceiling this process is actually
+	 * running under; passing it through (rather than null/unlimited, as this
+	 * test used to) makes both RestoreRunner's own per-entry decode budget
+	 * and the ArchiveReader memory guard it opens genuinely compute their
+	 * real thresholds against a real archive of this size, instead of being
+	 * skipped outright. It is not tightened further to force a refusal: the
+	 * guard's REFUSAL_MEMORY_FACTOR (3x the declared ~11 MB manifest, about
+	 * 33 MB) sits far below any memory_limit a host running a 60,000-entry
+	 * restore could plausibly have, so a boundary case belongs with
+	 * ArchiveReaderTest's own memory-guard tests (which exercise the guard
+	 * in isolation, deterministically, without needing a real decode this
+	 * large to succeed at a deliberately tight ceiling) rather than here.
+	 *
 	 * @return void
 	 */
 	#[RunInSeparateProcess]
 	public function test_sixty_thousand_entries_refused_under_old_ceiling_recovered_under_new(): void {
 		$this->write_flat_path_archive( 60000 );
+
+		// Matches phpunit.xml.dist's ambient memory_limit ini setting for this
+		// (not process-overridden) test.
+		$memory_limit_bytes = 512 * 1024 * 1024;
 
 		$old_ceiling_limits = new ArchiveLimits( 50000, 2147483648, 100, 1099511627776 );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the fixture archive back from its real temp file.
@@ -167,7 +196,7 @@ final class ScaleRoundTripTest extends TestCase {
 		// report the thing it exists to check.
 		$thrown = null;
 		try {
-			$this->make_verifying_runner( $old_ceiling_limits )->verify( $stream );
+			$this->make_verifying_runner( $old_ceiling_limits, $memory_limit_bytes )->verify( $stream );
 		} catch ( RuntimeException $e ) {
 			$thrown = $e;
 		}
@@ -184,7 +213,7 @@ final class ScaleRoundTripTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the fixture archive back from its real temp file, fresh for the second pass.
 		$stream         = fopen( $this->archive_path, 'rb' );
 		$verified_count = 0;
-		$this->make_verifying_runner( $raised_ceiling_limits )->verify(
+		$this->make_verifying_runner( $raised_ceiling_limits, $memory_limit_bytes )->verify(
 			$stream,
 			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- The closure must match RestoreRunner::verify()'s `( int $done, int $total ): void` progress-callback contract; only the running count is needed here.
 			static function ( int $done, int $total ) use ( &$verified_count ): void {
@@ -209,6 +238,25 @@ final class ScaleRoundTripTest extends TestCase {
 	 * relying on phpunit.xml.dist's default and letting a future, larger
 	 * scale test fatal without explanation.
 	 *
+	 * That explicit 768 MiB is now also what make_verifying_runner() is told
+	 * the runtime limit is — this test used to pass no memory limit through
+	 * to RestoreRunner at all, which switched off both RestoreRunner's own
+	 * per-entry decode budget and the ArchiveReader memory guard it opens,
+	 * at exactly the scale (90,000 entries, a ~15 MB manifest) where either
+	 * could plausibly matter. Passed through, both genuinely compute their
+	 * thresholds against the same real ini_set() ceiling this process is
+	 * actually running under, rather than being skipped outright. As with
+	 * the 60,000-entry test above, it is not tightened further to force a
+	 * refusal: REFUSAL_MEMORY_FACTOR's 3x on a ~15 MB manifest is about 45
+	 * MB, far below any memory_limit a host running a 90,000-entry restore
+	 * could plausibly have, and forcing that boundary here would mean either
+	 * an artificial ini value disconnected from anything a real deployment
+	 * would run this at, or a genuine risk of the real 90,000-entry decode
+	 * this test's own job is to prove succeeds instead fatalling for real —
+	 * ArchiveReaderTest's own memory-guard tests already cover that boundary
+	 * deterministically, without needing a decode this large to also succeed
+	 * under a deliberately tight ceiling.
+	 *
 	 * @return void
 	 */
 	#[RunInSeparateProcess]
@@ -219,10 +267,12 @@ final class ScaleRoundTripTest extends TestCase {
 		$this->write_flat_path_archive( 90000 );
 
 		$limits = ArchiveLimits::defaults();
+		// Matches the ini_set('memory_limit', '768M') just above.
+		$memory_limit_bytes = 768 * 1024 * 1024;
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the fixture archive back from its real temp file.
 		$stream         = fopen( $this->archive_path, 'rb' );
 		$verified_count = 0;
-		$this->make_verifying_runner( $limits )->verify(
+		$this->make_verifying_runner( $limits, $memory_limit_bytes )->verify(
 			$stream,
 			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- The closure must match RestoreRunner::verify()'s `( int $done, int $total ): void` progress-callback contract; only the running count is needed here.
 			static function ( int $done, int $total ) use ( &$verified_count ): void {

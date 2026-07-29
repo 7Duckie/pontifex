@@ -121,6 +121,13 @@ final class ArchiveManifest {
 	 * is defence in depth for exactly that case, catching it once the (by
 	 * then unavoidable) decode has already happened.
 	 *
+	 * {@see self::project_payload_bytes()} uses this constant as a starting
+	 * baseline only, not as the final per-entry charge: it layers a measured
+	 * (not assumed) path-encoding term on top for path-bearing entries, and a
+	 * measured chunk_index digit width plus a provable numeric-field margin
+	 * on top for db_chunk entries, so that method's own guarantee holds
+	 * regardless of path content or archive size.
+	 *
 	 * @var int
 	 */
 	public const MIN_ENTRY_PAYLOAD_BYTES = 169;
@@ -137,6 +144,51 @@ final class ArchiveManifest {
 	 * @var int
 	 */
 	private const ENTRIES_JSON_WRAPPER_BYTES = 14;
+
+	/**
+	 * JSON-encoded byte length of the shortest possible path value: the two
+	 * quote characters plus one unescaped character, e.g. `"a"`.
+	 *
+	 * MIN_ENTRY_PAYLOAD_BYTES already assumes exactly this text cost for a
+	 * path-bearing entry's path field (see its own docblock: "a 1-character
+	 * path"). {@see self::project_payload_bytes()} swaps that assumption for
+	 * a path's real canonical-JSON-encoded length (quotes and any escaping
+	 * included), so it must subtract this constant — not the raw 1-character
+	 * count — to avoid double-charging the two quote bytes that were already
+	 * folded into MIN_ENTRY_PAYLOAD_BYTES.
+	 *
+	 * @var int
+	 */
+	private const MINIMAL_PATH_JSON_BYTES = 3;
+
+	/**
+	 * Decimal digit width of PHP_INT_MAX (9,223,372,036,854,775,807) on the
+	 * 64-bit builds this project targets.
+	 *
+	 * Used by {@see self::project_payload_bytes()} as a provable — not
+	 * heuristic — upper bound on how many digits a manifest numeric field can
+	 * ever contribute once JSON-encoded: no int PHP can hold encodes to more
+	 * digits than this, regardless of how large a real archive grows.
+	 *
+	 * @var int
+	 */
+	private const MAX_INT_DIGITS = 19;
+
+	/**
+	 * Count of a db_chunk manifest entry's numeric fields that this
+	 * projection cannot see before the entry is written: index, offset, and
+	 * length.
+	 *
+	 * None of the three live on EntryHeader — offset and length are only
+	 * known once the entry's real encoded size and position in the finished
+	 * archive exist, and index is likewise assigned only once the entry is
+	 * actually appended. (chunk_index is different: EntryHeader::for_db_chunk()
+	 * always carries it, so {@see self::project_payload_bytes()} charges its
+	 * real digit width exactly instead of guessing at it too.)
+	 *
+	 * @var int
+	 */
+	private const DB_CHUNK_UNSEEN_NUMERIC_FIELDS = 3;
 
 	/**
 	 * Maximum nesting depth when decoding the canonical-JSON payload (PHP's default).
@@ -212,37 +264,108 @@ final class ArchiveManifest {
 	 * Project the manifest payload size an export of these entries would produce.
 	 *
 	 * Computed from the entries' real identifiers (paths for file/directory/
-	 * symlink entries, a flat estimate for db_chunk entries, which carry no
+	 * symlink entries, the chunk_index for db_chunk entries, which carry no
 	 * path) rather than from entry count alone, because the byte cost moves
-	 * with path depth: a deep-path archive fills MAX_PAYLOAD_SIZE at far
-	 * fewer entries than a flat-path one. Every path-bearing entry is
-	 * estimated at (MIN_ENTRY_PAYLOAD_BYTES - 1) bytes of fixed overhead plus
-	 * its real path length — MIN_ENTRY_PAYLOAD_BYTES already assumes a
-	 * 1-character path, so the "- 1" swaps that assumed character for the
-	 * real one being added. A db_chunk entry (no path) is estimated flat at
-	 * MIN_ENTRY_PAYLOAD_BYTES, comfortably above its real measured cost
-	 * (roughly 155-165 bytes), keeping the estimate conservative rather than
-	 * an under-count.
+	 * with both path depth and how many digits an entry's numeric fields
+	 * print as: a deep-path archive fills MAX_PAYLOAD_SIZE at far fewer
+	 * entries than a flat-path one, and a large archive's own offsets need
+	 * more digits than a small one's.
+	 *
+	 * Every path-bearing entry is charged (MIN_ENTRY_PAYLOAD_BYTES -
+	 * MINIMAL_PATH_JSON_BYTES) bytes of fixed overhead plus the path's own
+	 * canonical-JSON-encoded length, quotes included — MINIMAL_PATH_JSON_BYTES
+	 * is exactly what MIN_ENTRY_PAYLOAD_BYTES already assumes for a
+	 * 1-character path (`"a"`), so the subtraction swaps that assumption for
+	 * the path's real encoded byte count, measured with
+	 * {@see self::JSON_ENCODE_FLAGS} (the same flags the manifest itself
+	 * encodes with) rather than approximated with strlen() on the raw path.
+	 * The two differ whenever the path contains a byte JSON must escape — a
+	 * `"`, a `\`, a control character, or a U+2028/U+2029 line separator are
+	 * all legal POSIX filename bytes that cost more than one byte once
+	 * escaped, so measuring the encoded form (not the raw one) is what makes
+	 * this exact rather than approximate.
+	 *
+	 * A db_chunk entry carries no path. Its chunk_index is known from the
+	 * header, so — the same swap-the-assumed-digit approach as the path
+	 * term — its real digit width is charged exactly in place of the single
+	 * digit MIN_ENTRY_PAYLOAD_BYTES assumes. Its other three manifest-only
+	 * numeric fields (index, offset, length; see
+	 * DB_CHUNK_UNSEEN_NUMERIC_FIELDS) are not knowable at all from an
+	 * EntryHeader, so each is instead charged a fixed margin at
+	 * MAX_INT_DIGITS — the most digits any PHP int can ever print as. That
+	 * margin is a proven bound, not a guess, so the projection stays an
+	 * over-estimate at any archive size, right up to PHP's own integer
+	 * ceiling; the trade-off is a markedly higher flat cost per db_chunk
+	 * entry than the pre-fix estimate assumed.
 	 *
 	 * Lets a caller (the export engine) refuse an oversized backup BEFORE
 	 * writing a single byte, rather than discovering only after a
 	 * multi-hour export completes that the reader will refuse the result.
 	 *
 	 * @param iterable<int, EntryHeader> $entry_headers The archive's entry headers, in the order they will be written.
-	 * @return int The projected manifest payload size in bytes (never an under-estimate against real writer output, validated empirically).
+	 * @return int The projected manifest payload size in bytes. Proven never an under-estimate against real writer output: the path term now measures the real JSON-encoded length instead of assuming no byte needs escaping, and the db_chunk term charges chunk_index exactly plus a provable worst-case margin for the three numeric fields an EntryHeader cannot carry — see {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest} for the empirical proof, including at PHP_INT_MAX.
+	 * @throws JsonException If a path cannot be JSON-encoded (e.g. it contains invalid UTF-8 byte sequences) — the same failure the real manifest encoder would hit later, surfaced here instead, before a single byte has been written.
+	 * @throws InvalidArgumentException If a db_chunk header is somehow missing its chunk_index (structurally unreachable: EntryHeader::for_db_chunk() always sets it).
 	 */
 	public static function project_payload_bytes( iterable $entry_headers ): int {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		$total = self::HEADER_SIZE + self::ENTRIES_JSON_WRAPPER_BYTES;
 
 		foreach ( $entry_headers as $header ) {
-			$path   = $header->path();
-			$total += null !== $path
-				? ( self::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( $path ) )
-				: self::MIN_ENTRY_PAYLOAD_BYTES;
+			$path = $header->path();
+
+			if ( null !== $path ) {
+				$total += self::MIN_ENTRY_PAYLOAD_BYTES - self::MINIMAL_PATH_JSON_BYTES + strlen( self::encode_json_string( $path ) );
+				continue;
+			}
+
+			$chunk_index = self::require_db_chunk_index( $header );
+
+			$total += self::MIN_ENTRY_PAYLOAD_BYTES
+				+ ( strlen( (string) $chunk_index ) - 1 )
+				+ self::DB_CHUNK_UNSEEN_NUMERIC_FIELDS * ( self::MAX_INT_DIGITS - 1 );
 		}
 
 		return $total;
+	}
+
+	/**
+	 * Extract a db_chunk header's chunk_index, which is guaranteed non-null by construction.
+	 *
+	 * EntryHeader::for_db_chunk() takes chunk_index as a required, non-nullable
+	 * constructor argument, so a null here is structurally unreachable for a
+	 * genuine db_chunk header — this guards it explicitly anyway rather than
+	 * silently trusting that invariant, and gives the caller a concrete int
+	 * instead of the property's own nullable type.
+	 *
+	 * @param EntryHeader $header A db_chunk-kind header (one whose path() is null).
+	 * @return int The chunk_index.
+	 * @throws InvalidArgumentException If chunk_index is unexpectedly null.
+	 */
+	private static function require_db_chunk_index( EntryHeader $header ): int {
+		$chunk_index = $header->chunk_index();
+		if ( null === $chunk_index ) {
+			throw new InvalidArgumentException( 'ArchiveManifest::project_payload_bytes: a database-chunk header must carry a chunk_index.' );
+		}
+		return $chunk_index;
+	}
+
+	/**
+	 * Encode a single string value exactly as the manifest's own JSON encoder would.
+	 *
+	 * Used by {@see self::project_payload_bytes()} to measure a path's real
+	 * encoded byte length (quotes and any escaping included) instead of
+	 * assuming its raw strlen(). Kept as its own method so that measurement
+	 * uses the identical flags {@see self::encode_canonical_json()} does,
+	 * rather than a second, potentially-drifting copy of them.
+	 *
+	 * @param string $value The raw string value (e.g. a path) to encode.
+	 * @return string The value's canonical JSON encoding, including its surrounding quotes.
+	 * @throws JsonException If the value cannot be encoded (e.g. invalid UTF-8 byte sequences).
+	 */
+	private static function encode_json_string( string $value ): string {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- Deterministic byte output required to match the manifest's own encoder exactly; wp_json_encode wraps json_encode without adding anything needed here, and depends on WordPress being loaded.
+		return json_encode( $value, self::JSON_ENCODE_FLAGS );
 	}
 
 	/**

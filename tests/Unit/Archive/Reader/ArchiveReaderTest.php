@@ -101,6 +101,53 @@ final class ArchiveReaderTest extends TestCase {
 	}
 
 	/**
+	 * Build a real archive with a genuinely multi-megabyte manifest and return a
+	 * stream positioned at offset 0, plus the entry count actually written.
+	 *
+	 * Unlike {@see self::build_sample_archive_stream()}'s ~50-byte empty manifest,
+	 * this exercises the memory guard against a real decode of meaningful size: raw
+	 * codec and 1-byte payloads keep the write itself fast (well under a second for
+	 * 8,000 entries), while the long, realistic-looking paths alone push the
+	 * manifest past 2 MB.
+	 *
+	 * @return array{0: resource, 1: int} The archive stream and the entry count it contains.
+	 */
+	private static function build_large_manifest_archive_stream(): array {
+		$entry_count = 8000;
+		$plans       = array();
+		for ( $i = 0; $i < $entry_count; $i++ ) {
+			$path    = sprintf( 'wp-content/uploads/2026/07/deeply/nested/path/file-%06d-with-a-reasonably-descriptive-name.jpg', $i );
+			$plans[] = new EntryPlan(
+				EntryHeader::for_file( $path, 1, 0644, 1700000000, 'image/jpeg', 0 ),
+				RawCodec::ID,
+				str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+				self::memory_stream_with( 'x' )
+			);
+		}
+
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( self::sample_provenance(), $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		return array( $dest, $entry_count );
+	}
+
+	/**
+	 * Open a php://memory stream pre-filled with the given contents, rewound to offset 0.
+	 *
+	 * @param string $contents The bytes to seed the stream with.
+	 * @return resource A readable, seekable stream.
+	 */
+	private static function memory_stream_with( string $contents ) {
+		$stream = self::memory_stream();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $stream );
+		return $stream;
+	}
+
+	/**
 	 * Wrap arbitrary bytes in a seekable in-memory stream.
 	 *
 	 * @param string $bytes The bytes to wrap.
@@ -622,12 +669,21 @@ final class ArchiveReaderTest extends TestCase {
 	 * A real fixture archive read under a generous ceiling must open exactly
 	 * as it does with no limit supplied at all.
 	 *
+	 * Deliberately a genuinely multi-megabyte manifest (~2 MB from 8,000
+	 * entries), not the ~50-byte empty fixture the rest of this file uses:
+	 * an empty manifest would pass this assertion whether the guard exists,
+	 * over-refuses, or was deleted outright, so it could never actually catch
+	 * an over-eager refusal. A real decode of meaningful size is the only way
+	 * this half of the pair means anything.
+	 *
 	 * @return void
 	 */
 	public function test_memory_guard_permits_an_archive_that_fits(): void {
-		$reader = new ArchiveReader( self::build_sample_archive_stream(), 268435456 );
+		list( $stream, $entry_count ) = self::build_large_manifest_archive_stream();
 
-		$this->assertSame( 0, $reader->manifest()->entry_count() );
+		$reader = new ArchiveReader( $stream, 268435456 );
+
+		$this->assertSame( $entry_count, $reader->manifest()->entry_count() );
 	}
 
 	/**
@@ -719,11 +775,51 @@ final class ArchiveReaderTest extends TestCase {
 	 * non-positive value; the reader must then skip the check rather than
 	 * compute headroom against a meaningless ceiling.
 	 *
+	 * The ~50-byte empty fixture this test used to read cannot tell "skipped
+	 * because unlimited" apart from "checked, and passed anyway" — at that
+	 * size the raise-or-refuse logic would always pass regardless, so the
+	 * assertion held whether or not the skip branch existed. Proving the
+	 * branch itself fires needs two things a real decode cannot give
+	 * deterministically: a genuinely multi-megabyte declared length (fed
+	 * directly to the guard method, exactly as
+	 * {@see self::test_a_decode_within_the_refusal_threshold_still_raises_the_limit()}
+	 * already does, rather than physically built — a real decode that size
+	 * would risk a genuine out-of-memory fatal under the tight ini limit this
+	 * test sets, which has nothing to do with what is under test here), and a
+	 * process-isolated, explicitly finite ambient memory_limit the guard
+	 * would otherwise have to reckon with. Under that finite limit, 25 MB
+	 * declared * REFUSAL_MEMORY_FACTOR (3) is 75 MB, comfortably past the 64
+	 * MB just set — exactly the shape that would force a raise attempt (and
+	 * therefore an ini_set call) were the "unlimited" skip not the first
+	 * thing the guard checks. The skip branch's true signature is that it
+	 * returns before doing anything at all, so memory_limit itself staying
+	 * byte-for-byte unchanged is the tightest possible proof it ran — a
+	 * "no exception was thrown" assertion alone would not catch a mutation
+	 * that fell through to the raise logic and simply succeeded at raising,
+	 * since an unrestricted test process lets ini_set succeed either way.
+	 *
 	 * @return void
 	 */
+	#[RunInSeparateProcess]
 	public function test_memory_guard_skipped_when_memory_is_unlimited(): void {
-		$reader = new ArchiveReader( self::build_sample_archive_stream(), -1 );
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] provides; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
+		ini_set( 'memory_limit', '64M' );
 
+		$reader = new ArchiveReader( self::build_sample_archive_stream(), -1 );
+		$guard  = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
+
+		// A genuinely multi-megabyte declared length: 25 MB * REFUSAL_MEMORY_FACTOR
+		// would need 75 MB against the 64 MB just set, so only the unlimited skip
+		// — not luck, not a harmless raise — can explain a clean return here.
+		$guard->invoke( $reader, 25000000 );
+
+		$this->assertSame(
+			'64M',
+			ini_get( 'memory_limit' ),
+			'An unlimited memory_limit_bytes must skip the guard before it ever inspects, let alone tries to raise, the real ini limit.'
+		);
+
+		// The public path must still behave correctly for a real manifest too.
 		$this->assertSame( 0, $reader->manifest()->entry_count() );
 	}
 }

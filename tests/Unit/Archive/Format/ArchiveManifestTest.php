@@ -448,15 +448,36 @@ final class ArchiveManifestTest extends TestCase {
 	}
 
 	/**
-	 * The project_payload_bytes() method must charge a flat MIN_ENTRY_PAYLOAD_BYTES
-	 * for a db_chunk entry, which carries no path.
+	 * The project_payload_bytes() method must charge a db_chunk entry
+	 * MIN_ENTRY_PAYLOAD_BYTES plus its chunk_index's own real digit width
+	 * (known from the header) plus a fixed margin for the three numeric
+	 * fields (index, offset, length) the header cannot carry at all —
+	 * no longer a flat MIN_ENTRY_PAYLOAD_BYTES regardless of chunk_index, now
+	 * that db_chunk digit growth is measured exactly where it can be and
+	 * margined honestly where it cannot (see {@see ArchiveManifest::project_payload_bytes()}).
 	 *
 	 * @return void
 	 */
-	public function test_project_payload_bytes_charges_flat_estimate_for_db_chunk(): void {
-		$headers = array( EntryHeader::for_db_chunk( 0, 'wp_posts', 10, 5000, 0 ) );
+	public function test_project_payload_bytes_charges_measured_estimate_for_db_chunk(): void {
+		$max_int_digits             = ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_INT_DIGITS' ) )->getValue();
+		$unseen_numeric_field_count = ( new \ReflectionClassConstant( ArchiveManifest::class, 'DB_CHUNK_UNSEEN_NUMERIC_FIELDS' ) )->getValue();
+		$fixed_margin               = $unseen_numeric_field_count * ( $max_int_digits - 1 );
 
-		$this->assertSame( 50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES, ArchiveManifest::project_payload_bytes( $headers ) );
+		// chunk_index 0: a single digit, the same width MIN_ENTRY_PAYLOAD_BYTES
+		// already assumes, so only the fixed unseen-field margin applies on top.
+		$single_digit_headers = array( EntryHeader::for_db_chunk( 0, 'wp_posts', 10, 5000, 0 ) );
+		$this->assertSame(
+			50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES + $fixed_margin,
+			ArchiveManifest::project_payload_bytes( $single_digit_headers )
+		);
+
+		// chunk_index 12345: five digits, so the projection must additionally
+		// charge the four digits beyond the single-digit baseline.
+		$five_digit_headers = array( EntryHeader::for_db_chunk( 12345, 'wp_posts', 10, 5000, 0 ) );
+		$this->assertSame(
+			50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES + 4 + $fixed_margin,
+			ArchiveManifest::project_payload_bytes( $five_digit_headers )
+		);
 	}
 
 	/**
@@ -464,8 +485,31 @@ final class ArchiveManifestTest extends TestCase {
 	 * ArchiveWriter output — it is the whole point of the projection (§Part 3
 	 * of the entry-count-ceiling fix): a projection that could fall short
 	 * would let a doomed-to-be-unreadable export slip past the pre-write
-	 * refusal. Compares the projection against a real archive built by
-	 * ArchiveWriter over EntryHeaders with the same identifiers.
+	 * refusal.
+	 *
+	 * Two phases, because one technique cannot honestly cover every shape:
+	 *
+	 *  - Phase 1 compares the projection against a REAL archive built by
+	 *    ArchiveWriter over a deliberately varied plan list — not just the
+	 *    200 flat-path files this test used to check alone (the most
+	 *    favourable shape possible: no escaping, no digit growth, small
+	 *    offsets), but a directory, a symlink, a db_chunk, a path needing
+	 *    JSON escaping, and a non-ASCII path too, so a regression in any one
+	 *    of the fixed causes (JSON escaping, db_chunk digit growth) would
+	 *    actually be caught here.
+	 *  - Phase 2 proves the db_chunk term at realistically large offsets —
+	 *    2e9 and 9e11, the exact magnitudes a large real backup reaches —
+	 *    plus the theoretical worst case a PHP int can ever hold
+	 *    (PHP_INT_MAX for index/offset/length, together with chunk_index and
+	 *    codec_id both at their own real maximums). Physically writing
+	 *    terabytes through ArchiveWriter to reach those offsets for real is
+	 *    not practical in a unit test, so this phase constructs a real
+	 *    ManifestEntry with the chosen field values directly and calls
+	 *    to_bytes() — the exact same encoder
+	 *    {@see \Pontifex\Archive\Writer\IncrementalArchiveWriter::finish()}
+	 *    calls to serialise the real manifest, so the byte count is exactly
+	 *    what the real writer would have produced for those field values,
+	 *    not an approximation of it.
 	 *
 	 * @return void
 	 */
@@ -474,6 +518,11 @@ final class ArchiveManifestTest extends TestCase {
 		for ( $i = 0; $i < 200; $i++ ) {
 			$plans[] = self::real_file_plan( sprintf( 'wp-content/uploads/2026/07/file-%04d.jpg', $i ), 'x' );
 		}
+		$plans[] = self::real_directory_plan( 'wp-content/uploads/2026/07' );
+		$plans[] = self::real_symlink_plan( 'wp-content/link', '/var/www/target/with/a/reasonably/long/path' );
+		$plans[] = self::real_db_chunk_plan( 0, 'wp_postmeta', 10, "INSERT INTO wp_postmeta VALUES (1, 1, 'a', 'b');\n" );
+		$plans[] = self::real_file_plan( 'wp-content/uploads/say "hello".jpg', 'x' );
+		$plans[] = self::real_file_plan( "wp-content/uploads/\u{65E5}\u{672C}\u{8A9E}\u{540D}\u{524D}.jpg", 'x' );
 
 		$headers   = array_map( static fn( $plan ) => $plan->header(), $plans );
 		$projected = ArchiveManifest::project_payload_bytes( $headers );
@@ -498,7 +547,40 @@ final class ArchiveManifestTest extends TestCase {
 		$reader = new ArchiveReader( $destination );
 		$actual = $reader->footer()->manifest_length();
 
-		$this->assertGreaterThanOrEqual( $actual, $projected, 'The projection must be at or above what the real writer produced.' );
+		$this->assertGreaterThanOrEqual( $actual, $projected, 'The projection must be at or above what the real writer produced for a realistically varied archive.' );
+
+		// Phase 2: db_chunk at real-world-large and theoretical-worst-case numeric widths.
+		$hash = str_repeat( "\x5a", Sha256::DIGEST_SIZE );
+		foreach ( $this->large_db_chunk_offset_cases() as $case_label => $case ) {
+			[$index, $offset, $length, $chunk_index, $codec_id] = $case;
+
+			$header = EntryHeader::for_db_chunk( $chunk_index, 'wp_postmeta', 4000, 6000000, 0 );
+			$entry  = ManifestEntry::for_db_chunk( $index, $offset, $length, $chunk_index, $codec_id, $hash );
+
+			$case_projected = ArchiveManifest::project_payload_bytes( array( $header ) );
+			$case_actual    = strlen( ( new ArchiveManifest( array( $entry ) ) )->to_bytes() );
+
+			$this->assertGreaterThanOrEqual(
+				$case_actual,
+				$case_projected,
+				sprintf( 'The projection must be at or above the real manifest bytes for the "%s" case.', $case_label )
+			);
+		}
+	}
+
+	/**
+	 * Numeric field combinations for a db_chunk entry to prove
+	 * project_payload_bytes() against, from a realistic large archive up to
+	 * the theoretical worst case a PHP int can ever reach.
+	 *
+	 * @return array<string, array{0: int, 1: int, 2: int, 3: int, 4: int}> Each entry is [index, offset, length, chunk_index, codec_id].
+	 */
+	private function large_db_chunk_offset_cases(): array {
+		return array(
+			'offset around 2e9 (a real multi-gigabyte archive)'                        => array( 50000, 2000000000, 6000000, 12345, 1 ),
+			'offset around 9e11 (a real multi-hundred-gigabyte archive)'                => array( 90000, 900000000000, 6000000, 45000, 1 ),
+			'index, offset and length all at PHP_INT_MAX, chunk_index and codec_id maxed' => array( PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, 999999, ManifestEntry::MAX_CODEC_ID ),
+		);
 	}
 
 	/**
@@ -509,17 +591,75 @@ final class ArchiveManifestTest extends TestCase {
 	 * @return EntryPlan A raw-codec file plan.
 	 */
 	private static function real_file_plan( string $path, string $contents ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $contents )
+		);
+	}
+
+	/**
+	 * Build a real directory EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path Relative archive path.
+	 * @return EntryPlan A raw-codec directory plan.
+	 */
+	private static function real_directory_plan( string $path ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_directory( $path, 0755, 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( '' )
+		);
+	}
+
+	/**
+	 * Build a real symlink EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path   Relative archive path.
+	 * @param string $target Symlink target.
+	 * @return EntryPlan A raw-codec symlink plan.
+	 */
+	private static function real_symlink_plan( string $path, string $target ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_symlink( $path, $target, 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $target )
+		);
+	}
+
+	/**
+	 * Build a real db_chunk EntryPlan for the writer-comparison test.
+	 *
+	 * @param int    $chunk_index Zero-based chunk index.
+	 * @param string $table_name  Predominant table name.
+	 * @param int    $stmt_count  Statement count.
+	 * @param string $sql         Raw SQL contents.
+	 * @return EntryPlan A raw-codec db_chunk plan.
+	 */
+	private static function real_db_chunk_plan( int $chunk_index, string $table_name, int $stmt_count, string $sql ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_db_chunk( $chunk_index, $table_name, $stmt_count, strlen( $sql ), 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $sql )
+		);
+	}
+
+	/**
+	 * Open an in-memory stream pre-filled with the given contents, rewound to offset 0.
+	 *
+	 * @param string $contents The bytes to seed the stream with.
+	 * @return resource A readable, seekable stream.
+	 */
+	private static function real_content_stream( string $contents ) {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
 		$src = fopen( 'php://temp', 'r+b' );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
 		fwrite( $src, $contents );
 		rewind( $src );
-
-		return new EntryPlan(
-			EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 ),
-			RawCodec::ID,
-			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
-			$src
-		);
+		return $src;
 	}
 }
