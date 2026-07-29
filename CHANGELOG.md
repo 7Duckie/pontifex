@@ -17,6 +17,146 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [0.9.5] — 2026-07-29 — An archive can no longer reach outside the site it restores into
+
+A security release, and the one that finishes what v0.9.4 started. v0.9.4 stopped an
+archive's SQL escaping its staging table; this one stops an archive's *files* escaping
+the site. **If you ever restore or import an archive you did not create yourself,
+upgrade before you do it again.**
+
+### Breaking
+
+- **An uploaded backup must now carry a trusted signature, when a trusted key is
+  pinned.** A site that defines `PONTIFEX_PUBLIC_KEY` in `wp-config.php` had that key
+  honoured on the command line and ignored entirely in the browser — on the one screen
+  that exists so an operator can bring a backup in from another server. Uploading an
+  archive that is unsigned, or signed by a different key, is now refused before the file
+  is stored.
+
+  This is the browser counterpart of the command-line enforcement shipped in v0.5.0, and
+  it is breaking in the same way and for the same reason: a stripped signature is
+  indistinguishable from one that was never there, so a warning would be no defence.
+
+  **A site with no key configured is unaffected**, byte for byte — the check returns on
+  its first line and does not so much as extend the request's time limit.
+
+  Enforcement sits at upload because nowhere later can know where an archive came from:
+  uploaded and locally-produced backups land in the same directory, under the same name
+  pattern, through the same helper, and the provenance recorded inside an archive is
+  written by whoever made it. Origin is a fact when a file arrives and a claim
+  afterwards. Recorded in
+  [ADR 0020](docs/adr/0020-signature-enforcement-on-the-upload-path.md).
+
+### Security
+
+- **A restored symlink is confined to the site it is restored into.** A content-only
+  restore — the default, and the only mode the admin screens offer — would happily
+  create `wp-content/uploads/leak.txt` pointing at `wp-config.php`. Uploads are served
+  as static files and web servers follow symlinks, so an unauthenticated request then
+  returned the database password and the authentication salts.
+
+  Measured against the real writer before the fix: eight of ten hostile shapes were
+  written, and five of them handed back the planted secret when read through. All ten
+  are now refused, and the six legitimate layouts tested alongside them — including
+  Composer-managed sites whose plugins point at a vendor tree beside `wp-content` —
+  still work.
+
+  The check resolves every link the archive declares before the first byte is written,
+  following each step the way the kernel does, including through links the archive is
+  about to create but has not yet. Resolving the target as a *string* does not work: two
+  entries, `hop -> ".."` and then `leak.txt -> "hop/../wp-config.php"`, collapse on paper
+  to somewhere harmless while the kernel dereferences `hop` first and lands on the real
+  file. Absolute targets, the site root itself, `wp-config.php` and the plugin's own
+  working directory are all refused. Two limits are stated rather than implied:
+  Unicode look-alike spellings are not covered, and a link declared beneath another
+  declared link is caught by the existing write-time check rather than by this one.
+
+- **A forged archive can no longer write into Pontifex's own working directory.** That
+  namespace holds the safety archives a restore creates as its undo, the `.htaccess`
+  keeping whole-database backups out of web reach, and the files the admin backup list
+  is built from — so an archive could disarm the recovery meant to survive it, plant a
+  rollback the operator would then choose themselves, or expose every backup on the site
+  to an unauthenticated request. No legitimate archive can contain such a path: the
+  scanner prunes that namespace structurally, before exclusion rules are consulted.
+
+  Entry paths are normalised once, up front, because the first version of this refusal
+  was evadable — `wp-content/./pontifex/.htaccess` failed the string comparison while
+  the filesystem resolved it into the protected directory anyway. Case is decided by
+  probing the destination filesystem rather than assumed, so the guard holds on macOS
+  and Windows without refusing a genuine `wp-content/Pontifex/` directory on Linux.
+
+### Fixed
+
+- **A backup killed outright could not be resumed.** A hard kill runs no cleanup, so the
+  job stayed active and the lock stayed held; the lock then refused the only command able
+  to finish it, while the error advised "resume it, then retry". Nothing was ever lost —
+  the scheduler could always adopt the job — but the documented command did not work. A
+  resume now takes the lock from the job it is adopting, and only when there is genuinely
+  a stalled backup to adopt.
+
+- **A restore that would run out of disk is stopped before it starts.** A disk filling
+  part-way left a site with some files new and some old. The check needs room for the
+  largest single file — each is written alongside the original before being swapped in —
+  and for however much the incoming files are *larger* than what they replace. Sizing it
+  by growth rather than by total is what keeps a rollback working on a nearly-full disk,
+  where files are replaced rather than added.
+
+- **The export refuses a backup this installation could not read back.** Past roughly
+  74,700 entries the writer produced a manifest larger than its own reader accepts, so
+  the backup completed and was then rejected as unreadable. Both export paths now project
+  the manifest size from the real entries and refuse before the temporary file is opened.
+
+- **The entry ceiling rises from 50,000 to 100,000.** The old limit refused legitimate
+  sites for no benefit; the manifest's own byte cap already bounds an archive first.
+
+- **Opening a large manifest no longer dies without explanation.** Exhausting memory is
+  an uncatchable fatal, so a restore that died this way never restored its safety
+  archive, never released the lock and never cleaned up its job. The reader now raises
+  the limit where the host permits it and refuses with the megabytes named where it does
+  not. Proven on a real 18,675-entry archive at 512M, at 64M, and at 64M with `ini_set`
+  disabled.
+
+- **A restore is stopped when no readable safety archive can be written.** The undo was
+  previously exempted from the size refusal on the grounds that an archive needing more
+  memory to open was better than none. That was wrong: the cap is structural, and such an
+  archive opens at no memory limit at all — verified at unlimited and with a 64 GB
+  budget. It was not a harder-to-open undo; it was no undo, while the restore proceeded
+  believing one existed.
+
+- **The scheduler no longer records failures that did not happen.** A signed resumable
+  backup cannot be continued by cron, because signing needs a key that is deliberately
+  never stored with the job. The scheduler treated the engine's refusal as a failed
+  backup and wrote it into the history. It now leaves such a job for the command that
+  started it.
+
+- **`verify --list` carries a memory budget**, so listing a large backup's contents
+  cannot die without explanation — on the command an operator reaches for when they are
+  already worried about a backup.
+
+- **A clean resume tick no longer rewrites the progress log.** Every tick re-read,
+  re-encoded and rewrote the whole log to arrive at the bytes already on disk.
+
+### Documentation
+
+- **`PRIVACY.md` now describes what actually happens.** It claimed no outbound network
+  requests — untrue since offsite destinations shipped in v0.8.0 — and said all work
+  happens "on the machine running WP-CLI", written before the admin screens existed. An
+  architecture test now fails the build on any network call outside `src/Destination/`,
+  so the promise is enforced rather than asserted.
+
+- **The format specification no longer states a rule the browser did not follow.** Its
+  reader obligation appeared in three places that the admin met in none; it now records
+  that a reader may scope a trusted key's reach to archives admitted from outside its
+  trust boundary, with the provenance route explicitly closed off.
+
+- **The threat model no longer advises a defence the admin did not provide**, and names
+  what remains uncovered.
+
+### Development
+
+- The npm toolchain lockfile is refreshed onto patched releases, closing five advisories.
+  None of it ships: `.distignore` keeps it out of the built plugin.
+
 ## [0.9.4] — 2026-07-28 — Restore refuses an archive's stray SQL
 
 A security release. **If you ever restore or import an archive you did not
@@ -965,7 +1105,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/7Duckie/pontifex/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/7Duckie/pontifex/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/7Duckie/pontifex/compare/v0.9.0...v0.9.3
 [0.9.0]: https://github.com/7Duckie/pontifex/compare/v0.8.0...v0.9.0

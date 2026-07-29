@@ -365,6 +365,66 @@ sentence on faith.
   UI does not do today; a follow-up once there is a concrete need for
   that level of detail.
 
+## v0.9.5 — An archive cannot reach outside the site it restores into
+
+Where v0.9.4 stopped an archive's SQL escaping its staging table, v0.9.5 stops its
+*files* escaping the site — and makes the browser honour a trusted key the command
+line already honoured.
+
+### What ships
+
+- **Symlink target confinement** (recorded in the design study behind this release) —
+  a restored symlink is resolved the way the kernel resolves it, over the whole
+  archive, before the first byte is written. Resolving a target as a string does not
+  work, because the archive supplies the intermediate link: `hop -> ".."` followed by
+  `leak.txt -> "hop/../wp-config.php"` collapses on paper to somewhere harmless while
+  the kernel lands on the real file. Measured beforehand, eight of ten hostile shapes
+  were written and five returned the database password. The containment boundary is
+  the site root rather than `wp-content`, so Composer-managed layouts that point at a
+  vendor tree beside `wp-content` keep working.
+
+- **Signature enforcement on the upload path**
+  ([ADR 0020](./adr/0020-signature-enforcement-on-the-upload-path.md)) — a site that
+  pins `PONTIFEX_PUBLIC_KEY` now has that key honoured in the browser, on the one
+  screen that exists to bring an archive in from elsewhere. Upload is the only sound
+  enforcement point: once stored, an uploaded and a locally-produced archive are
+  indistinguishable, and the provenance inside an archive is written by whoever made
+  it. **Breaking** for a site that pins a key and uploads unsigned backups; a site
+  with no key configured is unaffected.
+
+- **Pontifex's own working directory is refused as a restore destination** — that
+  namespace holds the safety archives a restore creates as its undo, the `.htaccess`
+  keeping whole-database backups out of web reach, and the admin backup list.
+
+- **Backups you can read back** — the export refuses before writing an archive its own
+  reader could not open, the entry ceiling rises from 50,000 to 100,000, and the
+  manifest size projection is measured rather than assumed. Opening a large manifest
+  now raises the memory ceiling through WordPress where the host allows it and refuses
+  with the megabytes named where it does not, instead of dying as an uncatchable fatal
+  that skipped safety-archive recovery, lock release and job cleanup.
+
+- **A restore is stopped before it can run out of disk**, sized by how much the
+  incoming files are larger than what they replace, so a rollback on a nearly-full
+  disk is not refused.
+
+- **A force-killed backup can be resumed again** — the lock guarding the dead job had
+  been refusing the only command able to finish it.
+
+### What is deliberately deferred
+
+- **Unicode look-alike spellings in symlink targets.** The normalisation required
+  lives in an extension this project does not depend on, and a guard whose verdict
+  varies with a host's extensions is worse than one with a stated edge.
+- **A symlink declared beneath another declared symlink.** It cannot leak — the
+  write-time ancestor check or the operating system refuses either ordering — but the
+  preflight alone does not close it.
+- **Streaming the manifest.** Opening a large archive still costs memory proportional
+  to its entry count; removing that needs a format-level decision that stays
+  compatible with every archive already written.
+- **Signature enforcement anywhere but upload.** Everything Pontifex writes through the
+  browser or on a schedule is unsigned, including the safety archive, so enforcing
+  elsewhere would refuse a site's own backups and its own recovery.
+
 ## v0.9.4 — Restore refuses an archive's stray SQL
 
 The first release to treat an archive as genuinely untrusted input rather than as
