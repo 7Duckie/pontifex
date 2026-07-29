@@ -5,9 +5,18 @@ Pontifex is privacy-first by construction.
 ## What Pontifex collects
 
 **Nothing.** Pontifex sends no data anywhere. It has no telemetry, no
-analytics, no "phone home", and makes no outbound network requests. All
-work — export, import, logging, counters — happens locally on the
-machine running WP-CLI, on data the Pontifex authors never see.
+analytics and no "phone home". All work — export, import, logging,
+counters — happens locally, on the machine running WP-CLI or serving the
+admin screens, on data the Pontifex authors never see.
+
+There is exactly one way a byte can leave the machine, and you have to
+ask for it: an **offsite destination** you configure yourself (v0.8.0
+onwards), which uploads a finished archive over SFTP to a server whose
+address, credentials and host key you supply. It goes to your server, not
+ours — Pontifex has no service, no account and no endpoint of its own.
+Configure no destination and nothing is ever sent. Every network call in
+the plugin lives in that one component, and a test in the suite fails the
+build if one appears anywhere else.
 
 ## What Pontifex stores, and where
 
