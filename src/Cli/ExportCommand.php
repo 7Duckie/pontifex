@@ -398,8 +398,11 @@ final class ExportCommand {
 		// operation. The shutdown handler below is still registered, so a fatal
 		// mid-export clears the transient promptly rather than waiting for the
 		// next acquire attempt to reclaim it.
+		// On --resume the blocking backup is the very job about to be adopted:
+		// a killed export leaves its job active and its holder transient set,
+		// and nothing else can finish it. See OperationLock::acquire().
 		$lock = $this->operation_lock();
-		if ( ! $lock->acquire( OperationLock::OP_BACKUP ) ) {
+		if ( ! $lock->acquire( OperationLock::OP_BACKUP, $resume ) ) {
 			WP_CLI::error( sprintf( /* translators: %s: the kind of operation currently running */ __( 'Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry.', 'pontifex' ), $lock->current_holder() ?? 'unknown' ) );
 		}
 		$this->lock = $lock;

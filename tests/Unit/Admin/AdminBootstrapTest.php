@@ -155,6 +155,7 @@ final class AdminBootstrapTest extends TestCase {
 	 */
 	private function upload_controller(): UploadController {
 		return new UploadController(
+			Mockery::mock( Environment::class ),
 			Mockery::mock( WordPressContext::class ),
 			new BackupStore( sys_get_temp_dir() ),
 			new NullLogger()

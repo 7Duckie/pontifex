@@ -12,11 +12,13 @@ namespace Pontifex\Tests\Unit\Archive\Reader;
 use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Footer;
@@ -24,6 +26,7 @@ use Pontifex\Archive\Format\Header;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Integrity\Sha256;
+use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
@@ -95,6 +98,53 @@ final class ArchiveReaderTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
 		rewind( $dest );
 		return $dest;
+	}
+
+	/**
+	 * Build a real archive with a genuinely multi-megabyte manifest and return a
+	 * stream positioned at offset 0, plus the entry count actually written.
+	 *
+	 * Unlike {@see self::build_sample_archive_stream()}'s ~50-byte empty manifest,
+	 * this exercises the memory guard against a real decode of meaningful size: raw
+	 * codec and 1-byte payloads keep the write itself fast (well under a second for
+	 * 8,000 entries), while the long, realistic-looking paths alone push the
+	 * manifest past 2 MB.
+	 *
+	 * @return array{0: resource, 1: int} The archive stream and the entry count it contains.
+	 */
+	private static function build_large_manifest_archive_stream(): array {
+		$entry_count = 8000;
+		$plans       = array();
+		for ( $i = 0; $i < $entry_count; $i++ ) {
+			$path    = sprintf( 'wp-content/uploads/2026/07/deeply/nested/path/file-%06d-with-a-reasonably-descriptive-name.jpg', $i );
+			$plans[] = new EntryPlan(
+				EntryHeader::for_file( $path, 1, 0644, 1700000000, 'image/jpeg', 0 ),
+				RawCodec::ID,
+				str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+				self::memory_stream_with( 'x' )
+			);
+		}
+
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( self::sample_provenance(), $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		return array( $dest, $entry_count );
+	}
+
+	/**
+	 * Open a php://memory stream pre-filled with the given contents, rewound to offset 0.
+	 *
+	 * @param string $contents The bytes to seed the stream with.
+	 * @return resource A readable, seekable stream.
+	 */
+	private static function memory_stream_with( string $contents ) {
+		$stream = self::memory_stream();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $stream );
+		return $stream;
 	}
 
 	/**
@@ -513,5 +563,273 @@ final class ArchiveReaderTest extends TestCase {
 
 		$this->expectException( RuntimeException::class );
 		$reader->provenance();
+	}
+
+	/**
+	 * Build an archive stream whose footer declares a manifest length larger
+	 * than the actual (tiny) manifest content, padded so the declared length
+	 * genuinely fits between the header and the footer (satisfying the
+	 * bounds check) without the padding bytes ever needing to be valid
+	 * manifest JSON — the pre-decode guard must refuse before anything past
+	 * the length field is ever read.
+	 *
+	 * @param string $path            Absolute path to write the fixture to.
+	 * @param int    $declared_length The manifest length to declare in the footer.
+	 * @return void
+	 */
+	private static function write_hostile_declared_length_fixture( string $path, int $declared_length ): void {
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( self::sample_provenance(), array(), $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		$bytes = self::read_all( $dest );
+
+		$footer_start    = strlen( $bytes ) - Footer::SIZE;
+		$manifest_offset = ByteOrder::unpack_uint64( substr( $bytes, $footer_start, 8 ) );
+		$prefix          = substr( $bytes, 0, $manifest_offset );
+		$footer          = substr( $bytes, $footer_start );
+		// Patch only the manifest_length field (bytes 8-16 of the footer); offset,
+		// hash, and salt are left as-is — never verified, because the guard
+		// refuses before either is read.
+		$patched_footer = substr( $footer, 0, 8 ) . ByteOrder::pack_uint64( $declared_length ) . substr( $footer, 16 );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Writing a test fixture to a real file so it can be sparsely padded without holding it in memory.
+		$out = fopen( $path, 'w+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing a test fixture to a real file.
+		fwrite( $out, $prefix );
+		// Pad the file out to manifest_offset + declared_length with a single
+		// sparse write at the target position, so building even a many-megabyte
+		// fixture costs no real memory or disk I/O for the padding itself.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Positioning at the end of the padded region to create a sparse file.
+		fseek( $out, $manifest_offset + $declared_length - 1 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Sparse single-byte write; see above.
+		fwrite( $out, "\0" );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing a test fixture to a real file.
+		fwrite( $out, $patched_footer );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test fixture file after writing it.
+		fclose( $out );
+	}
+
+	/**
+	 * A manifest whose decode cannot fit must be refused where the host
+	 * forbids raising the limit.
+	 *
+	 * The refusal branch is only reachable on a host that will not let the
+	 * request raise its own ceiling — where ini_set succeeds, the guard raises
+	 * and proceeds, which is the behaviour we want. Simulating that honestly
+	 * means a real child process with ini_set disabled, so this shells out
+	 * rather than pretending in-process.
+	 *
+	 * The declared length sits just UNDER MAX_PAYLOAD_SIZE so the existing
+	 * allocation cap cannot be what refuses it — otherwise this test would
+	 * pass for the wrong reason. That a catchable RuntimeException comes back
+	 * at all is itself proof no allocation happened: reading 16,000,000 bytes
+	 * under an 8 MiB ceiling would be an uncatchable fatal.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_decode_refused_when_the_host_forbids_raising_the_limit(): void {
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-oom-' );
+		self::write_hostile_declared_length_fixture( $path, 16000000 );
+
+		// Paths travel as environment variables rather than being interpolated
+		// into the snippet: nothing from this test then has to survive two
+		// levels of quoting, which is where scaffolding like this usually breaks.
+		$snippet = 'require getenv( "PONTIFEX_AUTOLOAD" );'
+			. ' $s = fopen( getenv( "PONTIFEX_FIXTURE" ), "rb" );'
+			. ' $r = new Pontifex\\Archive\\Reader\\ArchiveReader( $s, 8388608 );'
+			. ' try { $r->manifest(); echo "NO-REFUSAL"; } catch ( Throwable $e ) { echo $e->getMessage(); }';
+
+		$command = sprintf(
+			'PONTIFEX_AUTOLOAD=%s PONTIFEX_FIXTURE=%s php -d memory_limit=8M -d disable_functions=ini_set -r %s 2>&1',
+			escapeshellarg( dirname( __DIR__, 4 ) . '/vendor/autoload.php' ),
+			escapeshellarg( $path ),
+			escapeshellarg( $snippet )
+		);
+
+		try {
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec -- Test-only: the refusal branch is reachable only where ini_set is disabled, which cannot be simulated in-process; a real child process is the only honest way to exercise it.
+			$output = (string) shell_exec( $command );
+
+			$this->assertStringContainsString( 'Raise memory_limit on this server', $output );
+			$this->assertStringNotContainsString( 'NO-REFUSAL', $output );
+			$this->assertStringNotContainsString( 'Allowed memory size', $output, 'The guard must refuse cleanly, never fatal.' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown; best-effort.
+			@unlink( $path );
+		}
+	}
+
+	/**
+	 * The memory guard must not refuse an archive that fits.
+	 *
+	 * The must-permit half, and the more important of the pair: a guard that
+	 * refuses too eagerly locks an operator out of their own recovery, which
+	 * is a worse failure for a backup tool than the one it defends against.
+	 * A real fixture archive read under a generous ceiling must open exactly
+	 * as it does with no limit supplied at all.
+	 *
+	 * Deliberately a genuinely multi-megabyte manifest (~2 MB from 8,000
+	 * entries), not the ~50-byte empty fixture the rest of this file uses:
+	 * an empty manifest would pass this assertion whether the guard exists,
+	 * over-refuses, or was deleted outright, so it could never actually catch
+	 * an over-eager refusal. A real decode of meaningful size is the only way
+	 * this half of the pair means anything.
+	 *
+	 * @return void
+	 */
+	public function test_memory_guard_permits_an_archive_that_fits(): void {
+		list( $stream, $entry_count ) = self::build_large_manifest_archive_stream();
+
+		$reader = new ArchiveReader( $stream, 268435456 );
+
+		$this->assertSame( $entry_count, $reader->manifest()->entry_count() );
+	}
+
+	/**
+	 * A decode that fits the refusal threshold but not the real cost must still
+	 * raise the limit.
+	 *
+	 * The regression test for a real defect. The guard originally decided whether
+	 * to raise using the REFUSAL threshold, so a decode needing eight times its
+	 * declared length sailed past the optimistic check with room to spare, no
+	 * raise was attempted, and it then died on the uncatchable fatal this whole
+	 * method exists to prevent. The two thresholds answer different questions:
+	 * "should I ask for more headroom?" must use the pessimistic figure.
+	 *
+	 * Chooses a declared length whose refusal estimate fits the starting limit
+	 * comfortably while the raise target does not, so the only way the assertion
+	 * can pass is if the raise decision ignores the refusal threshold.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_a_decode_within_the_refusal_threshold_still_asks_for_more_memory(): void {
+		// The guard reads the runtime's real ceiling, so the child process this
+		// attribute provides is given one low enough for the arithmetic below to
+		// mean something.
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, inside the isolated child process; the production path no longer touches ini_set at all.
+		ini_set( 'memory_limit', '64M' );
+
+		// 3x this is 24 MB and fits inside that 64 MB; 12x is 96 MB and does not.
+		// The only way the raiser is reached is if the decision to ask for headroom
+		// uses the raise threshold rather than the refusal one.
+		$declared = 8388608;
+		$limit    = 67108864;
+
+		$asked  = false;
+		$reader = new ArchiveReader(
+			self::build_sample_archive_stream(),
+			$limit,
+			static function () use ( &$asked ): void {
+				$asked = true;
+			}
+		);
+
+		$guard = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
+		$guard->invoke( $reader, $declared );
+
+		$this->assertTrue(
+			$asked,
+			'The guard must ask for more memory on the raise threshold, not skip asking because the refusal threshold happened to fit.'
+		);
+	}
+
+	/**
+	 * Convert PHP's memory shorthand to bytes, for assertions.
+	 *
+	 * @param string $value A memory_limit value such as "96M".
+	 * @return int The value in bytes.
+	 */
+	private function parse_shorthand_bytes( string $value ): int {
+		$number = (int) $value;
+		switch ( strtolower( substr( trim( $value ), -1 ) ) ) {
+			case 'g':
+				return $number * 1073741824;
+			case 'm':
+				return $number * 1048576;
+			case 'k':
+				return $number * 1024;
+			default:
+				return $number;
+		}
+	}
+
+	/**
+	 * The raise target must always clear the refusal threshold.
+	 *
+	 * The algorithm only terminates sensibly if a SUCCESSFUL raise is
+	 * guaranteed to satisfy the very check that triggered it. Were the
+	 * refusal factor ever set at or above the raise factor, the guard would
+	 * raise the limit and then refuse anyway — doing the work and still
+	 * failing. Pins the relationship rather than either number, because it is
+	 * the relationship that carries the correctness.
+	 *
+	 * @return void
+	 */
+	public function test_raise_factor_clears_the_refusal_threshold(): void {
+		$refusal = new \ReflectionClassConstant( ArchiveReader::class, 'REFUSAL_MEMORY_FACTOR' );
+		$raise   = new \ReflectionClassConstant( ArchiveReader::class, 'RAISE_MEMORY_FACTOR' );
+
+		$this->assertGreaterThan(
+			$refusal->getValue(),
+			$raise->getValue(),
+			'A successful raise must leave more headroom than the refusal threshold demands.'
+		);
+	}
+
+	/**
+	 * An unlimited memory limit must switch the guard off entirely.
+	 *
+	 * A CLI run reports memory_limit as -1, which the callers normalise to a
+	 * non-positive value; the reader must then skip the check rather than
+	 * compute headroom against a meaningless ceiling.
+	 *
+	 * The ~50-byte empty fixture this test used to read cannot tell "skipped
+	 * because unlimited" apart from "checked, and passed anyway" — at that
+	 * size the raise-or-refuse logic would always pass regardless, so the
+	 * assertion held whether or not the skip branch existed. Proving the
+	 * branch itself fires needs two things a real decode cannot give
+	 * deterministically: a genuinely multi-megabyte declared length (fed
+	 * directly to the guard method, exactly as
+	 * {@see self::test_a_decode_within_the_refusal_threshold_still_raises_the_limit()}
+	 * already does, rather than physically built — a real decode that size
+	 * would risk a genuine out-of-memory fatal under the tight ini limit this
+	 * test sets, which has nothing to do with what is under test here), and a
+	 * process-isolated, explicitly finite ambient memory_limit the guard
+	 * would otherwise have to reckon with. Under that finite limit, 25 MB
+	 * declared * REFUSAL_MEMORY_FACTOR (3) is 75 MB, comfortably past the 64
+	 * MB just set — exactly the shape that would force a raise attempt (and
+	 * therefore an ini_set call) were the "unlimited" skip not the first
+	 * thing the guard checks. The skip branch's true signature is that it
+	 * returns before doing anything at all, so memory_limit itself staying
+	 * byte-for-byte unchanged is the tightest possible proof it ran — a
+	 * "no exception was thrown" assertion alone would not catch a mutation
+	 * that fell through to the raise logic and simply succeeded at raising,
+	 * since an unrestricted test process lets ini_set succeed either way.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_memory_guard_skipped_when_memory_is_unlimited(): void {
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] provides; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
+		ini_set( 'memory_limit', '64M' );
+
+		$reader = new ArchiveReader( self::build_sample_archive_stream(), -1 );
+		$guard  = new \ReflectionMethod( ArchiveReader::class, 'assert_manifest_decode_fits_in_memory' );
+
+		// A genuinely multi-megabyte declared length: 25 MB * REFUSAL_MEMORY_FACTOR
+		// would need 75 MB against the 64 MB just set, so only the unlimited skip
+		// — not luck, not a harmless raise — can explain a clean return here.
+		$guard->invoke( $reader, 25000000 );
+
+		$this->assertSame(
+			'64M',
+			ini_get( 'memory_limit' ),
+			'An unlimited memory_limit_bytes must skip the guard before it ever inspects, let alone tries to raise, the real ini limit.'
+		);
+
+		// The public path must still behave correctly for a real manifest too.
+		$this->assertSame( 0, $reader->manifest()->entry_count() );
 	}
 }

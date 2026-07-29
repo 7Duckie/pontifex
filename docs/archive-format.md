@@ -565,7 +565,7 @@ When flag bit 1 is set, an Ed25519 signature is appended after the footer. (Ed25
 
 **Verification:** an operator who trusts a particular public key can verify the signature — by recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key — to prove the archive was produced by the holder of the corresponding private key. This is independent of encryption: an archive can be signed without being encrypted, and vice versa.
 
-The signature is **detached and optional** for writers: v1 archives are not required to carry one. Reader obligations follow the trust model in section 12: a reader holding a trusted public key (supplied per run or pinned in configuration) MUST refuse an archive that is unsigned or whose signature does not verify — a stripped signature is indistinguishable from never-signed, and the unkeyed hashes cannot detect tampering. A reader with no trusted key should warn the operator when a signature is present and goes unverified.
+The signature is **detached and optional** for writers: v1 archives are not required to carry one. Reader obligations follow the trust model in section 12: a reader holding a trusted public key (supplied per run or pinned in configuration) MUST refuse an archive that is unsigned or whose signature does not verify — a stripped signature is indistinguishable from never-signed, and the unkeyed hashes cannot detect tampering. A reader MAY limit the key's reach to archives admitted from outside its own trust boundary, on the terms set out in §12.1 step 7. A reader with no trusted key should warn the operator when a signature is present and goes unverified.
 
 ## 12. Integrity and tamper detection
 
@@ -586,8 +586,10 @@ recompute every hash so it still matches — and a signature can be *stripped*
 archive. The Ed25519 signature is therefore the only tamper defence, and it
 protects only when the reader enforces it: a reader holding a trusted public
 key (supplied per run, or pinned in configuration) MUST refuse an archive that
-is unsigned or whose signature does not verify. A reader with no trusted key
-provides corruption detection only, and must not claim otherwise.
+is unsigned or whose signature does not verify. A reader MAY limit the key's
+reach to archives admitted from outside its own trust boundary, on the terms
+set out in §12.1 step 7. A reader with no trusted key provides corruption
+detection only, and must not claim otherwise.
 
 ### 12.1 On-import verification flow
 
@@ -599,7 +601,7 @@ A conforming reader performs verification in this order:
 4. **Read manifest.** Compute and verify manifest hash against the value in the footer.
 5. **Walk entries from manifest.** For each entry, seek to its offset, read the stored bytes, compute SHA-256, and compare to the manifest's expected hash.
 6. **If encrypted:** decrypt each entry's payload using the derived key, the per-entry nonce, and the entry header as AAD. AES-GCM will fail the authentication tag check if any byte has been modified.
-7. **Signature enforcement:** when the operator has supplied or pinned a trusted public key, the archive MUST be signed and the Ed25519 signature MUST verify — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key; an unsigned archive is refused as presumed-tampered (a stripped signature is indistinguishable from never-signed). With no trusted key, a signed archive's signature goes unverified and the reader should say so.
+7. **Signature enforcement:** when the operator has supplied or pinned a trusted public key **that applies to this archive**, the archive MUST be signed and the Ed25519 signature MUST verify — recomputing the SHA-256 of bytes [0 … end of footer] and checking it against that key; an unsigned archive is refused as presumed-tampered (a stripped signature is indistinguishable from never-signed). A reader MAY limit the key's reach to archives **admitted from outside its own trust boundary** — those it did not itself produce — provided that (a) the distinction is drawn from the *channel through which the archive arrived*, observed at the moment of arrival, and never from any claim the archive makes about itself, since provenance is chosen by whoever wrote the archive and MUST NOT be used to decide whether the key applies; (b) the reader refuses at the point of admission rather than deferring to restore time; and (c) the scope is documented, so an operator knows which of their archives the key protects. With no trusted key, a signed archive's signature goes unverified and the reader should say so.
 
 Any failure at any step halts the import. The reader must report which step failed, which entry or block was affected, and what the expected versus actual values were. Specifically: "Entry #1273 (`wp-content/uploads/2024/01/banner.jpg`): expected hash `a1b2…`, got `f7e8…`" — not "Import failed."
 
@@ -704,6 +706,7 @@ What conforming implementations must always do. These are behavioural, not struc
 - Readers must verify the manifest hash before trusting any offset or length value in the manifest.
 - Readers must verify each entry's hash before decrypting or decompressing its payload.
 - Readers performing a restore must validate every `db_chunk` statement against the reader's own destination identifier by exact, allow-listed shape before executing it, covering both legitimate `INSERT INTO` forms (with an explicit column list, or straight to `VALUES` with none); must, once a chunk's `CREATE TABLE` statement has executed, verify the created object's storage engine, `CREATE_OPTIONS`, and table type against the server's own catalogue, and — separately, because `CREATE_OPTIONS` alone reports a partitioned table only as `partitioned` — verify that none of its own partitions name a data or index directory of their own; must independently refuse any statement carrying an executable semicolon outside a quoted literal or a comment (tracking SQL's comment forms, and treating both MySQL's `/*! ... */` and MariaDB's `/*M! ... */` as executable rather than as a comment); and must refuse the whole restore on any statement or object that fails any of these checks (§6, [ADR 0019](./adr/0019-db-chunk-statement-containment.md)).
+- Readers that limit signature enforcement to archives admitted from outside their own trust boundary must decide that scope from the channel of arrival observed at admission time, never from the archive's own provenance, and must refuse at admission rather than at restore (§12.1, [ADR 0020](./adr/0020-signature-enforcement-on-the-upload-path.md)).
 - Readers must log integrity-failure events to the `pontifex_integrity_log` option in the destination WordPress instance, append-only.
 - Readers offering an override mechanism (e.g., `--force`) must record the override in the audit log and leave a persistent admin notice in the destination instance.
 - Implementations must never silently drop unknown future-version fields when re-emitting an archive (e.g., during conversion).

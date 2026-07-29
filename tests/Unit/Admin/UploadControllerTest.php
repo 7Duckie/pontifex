@@ -16,12 +16,16 @@ use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\UploadController;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Crypto\SigningContext;
+use Pontifex\Archive\Crypto\SigningKeypair;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Cli\SigningKeys;
+use Pontifex\Environment\Environment;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\NullLogger;
@@ -35,8 +39,23 @@ use RuntimeException;
  * the move into the backups directory are exercised for real; WordPress functions
  * are stubbed with brain/monkey, with wp_send_json_error throwing so a refused
  * request halts as in production and wp_send_json_success capturing its payload.
+ *
+ * The signature cases build genuinely signed and genuinely unsigned archives with
+ * the real ArchiveWriter and real Ed25519 keys, and read the trusted key back out
+ * of a real key file, so what is under test is real verification rather than a
+ * stubbed reader agreeing with itself.
  */
 final class UploadControllerTest extends TestCase {
+
+	/**
+	 * The refusal an upload that is not an archive at all has always received.
+	 *
+	 * Spelled out here rather than read from the controller so the test fails if the
+	 * wording drifts, and so the signature refusal can be asserted to differ from it.
+	 *
+	 * @var string
+	 */
+	private const NOT_AN_ARCHIVE_MESSAGE = 'That file is not a Pontifex backup, so it was not stored.';
 
 	/**
 	 * Temporary content directory the store is rooted at for one test.
@@ -167,6 +186,7 @@ final class UploadControllerTest extends TestCase {
 
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 422, $this->json['status'] );
+		$this->assertSame( self::NOT_AN_ARCHIVE_MESSAGE, $this->json['data']['message'] );
 
 		$store = new BackupStore( $this->base );
 		$this->assertSame( array(), $store->backups(), 'No backup is stored when the upload is not an archive.' );
@@ -219,18 +239,258 @@ final class UploadControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// Signature enforcement on the upload path (ADR 0020).
+	// -------------------------------------------------------------------------
+
+	/**
+	 * With no trusted key pinned, an unsigned upload is stored exactly as before.
+	 *
+	 * The must-not-change case, and the one that covers almost every site. The
+	 * environment double refuses to answer constant_value at all, so the controller
+	 * reaching for the key would fail the test rather than pass it quietly.
+	 *
+	 * @return void
+	 */
+	public function test_stores_an_unsigned_upload_when_no_trusted_key_is_pinned(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes();
+		$this->set_request( 'nopin123', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		$environment->shouldNotReceive( 'constant_value' );
+
+		$this->controller( $environment )->chunk();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['done'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertNotNull( $store->resolve( $this->json['data']['filename'] ), 'An unsigned upload is stored when nothing is pinned.' );
+	}
+
+	/**
+	 * With a trusted key pinned, an unsigned upload is refused and nothing is stored.
+	 *
+	 * The hole being closed: a stripped signature is byte-for-byte indistinguishable
+	 * from never-signed, so an unsigned archive cannot be accepted on a site that has
+	 * declared which key it trusts.
+	 *
+	 * @return void
+	 */
+	public function test_refuses_an_unsigned_upload_when_a_trusted_key_is_pinned(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes();
+		$this->set_request( 'unsign12', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$key_path = $this->written_public_key( SigningKeypair::generate() );
+
+		try {
+			$this->controller( $this->environment_pinning( $key_path ) )->chunk();
+			$this->fail( 'chunk() should refuse an unsigned upload when a trusted key is pinned.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 422, $this->json['status'] );
+		$this->assert_names_the_signature_problem( $this->json['data']['message'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertSame( array(), $store->backups(), 'An unsigned upload never reaches the backups directory.' );
+	}
+
+	/**
+	 * With a trusted key pinned, an upload signed by a different key is refused.
+	 *
+	 * A signature that verifies against somebody else's key is worth exactly as much
+	 * as no signature, so it is refused the same way and with the same message.
+	 *
+	 * @return void
+	 */
+	public function test_refuses_an_upload_signed_by_a_different_key(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes( SigningContext::from_keypair( SigningKeypair::generate() ) );
+		$this->set_request( 'wrongkey', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		// The site trusts a key that had nothing to do with signing that archive.
+		$key_path = $this->written_public_key( SigningKeypair::generate() );
+
+		try {
+			$this->controller( $this->environment_pinning( $key_path ) )->chunk();
+			$this->fail( 'chunk() should refuse an upload signed by a key the site does not trust.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 422, $this->json['status'] );
+		$this->assert_names_the_signature_problem( $this->json['data']['message'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertSame( array(), $store->backups(), 'An archive signed by an untrusted key never reaches the backups directory.' );
+	}
+
+	/**
+	 * With a trusted key pinned, an upload signed by that key is stored.
+	 *
+	 * The enforcement must admit what it is meant to admit, or it is only a way of
+	 * refusing everything.
+	 *
+	 * @return void
+	 */
+	public function test_stores_an_upload_signed_by_the_pinned_key(): void {
+		$this->prepare_request();
+		$keypair = SigningKeypair::generate();
+		$bytes   = $this->archive_bytes( SigningContext::from_keypair( $keypair ) );
+		$this->set_request( 'goodsign', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$this->controller( $this->environment_pinning( $this->written_public_key( $keypair ) ) )->chunk();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['done'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertNotNull( $store->resolve( $this->json['data']['filename'] ), 'A correctly signed upload is stored.' );
+	}
+
+	/**
+	 * A pinned key that cannot be read refuses the upload, with its own message.
+	 *
+	 * Failing open on a broken pin would let a typo in wp-config.php switch the
+	 * protection off silently. The message must send the operator to their
+	 * configuration, not to the backup, so it is asserted to differ from both other
+	 * refusals.
+	 *
+	 * @return void
+	 */
+	public function test_refuses_when_the_pinned_trusted_key_cannot_be_read(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes( SigningContext::from_keypair( SigningKeypair::generate() ) );
+		$this->set_request( 'badpin12', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$missing = $this->base . '/no-such-key.pub';
+
+		try {
+			$this->controller( $this->environment_pinning( $missing ) )->chunk();
+			$this->fail( 'chunk() should refuse when the pinned trusted key cannot be read.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$message = $this->json['data']['message'];
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 500, $this->json['status'], 'An unreadable pin is a configuration fault, not a bad upload.' );
+		$this->assertStringContainsString( 'PONTIFEX_PUBLIC_KEY', $message );
+		$this->assertStringContainsString( 'could not be read', $message );
+		$this->assertStringNotContainsString( self::NOT_AN_ARCHIVE_MESSAGE, $message );
+		$this->assertStringNotContainsString( $missing, $message, 'The key file path is logged, never rendered into the page.' );
+
+		$store = new BackupStore( $this->base );
+		$this->assertSame( array(), $store->backups(), 'Nothing is stored when the pinned key cannot be read.' );
+	}
+
+	/**
+	 * A file that is not an archive keeps its own message even when a key is pinned.
+	 *
+	 * The signature gate must not swallow the earlier refusal: a corrupt or wrong file
+	 * is still "not a Pontifex backup", and telling its uploader to go and sign it
+	 * would send them to debug the wrong thing entirely.
+	 *
+	 * @return void
+	 */
+	public function test_a_non_archive_keeps_its_own_message_when_a_trusted_key_is_pinned(): void {
+		$this->prepare_request();
+		$junk = 'this is not a Pontifex archive at all';
+		$this->set_request( 'junkpin1', 0, strlen( $junk ) );
+		$this->set_chunk( $junk );
+
+		$key_path = $this->written_public_key( SigningKeypair::generate() );
+
+		try {
+			$this->controller( $this->environment_pinning( $key_path ) )->chunk();
+			$this->fail( 'chunk() should refuse a non-archive.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 422, $this->json['status'] );
+		$this->assertSame( self::NOT_AN_ARCHIVE_MESSAGE, $this->json['data']['message'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertSame( array(), $store->backups() );
+	}
+
+	// -------------------------------------------------------------------------
 	// Helpers.
 	// -------------------------------------------------------------------------
 
 	/**
+	 * Assert a refusal message blames the signature, and is not the not-an-archive one.
+	 *
+	 * @param string $message The message the controller sent back.
+	 * @return void
+	 */
+	private function assert_names_the_signature_problem( string $message ): void {
+		$this->assertStringContainsString( 'signed', $message, 'The refusal says the signature is the problem.' );
+		$this->assertStringContainsString( 'PONTIFEX_PUBLIC_KEY', $message, 'The refusal names the setting the operator must act on.' );
+		$this->assertStringNotContainsString( self::NOT_AN_ARCHIVE_MESSAGE, $message, 'A trust refusal must not claim the file is not a backup.' );
+	}
+
+	/**
+	 * An Environment double reporting a trusted public key pinned at the given path.
+	 *
+	 * @param string $key_path The path the PONTIFEX_PUBLIC_KEY constant holds.
+	 * @return Environment&\Mockery\MockInterface
+	 */
+	private function environment_pinning( string $key_path ) {
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( $key_path );
+		return $environment;
+	}
+
+	/**
+	 * Write a keypair to real key files and return the public half's path.
+	 *
+	 * The controller reads the trusted key through the same loader the CLI uses, so
+	 * the test gives it a genuine key file rather than a pre-decoded key.
+	 *
+	 * @param SigningKeypair $keypair The keypair to write.
+	 * @return string The absolute path of the public-key file.
+	 */
+	private function written_public_key( SigningKeypair $keypair ): string {
+		$this->ensure_base();
+		$stem = $this->base . '/key-' . uniqid( '', true );
+		SigningKeys::write_keypair( $keypair, $stem . '.secret', $stem . '.pub' );
+		return $stem . '.pub';
+	}
+
+	/**
 	 * Build the controller over a real store and a mocked context.
 	 *
+	 * Defaults to an environment with no trusted key pinned — the state almost every
+	 * site is in, and the one the pre-existing cases were written against.
+	 *
+	 * @param Environment|null $environment Optional environment double; defaults to no pinned key.
 	 * @return UploadController
 	 */
-	private function controller(): UploadController {
+	private function controller( ?Environment $environment = null ): UploadController {
+		if ( null === $environment ) {
+			$environment = Mockery::mock( Environment::class );
+			$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		}
+
 		// The genuine-upload guard is seamed so the test's fixture files (which are not
 		// real HTTP uploads) pass; everything else runs for real.
 		return new UploadController(
+			$environment,
 			$this->context(),
 			new BackupStore( $this->base ),
 			new NullLogger(),
@@ -290,10 +550,7 @@ final class UploadControllerTest extends TestCase {
 	 * @return void
 	 */
 	private function set_chunk( string $bytes ): void {
-		if ( ! is_dir( $this->base ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating a temp fixture directory for the posted chunk.
-			mkdir( $this->base, 0700, true );
-		}
+		$this->ensure_base();
 		$tmp = $this->base . '/upload-tmp-' . uniqid( '', true );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Writing a temp fixture chunk file.
 		file_put_contents( $tmp, $bytes );
@@ -335,13 +592,15 @@ final class UploadControllerTest extends TestCase {
 	/**
 	 * Return the raw bytes of a valid, empty, unencrypted Pontifex archive.
 	 *
+	 * Written by the real ArchiveWriter, so a signed fixture carries a real Ed25519
+	 * signature over its real bytes and the controller's verification is exercised for
+	 * what it is rather than against a hand-rolled block.
+	 *
+	 * @param SigningContext|null $signing Sign the archive with this context; null leaves it unsigned.
 	 * @return string The archive bytes.
 	 */
-	private function archive_bytes(): string {
-		if ( ! is_dir( $this->base ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating a temp fixture directory for the archive bytes.
-			mkdir( $this->base, 0700, true );
-		}
+	private function archive_bytes( ?SigningContext $signing = null ): string {
+		$this->ensure_base();
 		$path = $this->base . '/fixture-' . uniqid( '', true ) . '.wpmig';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
@@ -349,11 +608,23 @@ final class UploadControllerTest extends TestCase {
 			$this->fail( 'Could not open the fixture archive for writing.' );
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
-			->write_archive( $this->sample_provenance(), array(), $dest );
+			->write_archive( $this->sample_provenance(), array(), $dest, null, null, $signing );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading a temp fixture archive's bytes for the test.
 		return (string) file_get_contents( $path );
+	}
+
+	/**
+	 * Create the temp fixture directory if it does not exist yet.
+	 *
+	 * @return void
+	 */
+	private function ensure_base(): void {
+		if ( ! is_dir( $this->base ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the temp fixture directory for this test's files.
+			mkdir( $this->base, 0700, true );
+		}
 	}
 
 	/**

@@ -112,7 +112,7 @@ final class AdminBootstrap {
 		$backup_controller  = new BackupController( $environment, $context, $backup_store, $logger );
 		$verify_controller  = new VerifyController( $environment, $context, $backup_store, $logger );
 		$restore_controller = new RestoreController( $environment, $context, $backup_store, $rollback_store, $logger );
-		$upload_controller  = new UploadController( $context, $backup_store, $logger );
+		$upload_controller  = new UploadController( $environment, $context, $backup_store, $logger );
 
 		return new self( new Menu( $overview, $backup, $verify, $restore ), $backup_controller, $verify_controller, $restore_controller, $upload_controller );
 	}

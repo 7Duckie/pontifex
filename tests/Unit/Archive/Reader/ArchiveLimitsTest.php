@@ -37,7 +37,7 @@ final class ArchiveLimitsTest extends TestCase {
 	public function test_defaults_expose_documented_values(): void {
 		$limits = ArchiveLimits::defaults();
 
-		$this->assertSame( 50000, $limits->max_entry_count() );
+		$this->assertSame( 100000, $limits->max_entry_count() );
 		$this->assertSame( 2147483648, $limits->max_entry_bytes() );
 		$this->assertSame( 100, $limits->max_total_ratio() );
 		$this->assertSame( 1099511627776, $limits->max_total_bytes() );
@@ -49,7 +49,7 @@ final class ArchiveLimitsTest extends TestCase {
 	 * @return void
 	 */
 	public function test_default_constants_match_factory(): void {
-		$this->assertSame( 50000, ArchiveLimits::DEFAULT_MAX_ENTRY_COUNT );
+		$this->assertSame( 100000, ArchiveLimits::DEFAULT_MAX_ENTRY_COUNT );
 		$this->assertSame( 2147483648, ArchiveLimits::DEFAULT_MAX_ENTRY_BYTES );
 		$this->assertSame( 100, ArchiveLimits::DEFAULT_MAX_TOTAL_RATIO );
 		$this->assertSame( 1099511627776, ArchiveLimits::DEFAULT_MAX_TOTAL_BYTES );

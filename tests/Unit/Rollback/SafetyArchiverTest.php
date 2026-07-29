@@ -110,6 +110,69 @@ final class SafetyArchiverTest extends TestCase {
 	}
 
 	/**
+	 * A safety archive whose file listing is too large to read back must stop
+	 * the restore, not proceed with a phantom undo.
+	 *
+	 * ArchiveManifest::MAX_PAYLOAD_SIZE is a structural cap enforced by
+	 * ArchiveReader::read_manifest() before memory is ever considered — no
+	 * memory_limit, however large, opens an over-cap manifest. create() never
+	 * reads back what it wrote, so a silently-unreadable safety archive would
+	 * leave a destructive restore believing rollback is available when it is
+	 * not. Proven with the same deliberately-oversized single entry
+	 * {@see \Pontifex\Tests\Unit\Export\ExportRunnerTest} uses to prove the
+	 * refusal fires for an ordinary export — this test asserts create() turns
+	 * that refusal into a restore-stopping RuntimeException, not that a file
+	 * merely appeared on disk.
+	 *
+	 * @return void
+	 */
+	public function test_create_stops_the_restore_when_the_manifest_is_too_large_to_read_back(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'a safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
+
+		$archiver->create( '/var/www/html' );
+	}
+
+	/**
+	 * An ordinary-sized safety archive is unaffected by removing the
+	 * exemption: create() still writes it, and it still reads back cleanly.
+	 *
+	 * Proves the refusal added above is scoped to the pathological
+	 * oversized-manifest case, not a regression that stops every safety
+	 * archive.
+	 *
+	 * @return void
+	 */
+	public function test_create_still_writes_an_ordinary_sized_archive(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array(
+			$this->file_plan( 'index.php', "<?php\n// fixture\n" ),
+			$this->file_plan( 'wp-content/note.txt', "café ☕\n" ),
+		);
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		$path = $archiver->create( '/var/www/html' );
+
+		$this->assertSame( 2, $this->entry_count( $path ), 'An ordinary-sized safety archive must still be written and read back cleanly.' );
+	}
+
+	/**
 	 * A retention below the floor is clamped up to 2, never honoured.
 	 *
 	 * A second restore's safety archive must never prune the first restore's —

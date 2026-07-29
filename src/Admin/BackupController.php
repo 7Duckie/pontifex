@@ -18,6 +18,7 @@ use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
@@ -524,6 +525,24 @@ final class BackupController {
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			wp_send_json_success( array( 'cancelled' => true ) );
+		} catch ( ManifestTooLargeException $error ) {
+			// Caught ahead of the generic Throwable handler below, the same
+			// shape as BackupCancelled: failure_message() unsets every other
+			// exception's message and returns a generic "check the log"
+			// sentence, but this one is a specific, actionable refusal the
+			// operator needs to see verbatim (it names the entry count and
+			// what to change), not one worth losing behind that sentence.
+			$this->logger->warning( 'Admin backup refused: the manifest would be too large to read back.', array( 'exception' => $error ) );
+			$this->cleanup_job_artefacts();
+			$this->delete_partial_backup();
+			$this->active_backup_path = null;
+			$this->lock->release();
+			$this->clear_progress();
+			$this->store->clear_cancel();
+			$this->bump_counters( array( 'failed' => 1 ) );
+			TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The message is our own, built in ExportRunner/ResumableExportRunner from plain facts (counts, byte totals); wp_send_json_error JSON-encodes it, not HTML output.
+			wp_send_json_error( array( 'message' => $error->getMessage() ), 400 );
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin backup failed.', array( 'exception' => $error ) );
 			$this->cleanup_job_artefacts();
