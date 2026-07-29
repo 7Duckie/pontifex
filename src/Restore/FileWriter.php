@@ -117,6 +117,19 @@ final class FileWriter {
 	private ?string $required_prefix;
 
 	/**
+	 * Cached result of the destination filesystem case-sensitivity probe.
+	 *
+	 * Null until {@see self::destination_is_case_sensitive()} has run once;
+	 * true or false thereafter for the lifetime of this writer. Every entry
+	 * in one restore is written under the same destination_root, so the
+	 * answer cannot change mid-restore — probing once and caching avoids a
+	 * filesystem round trip per entry.
+	 *
+	 * @var bool|null
+	 */
+	private ?bool $case_sensitive_destination = null;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
@@ -172,6 +185,18 @@ final class FileWriter {
 	 * db_chunk kind is explicitly rejected — those entries go
 	 * through DatabaseWriter (a later commit), not FileWriter.
 	 *
+	 * The entry's path is normalised first, before anything else looks
+	 * at it — see {@see self::normalise_entry_path()}. Every guard that
+	 * follows (required-prefix, Pontifex-working-path, the traversal
+	 * checks inside {@see self::resolve_safe_path()}, the symlinked-ancestor
+	 * walk) is a text comparison against that same normalised path, and
+	 * that same normalised path is what gets joined onto the destination
+	 * root to build the write target — so what the guards evaluate is
+	 * guaranteed to be what actually gets written to. (The
+	 * Pontifex-working-path guard also depends on one filesystem fact —
+	 * whether the destination folds case — which is probed once per writer
+	 * and cached; see {@see self::destination_is_case_sensitive()}.)
+	 *
 	 * @param EntryReadResult $result A decoded entry to restore.
 	 * @throws InvalidArgumentException If the entry's kind is db_chunk or the path is unsafe.
 	 * @throws RuntimeException         If the filesystem operation fails.
@@ -184,7 +209,9 @@ final class FileWriter {
 		}
 
 		$relative_path = (string) $header->path();
+		$relative_path = $this->normalise_entry_path( $relative_path );
 		$this->assert_within_required_prefix( $relative_path );
+		$this->assert_not_pontifex_working_path( $relative_path );
 		$target_path = $this->resolve_safe_path( $relative_path );
 		$this->assert_no_symlinked_ancestor( $relative_path );
 		$this->ensure_parent_directory( $target_path );
@@ -210,6 +237,105 @@ final class FileWriter {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
 			sprintf( 'FileWriter: unsupported entry kind "%s".', $header->kind() )
 		);
+	}
+
+	/**
+	 * Normalise a raw entry path before any guard compares it as text.
+	 *
+	 * Every guard downstream of this method — assert_within_required_prefix(),
+	 * assert_not_pontifex_working_path(), and the checks inside
+	 * resolve_safe_path() — decides by literal string comparison. But a raw
+	 * archive path can carry filesystem-equivalent noise those comparisons
+	 * don't see through: a "." segment, or a doubled "/", both resolve to
+	 * exactly the same place on disk yet neither matches "wp-content/pontifex"
+	 * as text. Left unnormalised, an entry path such as
+	 * "wp-content/./pontifex/.htaccess" sails straight past a literal
+	 * strncmp() against "wp-content/pontifex/" — while still landing inside
+	 * that very directory once the filesystem joins and opens the path,
+	 * silently defeating the Pontifex-working-path guard (and the
+	 * required-prefix guard alongside it). Normalising once, here, before
+	 * any comparison runs, and feeding every later step the same cleaned
+	 * value that is then joined onto destination_root to build the write
+	 * target, closes that gap for good rather than patching one guard at a
+	 * time.
+	 *
+	 * The steps run in this order, and the order is load-bearing:
+	 *
+	 *  1. The unsafe shapes are refused outright — empty, containing a null
+	 *     byte, or absolute — the same checks resolve_safe_path() makes,
+	 *     run early so nothing downstream ever has to see them.
+	 *  2. A ".." segment is refused BEFORE anything is collapsed. Collapsing
+	 *     "." is always safe: it never changes which directory a path
+	 *     refers to. Collapsing ".." is not — doing so could turn a genuine
+	 *     escape attempt into something that looks in-bounds afterwards.
+	 *     "wp-content/uploads/../../../etc/passwd" must stay refused
+	 *     exactly as it is today, never be silently resolved down to
+	 *     something that looks safe.
+	 *  3. Only once no ".." segment is present are runs of "/" collapsed to
+	 *     one and "." segments dropped (which, applied to a segment split,
+	 *     also removes a trailing slash). Backslashes are deliberately left
+	 *     untouched here — resolve_safe_path() already normalises them for
+	 *     its own ".." check and is kept in place as a second, redundant
+	 *     guard, so a backslash-disguised traversal attempt is still caught
+	 *     exactly as before.
+	 *  4. The COLLAPSED result is checked for emptiness too — a separate
+	 *     check from step 1's, which only looked at the raw INPUT. A raw
+	 *     path of "." or "./" is non-empty going in, so step 1 lets it
+	 *     through, but it collapses to "" once its "." segments are dropped
+	 *     in step 3. An empty relative path, joined onto destination_root,
+	 *     resolves to destination_root ITSELF — so a directory entry at
+	 *     that path would apply the archive's mode to the WordPress root
+	 *     (0000 has been demonstrated). Refusing it here, on the collapsed
+	 *     value, closes that gap. resolve_safe_path() makes the same
+	 *     "empty" check independently, on whatever value IT is given; see
+	 *     its docblock for why that is a deliberate second guard, not a
+	 *     duplicate of this one.
+	 *
+	 * @param string $relative_path The raw path field from the entry header.
+	 * @return string The normalised path; every later guard and the eventual write target are built from this value.
+	 * @throws InvalidArgumentException If the path is empty, contains a null byte, is absolute, contains a parent-directory segment, or normalises to an empty path.
+	 */
+	private function normalise_entry_path( string $relative_path ): string {
+		if ( '' === $relative_path ) {
+			throw new InvalidArgumentException( 'FileWriter: entry path must be non-empty.' );
+		}
+		if ( false !== strpos( $relative_path, "\0" ) ) {
+			throw new InvalidArgumentException( 'FileWriter: entry path contains a null byte.' );
+		}
+		if ( self::is_absolute_path( $relative_path ) ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: entry path "%s" must be relative, not absolute.', $relative_path )
+			);
+		}
+
+		$segments = explode( '/', $relative_path );
+		foreach ( $segments as $segment ) {
+			if ( '..' === $segment ) {
+				throw new InvalidArgumentException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'FileWriter: normalise_entry_path refuses entry path "%s": it contains a parent-directory segment.', $relative_path )
+				);
+			}
+		}
+
+		$cleaned_segments = array();
+		foreach ( $segments as $segment ) {
+			if ( '' === $segment || '.' === $segment ) {
+				continue;
+			}
+			$cleaned_segments[] = $segment;
+		}
+
+		$normalised = implode( '/', $cleaned_segments );
+		if ( '' === $normalised ) {
+			throw new InvalidArgumentException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: entry path "%s" normalises to an empty path (e.g. ".", "./", or a run of such segments) and is refused.', $relative_path )
+			);
+		}
+
+		return $normalised;
 	}
 
 	/**
@@ -244,13 +370,260 @@ final class FileWriter {
 	}
 
 	/**
+	 * Refuse an entry whose own path targets Pontifex's own working directory.
+	 *
+	 * Applies in every restore mode, including a whole-site restore with no
+	 * required prefix — this is a structural guard, not a scope guard, so it
+	 * runs regardless of what {@see self::assert_within_required_prefix()}
+	 * decided. See {@see self::is_pontifex_working_path()} for why the only
+	 * way an entry can ever land here is a forged archive, and what
+	 * restoring it would let an attacker overwrite.
+	 *
+	 * The check looks only at where the entry itself is written TO. It says
+	 * nothing about a symlink's TARGET: a symlink written elsewhere in the
+	 * tree that merely points into wp-content/pontifex/ (for example
+	 * wp-content/uploads/leak.wpmig -> ../pontifex/rollback/safety.wpmig) is
+	 * a different class of problem that this guard does not, and is not
+	 * meant to, address.
+	 *
+	 * Nor does it cover every Windows-specific path spelling, or a site
+	 * whose WP_CONTENT_DIR is not the literal "wp-content" — see
+	 * {@see self::is_pontifex_working_path()}'s "Known limits" for the
+	 * current, honest list of what this guard does not catch.
+	 *
+	 * @param string $relative_path The entry path, relative to the restore root.
+	 * @throws InvalidArgumentException If the path is wp-content/pontifex itself or beneath it.
+	 */
+	private function assert_not_pontifex_working_path( string $relative_path ): void {
+		if ( ! self::is_pontifex_working_path( $relative_path, $this->destination_is_case_sensitive() ) ) {
+			return;
+		}
+		throw new InvalidArgumentException(
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
+			sprintf( 'FileWriter: entry path "%s" targets Pontifex\'s own working directory and is refused; no legitimate archive ever contains one.', $relative_path )
+		);
+	}
+
+	/**
+	 * Whether the given relative path is inside Pontifex's own working directory.
+	 *
+	 * A relative of {@see \Pontifex\Manifest\FileScanner::is_pontifex_working_path()},
+	 * which always compares byte-exact. Byte-exact is correct for the
+	 * scanner: it walks a filesystem it controls, so the case it observes is
+	 * whatever it actually wrote. This method instead compares a path taken
+	 * from an UNTRUSTED archive against a destination filesystem whose case
+	 * sensitivity is not a given — it varies by host (APFS on macOS and
+	 * NTFS on Windows fold case by default; ext4, the common Linux/hosting
+	 * case, does not) — so a single, unconditional comparison rule cannot be
+	 * correct for every destination.
+	 *
+	 * $case_sensitive_filesystem is therefore taken as a PARAMETER rather
+	 * than read from instance state, deliberately. It keeps this method
+	 * static so BOTH branches can be driven directly by reflection in tests
+	 * on any host, rather than the suite's coverage of one branch depending
+	 * on whichever filesystem happens to run it. The caller,
+	 * {@see self::assert_not_pontifex_working_path()}, determines the real
+	 * answer via {@see self::destination_is_case_sensitive()} (a probe
+	 * against the actual destination) and passes it in.
+	 *
+	 * Case-SENSITIVE branch: byte-exact, identical to FileScanner's own
+	 * comparison. This is the false-refusal fix: previously this method
+	 * folded case UNCONDITIONALLY, so on a case-sensitive destination a
+	 * genuine "wp-content/Pontifex/" directory — scanned faithfully into a
+	 * legitimate archive by the byte-exact FileScanner, which never prunes
+	 * it — was refused on restore, making that backup unrestorable with no
+	 * attacker involved. In this branch "wp-content/Pontifex/…" and
+	 * "wp-content/PONTIFEX/…" are ordinary, different directories and are
+	 * correctly PERMITTED.
+	 *
+	 * Case-INSENSITIVE branch: unchanged from before this fix — ASCII
+	 * case-insensitive (strcasecmp()/strncasecmp()), deliberately not
+	 * mb_*() or a locale-dependent fold, either of which could behave
+	 * differently depending on server configuration and make a security
+	 * guard's behaviour non-deterministic. Here "wp-content/PONTIFEX/…" and
+	 * "wp-content/pontifex/…" name the very same on-disk directory even
+	 * though they are different byte strings, so a forged archive spelling
+	 * its way past a byte-exact check would still land inside the real
+	 * working directory; refusing it is correct.
+	 *
+	 * Because of the case-insensitive branch, FileWriter's guard remains a
+	 * strict superset of FileScanner's on a case-insensitive destination —
+	 * every path FileScanner prunes, FileWriter also refuses, but not the
+	 * reverse. On a case-sensitive destination the two are byte-identical.
+	 * See FileWriterTest::test_writer_refuses_everything_the_scanner_prunes()
+	 * for the asserted relationship in both branches.
+	 *
+	 * Known limits (deliberately not addressed by this method or its case
+	 * probe, and not in scope here):
+	 *
+	 *  - Windows-specific path spellings: a trailing dot or trailing space
+	 *    ("wp-content/pontifex." / "wp-content/pontifex "), backslash path
+	 *    separators ("wp-content\pontifex\.htaccess"), and 8.3 short names.
+	 *    Win32 silently strips trailing dots/spaces from a path and treats
+	 *    backslash as a separator; none of that is reproduced here.
+	 *  - The comparison is against the literal string "wp-content/pontifex".
+	 *    A site with a customised WP_CONTENT_DIR (for example Bedrock's
+	 *    "app/") has its actual Pontifex working directory somewhere else
+	 *    entirely; this method has no way to know that and does not guard
+	 *    it.
+	 *
+	 * @param string $relative_path            Path relative to the restore root.
+	 * @param bool   $case_sensitive_filesystem Whether the destination filesystem treats path case as significant.
+	 * @return bool True if the path is wp-content/pontifex itself or beneath it.
+	 */
+	private static function is_pontifex_working_path( string $relative_path, bool $case_sensitive_filesystem ): bool {
+		$root = 'wp-content/pontifex';
+
+		if ( $case_sensitive_filesystem ) {
+			if ( $relative_path === $root ) {
+				return true;
+			}
+			$prefix = $root . '/';
+			return 0 === strncmp( $relative_path, $prefix, strlen( $prefix ) );
+		}
+
+		if ( 0 === strcasecmp( $relative_path, $root ) ) {
+			return true;
+		}
+		$prefix = $root . '/';
+		return 0 === strncasecmp( $relative_path, $prefix, strlen( $prefix ) );
+	}
+
+	/**
+	 * Determine, once, whether the destination filesystem folds path case.
+	 *
+	 * A text comparison alone cannot know whether "wp-content/pontifex" and
+	 * "wp-content/PONTIFEX" name the same on-disk directory — that depends
+	 * on the destination filesystem, not on the bytes being compared. This
+	 * probes the real answer once, against $this->destination_root (the
+	 * actual directory the restore is about to write hundreds of entries
+	 * into), and caches it: every entry in one restore shares the same
+	 * destination_root, so the answer cannot change mid-restore, and
+	 * probing per entry would cost a filesystem round trip for nothing.
+	 *
+	 * The probe creates a uniquely-named, mixed-case file inside the
+	 * destination root, then asks file_exists() whether the CASE-FLIPPED
+	 * spelling of that same name resolves to it. On a case-folding
+	 * filesystem it does; on a case-sensitive one it does not, because the
+	 * flipped spelling names a different, non-existent file. Where
+	 * file_exists() alone could in principle be fooled by an unrelated file
+	 * that happens to collide with the flipped name, fileinode() confirms
+	 * the flipped spelling really does resolve to the very file just
+	 * created, not a coincidence. The probe file is always removed,
+	 * including when the probe itself fails partway through — the
+	 * try/finally covers every exit path, so a restore never leaves probe
+	 * litter behind in a site's wp-content.
+	 *
+	 * If the probe cannot run at all (the write itself fails), the
+	 * filesystem is treated as case-INSENSITIVE — the stricter branch of
+	 * {@see self::is_pontifex_working_path()}, so a guard that cannot
+	 * determine the truth fails closed rather than open. In practice this
+	 * fallback is unreachable at the point a real restore would hit it:
+	 * destination_root is the very directory hundreds of subsequent entries
+	 * are about to be written into, so a root Pontifex cannot write one
+	 * probe file into is a root the restore is about to fail on anyway, for
+	 * the identical reason, on its very first real entry.
+	 *
+	 * @return bool True if the destination filesystem is case-sensitive.
+	 */
+	private function destination_is_case_sensitive(): bool {
+		if ( null !== $this->case_sensitive_destination ) {
+			return $this->case_sensitive_destination;
+		}
+
+		$name         = 'PontifexCaseProbe' . bin2hex( random_bytes( 8 ) );
+		$probe_path   = $this->destination_root . '/.' . $name;
+		$flipped_path = $this->destination_root . '/.' . self::flip_case( $name );
+
+		$this->case_sensitive_destination = false;
+
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- One-off case-sensitivity probe at the start of a restore; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
+			if ( false === @file_put_contents( $probe_path, '' ) ) {
+				return $this->case_sensitive_destination;
+			}
+
+			if ( ! file_exists( $flipped_path ) ) {
+				$this->case_sensitive_destination = true;
+				return $this->case_sensitive_destination;
+			}
+
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort identity check; either side reading false falls through to the safer case-insensitive default below.
+			$probe_inode = @fileinode( $probe_path );
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort identity check; either side reading false falls through to the safer case-insensitive default below.
+			$flipped_inode = @fileinode( $flipped_path );
+
+			$this->case_sensitive_destination = ! ( false !== $probe_inode && $probe_inode === $flipped_inode );
+
+			return $this->case_sensitive_destination;
+		} finally {
+			if ( is_file( $probe_path ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the probe file; its own failure must not mask the probe result already computed.
+				@unlink( $probe_path );
+			}
+		}
+	}
+
+	/**
+	 * Flip the case of every ASCII letter in a string; non-letters pass through unchanged.
+	 *
+	 * Used only to build the case-sensitivity probe's second spelling: a
+	 * predictable, deterministic transform (never mb_*() or a locale fold,
+	 * for the same reason {@see self::is_pontifex_working_path()} avoids
+	 * them) guaranteed to differ, byte-for-byte, from its input wherever the
+	 * input contains a letter.
+	 *
+	 * @param string $value The string to flip.
+	 * @return string The case-flipped string.
+	 */
+	private static function flip_case( string $value ): string {
+		$flipped = '';
+		for ( $i = 0, $length = strlen( $value ); $i < $length; $i++ ) {
+			$character = $value[ $i ];
+			if ( ctype_upper( $character ) ) {
+				$flipped .= strtolower( $character );
+			} elseif ( ctype_lower( $character ) ) {
+				$flipped .= strtoupper( $character );
+			} else {
+				$flipped .= $character;
+			}
+		}
+		return $flipped;
+	}
+
+	/**
 	 * Convert a relative archive path into a safe absolute path under the destination root.
 	 *
-	 * Rejects absolute paths, paths with ".." segments, and paths
-	 * containing null bytes. Returns the joined absolute path; the
+	 * Rejects an empty path, absolute paths, paths with ".." segments, and
+	 * paths containing null bytes. Returns the joined absolute path; the
 	 * path is not required to exist yet (it will be created).
 	 *
-	 * @param string $relative_path The path field from the entry header.
+	 * These checks are NOT a byte-for-byte duplicate of
+	 * normalise_entry_path()'s, even though both methods make the same four
+	 * checks — the two guard different VALUES. normalise_entry_path()
+	 * checks its INPUT, the raw path field straight off the entry header,
+	 * before any collapsing happens. This method checks whatever value it
+	 * is actually given — which, in the normal write_entry() call sequence,
+	 * is normalise_entry_path()'s COLLAPSED OUTPUT, not the raw input.
+	 *
+	 * That distinction is not academic: it is exactly what "empty" means
+	 * for each method. A raw path of "." or "./" is non-empty on input, so
+	 * normalise_entry_path()'s own pre-collapse check lets it through — but
+	 * it collapses to the empty string once its "." segments are dropped,
+	 * and an empty relative path, joined onto destination_root, resolves to
+	 * destination_root ITSELF. A directory entry at that path would apply
+	 * the archive's mode to the WordPress root (0000 has been
+	 * demonstrated). Since normalise_entry_path() now also checks its own
+	 * collapsed output before returning (see its docblock), the two checks
+	 * overlap for paths that reach this method via write_entry() — but
+	 * keeping both is deliberate defence in depth, not duplication: this
+	 * method remains correct on its own terms for any other caller,
+	 * present or future, that might reach it with a path that was never
+	 * routed through normalise_entry_path() first, and a second,
+	 * independent check on the exact value about to be joined into a
+	 * filesystem path costs nothing.
+	 *
+	 * @param string $relative_path The path to resolve. In the normal write_entry() sequence this is normalise_entry_path()'s collapsed OUTPUT, not the raw header field.
 	 * @return string An absolute path under the destination root.
 	 * @throws InvalidArgumentException If the path is unsafe.
 	 */
