@@ -166,13 +166,11 @@ final class ExportRunner {
 		// archived would produce a manifest this installation's own reader
 		// will later refuse to open (ArchiveManifest::MAX_PAYLOAD_SIZE) —
 		// today the writer emits what the reader refuses; this closes that.
-		// The safety archive is deliberately exempt (see
-		// ExportOptions::is_exempt_from_manifest_size_refusal()'s docblock).
 		// Skipped for a non-Countable $entry_plans (an arbitrary one-shot
 		// iterable): the projection needs a second pass over the entries,
 		// which only a plain array or the reusable ManifestStream safely
 		// support — the only two shapes any real caller passes.
-		if ( ! $options->is_exempt_from_manifest_size_refusal() && is_countable( $entry_plans ) ) {
+		if ( is_countable( $entry_plans ) ) {
 			$this->refuse_if_manifest_too_large( $entry_plans, $entry_count );
 		}
 

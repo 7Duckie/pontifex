@@ -77,24 +77,6 @@ final class ExportOptions {
 	private ?Scope $scope;
 
 	/**
-	 * Whether this export is exempt from the pre-write manifest-size refusal.
-	 *
-	 * False for every ordinary export (CLI, admin Backup screen). True ONLY
-	 * for the pre-restore safety archive ({@see \Pontifex\Rollback\SafetyArchiver}):
-	 * that archive is an undo for a destructive restore about to happen, not
-	 * a backup an operator chose to take, and it must be written even if it
-	 * would need a bigger memory_limit to open later — a safety archive that
-	 * needs a bigger host to open is still better than no safety archive at
-	 * all, whereas refusing it here would turn a recoverable restore into an
-	 * irreversible one. Deliberately its own named flag, not inferred from
-	 * $scope being null or any other field, so this exemption cannot be
-	 * quietly widened or removed by a change to unrelated logic.
-	 *
-	 * @var bool
-	 */
-	private bool $exempt_from_manifest_size_refusal;
-
-	/**
 	 * Construct an ExportOptions.
 	 *
 	 * @param string                 $output_path                       Absolute path the archive is written to; must be non-empty.
@@ -102,7 +84,6 @@ final class ExportOptions {
 	 * @param SigningContext|null    $signing                           Signing inputs, or null for an unsigned archive.
 	 * @param string|null            $encryption_disabled_reason        Reason recorded when the archive is unencrypted, or null.
 	 * @param Scope|null             $scope                             What the archive backs up, or null to record no scope.
-	 * @param bool                   $exempt_from_manifest_size_refusal Whether to skip the pre-write manifest-size refusal; true ONLY for the pre-restore safety archive (see the property docblock).
 	 * @throws InvalidArgumentException If $output_path is the empty string.
 	 */
 	public function __construct(
@@ -110,19 +91,17 @@ final class ExportOptions {
 		?EncryptionContext $encryption = null,
 		?SigningContext $signing = null,
 		?string $encryption_disabled_reason = null,
-		?Scope $scope = null,
-		bool $exempt_from_manifest_size_refusal = false
+		?Scope $scope = null
 	) {
 		if ( '' === $output_path ) {
 			throw new InvalidArgumentException( 'ExportOptions: output_path must not be empty.' );
 		}
 
-		$this->output_path                       = $output_path;
-		$this->encryption                        = $encryption;
-		$this->signing                           = $signing;
-		$this->encryption_disabled_reason        = $encryption_disabled_reason;
-		$this->scope                             = $scope;
-		$this->exempt_from_manifest_size_refusal = $exempt_from_manifest_size_refusal;
+		$this->output_path                = $output_path;
+		$this->encryption                 = $encryption;
+		$this->signing                    = $signing;
+		$this->encryption_disabled_reason = $encryption_disabled_reason;
+		$this->scope                      = $scope;
 	}
 
 	/**
@@ -168,14 +147,5 @@ final class ExportOptions {
 	 */
 	public function scope(): ?Scope {
 		return $this->scope;
-	}
-
-	/**
-	 * Whether this export skips the pre-write manifest-size refusal.
-	 *
-	 * @return bool True only for the pre-restore safety archive.
-	 */
-	public function is_exempt_from_manifest_size_refusal(): bool {
-		return $this->exempt_from_manifest_size_refusal;
 	}
 }

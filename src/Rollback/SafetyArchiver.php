@@ -15,6 +15,7 @@ use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
@@ -155,7 +156,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void` with each chunk's raw source byte count.
 	 * @param callable|null $on_total       Optional callback, called once before copying with the estimated total source bytes, as `( int $estimated_bytes ): void`, so the caller can show a determinate bar.
 	 * @return string The absolute path of the safety archive written.
-	 * @throws RuntimeException If the preflight refuses, or the archive cannot be written.
+	 * @throws RuntimeException If the preflight refuses, the safety archive's file listing is too large for this installation to read back (a caught ManifestTooLargeException is converted to this, so the restore stops rather than proceed without a usable undo), or the archive cannot be written.
 	 */
 	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null, ?callable $on_total = null ): string {
 		$this->store->ensure_directory();
@@ -184,14 +185,30 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 			? Scope::content_only( $exclusions->patterns() )
 			: Scope::whole_site( $exclusions->patterns() );
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
-		// Exempt from the pre-write manifest-size refusal (ExportRunner's
-		// entry-count-ceiling guard): this archive is the undo for the
-		// destructive restore about to happen, not a backup the operator
-		// chose to take. Refusing it here would trade a recoverable restore
-		// for an irreversible one — an undo that needs a bigger memory_limit
-		// to open later is still strictly better than no undo at all.
-		$options = new ExportOptions( $path, null, null, null, $scope, true );
-		$export_runner->export( $options, $entry_plans, $on_entry, $on_bytes );
+		$options       = new ExportOptions( $path, null, null, null, $scope );
+
+		// ArchiveManifest::MAX_PAYLOAD_SIZE is a structural cap enforced by
+		// ArchiveReader::read_manifest() before memory is ever considered — no
+		// memory_limit, however large, makes an over-cap manifest readable. A
+		// safety archive that trips the refusal is therefore not a
+		// harder-to-open undo, it is no undo at all, and this method never
+		// reads back what it wrote to notice the difference. So the refusal is
+		// not exempted here: it is converted into a plain failure that stops
+		// the caller's destructive restore outright, rather than let it
+		// proceed believing a rollback exists when none was written.
+		try {
+			$export_runner->export( $options, $entry_plans, $on_entry, $on_bytes );
+		} catch ( ManifestTooLargeException $e ) {
+			throw new RuntimeException(
+				sprintf(
+					'SafetyArchiver: a safety archive could not be taken for this site because its file listing (%d entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.',
+					count( $entry_plans )
+				),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying ManifestTooLargeException, chained as the previous exception for diagnostics; not HTML output.
+				$e
+			);
+		}
 
 		// The archive holds the whole database, so it must be owner-only. On a
 		// POSIX host a failed chmod means it could not be secured; rather than
