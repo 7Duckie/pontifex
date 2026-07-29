@@ -55,15 +55,22 @@ final class ArchiveLimits {
 	/**
 	 * Default maximum number of entries an archive may declare.
 	 *
-	 * Set to 100,000 — above the format's own implicit structural cap of
-	 * 99,273 entries ({@see \Pontifex\Archive\Format\ArchiveManifest::MAX_PAYLOAD_SIZE}
-	 * divided by {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}),
-	 * so this ceiling never refuses a real site on entry count alone; the
-	 * manifest's own byte cap is what actually bounds it.
+	 * Set to 100,000. The previous value (50,000) refused legitimate sites for
+	 * no benefit: the manifest's own 16 MiB byte cap already bounds an archive
+	 * long before any realistic site reaches that count, so the lower ceiling
+	 * only turned readable archives away.
 	 *
-	 * The previous value (50,000) bounded nothing the format did not already
-	 * bound structurally — it only refused legitimate sites in the
-	 * 50,000-99,273 entry band. And whatever this value is set to, it used
+	 * Note what this number is NOT. Dividing
+	 * {@see \Pontifex\Archive\Format\ArchiveManifest::MAX_PAYLOAD_SIZE} by
+	 * {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}
+	 * gives roughly 99,273, but that is a deliberately conservative estimate
+	 * rather than a structural cap: measured against the real writer, the true
+	 * maximum an archive can express is about 114,912 entries. So 100,000 sits
+	 * BELOW the structural maximum and does bite, in the band between the two.
+	 * That is a real ceiling on entry count, not a formality — it simply sits
+	 * far enough out that the byte cap is what a real site meets first.
+	 *
+	 * Whatever this value is set to, it used
 	 * to be enforced too late to matter: the count was only checked AFTER
 	 * {@see \Pontifex\Archive\Reader\ArchiveReader::manifest()} had already
 	 * decoded every entry into memory, so a hostile or merely-large archive
