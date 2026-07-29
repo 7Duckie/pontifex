@@ -9,9 +9,11 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Closure;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
 
 /**
@@ -81,6 +83,17 @@ final class FileWriter {
 	private const PARENT_DIR_MODE = 0o755;
 
 	/**
+	 * Bytes in one megabyte, used only to render a disk-space shortfall in human terms.
+	 *
+	 * Matches the literal {@see \Pontifex\Archive\Reader\ArchiveReader} already
+	 * uses for its own memory-shortfall message, so the two "not enough X on
+	 * this server" messages a restore can surface read consistently.
+	 *
+	 * @var int
+	 */
+	private const BYTES_PER_MEGABYTE = 1048576;
+
+	/**
 	 * Absolute path of the directory under which all entries are restored.
 	 *
 	 * Always stored without a trailing slash.
@@ -130,21 +143,45 @@ final class FileWriter {
 	private ?bool $case_sensitive_destination = null;
 
 	/**
+	 * Guard reading free disk space at a given path.
+	 *
+	 * Wraps PHP's disk_free_space() — the reading
+	 * {@see self::assert_free_space_for()} weighs against what a restore is
+	 * about to need. Held behind a seam (defaulting to the real function,
+	 * silenced with `@` the same way
+	 * {@see \Pontifex\Admin\UploadController::refuse_if_no_room()} silences its
+	 * own upload-time disk check, since a host can disable or restrict the
+	 * function) only so unit tests — which cannot make the real disk report an
+	 * arbitrary free-space figure — can substitute a controlled reading;
+	 * production always reads the real filesystem.
+	 *
+	 * @var Closure(string): (float|false)
+	 */
+	private Closure $disk_free_space;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
 	 * exist. Once created, the absolute, real path is stored so
 	 * subsequent path-traversal checks can use string comparison.
 	 *
-	 * @param string      $destination_root      Absolute filesystem path of the restore root.
-	 * @param bool        $allow_unsafe_symlinks  Optional. Allow symlink targets that escape the root (default false).
-	 * @param string|null $required_prefix        Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
+	 * @param string        $destination_root      Absolute filesystem path of the restore root.
+	 * @param bool          $allow_unsafe_symlinks Optional. Allow symlink targets that escape the root (default false).
+	 * @param string|null   $required_prefix       Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
+	 * @param callable|null $disk_free_space       Optional free-space reader used by {@see self::assert_free_space_for()}, called as `( string $path ): float|false`; defaults to disk_free_space().
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null ) {
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null ) {
 		$this->allow_unsafe_symlinks = $allow_unsafe_symlinks;
 		$this->required_prefix       = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
+		$this->disk_free_space       = null !== $disk_free_space
+			? Closure::fromCallable( $disk_free_space )
+			: static function ( string $path ) {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled or restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
+				return @disk_free_space( $path );
+			};
 
 		if ( '' === $destination_root ) {
 			throw new InvalidArgumentException( 'FileWriter: destination_root must be non-empty.' );
@@ -237,6 +274,116 @@ final class FileWriter {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
 			sprintf( 'FileWriter: unsupported entry kind "%s".', $header->kind() )
 		);
+	}
+
+	/**
+	 * Refuse to begin a restore the destination does not have room for.
+	 *
+	 * Called once by the caller (RestoreRunner::restore()) before any entry is
+	 * written — never from a verify-only walk, which writes nothing and so has
+	 * nothing to preflight. FileWriter owns the destination directory, so it
+	 * owns the question "will this fit": {@see self::write_file()} always lands
+	 * a file in a sibling temp file before renaming it into place, so even
+	 * replacing an unchanged file needs its full size free momentarily.
+	 *
+	 * The amount needed is the LARGER of two figures, both read only from the
+	 * manifest's file entries (a directory or symlink entry costs nothing worth
+	 * measuring):
+	 *
+	 *  1. The single largest file entry. Because of the temp-then-rename
+	 *     write, the restore cannot proceed unless there is room for its
+	 *     biggest file, whatever else is true of the rest of the archive.
+	 *  2. The sum, over every file entry, of how much bigger it is than
+	 *     whatever already occupies its destination path —
+	 *     `max( 0, $entry_size - $existing_size )`, with a missing
+	 *     destination file counted as size 0. This is what catches
+	 *     restoring a much larger site onto a small disk, while costing
+	 *     almost nothing for a same-site rollback, where nearly every file
+	 *     already exists at the same size.
+	 *
+	 * A {@see ManifestEntry::length()} is the entry's STORED size on disk —
+	 * the compressed payload plus its own record overhead — not the unpacked
+	 * file size. For compressible content that makes this estimate SMALLER
+	 * than the file once restored, so the whole method leans low by
+	 * construction. That is the correct direction to lean: an under-estimate
+	 * merely leaves today's behaviour in place (the write itself remains the
+	 * hard backstop against actually running out of room), whereas an
+	 * over-estimate would refuse a restore that would in fact have succeeded —
+	 * for a backup tool, wrongly locking someone out of their own recovery.
+	 *
+	 * An entry whose path {@see self::normalise_entry_path()} cannot make
+	 * sense of (a hostile or malformed path) is skipped here rather than
+	 * refused: this method is a disk-space estimate, not the path-safety
+	 * guard, and {@see self::write_entry()} refuses that same entry properly,
+	 * with its own message, once the walk actually reaches it.
+	 *
+	 * A free-space reading that cannot be taken (the injected reader returns
+	 * false, e.g. under open_basedir) is treated exactly as
+	 * {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()} treats
+	 * it: proceed rather than refuse. An unknown must never become a refusal.
+	 *
+	 * @param array<int, ManifestEntry> $manifest_entries Every entry the restore is about to write.
+	 * @return void
+	 * @throws RuntimeException If free space is known and smaller than what this restore needs.
+	 */
+	public function assert_free_space_for( array $manifest_entries ): void {
+		$largest_entry_length = 0;
+		$total_growth         = 0;
+
+		foreach ( $manifest_entries as $manifest_entry ) {
+			if ( ! $manifest_entry->is_file() ) {
+				continue;
+			}
+
+			$path = $manifest_entry->path();
+			if ( null === $path ) {
+				continue;
+			}
+
+			try {
+				$relative_path = $this->normalise_entry_path( $path );
+			} catch ( InvalidArgumentException $error ) {
+				// A hostile or malformed path: not this method's guard to enforce, and
+				// not this entry's problem to contribute to either figure below —
+				// write_entry() refuses it properly, with its own message, when the
+				// walk actually reaches it. Skipped BEFORE the entry's length is
+				// weighed against $largest_entry_length, not just before it is
+				// weighed against $total_growth: a hostile entry must not inflate
+				// either figure.
+				continue;
+			}
+
+			$entry_length = $manifest_entry->length();
+			if ( $entry_length > $largest_entry_length ) {
+				$largest_entry_length = $entry_length;
+			}
+
+			$target_path   = $this->destination_root . '/' . $relative_path;
+			$existing_size = is_file( $target_path ) ? (int) filesize( $target_path ) : 0;
+			$total_growth += max( 0, $entry_length - $existing_size );
+		}
+
+		$needed = max( $largest_entry_length, $total_growth );
+		if ( 0 === $needed ) {
+			return;
+		}
+
+		$free = ( $this->disk_free_space )( $this->destination_root );
+		if ( false === $free ) {
+			return;
+		}
+
+		if ( $free < $needed ) {
+			throw new RuntimeException(
+				sprintf(
+					'FileWriter: the restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->destination_root is plugin-derived, not web output; reported verbatim for diagnostic context.
+					$this->destination_root,
+					(int) ceil( $needed / self::BYTES_PER_MEGABYTE ),
+					(int) floor( $free / self::BYTES_PER_MEGABYTE )
+				)
+			);
+		}
 	}
 
 	/**

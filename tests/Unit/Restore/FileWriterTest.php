@@ -15,6 +15,7 @@ use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
@@ -185,6 +186,26 @@ final class FileWriterTest extends TestCase {
 	private static function db_chunk_result( string $table_name, int $statement_count, string $sql ): EntryReadResult {
 		$header = EntryHeader::for_db_chunk( 0, $table_name, $statement_count, strlen( $sql ), 0 );
 		return new EntryReadResult( $header, $sql );
+	}
+
+	/**
+	 * Build a ManifestEntry for a file entry with the given path and stored length.
+	 *
+	 * Unlike {@see self::file_result()}, this goes through
+	 * {@see ManifestEntry::for_file()} directly rather than EntryHeader, and
+	 * ManifestEntry validates only that the path is non-empty — so, deliberately,
+	 * this can build an entry carrying a hostile path (a "../" segment, say) that
+	 * EntryHeader's own factories never would. That gap is exactly what the
+	 * disk-space preflight tests below need: a real manifest can carry such an
+	 * entry (it is untrusted input read off the archive), and the preflight must
+	 * cope with it without mistaking a path problem for a disk-space one.
+	 *
+	 * @param string $path   Relative path recorded on the entry.
+	 * @param int    $length The entry's STORED length, as ManifestEntry::length() reports it.
+	 * @return ManifestEntry A file-kind manifest entry ready to feed to assert_free_space_for().
+	 */
+	private static function manifest_file_entry( string $path, int $length ): ManifestEntry {
+		return ManifestEntry::for_file( 0, 0, $length, $path, 0, str_repeat( "\0", 32 ) );
 	}
 
 	// -------------------------------------------------------------------
@@ -1618,5 +1639,267 @@ final class FileWriterTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
 		$this->assertSame( 'original', file_get_contents( $target ), 'A failed write must leave the original untouched.' );
 		$this->assertSame( array(), glob( $dir . '/*.tmp' ), 'A failed write must leave no orphaned temp file.' );
+	}
+
+	// -------------------------------------------------------------------
+	// assert_free_space_for() — the pre-restore disk-space preflight
+	// -------------------------------------------------------------------
+
+	/**
+	 * A restore is refused when the destination has less free space than it needs, and the message names the megabytes.
+	 *
+	 * A single 10 MB file entry with nothing already at its destination path:
+	 * both figures (largest single file, total growth) come out at 10 MB, so
+	 * "needed" is unambiguous. Only 2 MB is reported free, so the preflight
+	 * must refuse — and the message must be readable in human terms (megabytes),
+	 * not the raw byte counts SafetyArchiver's own preflight message uses.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_refuses_when_space_is_short(): void {
+		$ten_mb = 10 * 1024 * 1024;
+		$two_mb = 2 * 1024 * 1024;
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $two_mb ) {
+				return $two_mb;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'needs about 10 MB free, and only 2 MB is available' );
+
+		$writer->assert_free_space_for( array( self::manifest_file_entry( 'big.iso', $ten_mb ) ) );
+	}
+
+	/**
+	 * A restore is permitted when there is ample free space for it.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_permits_ample_space(): void {
+		$five_mb    = 5 * 1024 * 1024;
+		$hundred_mb = 100 * 1024 * 1024;
+		$writer     = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $hundred_mb ) {
+				return $hundred_mb;
+			}
+		);
+
+		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'medium.bin', $five_mb ) ) );
+
+		$this->assertNull( $result, 'Ample free space must not refuse the restore.' );
+	}
+
+	/**
+	 * Even with zero growth, there must be room for the largest single file.
+	 *
+	 * The other half of the pair, and the half a growth-only calculation misses
+	 * entirely. FileWriter writes each file to a temporary name and renames it
+	 * into place, so replacing a 10 MB file needs 10 MB free for the moment both
+	 * copies exist — even though the net change is nothing. A restore onto a
+	 * nearly-full disk therefore fails on the very first large file while a
+	 * growth-only sum happily reports that nothing is needed.
+	 *
+	 * Every entry here already exists at exactly its incoming size, so growth is
+	 * zero and the largest-entry figure is the only thing that can refuse this.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_refuses_when_the_largest_file_alone_will_not_fit(): void {
+		$entry_length = 100000;
+		$free_space   = 40000;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; every entry below shares this one destination directory.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+
+		$entries = array();
+		for ( $i = 0; $i < 3; $i++ ) {
+			$path = sprintf( 'wp-content/uploads/existing-%d.bin', $i );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a destination file matching the incoming entry exactly, so growth is zero.
+			file_put_contents( $this->fixture_root . '/' . $path, str_repeat( 'a', $entry_length ) );
+			$entries[] = self::manifest_file_entry( $path, $entry_length );
+		}
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $free_space ) {
+				return $free_space;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'stopped before changing anything' );
+
+		$writer->assert_free_space_for( $entries );
+	}
+
+	/**
+	 * The most important test: a rollback-shaped restore, where every file already exists at the same size, must be
+	 * PERMITTED even when free space sits far below the archive's total size.
+	 *
+	 * This is the exact false refusal this guard exists to avoid. A rollback (or
+	 * any same-site restore) rewrites files that are already there, so growth —
+	 * "how much bigger is the new file than what is already at that path" — is
+	 * zero for every entry: five 100,000-byte files whose destinations already
+	 * hold 100,000 bytes each sum to zero growth, even though the archive's
+	 * total size is 500,000 bytes. Only the largest single entry (100,000
+	 * bytes, for the temp-then-rename write) is a real requirement, so 150,000
+	 * bytes free — comfortably above that, but well below the 500,000-byte
+	 * total — must be enough. A naive implementation that instead demanded
+	 * room for the archive's whole total would wrongly refuse this restore,
+	 * locking someone out of their own recovery with no attacker involved.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_permits_rollback_shape_despite_low_free_space(): void {
+		$entry_length = 100000;
+		$entry_count  = 5;
+		$free_space   = 150000;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; every entry below shares this one destination directory.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+
+		$entries = array();
+		for ( $i = 0; $i < $entry_count; $i++ ) {
+			$path = sprintf( 'wp-content/uploads/existing-%d.bin', $i );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a destination file that already matches the incoming entry's size, so growth is zero for it.
+			file_put_contents( $this->fixture_root . '/' . $path, str_repeat( 'a', $entry_length ) );
+			$entries[] = self::manifest_file_entry( $path, $entry_length );
+		}
+		// Archive total is 500,000 bytes (5 x 100,000) -- well above the 150,000
+		// bytes free granted below; only growth (zero here) and the largest
+		// single entry (100,000) are meant to matter.
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $free_space ) {
+				return $free_space;
+			}
+		);
+
+		$result = $writer->assert_free_space_for( $entries );
+
+		$this->assertNull( $result, 'A rollback where every file already matches must be permitted despite the low free space.' );
+	}
+
+	/**
+	 * A "growth" shape — files are much larger than what already exists at their destinations — is refused when free
+	 * space is short, even though no single file is individually too big.
+	 *
+	 * Five 200,000-byte entries with nothing at their destinations sum to a
+	 * 1,000,000-byte total growth. 500,000 bytes free comfortably covers the
+	 * 200,000-byte largest single entry but not the summed growth, so the
+	 * restore must be refused — proving the growth figure, not just the
+	 * largest-entry figure, is enforced.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_refuses_growth_shape_when_space_is_short(): void {
+		$entry_length = 200000;
+		$entry_count  = 5;
+		$free_space   = 500000;
+
+		$entries = array();
+		for ( $i = 0; $i < $entry_count; $i++ ) {
+			// Nothing exists yet at any of these destinations, so each entry's full
+			// length counts as growth.
+			$entries[] = self::manifest_file_entry( sprintf( 'wp-content/uploads/new-%d.bin', $i ), $entry_length );
+		}
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $free_space ) {
+				return $free_space;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+
+		$writer->assert_free_space_for( $entries );
+	}
+
+	/**
+	 * An unknown free-space reading (false, e.g. under open_basedir) must never refuse the restore.
+	 *
+	 * Matches the posture {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()}
+	 * already takes: an unknown must never become a refusal.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_does_not_refuse_on_unknown_free_space(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) {
+				return false;
+			}
+		);
+
+		// An enormous entry that would certainly be refused if any real free-space
+		// figure were compared against it.
+		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'huge.bin', 500 * 1024 * 1024 ) ) );
+
+		$this->assertNull( $result, 'An unknown free-space reading must not refuse the restore.' );
+	}
+
+	/**
+	 * An entry whose path cannot be normalised is skipped by the preflight, not treated as a disk-space refusal.
+	 *
+	 * ManifestEntry (unlike EntryHeader) does not itself validate a path, so a
+	 * real manifest read off an archive can carry a hostile entry — here, one
+	 * with a "../" segment and a fabricated 500 MB length. If the preflight
+	 * mistakenly counted it, the tiny free-space figure below would refuse the
+	 * whole restore over a path problem. Instead it must be skipped here and
+	 * left for write_entry() to refuse in its own right, with its own message,
+	 * when the walk actually reaches it.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_skips_an_entry_with_an_unnormalisable_path(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) {
+				// Just enough for the one legitimate entry below, nowhere near
+				// enough for the hostile entry's fabricated 500 MB if it were
+				// wrongly counted.
+				return 5000;
+			}
+		);
+
+		$entries = array(
+			self::manifest_file_entry( 'note.txt', 1000 ),
+			self::manifest_file_entry( '../escape.bin', 500 * 1024 * 1024 ),
+		);
+
+		$result = $writer->assert_free_space_for( $entries );
+		$this->assertNull( $result, 'The hostile entry must be skipped, not treated as a disk-space shortfall.' );
+
+		// write_entry() must still be the one to refuse that same hostile entry,
+		// with its own path-safety message, once the walk actually reaches it.
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'parent-directory segment' );
+		$writer->write_entry( self::file_result( '../escape.bin', 'forged' ) );
 	}
 }

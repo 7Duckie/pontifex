@@ -1033,4 +1033,84 @@ final class RestoreRunnerTest extends TestCase {
 		}
 		$this->assertContains( 'DROP TABLE IF EXISTS `pontifexstg_wp_options`', $executed, 'The staged table must be dropped by the abort.' );
 	}
+
+	// -------------------------------------------------------------------
+	// The disk-space preflight — restore() consults it, verify() never does
+	// -------------------------------------------------------------------
+
+	/**
+	 * The restore() call reads free disk space before writing any entry, and the entry is written once that reading permits it.
+	 *
+	 * FileWriter is final, so this cannot be proven by spying on a mock; instead
+	 * the injected free-space reader itself checks, as a side effect of being
+	 * called, whether the entry it is about to be asked to permit has already
+	 * landed on disk. If RestoreRunner ever called the preflight late — after
+	 * dispatching even the first entry — that check would observe the file
+	 * already there and this test would fail. The reader then returns ample
+	 * space, so the restore proceeds and the entry is confirmed written
+	 * afterwards, proving the call is a real, load-bearing part of a working
+	 * restore(), not a dead path.
+	 *
+	 * @return void
+	 */
+	public function test_restore_consults_disk_space_before_writing_any_entry(): void {
+		$note_path              = $this->fixture_root . '/note.txt';
+		$file_did_not_exist_yet = null;
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and instead checks the fixture filesystem directly.
+			function ( string $path ) use ( $note_path, &$file_did_not_exist_yet ) {
+				$file_did_not_exist_yet = ! file_exists( $note_path );
+				return PHP_INT_MAX;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertTrue( $file_did_not_exist_yet, 'The free-space reading must be taken before any entry is written.' );
+		$this->assertFileExists( $note_path, 'The entry must still be written once the preflight permits it.' );
+	}
+
+	/**
+	 * The verify() call never consults the disk-space preflight — it writes nothing, so there is nothing to preflight.
+	 *
+	 * The injected free-space reader would refuse outright if it were ever
+	 * called (it reports 0 bytes free), so if verify() incorrectly called
+	 * FileWriter::assert_free_space_for(), this call would throw. It is also
+	 * tracked directly, so the assertion below is meaningful even if some
+	 * future change made a 0-byte reading non-refusing.
+	 *
+	 * @return void
+	 */
+	public function test_verify_never_consults_disk_space(): void {
+		$disk_space_was_consulted = false;
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and only records that it was called at all.
+			function ( string $path ) use ( &$disk_space_was_consulted ) {
+				$disk_space_was_consulted = true;
+				return 0;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->verify( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFalse( $disk_space_was_consulted, 'verify() must never consult the disk-space reader.' );
+	}
 }

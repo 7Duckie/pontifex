@@ -54,12 +54,18 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *     and footer; throws if either is malformed).
  *  2. Read the manifest (validates the manifest's internal hash
  *     against the footer's recorded hash; throws on mismatch).
- *  3. For each ManifestEntry, in the order the manifest records:
+ *  3. restore() only (never verify(), which writes nothing): before
+ *     touching the filesystem or the database, ask FileWriter whether
+ *     the destination has room for this restore
+ *     ({@see FileWriter::assert_free_space_for()}) — a full disk part-way
+ *     through is the most likely failure a restore can hit, needing no
+ *     attacker, just an ordinary full disk.
+ *  4. For each ManifestEntry, in the order the manifest records:
  *     a. Decode via EntryReader (verifies the entry's on-disk hash
  *        and decodes the payload through the codec).
  *     b. Route to FileWriter or DatabaseWriter based on the
  *        entry's kind.
- *  4. If any step throws, the restore halts immediately. Database
+ *  5. If any step throws, the restore halts immediately. Database
  *     changes never reach the live tables: every db_chunk replays into
  *     staging tables that are cut over atomically only after the whole
  *     walk succeeds (ADR 0009), and a failure drops the staging tables.
@@ -173,11 +179,18 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * supplied it is invoked once per entry, after that entry is written,
 	 * as `( int $done, int $total ): void`.
 	 *
+	 * Before any of that — before the database staging even begins, let
+	 * alone the entry walk — the destination is asked whether it has room
+	 * for this restore ({@see FileWriter::assert_free_space_for()}), so a
+	 * disk that fills part-way through fails closed up front rather than
+	 * leaving the site half old, half new. verify() never calls this: it
+	 * writes nothing, so there is nothing to preflight.
+	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
+	 * @throws RuntimeException         If the archive is malformed, hash verification fails, the destination lacks the free disk space this restore needs, or any worker fails.
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		// Reset the writer's staging state and sweep leftovers a crashed earlier
@@ -188,13 +201,21 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// the reader; the charset string itself is validated by the writer.
 		$reader     = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$provenance = $reader->provenance();
+		$manifest   = $reader->manifest();
 
 		// Fail closed on an archive that lies about its own scope: one whose
 		// recorded scope declares a half absent while the manifest actually
 		// carries it (ADR 0016). Pontifex's own exports never contradict their
 		// scope, so this only catches a corrupt or hand-forged archive — refuse
 		// it rather than restore contents the scope says are not there.
-		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $reader->manifest() );
+		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $manifest );
+
+		// Refuse before anything is touched — filesystem or database — when the
+		// destination cannot hold this restore. FileWriter owns the destination
+		// directory, so it owns this estimate; see its own docblock for why the
+		// figure leans low rather than risk refusing a restore that would have
+		// succeeded.
+		$this->file_writer->assert_free_space_for( $manifest->entries() );
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
