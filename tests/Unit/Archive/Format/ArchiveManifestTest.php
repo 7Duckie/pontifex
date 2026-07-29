@@ -9,12 +9,23 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Archive\Format;
 
+use DateTimeImmutable;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ByteOrder;
+use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Integrity\Sha256;
+use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 
 /**
  * Behavioural tests for the ArchiveManifest class.
@@ -106,6 +117,56 @@ final class ArchiveManifestTest extends TestCase {
 	public function test_max_payload_size_is_sixteen_mib(): void {
 		$this->assertSame( 16777216, ArchiveManifest::MAX_PAYLOAD_SIZE );
 		$this->assertSame( 16 * 1024 * 1024, ArchiveManifest::MAX_PAYLOAD_SIZE );
+	}
+
+	/**
+	 * The min-entry-payload-bytes constant must be 169.
+	 *
+	 * @return void
+	 */
+	public function test_min_entry_payload_bytes_is_one_hundred_sixty_nine(): void {
+		$this->assertSame( 169, ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES );
+	}
+
+	/**
+	 * Pin the format's true structural floor: a hand-forged, maximally
+	 * degenerate entry (the shortest kind, "file", a 1-character path,
+	 * every numeric field at 0) encoded as the sole entry in a manifest.
+	 *
+	 * This is the literal "minimal one-entry manifest" MIN_ENTRY_PAYLOAD_BYTES's
+	 * docblock refers to. Its size is pinned exactly, so a future format
+	 * change that shrinks it further is caught here rather than silently
+	 * eroding the margin the reader guard and the export-side projection
+	 * both rely on.
+	 *
+	 * @return void
+	 */
+	public function test_minimal_one_entry_manifest_size_is_pinned(): void {
+		$minimal = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+
+		$bytes = ( new ArchiveManifest( array( $minimal ) ) )->to_bytes();
+
+		$this->assertSame( 195, strlen( $bytes ), 'ArchiveManifest::to_bytes() for one maximally-degenerate entry must be exactly 195 bytes.' );
+	}
+
+	/**
+	 * The true asymptotic marginal cost of an additional maximally-degenerate
+	 * entry (146 bytes) must stay comfortably below MIN_ENTRY_PAYLOAD_BYTES
+	 * (169), proving the constant is a deliberate margin above the format's
+	 * real floor rather than an accidental over-claim. See
+	 * MIN_ENTRY_PAYLOAD_BYTES's docblock for why the guard is built this way.
+	 *
+	 * @return void
+	 */
+	public function test_true_minimal_marginal_entry_cost_stays_below_the_conservative_constant(): void {
+		$minimal = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+
+		$one_entry_bytes = strlen( ( new ArchiveManifest( array( $minimal ) ) )->to_bytes() );
+		$two_entry_bytes = strlen( ( new ArchiveManifest( array( $minimal, $minimal ) ) )->to_bytes() );
+		$marginal_cost   = $two_entry_bytes - $one_entry_bytes;
+
+		$this->assertSame( 146, $marginal_cost, 'The true marginal cost of a maximally-degenerate entry must be exactly 146 bytes.' );
+		$this->assertLessThan( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES, $marginal_cost, 'MIN_ENTRY_PAYLOAD_BYTES must sit above the format\'s real floor, never at or below it.' );
 	}
 
 	/**
@@ -356,5 +417,574 @@ final class ArchiveManifestTest extends TestCase {
 		$this->assertSame( $original_entries[1]->offset(), $parsed_entries[1]->offset() );
 		$this->assertSame( 'db_chunk', $parsed_entries[1]->kind() );
 		$this->assertSame( 0, $parsed_entries[1]->chunk_index() );
+	}
+
+	/**
+	 * The project_payload_bytes() method over no entries must project the fixed framing only.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_empty_is_framing_only(): void {
+		$this->assertSame( 50, ArchiveManifest::project_payload_bytes( array() ) );
+	}
+
+	/**
+	 * The project_payload_bytes() method must charge each path-bearing entry its
+	 * OWN kind's structural floor (less the 1-character path that floor assumes)
+	 * plus the real path length and the shared unseen-numeric margin.
+	 *
+	 * The per-kind floor matters: a single baseline for all kinds under-charges
+	 * every kind but the shortest, and `directory` — five bytes above `file`
+	 * purely because its kind string is longer — is the one that broke first.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_charges_overhead_plus_real_path_length(): void {
+		$headers = array(
+			EntryHeader::for_file( 'wp-content/uploads/photo.jpg', 100, 0644, 1690000000, 'image/jpeg', 0 ),
+			EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 ),
+		);
+
+		$margin = self::EXPECTED_UNSEEN_MARGIN;
+
+		$expected = 50
+			+ ( self::FLOOR_FILE - 1 + strlen( 'wp-content/uploads/photo.jpg' ) + $margin )
+			+ ( self::FLOOR_DIRECTORY - 1 + strlen( 'wp-content/uploads' ) + $margin );
+
+		$this->assertSame( $expected, ArchiveManifest::project_payload_bytes( $headers ) );
+	}
+
+	/**
+	 * The project_payload_bytes() method must charge a db_chunk entry its own
+	 * structural floor plus its chunk_index's real digit width (known from the
+	 * header) plus the shared margin for the separator and the numeric fields the
+	 * header cannot carry at all — no longer a flat baseline regardless of
+	 * chunk_index, now that db_chunk digit growth is measured exactly where it
+	 * can be and margined honestly where it cannot (see
+	 * {@see ArchiveManifest::project_payload_bytes()}).
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_charges_measured_estimate_for_db_chunk(): void {
+		$margin = self::EXPECTED_UNSEEN_MARGIN;
+
+		// chunk_index 0: a single digit, the same width the floor already assumes,
+		// so only the shared unseen-field margin applies on top.
+		$single_digit_headers = array( EntryHeader::for_db_chunk( 0, 'wp_posts', 10, 5000, 0 ) );
+		$this->assertSame(
+			50 + self::FLOOR_DB_CHUNK + $margin,
+			ArchiveManifest::project_payload_bytes( $single_digit_headers )
+		);
+
+		// chunk_index 12345: five digits, so the projection must additionally
+		// charge the four digits beyond the single-digit baseline.
+		$five_digit_headers = array( EntryHeader::for_db_chunk( 12345, 'wp_posts', 10, 5000, 0 ) );
+		$this->assertSame(
+			50 + self::FLOOR_DB_CHUNK + 4 + $margin,
+			ArchiveManifest::project_payload_bytes( $five_digit_headers )
+		);
+	}
+
+	/**
+	 * Every kind's structural floor must be exactly what the real encoder
+	 * produces for that kind's most degenerate entry.
+	 *
+	 * The projection now builds each entry's charge up from these floors with no
+	 * cushion above them, so a floor that drifts from the real format is an
+	 * immediate under-count rather than something an inflated baseline would
+	 * absorb. Measured against to_bytes() rather than restated.
+	 *
+	 * @return void
+	 */
+	public function test_per_kind_structural_floors_match_the_real_encoder(): void {
+		$hash = str_repeat( "\x00", Sha256::DIGEST_SIZE );
+
+		$floors = array(
+			'file'      => array( self::FLOOR_FILE, ManifestEntry::for_file( 0, 0, 0, 'a', 0, $hash ) ),
+			'symlink'   => array( self::FLOOR_SYMLINK, ManifestEntry::for_symlink( 0, 0, 0, 'a', 0, $hash ) ),
+			'directory' => array( self::FLOOR_DIRECTORY, ManifestEntry::for_directory( 0, 0, 0, 'a', 0, $hash ) ),
+			'db_chunk'  => array( self::FLOOR_DB_CHUNK, ManifestEntry::for_db_chunk( 0, 0, 0, 0, 0, $hash ) ),
+		);
+
+		foreach ( $floors as $kind => $case ) {
+			[$expected, $entry] = $case;
+
+			$this->assertSame(
+				$expected,
+				strlen( ( new ArchiveManifest( array( $entry ) ) )->to_bytes() ) - 50,
+				sprintf( 'The structural floor of a "%s" entry must be exactly %d bytes.', $kind, $expected )
+			);
+		}
+	}
+
+	/**
+	 * At the worst case the format permits, the projection must sit EXACTLY one
+	 * byte above the real byte count — never under it, and never further over.
+	 *
+	 * Every term is now measured or provably bounded, with no cushion above the
+	 * structural floor, so the two meet as tightly as the arithmetic allows when
+	 * an entry is pushed to the widest values that can actually occur: the
+	 * largest index a 16 MiB manifest can hold, offset and length at
+	 * PHP_INT_MAX, codec_id at its own ceiling.
+	 *
+	 * The single remaining byte is ENTRY_SEPARATOR_BYTES' deliberate uniformity:
+	 * the projection charges one separator per entry, where a manifest of N
+	 * entries carries N-1. That surplus is one byte for the WHOLE manifest, not
+	 * per entry, so it is asserted at two different entry counts here — if it
+	 * ever scaled with N it would be a per-entry over-charge costing real
+	 * entries, which is precisely what this rebase onto per-kind floors set out
+	 * to eliminate.
+	 *
+	 * Anything below zero is the under-count the fix exists to remove; anything
+	 * above one is unexplained slack.
+	 *
+	 * @return void
+	 */
+	public function test_projection_meets_the_real_bytes_exactly_at_the_format_worst_case(): void {
+		$hash  = str_repeat( "\x5a", Sha256::DIGEST_SIZE );
+		$path  = 'wp-content/uploads/2026/07/photo.jpg';
+		$index = self::LARGEST_POSSIBLE_INDEX;
+		$max   = ManifestEntry::MAX_CODEC_ID;
+
+		$cases = array(
+			'file'      => array( EntryHeader::for_file( $path, 1024, 0644, 1690000000, 'image/jpeg', 0 ), ManifestEntry::for_file( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'symlink'   => array( EntryHeader::for_symlink( $path, '/var/www/t', 0 ), ManifestEntry::for_symlink( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'directory' => array( EntryHeader::for_directory( $path, 0755, 0 ), ManifestEntry::for_directory( $index, PHP_INT_MAX, PHP_INT_MAX, $path, $max, $hash ) ),
+			'db_chunk'  => array( EntryHeader::for_db_chunk( 999999, 'wp_postmeta', 4000, 6000000, 0 ), ManifestEntry::for_db_chunk( $index, PHP_INT_MAX, PHP_INT_MAX, 999999, $max, $hash ) ),
+		);
+
+		foreach ( $cases as $kind => $case ) {
+			[$header, $entry] = $case;
+
+			foreach ( array( 1, 3 ) as $count ) {
+				$headers = array_fill( 0, $count, $header );
+				$entries = array_fill( 0, $count, $entry );
+
+				$this->assertSame(
+					strlen( ( new ArchiveManifest( $entries ) )->to_bytes() ) + 1,
+					ArchiveManifest::project_payload_bytes( $headers ),
+					sprintf(
+						'The projection for %d "%s" entries must sit exactly one byte above the real bytes at the format\'s worst case.',
+						$count,
+						$kind
+					)
+				);
+			}
+		}
+	}
+
+	/**
+	 * The largest index bound must follow from the format's own structural cap.
+	 *
+	 * MAX_INDEX_DIGITS is derived from this, and with no cushion left above the
+	 * floors it is load-bearing: an entry costs at least its floor plus one
+	 * separator (146 bytes, pinned above), so a payload within MAX_PAYLOAD_SIZE
+	 * cannot hold more entries than that divides into. This pins the derivation
+	 * so a change to the cap or the floor cannot invalidate it silently.
+	 *
+	 * @return void
+	 */
+	public function test_largest_possible_index_follows_from_the_payload_cap(): void {
+		$minimal       = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+		$marginal_cost = strlen( ( new ArchiveManifest( array( $minimal, $minimal ) ) )->to_bytes() )
+			- strlen( ( new ArchiveManifest( array( $minimal ) ) )->to_bytes() );
+		$wrapper       = (int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'ENTRIES_JSON_WRAPPER_BYTES' ) )->getValue();
+		$largest_index = intdiv( ArchiveManifest::MAX_PAYLOAD_SIZE - $wrapper, $marginal_cost ) - 1;
+
+		$this->assertSame( self::LARGEST_POSSIBLE_INDEX, $largest_index, 'The largest structurally possible index must match the pinned value.' );
+		$this->assertSame(
+			strlen( (string) $largest_index ),
+			(int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_INDEX_DIGITS' ) )->getValue(),
+			'MAX_INDEX_DIGITS must equal the digit width of the largest structurally possible index.'
+		);
+	}
+
+	/**
+	 * The shared per-entry margin project_payload_bytes() adds to every entry,
+	 * pinned as a literal derived independently of the class's own constants.
+	 *
+	 * Deliberately NOT rebuilt by reflecting ArchiveManifest's constants and
+	 * repeating its arithmetic: that expresses the implementation twice rather
+	 * than pinning it, so both sides move together and any change to a constant
+	 * passes unnoticed. (Measured, not assumed — an earlier revision of this
+	 * class did exactly that, and zeroing ENTRY_SEPARATOR_BYTES left the whole
+	 * suite green.) The derivation, one term per field the projection cannot
+	 * see on an EntryHeader:
+	 *
+	 *   entry separator (the `,` between entries)                     =  1
+	 *   index    — bounded at MAX_INDEX_DIGITS (6), less the 1 digit each
+	 *              kind's structural floor already assumes               =  5
+	 *   codec_id — bounded at MAX_CODEC_ID_DIGITS (5), same less-one     =  4
+	 *   offset   — MAX_INT_DIGITS (19), same less-one                    = 18
+	 *   length   — MAX_INT_DIGITS (19), same less-one                    = 18
+	 *                                                                    ----
+	 *                                                                      46
+	 *
+	 * A deliberate change to any of those constants must update this literal;
+	 * that failure is the point.
+	 *
+	 * @var int
+	 */
+	private const EXPECTED_UNSEEN_MARGIN = 46;
+
+	/**
+	 * Structural floor of a `file` manifest entry, pinned independently of the
+	 * class's own constant so the two cannot drift together.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_FILE = 145;
+
+	/**
+	 * Structural floor of a `symlink` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_SYMLINK = 148;
+
+	/**
+	 * Structural floor of a `directory` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_DIRECTORY = 150;
+
+	/**
+	 * Structural floor of a `db_chunk` manifest entry.
+	 *
+	 * @var int
+	 */
+	private const FLOOR_DB_CHUNK = 154;
+
+	/**
+	 * The largest index an entry can carry in a manifest that fits the format's
+	 * 16 MiB payload cap, at the true 146-byte marginal cost per entry.
+	 *
+	 * @var int
+	 */
+	private const LARGEST_POSSIBLE_INDEX = 114911;
+
+	/**
+	 * MAX_CODEC_ID_DIGITS must stay pinned to the real digit width of
+	 * ManifestEntry::MAX_CODEC_ID.
+	 *
+	 * The projection bounds codec_id at this width instead of MAX_INT_DIGITS,
+	 * which is only sound while the two agree; if that ceiling is ever raised,
+	 * this fails rather than letting the projection quietly under-charge.
+	 *
+	 * @return void
+	 */
+	public function test_max_codec_id_digits_matches_the_real_codec_ceiling(): void {
+		$this->assertSame(
+			strlen( (string) ManifestEntry::MAX_CODEC_ID ),
+			(int) ( new \ReflectionClassConstant( ArchiveManifest::class, 'MAX_CODEC_ID_DIGITS' ) )->getValue(),
+			'MAX_CODEC_ID_DIGITS must equal the digit width of ManifestEntry::MAX_CODEC_ID.'
+		);
+	}
+
+	/**
+	 * The project_payload_bytes() method must never under-estimate real
+	 * ArchiveWriter output — it is the whole point of the projection (§Part 3
+	 * of the entry-count-ceiling fix): a projection that could fall short
+	 * would let a doomed-to-be-unreadable export slip past the pre-write
+	 * refusal.
+	 *
+	 * Two phases, because one technique cannot honestly cover every shape:
+	 *
+	 *  - Phase 1 compares the projection against a REAL archive built by
+	 *    ArchiveWriter over a deliberately varied plan list — not just the
+	 *    200 flat-path files this test used to check alone (the most
+	 *    favourable shape possible: no escaping, no digit growth, small
+	 *    offsets), but a directory, a symlink, a db_chunk, a path needing
+	 *    JSON escaping, and a non-ASCII path too, so a regression in any one
+	 *    of the fixed causes (JSON escaping, db_chunk digit growth) would
+	 *    actually be caught here.
+	 *  - Phase 2 proves the db_chunk term at realistically large offsets —
+	 *    2e9 and 9e11, the exact magnitudes a large real backup reaches —
+	 *    plus the theoretical worst case a PHP int can ever hold
+	 *    (PHP_INT_MAX for index/offset/length, together with chunk_index and
+	 *    codec_id both at their own real maximums). Physically writing
+	 *    terabytes through ArchiveWriter to reach those offsets for real is
+	 *    not practical in a unit test, so this phase constructs a real
+	 *    ManifestEntry with the chosen field values directly and calls
+	 *    to_bytes() — the exact same encoder
+	 *    {@see \Pontifex\Archive\Writer\IncrementalArchiveWriter::finish()}
+	 *    calls to serialise the real manifest, so the byte count is exactly
+	 *    what the real writer would have produced for those field values,
+	 *    not an approximation of it.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_never_under_estimates_real_writer_output(): void {
+		$plans = array();
+		for ( $i = 0; $i < 200; $i++ ) {
+			$plans[] = self::real_file_plan( sprintf( 'wp-content/uploads/2026/07/file-%04d.jpg', $i ), 'x' );
+		}
+		$plans[] = self::real_directory_plan( 'wp-content/uploads/2026/07' );
+		$plans[] = self::real_symlink_plan( 'wp-content/link', '/var/www/target/with/a/reasonably/long/path' );
+		$plans[] = self::real_db_chunk_plan( 0, 'wp_postmeta', 10, "INSERT INTO wp_postmeta VALUES (1, 1, 'a', 'b');\n" );
+		$plans[] = self::real_file_plan( 'wp-content/uploads/say "hello".jpg', 'x' );
+		$plans[] = self::real_file_plan( "wp-content/uploads/\u{65E5}\u{672C}\u{8A9E}\u{540D}\u{524D}.jpg", 'x' );
+
+		$headers   = array_map( static fn( $plan ) => $plan->header(), $plans );
+		$projected = ArchiveManifest::project_payload_bytes( $headers );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
+		$destination = fopen( 'php://temp', 'r+b' );
+		$writer      = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
+		$writer->write_archive(
+			new Provenance(
+				'6.6.1',
+				'8.2.10',
+				'https://example.test',
+				'utf8mb4',
+				'utf8mb4_unicode_520_ci',
+				new ExporterInfo( 'pontifex', '0.1.0' ),
+				new DateTimeImmutable( '2026-05-23T10:00:00+00:00' )
+			),
+			$plans,
+			$destination
+		);
+		rewind( $destination );
+		$reader = new ArchiveReader( $destination );
+		$actual = $reader->footer()->manifest_length();
+
+		$this->assertGreaterThanOrEqual( $actual, $projected, 'The projection must be at or above what the real writer produced for a realistically varied archive.' );
+
+		// Phase 2: db_chunk at real-world-large and theoretical-worst-case numeric widths.
+		$hash = str_repeat( "\x5a", Sha256::DIGEST_SIZE );
+		foreach ( $this->large_db_chunk_offset_cases() as $case_label => $case ) {
+			[$index, $offset, $length, $chunk_index, $codec_id] = $case;
+
+			$header = EntryHeader::for_db_chunk( $chunk_index, 'wp_postmeta', 4000, 6000000, 0 );
+			$entry  = ManifestEntry::for_db_chunk( $index, $offset, $length, $chunk_index, $codec_id, $hash );
+
+			$case_projected = ArchiveManifest::project_payload_bytes( array( $header ) );
+			$case_actual    = strlen( ( new ArchiveManifest( array( $entry ) ) )->to_bytes() );
+
+			$this->assertGreaterThanOrEqual(
+				$case_actual,
+				$case_projected,
+				sprintf( 'The projection must be at or above the real manifest bytes for the "%s" case.', $case_label )
+			);
+		}
+
+		// Phase 3: the SAME proof for the path-bearing kinds. Phase 1 exercises
+		// these only through a real writer, whose offsets sit in the low
+		// thousands, so nothing there could catch digit growth in index, offset,
+		// length or codec_id — none of which an EntryHeader carries either. That
+		// gap is what let a reachable under-count survive the db_chunk fix: at a
+		// multi-terabyte archive the margin above `directory`'s floor (the
+		// narrowest of the three, its kind string being the longest) is exhausted
+		// and the projection falls under the real bytes.
+		foreach ( $this->large_path_entry_cases() as $case_label => $case ) {
+			[$kind, $path, $index, $offset, $length, $codec_id] = $case;
+
+			$header = self::path_header_for_kind( $kind, $path );
+			$entry  = self::path_entry_for_kind( $kind, $index, $offset, $length, $path, $codec_id, $hash );
+
+			$case_projected = ArchiveManifest::project_payload_bytes( array( $header ) );
+			$case_actual    = strlen( ( new ArchiveManifest( array( $entry ) ) )->to_bytes() );
+
+			$this->assertGreaterThanOrEqual(
+				$case_actual,
+				$case_projected,
+				sprintf( 'The projection must be at or above the real manifest bytes for the "%s" case.', $case_label )
+			);
+		}
+	}
+
+	/**
+	 * The projection must stay at or above the real bytes across a WHOLE
+	 * multi-entry manifest, not just entry by entry.
+	 *
+	 * Every other proof in this class compares a ONE-entry manifest, where the
+	 * framing cancels exactly and the `,` between entries never appears. This is
+	 * the only assertion that exercises the projection the way a real export
+	 * does — against a manifest long enough for the separators to be a real cost.
+	 *
+	 * Scope, stated honestly: this does NOT isolate ENTRY_SEPARATOR_BYTES.
+	 * Zeroing that constant leaves this green, because the numeric margin
+	 * over-covers a single byte many times over. The separator charge is pinned
+	 * by EXPECTED_UNSEEN_MARGIN instead; what this catches is any aggregate
+	 * error large enough to outrun the margin — the failure mode a per-entry
+	 * assertion structurally cannot see.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_covers_the_separators_between_entries(): void {
+		$hash    = str_repeat( "\x5a", Sha256::DIGEST_SIZE );
+		$path    = 'wp-content/uploads/2026/07/photo.jpg';
+		$headers = array();
+		$entries = array();
+
+		// Offsets and lengths deliberately wide enough that the numeric margin is
+		// doing real work, so this fails if the separator charge is removed.
+		for ( $i = 0; $i < 500; $i++ ) {
+			$headers[] = EntryHeader::for_file( $path, 1048576, 0644, 1690000000, 'image/jpeg', 0 );
+			$entries[] = ManifestEntry::for_file( $i, $i * 1048576, 1048576, $path, 1, $hash );
+		}
+
+		$this->assertGreaterThanOrEqual(
+			strlen( ( new ArchiveManifest( $entries ) )->to_bytes() ),
+			ArchiveManifest::project_payload_bytes( $headers ),
+			'The projection must cover the separators a multi-entry manifest carries between its entries.'
+		);
+	}
+
+	/**
+	 * Numeric field combinations for the path-bearing kinds, mirroring the
+	 * db_chunk cases: realistic large archives up to the theoretical worst case
+	 * a PHP int can ever reach.
+	 *
+	 * `directory` carries the narrowest margin of the three and so appears at
+	 * the sizes where it breaks first; every kind is covered at PHP_INT_MAX.
+	 *
+	 * @return array<string, array{0: string, 1: string, 2: int, 3: int, 4: int, 5: int}> Each entry is [kind, path, index, offset, length, codec_id].
+	 */
+	private function large_path_entry_cases(): array {
+		$path = 'wp-content/uploads/2026/07/some-photo-name-1024x768.jpg';
+
+		return array(
+			'file at a 2e9 offset (a real multi-gigabyte archive)' => array( 'file', $path, 50000, 2000000000, 6000000, 1 ),
+			'file at a 9e11 offset (a real multi-hundred-gigabyte archive)' => array( 'file', $path, 90000, 900000000000, 104857600, 1 ),
+			'file at a 7e12 offset (a real multi-terabyte archive)' => array( 'file', $path, 75000, 7000000000000, 104857600, 1 ),
+			'directory at a 7e12 offset (the narrowest margin of the three)' => array( 'directory', $path, 75000, 7000000000000, 137, 0 ),
+			'symlink at a 7e12 offset' => array( 'symlink', $path, 75000, 7000000000000, 166, 0 ),
+			'file at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'file', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'directory at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'directory', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'symlink at the largest possible index, offset and length at PHP_INT_MAX, codec_id maxed' => array( 'symlink', $path, self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, ManifestEntry::MAX_CODEC_ID ),
+			'file whose path needs JSON escaping, at a large offset' => array( 'file', 'wp-content/uploads/say "hello"\\here.jpg', 75000, 7000000000000, 104857600, 1 ),
+		);
+	}
+
+	/**
+	 * Build an EntryHeader of the given path-bearing kind.
+	 *
+	 * @param string $kind One of file, directory, symlink.
+	 * @param string $path Relative archive path.
+	 * @return EntryHeader The header for that kind.
+	 */
+	private static function path_header_for_kind( string $kind, string $path ): EntryHeader {
+		return match ( $kind ) {
+			'directory' => EntryHeader::for_directory( $path, 0755, 0 ),
+			'symlink'   => EntryHeader::for_symlink( $path, '/var/www/target/path', 0 ),
+			default     => EntryHeader::for_file( $path, 1024, 0644, 1690000000, 'image/jpeg', 0 ),
+		};
+	}
+
+	/**
+	 * Build a ManifestEntry of the given path-bearing kind.
+	 *
+	 * @param string $kind       One of file, directory, symlink.
+	 * @param int    $index      Entry index.
+	 * @param int    $offset     Byte offset.
+	 * @param int    $length     Record length.
+	 * @param string $path       Relative archive path.
+	 * @param int    $codec_id   Codec id.
+	 * @param string $entry_hash Raw SHA-256 bytes.
+	 * @return ManifestEntry The entry for that kind.
+	 */
+	private static function path_entry_for_kind( string $kind, int $index, int $offset, int $length, string $path, int $codec_id, string $entry_hash ): ManifestEntry {
+		return match ( $kind ) {
+			'directory' => ManifestEntry::for_directory( $index, $offset, $length, $path, $codec_id, $entry_hash ),
+			'symlink'   => ManifestEntry::for_symlink( $index, $offset, $length, $path, $codec_id, $entry_hash ),
+			default     => ManifestEntry::for_file( $index, $offset, $length, $path, $codec_id, $entry_hash ),
+		};
+	}
+
+	/**
+	 * Numeric field combinations for a db_chunk entry to prove
+	 * project_payload_bytes() against, from a realistic large archive up to
+	 * the theoretical worst case a PHP int can ever reach.
+	 *
+	 * @return array<string, array{0: int, 1: int, 2: int, 3: int, 4: int}> Each entry is [index, offset, length, chunk_index, codec_id].
+	 */
+	private function large_db_chunk_offset_cases(): array {
+		return array(
+			'offset around 2e9 (a real multi-gigabyte archive)'                        => array( 50000, 2000000000, 6000000, 12345, 1 ),
+			'offset around 9e11 (a real multi-hundred-gigabyte archive)'                => array( 90000, 900000000000, 6000000, 45000, 1 ),
+			'largest possible index, offset and length at PHP_INT_MAX, chunk_index and codec_id maxed' => array( self::LARGEST_POSSIBLE_INDEX, PHP_INT_MAX, PHP_INT_MAX, 999999, ManifestEntry::MAX_CODEC_ID ),
+		);
+	}
+
+	/**
+	 * Build a real file EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path     Relative archive path.
+	 * @param string $contents Raw file contents.
+	 * @return EntryPlan A raw-codec file plan.
+	 */
+	private static function real_file_plan( string $path, string $contents ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $contents )
+		);
+	}
+
+	/**
+	 * Build a real directory EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path Relative archive path.
+	 * @return EntryPlan A raw-codec directory plan.
+	 */
+	private static function real_directory_plan( string $path ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_directory( $path, 0755, 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( '' )
+		);
+	}
+
+	/**
+	 * Build a real symlink EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path   Relative archive path.
+	 * @param string $target Symlink target.
+	 * @return EntryPlan A raw-codec symlink plan.
+	 */
+	private static function real_symlink_plan( string $path, string $target ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_symlink( $path, $target, 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $target )
+		);
+	}
+
+	/**
+	 * Build a real db_chunk EntryPlan for the writer-comparison test.
+	 *
+	 * @param int    $chunk_index Zero-based chunk index.
+	 * @param string $table_name  Predominant table name.
+	 * @param int    $stmt_count  Statement count.
+	 * @param string $sql         Raw SQL contents.
+	 * @return EntryPlan A raw-codec db_chunk plan.
+	 */
+	private static function real_db_chunk_plan( int $chunk_index, string $table_name, int $stmt_count, string $sql ): EntryPlan {
+		return new EntryPlan(
+			EntryHeader::for_db_chunk( $chunk_index, $table_name, $stmt_count, strlen( $sql ), 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			self::real_content_stream( $sql )
+		);
+	}
+
+	/**
+	 * Open an in-memory stream pre-filled with the given contents, rewound to offset 0.
+	 *
+	 * @param string $contents The bytes to seed the stream with.
+	 * @return resource A readable, seekable stream.
+	 */
+	private static function real_content_stream( string $contents ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
+		$src = fopen( 'php://temp', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $src, $contents );
+		rewind( $src );
+		return $src;
 	}
 }

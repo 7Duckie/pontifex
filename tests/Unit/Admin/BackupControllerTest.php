@@ -430,6 +430,50 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A backup whose entries would produce a too-large manifest must report
+	 * its own specific message, not the generic "check the log" sentence
+	 * every other export failure gets.
+	 *
+	 * ManifestTooLargeException is caught ahead of the generic Throwable
+	 * handler (the same shape as BackupCancelled), the way the existing
+	 * invalid-exclusion-pattern guard delivers its own specific sentence —
+	 * proving failure_message()'s generic swallow is bypassed for this
+	 * refusal.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_the_manifest_too_large_message_verbatim(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'warning' )->once();
+
+		$builder = $this->manifest_builder_returning( array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) ) );
+
+		try {
+			$this->controller( $builder, $logger )->create();
+			$this->fail( 'create() should have halted via wp_send_json_error.' );
+		} catch ( RuntimeException $halt ) {
+			$this->assertSame( 'pontifex-json-halt', $halt->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertStringContainsString( 'cannot be continued', $this->json['data']['message'] );
+		$this->assertNotSame(
+			'The backup could not be completed. Check the Pontifex log for details.',
+			$this->json['data']['message'],
+			'The specific refusal must reach the operator, not the generic failure_message() sentence.'
+		);
+		$this->assertSame(
+			array(),
+			( new BackupStore( $this->base ) )->backups(),
+			'A refused backup must leave no partial archive in the store.'
+		);
+	}
+
+	/**
 	 * The shutdown handler does nothing when no backup is in progress.
 	 *
 	 * Guards against it deleting a file or logging on an ordinary request's

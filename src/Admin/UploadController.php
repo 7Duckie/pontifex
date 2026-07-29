@@ -14,6 +14,8 @@ use DateTimeImmutable;
 use DateTimeZone;
 use Throwable;
 use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Cli\SigningKeys;
+use Pontifex\Environment\Environment;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 
@@ -39,6 +41,16 @@ use Psr\Log\LoggerInterface;
  * as a path; and a file that does not parse as an archive is refused and deleted
  * rather than stored. Nothing is ever overwritten — the stored backup is given a
  * fresh name.
+ *
+ * When the site pins a trusted public key in `wp-config.php`
+ * (`PONTIFEX_PUBLIC_KEY`), an arriving archive must also carry an Ed25519
+ * signature that verifies against that key, or it is refused here and never
+ * stored (ADR 0020). This is the one moment the code *observes* an archive
+ * crossing into the site from outside; afterwards an uploaded archive is
+ * indistinguishable from one this site made itself, and the only origin claim it
+ * carries is chosen by whoever wrote it. Archives this site produced are
+ * therefore untouched — the check lives on this path and nowhere else, so a site
+ * can always restore, and roll back to, its own unsigned backups.
  */
 final class UploadController {
 
@@ -58,6 +70,13 @@ final class UploadController {
 	 * @var int
 	 */
 	private const STALE_UPLOAD_SECONDS = 86400;
+
+	/**
+	 * The runtime seam used to read the site's pinned trusted-key constant.
+	 *
+	 * @var Environment
+	 */
+	private Environment $environment;
 
 	/**
 	 * The WordPressContext abstraction (upload ceiling and size formatting).
@@ -95,12 +114,17 @@ final class UploadController {
 	/**
 	 * Construct the controller around its collaborators.
 	 *
+	 * Environment comes first, matching the three sibling admin controllers, so the
+	 * admin composition root reads the same way for all four.
+	 *
+	 * @param Environment      $environment       Reads the site's pinned trusted-key constant.
 	 * @param WordPressContext $wordpress_context Upload-ceiling and size formatting.
 	 * @param BackupStore      $store             The uploads/backups directories.
 	 * @param LoggerInterface  $logger            Records a failure's real cause.
 	 * @param callable|null    $is_uploaded_file  Optional genuine-upload guard; defaults to is_uploaded_file().
 	 */
-	public function __construct( WordPressContext $wordpress_context, BackupStore $store, LoggerInterface $logger, ?callable $is_uploaded_file = null ) {
+	public function __construct( Environment $environment, WordPressContext $wordpress_context, BackupStore $store, LoggerInterface $logger, ?callable $is_uploaded_file = null ) {
+		$this->environment       = $environment;
 		$this->wordpress_context = $wordpress_context;
 		$this->store             = $store;
 		$this->logger            = $logger;
@@ -172,14 +196,15 @@ final class UploadController {
 				)
 			);
 		} else {
-			// The whole archive has arrived: prove it is a real Pontifex archive before it
-			// is allowed into the backups directory, then store it under a fresh name.
-			if ( ! $this->assembled_upload_is_an_archive( $upload_id ) ) {
+			// The whole archive has arrived: prove it may be admitted — a real Pontifex
+			// archive, and a trusted one where this site pins a key — before it is allowed
+			// into the backups directory, then store it under a fresh name. Each refusal
+			// carries its own message, because "not a backup" and "not a backup this site
+			// trusts" send the operator to fix entirely different things.
+			$refusal = $this->admission_refusal( $upload_id );
+			if ( null !== $refusal ) {
 				$this->store->discard_upload( $upload_id );
-				wp_send_json_error(
-					array( 'message' => __( 'That file is not a Pontifex backup, so it was not stored.', 'pontifex' ) ),
-					422
-				);
+				wp_send_json_error( array( 'message' => $refusal['message'] ), $refusal['status'] );
 			}
 
 			$path = $this->store_completed_upload( $upload_id );
@@ -329,33 +354,169 @@ final class UploadController {
 	}
 
 	/**
-	 * Whether the assembled upload parses as a Pontifex archive.
+	 * Decide whether the assembled upload may be admitted, and why not when it may not.
 	 *
-	 * Opens the completed part file and reads its header and provenance; a file that
-	 * is not a real archive throws, and is reported as not an archive. Reads only —
-	 * nothing is written or restored here.
+	 * The earliest point at which the whole file exists, and therefore the only
+	 * refusal point that runs before anything enters the backups directory. Opens the
+	 * completed part file and reads its header and provenance; a file that is not a
+	 * real archive throws, and is refused as not an archive. A readable archive is
+	 * then put to the trust gate below. Reads only — nothing is written or restored
+	 * here.
+	 *
+	 * Returns null for "admit this", or the refusal to send back. The caller cannot
+	 * infer the reason from a bare false, and it must: telling an operator their
+	 * signed-by-the-wrong-key backup "is not a Pontifex backup" sends them to debug a
+	 * file that is perfectly well-formed.
 	 *
 	 * @param string $upload_id The upload id whose assembled part file to check.
-	 * @return bool True when the file is a readable Pontifex archive.
+	 * @return array{message: string, status: int}|null Null when the upload may be stored; otherwise the refusal.
 	 */
-	private function assembled_upload_is_an_archive( string $upload_id ): bool {
+	private function admission_refusal( string $upload_id ): ?array {
 		$stream = $this->store->open_upload( $upload_id );
 		if ( null === $stream ) {
-			return false;
+			return $this->not_an_archive_refusal();
 		}
+
 		try {
-			$reader = new ArchiveReader( $stream );
-			$reader->header();
-			$reader->provenance();
-			$valid = true;
-		} catch ( Throwable $error ) {
-			$this->logger->warning( 'Admin upload: the assembled file is not a valid archive.', array( 'exception' => $error ) );
-			$valid = false;
+			try {
+				$reader = new ArchiveReader( $stream );
+				$reader->header();
+				$reader->provenance();
+			} catch ( Throwable $error ) {
+				$this->logger->warning( 'Admin upload: the assembled file is not a valid archive.', array( 'exception' => $error ) );
+				return $this->not_an_archive_refusal();
+			}
+
+			return $this->untrusted_signature_refusal( $reader );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the part-file stream opened for validation; not a WP_Filesystem operation.
 			fclose( $stream );
 		}
-		return $valid;
+	}
+
+	/**
+	 * Enforce the site's pinned trusted public key against an arriving archive.
+	 *
+	 * A site that pins `PONTIFEX_PUBLIC_KEY` in `wp-config.php` has declared which
+	 * key it trusts, and ADR 0012 makes that declaration binding: the signature stops
+	 * being optional. The unkeyed SHA-256 hashes elsewhere in the format detect
+	 * corruption, never tampering — anyone who can edit an archive recomputes them —
+	 * and a signature can simply be stripped, leaving a well-formed *unsigned*
+	 * archive. So an unsigned upload and one signed by a different key are refused
+	 * alike: there is no way to tell a never-signed archive from a downgraded one, and
+	 * accepting either would make the pin decorative.
+	 *
+	 * With no pin defined this returns immediately and nothing about the upload
+	 * changes — which is the overwhelmingly common case and is pinned by its own test.
+	 *
+	 * A pin that cannot be read is refused too, with its own message: falling back to
+	 * "accept it unchecked" would let a typo in `wp-config.php` silently switch the
+	 * protection off, which is precisely the downgrade the policy exists to stop.
+	 *
+	 * Layering note: {@see SigningKeys} lives in `Pontifex\Cli` because that is where
+	 * its first caller lived, not because reading a key file is a CLI concern — it is
+	 * a final class of pure statics with no WP-CLI dependency, so reusing it here
+	 * costs nothing at runtime and keeps one parser for one security-critical file
+	 * format. One admin-side caller is a wrinkle; **a second is the trigger to move
+	 * the class to a neutral namespace properly** (ADR 0020, decision 6).
+	 *
+	 * @param ArchiveReader $reader The reader over the assembled upload.
+	 * @return array{message: string, status: int}|null Null when the archive is trusted (or no key is pinned); otherwise the refusal.
+	 */
+	private function untrusted_signature_refusal( ArchiveReader $reader ): ?array {
+		if ( ! $this->environment->is_constant_defined( 'PONTIFEX_PUBLIC_KEY' ) ) {
+			return null;
+		}
+
+		try {
+			$public_key = SigningKeys::load_public_key( (string) $this->environment->constant_value( 'PONTIFEX_PUBLIC_KEY' ) );
+		} catch ( Throwable $error ) {
+			// The real cause names the key file's path, so it goes to the log rather than
+			// into a browser page that may be screenshotted or pasted into a support thread.
+			$this->logger->error( 'Admin upload: the trusted public key pinned in PONTIFEX_PUBLIC_KEY could not be read.', array( 'exception' => $error ) );
+			return $this->unreadable_pinned_key_refusal();
+		}
+
+		if ( null === $reader->signature() ) {
+			$this->logger->warning( 'Admin upload refused: this site pins a trusted public key, but the uploaded archive carries no signature.' );
+			return $this->untrusted_archive_refusal();
+		}
+
+		// Verifying streams the whole archive to recompute its digest, so the request
+		// needs to outlive the host's web timeout. Only reached when a key is pinned,
+		// which keeps the unpinned path byte-for-byte as it was.
+		$this->extend_time_limit();
+
+		if ( ! $reader->verify_signature( $public_key ) ) {
+			$this->logger->warning( 'Admin upload refused: the uploaded archive\'s signature did not verify against the trusted public key pinned in PONTIFEX_PUBLIC_KEY.' );
+			return $this->untrusted_archive_refusal();
+		}
+
+		return null;
+	}
+
+	/**
+	 * The refusal sent when the assembled upload is not a readable Pontifex archive.
+	 *
+	 * @return array{message: string, status: int} The message and HTTP status to send.
+	 */
+	private function not_an_archive_refusal(): array {
+		return array(
+			'message' => __( 'That file is not a Pontifex backup, so it was not stored.', 'pontifex' ),
+			'status'  => 422,
+		);
+	}
+
+	/**
+	 * The refusal sent when an archive is not signed by the key this site trusts.
+	 *
+	 * Deliberately distinct from the not-an-archive message: the file *is* a Pontifex
+	 * backup, and saying otherwise sends the operator to the wrong problem. The
+	 * message names both remedies — supply a backup signed with the trusted key, or
+	 * remove the pin — because a refusal an operator cannot act on becomes a support
+	 * ticket.
+	 *
+	 * @return array{message: string, status: int} The message and HTTP status to send.
+	 */
+	private function untrusted_archive_refusal(): array {
+		return array(
+			'message' => __( 'This site requires every uploaded backup to be signed with the trusted key it pins in PONTIFEX_PUBLIC_KEY. This backup is unsigned, or is signed by a different key, so it was not stored. Upload a backup signed with that key, or remove the PONTIFEX_PUBLIC_KEY line from wp-config.php if you no longer want uploads checked.', 'pontifex' ),
+			'status'  => 422,
+		);
+	}
+
+	/**
+	 * The refusal sent when the pinned trusted public key itself cannot be read.
+	 *
+	 * A configuration fault rather than a fault in the uploaded file, so it is a 500
+	 * and says so: the fix is in `wp-config.php`, not in the backup. The underlying
+	 * cause — a missing file, a malformed key — is in the log, where the key's
+	 * absolute path can be recorded without rendering it into a web page.
+	 *
+	 * @return array{message: string, status: int} The message and HTTP status to send.
+	 */
+	private function unreadable_pinned_key_refusal(): array {
+		return array(
+			'message' => __( 'This site pins a trusted public key in PONTIFEX_PUBLIC_KEY, but that key could not be read, so the upload was refused rather than accepted unchecked. Check the PONTIFEX_PUBLIC_KEY path in wp-config.php; the Pontifex log has the details.', 'pontifex' ),
+			'status'  => 500,
+		);
+	}
+
+	/**
+	 * Lift this request's execution time limit, best-effort.
+	 *
+	 * Recomputing an archive's digest reads every byte of it, which on a large backup
+	 * can outlast the host's web timeout. The same guarded call the other three admin
+	 * controllers make: hosts may disable set_time_limit entirely, so its failure must
+	 * not abort the check.
+	 *
+	 * @return void
+	 */
+	private function extend_time_limit(): void {
+		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- Verifying a signature streams the whole archive and must outlive the host's web timeout, the accepted pattern for backup tooling; set_time_limit can be disabled by the host, so the call is best-effort and its failure must not abort the check.
+			@set_time_limit( 0 );
+		}
 	}
 
 	/**

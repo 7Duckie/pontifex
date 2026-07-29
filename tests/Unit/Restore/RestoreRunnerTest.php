@@ -1033,4 +1033,188 @@ final class RestoreRunnerTest extends TestCase {
 		}
 		$this->assertContains( 'DROP TABLE IF EXISTS `pontifexstg_wp_options`', $executed, 'The staged table must be dropped by the abort.' );
 	}
+
+	// -------------------------------------------------------------------
+	// The disk-space preflight — restore() consults it, verify() never does
+	// -------------------------------------------------------------------
+
+	/**
+	 * The restore() call reads free disk space before writing any entry, and the entry is written once that reading permits it.
+	 *
+	 * FileWriter is final, so this cannot be proven by spying on a mock; instead
+	 * the injected free-space reader itself checks, as a side effect of being
+	 * called, whether the entry it is about to be asked to permit has already
+	 * landed on disk. If RestoreRunner ever called the preflight late — after
+	 * dispatching even the first entry — that check would observe the file
+	 * already there and this test would fail. The reader then returns ample
+	 * space, so the restore proceeds and the entry is confirmed written
+	 * afterwards, proving the call is a real, load-bearing part of a working
+	 * restore(), not a dead path.
+	 *
+	 * @return void
+	 */
+	public function test_restore_consults_disk_space_before_writing_any_entry(): void {
+		$note_path              = $this->fixture_root . '/note.txt';
+		$file_did_not_exist_yet = null;
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and instead checks the fixture filesystem directly.
+			function ( string $path ) use ( $note_path, &$file_did_not_exist_yet ) {
+				$file_did_not_exist_yet = ! file_exists( $note_path );
+				return PHP_INT_MAX;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertTrue( $file_did_not_exist_yet, 'The free-space reading must be taken before any entry is written.' );
+		$this->assertFileExists( $note_path, 'The entry must still be written once the preflight permits it.' );
+	}
+
+	/**
+	 * The verify() call never consults the disk-space preflight — it writes nothing, so there is nothing to preflight.
+	 *
+	 * The injected free-space reader would refuse outright if it were ever
+	 * called (it reports 0 bytes free), so if verify() incorrectly called
+	 * FileWriter::assert_free_space_for(), this call would throw. It is also
+	 * tracked directly, so the assertion below is meaningful even if some
+	 * future change made a 0-byte reading non-refusing.
+	 *
+	 * @return void
+	 */
+	public function test_verify_never_consults_disk_space(): void {
+		$disk_space_was_consulted = false;
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and only records that it was called at all.
+			function ( string $path ) use ( &$disk_space_was_consulted ) {
+				$disk_space_was_consulted = true;
+				return 0;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->verify( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFalse( $disk_space_was_consulted, 'verify() must never consult the disk-space reader.' );
+	}
+
+	// -------------------------------------------------------------------
+	// The whole-archive symlink preflight, driven through a real archive
+	// -------------------------------------------------------------------
+
+	/**
+	 * The entry plans for the proven wp-config.php leak, with an ordinary file in front of them.
+	 *
+	 * The file entry comes first on purpose. It is what makes "the preflight ran
+	 * before the walk" observable: if the symlink decision were still being made
+	 * entry by entry, this file would already be on disk by the time the archive
+	 * was refused, and the site would be part-restored.
+	 *
+	 * @return EntryPlan[] The plans, in archive order.
+	 */
+	private static function hostile_symlink_plans(): array {
+		return array(
+			self::file_plan( 'wp-content/uploads/innocent.txt', 'written before any refusal?' ),
+			self::symlink_plan( 'wp-content/uploads/hop', '..' ),
+			self::symlink_plan( 'wp-content/uploads/leak.txt', 'hop/../wp-config.php' ),
+		);
+	}
+
+	/**
+	 * A restore of the hop-pair archive is refused with the destination completely untouched.
+	 *
+	 * The end-to-end proof of the preflight: a real archive, built by the real
+	 * writer, read by the real reader. The refusal must arrive before the walk
+	 * starts, so neither the hostile links nor the innocent file that precedes
+	 * them in the archive may appear on disk. This test captures the exception
+	 * rather than using expectException() because it asserts about the
+	 * filesystem AFTER the throw; there is deliberately no self::fail() inside
+	 * the try, since PHPUnit's own failure exception would be swallowed by the
+	 * catch.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_the_hop_attack_before_writing_anything(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+		$thrown = null;
+
+		try {
+			$runner->restore( self::build_archive_stream( self::hostile_symlink_plans() ) );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$this->assertStringContainsString( "this site's own wp-config.php", $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-content/uploads/innocent.txt', 'The refusal must come before the walk writes anything at all.' );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/hop' ) );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/leak.txt' ) );
+		$this->assertSame( array(), $db->executed_statements(), 'A refused archive must not execute any SQL.' );
+	}
+
+	/**
+	 * The verify() walk never runs the symlink preflight, because it writes nothing.
+	 *
+	 * Verify's job is to answer "are these bytes intact", and it creates no
+	 * links, so there is no target to confine. Running the preflight there would
+	 * turn a read-only integrity check into a refusal, telling an operator their
+	 * archive is broken when what it actually is is hostile — a different
+	 * question, answered by attempting the restore.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_run_the_symlink_preflight(): void {
+		$runner = $this->make_runner();
+
+		$runner->verify( self::build_archive_stream( self::hostile_symlink_plans() ) );
+
+		$this->assertFileDoesNotExist( $this->fixture_root . '/wp-content/uploads/innocent.txt', 'verify() must write nothing.' );
+		$this->assertFalse( is_link( $this->fixture_root . '/wp-content/uploads/leak.txt' ), 'verify() must create no links.' );
+	}
+
+	/**
+	 * A Composer-shaped site's own archive restores, links intact, with no flag and no warning.
+	 *
+	 * The false-refusal gate, end to end. A Composer-managed WordPress keeps its
+	 * dependencies beside wp-content and reaches them by link, and the scanner
+	 * records those links verbatim — so this is what that site's OWN backup
+	 * looks like. Refusing it would make the site's backup unrestorable with no
+	 * attacker involved, which is what reverted an earlier attempt at this
+	 * guard. The targets deliberately do not exist on the destination, which is
+	 * also the migration case: the rule asks where a target resolves, never
+	 * whether it is already there.
+	 *
+	 * @return void
+	 */
+	public function test_restore_permits_a_composer_shaped_symlink_layout(): void {
+		$runner = $this->make_runner();
+		$plans  = array(
+			self::symlink_plan( 'wp-content/languages', '../languages' ),
+			self::symlink_plan( 'wp-content/mu-plugins/autoload.php', '../../vendor/acme/lib/autoload.php' ),
+			self::symlink_plan( 'wp-content/uploads/alias', '2026' ),
+		);
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( '../languages', readlink( $this->fixture_root . '/wp-content/languages' ) );
+		$this->assertSame( '../../vendor/acme/lib/autoload.php', readlink( $this->fixture_root . '/wp-content/mu-plugins/autoload.php' ) );
+		$this->assertSame( '2026', readlink( $this->fixture_root . '/wp-content/uploads/alias' ) );
+	}
 }

@@ -38,7 +38,10 @@ use Pontifex\Archive\Integrity\Sha256;
  *  - {@see ArchiveReader::__construct()} — takes a seekable readable
  *    stream resource; parses Header and Footer eagerly so the
  *    constructor either succeeds with a fully-validated reader or
- *    throws.
+ *    throws. Takes an optional process memory limit in bytes; when
+ *    supplied, a manifest whose decode would not fit is refused rather
+ *    than left to exhaust memory, which is an uncatchable fatal. Purely
+ *    additive, so every existing single-argument call site is unaffected.
  *  - {@see ArchiveReader::header()} — the parsed Header.
  *  - {@see ArchiveReader::footer()} — the parsed Footer.
  *  - {@see ArchiveReader::manifest_offset()} — byte offset where the
@@ -93,11 +96,56 @@ final class ArchiveReader {
 	private const SIGNED_DIGEST_CHUNK_SIZE = 1048576;
 
 	/**
+	 * Multiple of the declared manifest length below which a decode is refused.
+	 *
+	 * Must sit BELOW the real floor of peak-memory-to-declared-bytes, so the
+	 * refusal fires only when even the most memory-efficient archive this format
+	 * can express could not fit. Measured across path lengths from 1 to 2,000
+	 * bytes, the headroom-relative ratio ranges from 3.08x (very long paths, few
+	 * entries) to 9.54x (single-character paths, many entries). Three is below
+	 * that floor; four was not, and over-refused a decode that fit.
+	 *
+	 * See {@see self::assert_manifest_decode_fits_in_memory()} for why the two
+	 * factors differ and why this one must under-estimate.
+	 *
+	 * @var int
+	 */
+	private const REFUSAL_MEMORY_FACTOR = 3;
+
+	/**
+	 * Multiple of the declared manifest length aimed at when raising the limit.
+	 *
+	 * Must sit ABOVE the real ceiling (measured 9.54x at single-character paths),
+	 * so a raise that succeeds leaves enough headroom for the decode to finish
+	 * rather than fatalling just past the new limit. Twelve gives roughly a
+	 * quarter's margin; ten cleared the measured ceiling by only five per cent,
+	 * which is not a margin at all once a different PHP build or allocator is in
+	 * play.
+	 *
+	 * @var int
+	 */
+	private const RAISE_MEMORY_FACTOR = 12;
+
+	/**
 	 * The readable, seekable stream the archive is read from.
 	 *
 	 * @var resource
 	 */
 	private $source;
+
+	/**
+	 * The process memory limit in bytes, or 0 when memory is unlimited.
+	 *
+	 * Used by {@see self::read_manifest()} to refuse a manifest whose decode
+	 * would exhaust the request, rather than letting it fatal. Exhausting
+	 * memory_limit is an UNCATCHABLE fatal: no catch block runs, so a restore
+	 * that dies this way never restores its safety archive, never releases
+	 * the operation lock, and never cleans up its job. Turning that into a
+	 * thrown exception is the whole point.
+	 *
+	 * @var int
+	 */
+	private int $memory_limit_bytes;
 
 	/**
 	 * The parsed Header, populated eagerly at construction time.
@@ -152,10 +200,11 @@ final class ArchiveReader {
 	 * readers when the stream is too short, when a seek fails, or when
 	 * the bytes do not parse as a valid Header or Footer.
 	 *
-	 * @param resource $source A readable, seekable stream resource.
+	 * @param resource $source             A readable, seekable stream resource.
+	 * @param int|null $memory_limit_bytes The runtime PHP memory limit in bytes (null or non-positive for unlimited, matching {@see \Pontifex\Restore\RestoreRunner}'s convention). When set, a manifest whose decode would not fit is refused rather than allowed to fatal.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
 	 */
-	public function __construct( $source ) {
+	public function __construct( $source, ?int $memory_limit_bytes = null ) {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'ArchiveReader: $source must be a valid stream resource.' );
 		}
@@ -166,8 +215,9 @@ final class ArchiveReader {
 			throw new InvalidArgumentException( 'ArchiveReader: $source stream must be seekable.' );
 		}
 
-		$this->source = $source;
-		$this->header = $this->read_header();
+		$this->source             = $source;
+		$this->memory_limit_bytes = ( null !== $memory_limit_bytes && 0 < $memory_limit_bytes ) ? $memory_limit_bytes : 0;
+		$this->header             = $this->read_header();
 		// A signed archive ends with a 100-byte signature block; read it first so
 		// the footer is then located 64 bytes before it rather than at end of file.
 		if ( $this->header->is_signed() ) {
@@ -468,6 +518,8 @@ final class ArchiveReader {
 			);
 		}
 
+		$this->assert_manifest_decode_fits_in_memory( $length );
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, $offset ) ) {
 			throw new RuntimeException( 'ArchiveReader: could not seek to manifest offset.' );
@@ -496,6 +548,153 @@ final class ArchiveReader {
 		}
 
 		return $manifest;
+	}
+
+	/**
+	 * Refuse a manifest whose decode would not fit in the remaining memory.
+	 *
+	 * Decoding a manifest costs several times its own payload size: the bytes
+	 * read from disk, the substring handed to the JSON parser, the associative
+	 * array that parser builds, and the ManifestEntry object graph built from
+	 * that array all coexist at the peak. Exceeding `memory_limit` there is an
+	 * UNCATCHABLE fatal — no catch block runs, so a restore that dies this way
+	 * never restores its safety archive, never releases the operation lock and
+	 * never cleans up its job. This converts that into a thrown exception the
+	 * caller can handle and report.
+	 *
+	 * Two different multipliers, deliberately, because the two decisions fail
+	 * in opposite directions. Measured against this codebase, peak decode
+	 * memory divided by declared payload bytes ranges from 3.08x (very long
+	 * paths, about 2,000 bytes per entry) to 9.54x (single-character paths,
+	 * about 158 bytes per entry), measured against real archives.
+	 *
+	 *  - The REFUSAL uses REFUSAL_MEMORY_FACTOR, which sits BELOW the measured
+	 *    floor, so it fires only when even the most memory-efficient archive
+	 *    this format can express could not possibly fit. Over-estimating here
+	 *    would refuse an archive that would in fact have decoded — a false
+	 *    refusal, which for a backup tool means an operator locked out of
+	 *    their own recovery. Under-estimating merely leaves today's behaviour
+	 *    in place, so the conservative direction is the safe one.
+	 *  - The RAISE uses RAISE_MEMORY_FACTOR, ABOVE the measured maximum, so
+	 *    where the host permits a larger limit the decode actually completes
+	 *    rather than being raised to a value that still fatals.
+	 *
+	 * Raising the limit is best-effort and mirrors how the job ticker lifts
+	 * the execution-time limit: attempt it, then re-read what the runtime
+	 * actually applied rather than trusting the setter's return value, because
+	 * a host may forbid the change outright or clamp it.
+	 *
+	 * There are therefore three outcomes, and the third is a deliberate gap
+	 * rather than an oversight:
+	 *
+	 *  1. The raise succeeds — the decode proceeds with generous headroom. This
+	 *     is the common case and the one worth optimising for.
+	 *  2. The raise is impossible AND even the optimistic estimate cannot fit —
+	 *     refused cleanly, with the megabytes named. A catchable error instead
+	 *     of a fatal that would skip safety-archive recovery.
+	 *  3. The raise is impossible but the optimistic estimate DOES fit, while
+	 *     the real decode may still not — the decode is attempted anyway, and
+	 *     may still fatal. Nothing better is available here: the true cost per
+	 *     declared byte varies threefold with path length and cannot be known
+	 *     before decoding, so refusing on the pessimistic figure would refuse
+	 *     archives that open perfectly well. Attempting is no worse than the
+	 *     behaviour before this guard existed; a false refusal would be worse,
+	 *     because it locks an operator out of a recovery that would have
+	 *     succeeded. That trade is chosen deliberately and in that direction.
+	 *
+	 * @param int $length The declared manifest block length in bytes.
+	 * @return void
+	 * @throws RuntimeException If the decode cannot fit even after attempting to raise the limit.
+	 */
+	private function assert_manifest_decode_fits_in_memory( int $length ): void {
+		if ( 0 === $this->memory_limit_bytes ) {
+			return;
+		}
+
+		$applied = $this->applied_memory_limit_bytes();
+		if ( 0 === $applied ) {
+			// The runtime reports no ceiling at all; nothing can fatal on a limit.
+			return;
+		}
+
+		// Raise on the RAISE threshold, not the refusal one. Deciding whether to
+		// raise from REFUSAL_MEMORY_FACTOR was a real defect: a decode needing
+		// 8.3x its declared length sailed past a 4x check with room to spare, so
+		// no raise was attempted, and it then died on the very fatal this method
+		// exists to prevent. The two thresholds answer different questions —
+		// "should I ask for more headroom?" must use the pessimistic figure, and
+		// only the final refusal may use the optimistic one.
+		//
+		// Only ever RAISE. The target is computed from current usage, so on a
+		// process that already has a higher ceiling it would come out LOWER, and
+		// applying it would shrink the very budget being protected.
+		//
+		// function_exists() first: a host that lists ini_set in disable_functions
+		// — precisely the locked-down shared hosting this guard exists for —
+		// makes the call throw Error ("Call to undefined function"), which the
+		// silencing operator does NOT suppress.
+		$target = memory_get_usage( true ) + ( $length * self::RAISE_MEMORY_FACTOR );
+		if ( $target > $applied && function_exists( 'ini_set' ) ) {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed,WordPress.PHP.NoSilencedErrors.Discouraged -- WPCS points at wp_raise_memory_limit(), but the archive layer is deliberately WordPress-free (decisions D6/D8) and is exercised by unit tests with no WordPress loaded. Raising this request's own ceiling is the alternative to an uncatchable fatal that skips safety-archive recovery, lock release and job cleanup; a host that forbids the change is handled by re-reading the applied value below, not by a warning.
+			@ini_set( 'memory_limit', (string) $target );
+
+			// Re-read rather than trusting the setter: ini_set reports success
+			// even where a host clamps or forbids the change, so the applied
+			// value is the only truth worth acting on.
+			$applied = $this->applied_memory_limit_bytes();
+			if ( 0 === $applied ) {
+				return;
+			}
+		}
+
+		$required = $length * self::REFUSAL_MEMORY_FACTOR;
+		if ( $required <= ( $applied - memory_get_usage( true ) ) ) {
+			return;
+		}
+
+		throw new RuntimeException(
+			sprintf(
+				'ArchiveReader: this archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server; the admin screens usually have less memory available than WP-CLI does.',
+				(int) ceil( $required / 1048576 ),
+				(int) floor( max( 0, $applied - memory_get_usage( true ) ) / 1048576 ),
+				(int) floor( $applied / 1048576 )
+			)
+		);
+	}
+
+	/**
+	 * Read back the memory limit the runtime is currently applying, in bytes.
+	 *
+	 * Parses PHP's shorthand notation (a bare integer is bytes; a K, M or G
+	 * suffix multiplies accordingly) rather than assuming the value survived
+	 * unchanged. A value of "-1" means unlimited and is reported as 0, the
+	 * same sentinel this class uses throughout. An unset or unparseable value
+	 * is also reported as 0: refusing on a limit we could not read would be a
+	 * false refusal, so an unknown limit means the guard steps aside.
+	 *
+	 * @return int The applied limit in bytes, or 0 when unlimited or unknown.
+	 */
+	private function applied_memory_limit_bytes(): int {
+		$raw = trim( (string) ini_get( 'memory_limit' ) );
+		if ( '' === $raw || '-1' === $raw ) {
+			return 0;
+		}
+
+		$value = (int) $raw;
+		if ( 0 >= $value ) {
+			return 0;
+		}
+
+		switch ( strtolower( substr( $raw, -1 ) ) ) {
+			case 'g':
+				return $value * 1073741824;
+			case 'm':
+				return $value * 1048576;
+			case 'k':
+				return $value * 1024;
+			default:
+				return $value;
+		}
 	}
 
 	/**
