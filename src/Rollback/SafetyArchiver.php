@@ -184,7 +184,14 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 			? Scope::content_only( $exclusions->patterns() )
 			: Scope::whole_site( $exclusions->patterns() );
 		$export_runner = new ExportRunner( $this->environment, $this->wordpress_context );
-		$export_runner->export( new ExportOptions( $path, null, null, null, $scope ), $entry_plans, $on_entry, $on_bytes );
+		// Exempt from the pre-write manifest-size refusal (ExportRunner's
+		// entry-count-ceiling guard): this archive is the undo for the
+		// destructive restore about to happen, not a backup the operator
+		// chose to take. Refusing it here would trade a recoverable restore
+		// for an irreversible one — an undo that needs a bigger memory_limit
+		// to open later is still strictly better than no undo at all.
+		$options = new ExportOptions( $path, null, null, null, $scope, true );
+		$export_runner->export( $options, $entry_plans, $on_entry, $on_bytes );
 
 		// The archive holds the whole database, so it must be owner-only. On a
 		// POSIX host a failed chmod means it could not be secured; rather than

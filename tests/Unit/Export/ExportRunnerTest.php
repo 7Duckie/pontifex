@@ -22,6 +22,7 @@ use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
@@ -127,6 +128,108 @@ final class ExportRunnerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
 		$leftover = glob( $this->temp_output_path . '.*.tmp' );
 		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'The temp export file is cleaned up on failure.' );
+	}
+
+	/**
+	 * An export whose entries would produce a too-large manifest must be
+	 * refused before the destination is opened — no output file, no temp
+	 * file left behind.
+	 *
+	 * A single entry with a deliberately enormous path is the fastest way to
+	 * push the projected manifest payload over MAX_PAYLOAD_SIZE without
+	 * building thousands of entries: {@see ArchiveManifest::project_payload_bytes()}
+	 * charges (MIN_ENTRY_PAYLOAD_BYTES - 1) plus the real path length per
+	 * path-bearing entry, so one ~17-million-character path alone exceeds
+	 * the 16 MiB cap.
+	 *
+	 * @return void
+	 */
+	public function test_export_refuses_before_opening_destination_when_manifest_would_be_too_large(): void {
+		$plans  = array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+			$this->fail( 'A manifest projected over MAX_PAYLOAD_SIZE must be refused.' );
+		} catch ( ManifestTooLargeException $e ) {
+			$this->assertStringContainsString( '1 entries', $e->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist( $this->temp_output_path, 'A refused export must never open the destination.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'A refusal before the temp file opens must leave nothing behind.' );
+	}
+
+	/**
+	 * The safety-archive exemption must skip the manifest-size refusal
+	 * entirely — the same oversized entry that test_export_refuses_* refuses
+	 * must be allowed through when ExportOptions carries the exemption flag.
+	 *
+	 * @return void
+	 */
+	public function test_export_with_safety_archive_exemption_skips_the_refusal(): void {
+		$plans  = array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path, null, null, null, null, true ), $plans, null );
+		} catch ( ManifestTooLargeException $e ) {
+			$this->fail( 'The safety-archive exemption must skip the manifest-size refusal: ' . $e->getMessage() );
+		}
+
+		$this->assertFileExists( $this->temp_output_path, 'An exempt export must still write the archive.' );
+	}
+
+	/**
+	 * A must-permit corpus: an ordinary site's archive must never trip the
+	 * manifest-size refusal, at every scale the exclusions guard is meant to
+	 * leave untouched.
+	 *
+	 * @param int $count How many entries to write.
+	 * @return void
+	 */
+	private function assert_export_permits_ordinary_site_sized_corpus( int $count ): void {
+		$plans = array();
+		for ( $i = 0; $i < $count; $i++ ) {
+			$plans[] = $this->file_plan( sprintf( 'wp-content/uploads/2026/07/file-%06d.jpg', $i ), 'x' );
+		}
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( $count, $result->entry_count() );
+		$this->assertFileExists( $this->temp_output_path );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Removing this pass's archive so the next scale's assertion starts clean.
+		unlink( $this->temp_output_path );
+	}
+
+	/**
+	 * A 10,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_ten_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 10000 );
+	}
+
+	/**
+	 * A 25,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_twenty_five_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 25000 );
+	}
+
+	/**
+	 * A 49,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_forty_nine_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 49000 );
 	}
 
 	/**

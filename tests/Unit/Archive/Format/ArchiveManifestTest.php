@@ -9,12 +9,23 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Archive\Format;
 
+use DateTimeImmutable;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ByteOrder;
+use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Integrity\Sha256;
+use Pontifex\Archive\Reader\ArchiveReader;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 
 /**
  * Behavioural tests for the ArchiveManifest class.
@@ -106,6 +117,56 @@ final class ArchiveManifestTest extends TestCase {
 	public function test_max_payload_size_is_sixteen_mib(): void {
 		$this->assertSame( 16777216, ArchiveManifest::MAX_PAYLOAD_SIZE );
 		$this->assertSame( 16 * 1024 * 1024, ArchiveManifest::MAX_PAYLOAD_SIZE );
+	}
+
+	/**
+	 * The min-entry-payload-bytes constant must be 169.
+	 *
+	 * @return void
+	 */
+	public function test_min_entry_payload_bytes_is_one_hundred_sixty_nine(): void {
+		$this->assertSame( 169, ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES );
+	}
+
+	/**
+	 * Pin the format's true structural floor: a hand-forged, maximally
+	 * degenerate entry (the shortest kind, "file", a 1-character path,
+	 * every numeric field at 0) encoded as the sole entry in a manifest.
+	 *
+	 * This is the literal "minimal one-entry manifest" MIN_ENTRY_PAYLOAD_BYTES's
+	 * docblock refers to. Its size is pinned exactly, so a future format
+	 * change that shrinks it further is caught here rather than silently
+	 * eroding the margin the reader guard and the export-side projection
+	 * both rely on.
+	 *
+	 * @return void
+	 */
+	public function test_minimal_one_entry_manifest_size_is_pinned(): void {
+		$minimal = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+
+		$bytes = ( new ArchiveManifest( array( $minimal ) ) )->to_bytes();
+
+		$this->assertSame( 195, strlen( $bytes ), 'ArchiveManifest::to_bytes() for one maximally-degenerate entry must be exactly 195 bytes.' );
+	}
+
+	/**
+	 * The true asymptotic marginal cost of an additional maximally-degenerate
+	 * entry (146 bytes) must stay comfortably below MIN_ENTRY_PAYLOAD_BYTES
+	 * (169), proving the constant is a deliberate margin above the format's
+	 * real floor rather than an accidental over-claim. See
+	 * MIN_ENTRY_PAYLOAD_BYTES's docblock for why the guard is built this way.
+	 *
+	 * @return void
+	 */
+	public function test_true_minimal_marginal_entry_cost_stays_below_the_conservative_constant(): void {
+		$minimal = ManifestEntry::for_file( 0, 0, 0, 'a', 0, str_repeat( "\x00", Sha256::DIGEST_SIZE ) );
+
+		$one_entry_bytes = strlen( ( new ArchiveManifest( array( $minimal ) ) )->to_bytes() );
+		$two_entry_bytes = strlen( ( new ArchiveManifest( array( $minimal, $minimal ) ) )->to_bytes() );
+		$marginal_cost   = $two_entry_bytes - $one_entry_bytes;
+
+		$this->assertSame( 146, $marginal_cost, 'The true marginal cost of a maximally-degenerate entry must be exactly 146 bytes.' );
+		$this->assertLessThan( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES, $marginal_cost, 'MIN_ENTRY_PAYLOAD_BYTES must sit above the format\'s real floor, never at or below it.' );
 	}
 
 	/**
@@ -356,5 +417,109 @@ final class ArchiveManifestTest extends TestCase {
 		$this->assertSame( $original_entries[1]->offset(), $parsed_entries[1]->offset() );
 		$this->assertSame( 'db_chunk', $parsed_entries[1]->kind() );
 		$this->assertSame( 0, $parsed_entries[1]->chunk_index() );
+	}
+
+	/**
+	 * The project_payload_bytes() method over no entries must project the fixed framing only.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_empty_is_framing_only(): void {
+		$this->assertSame( 50, ArchiveManifest::project_payload_bytes( array() ) );
+	}
+
+	/**
+	 * The project_payload_bytes() method must charge (MIN_ENTRY_PAYLOAD_BYTES - 1)
+	 * plus the real path length for every path-bearing entry.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_charges_overhead_plus_real_path_length(): void {
+		$headers = array(
+			EntryHeader::for_file( 'wp-content/uploads/photo.jpg', 100, 0644, 1690000000, 'image/jpeg', 0 ),
+			EntryHeader::for_directory( 'wp-content/uploads', 0755, 0 ),
+		);
+
+		$expected = 50
+			+ ( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( 'wp-content/uploads/photo.jpg' ) )
+			+ ( ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( 'wp-content/uploads' ) );
+
+		$this->assertSame( $expected, ArchiveManifest::project_payload_bytes( $headers ) );
+	}
+
+	/**
+	 * The project_payload_bytes() method must charge a flat MIN_ENTRY_PAYLOAD_BYTES
+	 * for a db_chunk entry, which carries no path.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_charges_flat_estimate_for_db_chunk(): void {
+		$headers = array( EntryHeader::for_db_chunk( 0, 'wp_posts', 10, 5000, 0 ) );
+
+		$this->assertSame( 50 + ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES, ArchiveManifest::project_payload_bytes( $headers ) );
+	}
+
+	/**
+	 * The project_payload_bytes() method must never under-estimate real
+	 * ArchiveWriter output — it is the whole point of the projection (§Part 3
+	 * of the entry-count-ceiling fix): a projection that could fall short
+	 * would let a doomed-to-be-unreadable export slip past the pre-write
+	 * refusal. Compares the projection against a real archive built by
+	 * ArchiveWriter over EntryHeaders with the same identifiers.
+	 *
+	 * @return void
+	 */
+	public function test_project_payload_bytes_never_under_estimates_real_writer_output(): void {
+		$plans = array();
+		for ( $i = 0; $i < 200; $i++ ) {
+			$plans[] = self::real_file_plan( sprintf( 'wp-content/uploads/2026/07/file-%04d.jpg', $i ), 'x' );
+		}
+
+		$headers   = array_map( static fn( $plan ) => $plan->header(), $plans );
+		$projected = ArchiveManifest::project_payload_bytes( $headers );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
+		$destination = fopen( 'php://temp', 'r+b' );
+		$writer      = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
+		$writer->write_archive(
+			new Provenance(
+				'6.6.1',
+				'8.2.10',
+				'https://example.test',
+				'utf8mb4',
+				'utf8mb4_unicode_520_ci',
+				new ExporterInfo( 'pontifex', '0.1.0' ),
+				new DateTimeImmutable( '2026-05-23T10:00:00+00:00' )
+			),
+			$plans,
+			$destination
+		);
+		rewind( $destination );
+		$reader = new ArchiveReader( $destination );
+		$actual = $reader->footer()->manifest_length();
+
+		$this->assertGreaterThanOrEqual( $actual, $projected, 'The projection must be at or above what the real writer produced.' );
+	}
+
+	/**
+	 * Build a real file EntryPlan for the writer-comparison test.
+	 *
+	 * @param string $path     Relative archive path.
+	 * @param string $contents Raw file contents.
+	 * @return EntryPlan A raw-codec file plan.
+	 */
+	private static function real_file_plan( string $path, string $contents ): EntryPlan {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
+		$src = fopen( 'php://temp', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $src, $contents );
+		rewind( $src );
+
+		return new EntryPlan(
+			EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 ),
+			RawCodec::ID,
+			str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+			$src
+		);
 	}
 }

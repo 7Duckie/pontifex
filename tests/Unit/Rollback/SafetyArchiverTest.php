@@ -17,6 +17,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\SafetyArchiver;
@@ -107,6 +108,39 @@ final class SafetyArchiverTest extends TestCase {
 
 		// The archive is well-formed: it reads back with the two entries.
 		$this->assertSame( 2, $this->entry_count( $path ), 'The written archive should contain both entries.' );
+	}
+
+	/**
+	 * The safety archive is exempt from the pre-write manifest-size refusal.
+	 *
+	 * A pre-restore safety archive is an undo for a destructive restore
+	 * about to happen, not a backup the operator chose to take; refusing it
+	 * for being too large to read back later would turn a recoverable
+	 * restore into an irreversible one (ExportOptions::is_exempt_from_manifest_size_refusal()'s
+	 * docblock). Proven with the same deliberately-oversized single entry
+	 * {@see \Pontifex\Tests\Unit\Export\ExportRunnerTest} uses to prove the
+	 * refusal fires for an ordinary export.
+	 *
+	 * @return void
+	 */
+	public function test_create_is_exempt_from_the_manifest_size_refusal(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		try {
+			$path = $archiver->create( '/var/www/html' );
+		} catch ( ManifestTooLargeException $e ) {
+			$this->fail( 'The safety archive must be exempt from the manifest-size refusal: ' . $e->getMessage() );
+		}
+
+		$this->assertFileExists( $path );
 	}
 
 	/**

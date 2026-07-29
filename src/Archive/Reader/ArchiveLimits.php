@@ -55,9 +55,36 @@ final class ArchiveLimits {
 	/**
 	 * Default maximum number of entries an archive may declare.
 	 *
+	 * Set to 100,000 — above the format's own implicit structural cap of
+	 * 99,273 entries ({@see \Pontifex\Archive\Format\ArchiveManifest::MAX_PAYLOAD_SIZE}
+	 * divided by {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}),
+	 * so this ceiling never refuses a real site on entry count alone; the
+	 * manifest's own byte cap is what actually bounds it.
+	 *
+	 * The previous value (50,000) bounded nothing the format did not already
+	 * bound structurally — it only refused legitimate sites in the
+	 * 50,000-99,273 entry band. And whatever this value is set to, it used
+	 * to be enforced too late to matter: the count was only checked AFTER
+	 * {@see \Pontifex\Archive\Reader\ArchiveReader::manifest()} had already
+	 * decoded every entry into memory, so a hostile or merely-large archive
+	 * had already been fully allocated before the limit could refuse it. The
+	 * real guard now is {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}'s
+	 * pre-decode estimate in ArchiveReader, checked against the manifest's
+	 * declared length BEFORE any byte is read or decoded; this count remains
+	 * a second, post-parse check (defence in depth).
+	 *
+	 * Memory, not count, is the true constraint on opening a large archive:
+	 * decoding a manifest costs roughly 1.6 KB of PHP memory per entry (the
+	 * JSON payload plus the ManifestEntry object graph it decodes into), so
+	 * an archive with entries near this ceiling needs a correspondingly
+	 * larger memory_limit on the destination to open at all — streaming the
+	 * manifest instead of decoding it whole would remove that requirement,
+	 * but is deliberately deferred to its own future slice rather than
+	 * bundled here.
+	 *
 	 * @var int
 	 */
-	public const DEFAULT_MAX_ENTRY_COUNT = 50000;
+	public const DEFAULT_MAX_ENTRY_COUNT = 100000;
 
 	/**
 	 * Default maximum decoded size of any single entry, in bytes (2 GiB).

@@ -12,11 +12,13 @@ namespace Pontifex\Tests\Unit\Archive\Reader;
 use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\ArchiveManifest;
+use Pontifex\Archive\Format\ByteOrder;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Footer;
@@ -24,6 +26,7 @@ use Pontifex\Archive\Format\Header;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Integrity\Sha256;
+use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
@@ -513,5 +516,115 @@ final class ArchiveReaderTest extends TestCase {
 
 		$this->expectException( RuntimeException::class );
 		$reader->provenance();
+	}
+
+	/**
+	 * Build an archive stream whose footer declares a manifest length larger
+	 * than the actual (tiny) manifest content, padded so the declared length
+	 * genuinely fits between the header and the footer (satisfying the
+	 * bounds check) without the padding bytes ever needing to be valid
+	 * manifest JSON — the pre-decode guard must refuse before anything past
+	 * the length field is ever read.
+	 *
+	 * @param string $path            Absolute path to write the fixture to.
+	 * @param int    $declared_length The manifest length to declare in the footer.
+	 * @return void
+	 */
+	private static function write_hostile_declared_length_fixture( string $path, int $declared_length ): void {
+		$dest = self::memory_stream();
+		self::make_writer()->write_archive( self::sample_provenance(), array(), $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		$bytes = self::read_all( $dest );
+
+		$footer_start    = strlen( $bytes ) - Footer::SIZE;
+		$manifest_offset = ByteOrder::unpack_uint64( substr( $bytes, $footer_start, 8 ) );
+		$prefix          = substr( $bytes, 0, $manifest_offset );
+		$footer          = substr( $bytes, $footer_start );
+		// Patch only the manifest_length field (bytes 8-16 of the footer); offset,
+		// hash, and salt are left as-is — never verified, because the guard
+		// refuses before either is read.
+		$patched_footer = substr( $footer, 0, 8 ) . ByteOrder::pack_uint64( $declared_length ) . substr( $footer, 16 );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Writing a test fixture to a real file so it can be sparsely padded without holding it in memory.
+		$out = fopen( $path, 'w+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing a test fixture to a real file.
+		fwrite( $out, $prefix );
+		// Pad the file out to manifest_offset + declared_length with a single
+		// sparse write at the target position, so building even a many-megabyte
+		// fixture costs no real memory or disk I/O for the padding itself.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Positioning at the end of the padded region to create a sparse file.
+		fseek( $out, $manifest_offset + $declared_length - 1 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Sparse single-byte write; see above.
+		fwrite( $out, "\0" );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing a test fixture to a real file.
+		fwrite( $out, $patched_footer );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test fixture file after writing it.
+		fclose( $out );
+	}
+
+	/**
+	 * The pre-decode guard must refuse a manifest whose declared length alone
+	 * implies more entries than the configured maximum, before any manifest
+	 * byte is read.
+	 *
+	 * @return void
+	 */
+	public function test_manifest_pre_decode_guard_refuses_hostile_declared_length(): void {
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-hostile-' );
+		// max_entry_count = 100; a declared length of 1,000,000 bytes implies
+		// at least 1,000,000 / 169 = 5,917 entries — comfortably over.
+		self::write_hostile_declared_length_fixture( $path, 1000000 );
+
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading a test fixture from a real file.
+			$stream = fopen( $path, 'rb' );
+			$reader = new ArchiveReader( $stream, new ArchiveLimits( 100, 2147483648, 100, 1099511627776 ) );
+
+			$this->expectException( RuntimeException::class );
+			$this->expectExceptionMessage( 'implying at least 5917 entries' );
+			$reader->manifest();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown; best-effort.
+			@unlink( $path );
+		}
+	}
+
+	/**
+	 * The pre-decode guard must fire — and so avoid the fread the old,
+	 * post-decode-only check could never prevent — even under a memory_limit
+	 * far too small to read the declared manifest length into memory.
+	 *
+	 * A 50 MiB declared length is chosen deliberately: attempting to fread()
+	 * that many bytes under an 8 MiB memory_limit is an uncatchable fatal
+	 * ("Allowed memory size exhausted"), the exact failure mode this guard
+	 * exists to make unreachable. Because the guard rejects the archive from
+	 * the declared length alone (cheap integer arithmetic on an 8-byte
+	 * field), it never attempts that fread, so the assertion below — a clean
+	 * RuntimeException, not a fatal that would abort the whole test process —
+	 * is proof the process never allocated the manifest.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_manifest_pre_decode_guard_fires_before_allocating_under_low_memory_limit(): void {
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-hostile-oom-' );
+		self::write_hostile_declared_length_fixture( $path, 52428800 );
+
+		try {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] runs; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
+			ini_set( 'memory_limit', '8M' );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading a test fixture from a real file.
+			$stream = fopen( $path, 'rb' );
+			$reader = new ArchiveReader( $stream );
+
+			$this->expectException( RuntimeException::class );
+			$this->expectExceptionMessage( 'more than the 100000 entries this installation will read' );
+			$reader->manifest();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown; best-effort.
+			@unlink( $path );
+		}
 	}
 }

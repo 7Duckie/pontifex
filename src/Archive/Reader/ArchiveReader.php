@@ -38,7 +38,10 @@ use Pontifex\Archive\Integrity\Sha256;
  *  - {@see ArchiveReader::__construct()} — takes a seekable readable
  *    stream resource; parses Header and Footer eagerly so the
  *    constructor either succeeds with a fully-validated reader or
- *    throws.
+ *    throws. Takes an optional {@see ArchiveLimits} (defaulting to
+ *    {@see ArchiveLimits::defaults()}) that bounds the manifest's
+ *    declared entry count before it is read; purely additive, so every
+ *    existing single-argument call site is unaffected.
  *  - {@see ArchiveReader::header()} — the parsed Header.
  *  - {@see ArchiveReader::footer()} — the parsed Footer.
  *  - {@see ArchiveReader::manifest_offset()} — byte offset where the
@@ -100,6 +103,19 @@ final class ArchiveReader {
 	private $source;
 
 	/**
+	 * Defensive limits enforced while opening the archive.
+	 *
+	 * Currently used only for {@see ArchiveLimits::max_entry_count()} — the
+	 * pre-decode bound checked in {@see self::read_manifest()} before the
+	 * manifest bytes are read. Every other limit is enforced downstream, by
+	 * {@see \Pontifex\Restore\RestoreRunner}, which already holds its own
+	 * ArchiveLimits and passes it straight through here.
+	 *
+	 * @var ArchiveLimits
+	 */
+	private ArchiveLimits $limits;
+
+	/**
 	 * The parsed Header, populated eagerly at construction time.
 	 *
 	 * @var Header
@@ -152,10 +168,11 @@ final class ArchiveReader {
 	 * readers when the stream is too short, when a seek fails, or when
 	 * the bytes do not parse as a valid Header or Footer.
 	 *
-	 * @param resource $source A readable, seekable stream resource.
+	 * @param resource           $source A readable, seekable stream resource.
+	 * @param ArchiveLimits|null $limits Defensive limits to enforce; null applies {@see ArchiveLimits::defaults()}. Only max_entry_count() is currently consulted, for the pre-decode manifest-size guard.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
 	 */
-	public function __construct( $source ) {
+	public function __construct( $source, ?ArchiveLimits $limits = null ) {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( 'ArchiveReader: $source must be a valid stream resource.' );
 		}
@@ -167,6 +184,7 @@ final class ArchiveReader {
 		}
 
 		$this->source = $source;
+		$this->limits = $limits ?? ArchiveLimits::defaults();
 		$this->header = $this->read_header();
 		// A signed archive ends with a 100-byte signature block; read it first so
 		// the footer is then located 64 bytes before it rather than at end of file.
@@ -450,6 +468,34 @@ final class ArchiveReader {
 					(int) $length,
 					(int) Header::SIZE,
 					(int) $footer_start
+				)
+			);
+		}
+
+		// Pre-decode entry-count guard, checked against the DECLARED length
+		// alone — before a single manifest byte is read or decoded. Divides
+		// by MIN_ENTRY_PAYLOAD_BYTES to get an upper bound on how many
+		// entries this length could possibly represent, and refuses if that
+		// bound alone already exceeds what this installation will read.
+		// Without this, the count was only ever checked by
+		// RestoreRunner AFTER manifest() had already decoded every entry
+		// into memory (see ArchiveLimits::DEFAULT_MAX_ENTRY_COUNT's
+		// docblock) — the limit existed but could never prevent the very
+		// allocation it was meant to guard against. This is defence in
+		// depth alongside that post-parse check, not a replacement for it:
+		// MIN_ENTRY_PAYLOAD_BYTES is deliberately conservative rather than
+		// the format's absolute floor, so a manifest hand-forged from
+		// entries smaller than it assumes can still slip past this cheap
+		// estimate — the post-parse check is what catches that, once the
+		// decode has already happened.
+		$max_possible_entries = intdiv( $length, ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES );
+		if ( $max_possible_entries > $this->limits->max_entry_count() ) {
+			throw new RuntimeException(
+				sprintf(
+					'ArchiveReader: this archive declares a manifest of %d bytes, implying at least %d entries — more than the %d entries this installation will read. This archive cannot be opened here.',
+					(int) $length,
+					(int) $max_possible_entries,
+					(int) $this->limits->max_entry_count()
 				)
 			);
 		}

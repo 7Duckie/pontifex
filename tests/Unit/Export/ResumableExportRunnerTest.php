@@ -24,6 +24,7 @@ use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
@@ -464,6 +465,36 @@ final class ResumableExportRunnerTest extends TestCase {
 		$this->expectExceptionMessage( 'cannot be resumable' );
 
 		$runner->start( new ExportOptions( $this->output_path, $encryption ), '/tmp/wp/wp-content', 'wp-content', array(), 1700000000 );
+	}
+
+	/**
+	 * A tick whose scan would produce a too-large manifest must refuse
+	 * before the job's temp archive is even opened — no temp file left
+	 * behind, and the job is marked failed (so a subsequent --resume
+	 * correctly reports nothing to resume, rather than wedging).
+	 *
+	 * A single entry with a deliberately enormous path is the fastest way to
+	 * push the projected manifest payload over MAX_PAYLOAD_SIZE.
+	 *
+	 * @return void
+	 */
+	public function test_tick_refuses_before_opening_temp_when_manifest_would_be_too_large(): void {
+		$this->specs            = array( array( 'file', str_repeat( 'a', 17000000 ), 'x' ) );
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+		$temp                   = (string) $job->payload()['temp'];
+
+		$thrown = null;
+		try {
+			$runner->tick( $store->get( $job->id() ), 30.0 );
+		} catch ( ManifestTooLargeException $e ) {
+			$thrown = $e;
+		}
+
+		$this->assertNotNull( $thrown, 'A projected-oversized manifest must refuse with ManifestTooLargeException.' );
+		$this->assertStringContainsString( 'cannot be continued', $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $temp, 'The refusal must fire before the job\'s temp archive is opened.' );
+		$this->assertSame( Job::STATUS_FAILED, $store->get( $job->id() )->status() );
 	}
 
 	/**

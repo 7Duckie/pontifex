@@ -14,6 +14,7 @@ use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Crypto\SigningContext;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Format\Provenance;
@@ -27,6 +28,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionRules;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\WordPress\WordPressContext;
 
 /**
@@ -235,6 +237,16 @@ final class ResumableExportRunner {
 		$stream           = $builder->build( (string) $payload['scan_root'] );
 		$total            = count( $stream );
 
+		// Refuse before this tick's temp archive is even opened when the
+		// entries just scanned would produce a manifest this installation's
+		// own reader will later refuse to open — the same check
+		// ExportRunner::export() makes for the one-shot path, run again
+		// every tick because the resumable engine re-scans on every tick
+		// (ADR 0015) and the archive's shape could in principle change
+		// between them. $stream is a ManifestStream, safely re-iterable, so
+		// this costs nothing beyond the scan the tick was already doing.
+		$this->refuse_if_manifest_too_large( $stream, $total );
+
 		// Persist the source-byte total the moment the scan knows it, so a
 		// progress surface reading the job mid-tick has its denominator from
 		// the first seconds of the first tick — the admin bar rides on it, and
@@ -361,6 +373,45 @@ final class ResumableExportRunner {
 		$job->mark( Job::STATUS_PENDING, (int) $clock() );
 		$this->job_store->save( $job );
 		return false;
+	}
+
+	/**
+	 * Refuse before this tick's temp archive is opened when the just-scanned
+	 * entries would produce a manifest this installation's own reader will
+	 * later refuse to open.
+	 *
+	 * Shared by the CLI (`--resumable`/`--resume`) and the admin Backup
+	 * screen, which both drive this class — the wording covers both
+	 * surfaces' real remedies. The job itself is left for the caller: {@see
+	 * self::tick()} already marks any job a thrown exception escapes from as
+	 * FAILED, so a subsequent `--resume` correctly reports no interrupted
+	 * export to resume — this backup cannot be continued as configured.
+	 *
+	 * @param ManifestStream $stream The just-scanned entry stream (Countable, safely re-iterable).
+	 * @param int            $total  The entry count already computed by the caller, for the message.
+	 * @return void
+	 * @throws ManifestTooLargeException If the projected manifest would exceed what this installation's reader will accept.
+	 */
+	private function refuse_if_manifest_too_large( ManifestStream $stream, int $total ): void {
+		$headers = ( static function () use ( $stream ) {
+			foreach ( $stream as $plan ) {
+				yield $plan->header();
+			}
+		} )();
+
+		$projected = ArchiveManifest::project_payload_bytes( $headers );
+		if ( $projected <= ArchiveManifest::MAX_PAYLOAD_SIZE ) {
+			return;
+		}
+
+		throw new ManifestTooLargeException(
+			sprintf(
+				'ResumableExportRunner: this backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. This backup cannot be continued as configured — narrow it with narrower exclusion patterns (the Backup screen\'s editable exclusions, or --exclude/--exclude-table on the CLI), or drop the file listing entirely with --db-only, then start again.',
+				(int) $total,
+				(int) $projected,
+				(int) ArchiveManifest::MAX_PAYLOAD_SIZE
+			)
+		);
 	}
 
 	/**

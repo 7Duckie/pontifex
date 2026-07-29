@@ -13,6 +13,7 @@ use DateTimeImmutable;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Writer\ArchiveWriter;
@@ -161,6 +162,20 @@ final class ExportRunner {
 		// iterating them.
 		$entry_count = is_countable( $entry_plans ) ? count( $entry_plans ) : 0;
 
+		// Refuse before a single byte is written when the entries about to be
+		// archived would produce a manifest this installation's own reader
+		// will later refuse to open (ArchiveManifest::MAX_PAYLOAD_SIZE) —
+		// today the writer emits what the reader refuses; this closes that.
+		// The safety archive is deliberately exempt (see
+		// ExportOptions::is_exempt_from_manifest_size_refusal()'s docblock).
+		// Skipped for a non-Countable $entry_plans (an arbitrary one-shot
+		// iterable): the projection needs a second pass over the entries,
+		// which only a plain array or the reusable ManifestStream safely
+		// support — the only two shapes any real caller passes.
+		if ( ! $options->is_exempt_from_manifest_size_refusal() && is_countable( $entry_plans ) ) {
+			$this->refuse_if_manifest_too_large( $entry_plans, $entry_count );
+		}
+
 		$provenance  = $this->build_provenance( $options );
 		$output_path = $options->output_path();
 
@@ -224,6 +239,45 @@ final class ExportRunner {
 		$this->move_into_place( $temp_path, $output_path );
 
 		return new ExportResult( $bytes_written, $entry_count, $changed_files, $media_type_unresolved_count );
+	}
+
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; see the matching disable on export() above.
+	/**
+	 * Refuse before writing a byte when the entries would produce an unreadable archive.
+	 *
+	 * Projects the manifest payload size from the entries' real headers
+	 * ({@see ArchiveManifest::project_payload_bytes()}) and refuses if that
+	 * projection exceeds {@see ArchiveManifest::MAX_PAYLOAD_SIZE} — the same
+	 * ceiling {@see \Pontifex\Archive\Reader\ArchiveReader} enforces on
+	 * import, so a "yes" here means the reader will actually accept the
+	 * finished archive.
+	 *
+	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans The entries about to be written; iterated twice (a plain array or ManifestStream, both safely re-iterable).
+	 * @param int                                               $entry_count The entry count already computed by the caller, for the message.
+	 * @return void
+	 * @throws ManifestTooLargeException If the projected manifest would exceed what this installation's reader will accept.
+	 */
+	private function refuse_if_manifest_too_large( iterable $entry_plans, int $entry_count ): void {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
+		$headers = ( static function () use ( $entry_plans ) {
+			foreach ( $entry_plans as $plan ) {
+				yield $plan->header();
+			}
+		} )();
+
+		$projected = ArchiveManifest::project_payload_bytes( $headers );
+		if ( $projected <= ArchiveManifest::MAX_PAYLOAD_SIZE ) {
+			return;
+		}
+
+		throw new ManifestTooLargeException(
+			sprintf(
+				'ExportRunner: this backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. Narrow it with --exclude/--exclude-table, or drop the file listing entirely with --db-only.',
+				(int) $entry_count,
+				(int) $projected,
+				(int) ArchiveManifest::MAX_PAYLOAD_SIZE
+			)
+		);
 	}
 
 	/**

@@ -43,9 +43,10 @@ use Pontifex\Archive\Integrity\Sha256;
  * verifies the stored hash against whatever bytes were on disk.
  *
  * Reads reject payloads larger than MAX_PAYLOAD_SIZE (16 MiB) as a
- * defensive ceiling. 16 MiB is large enough to cover roughly 50,000
- * entries with comfortable headroom and small enough to flag
- * anything wildly out of range as malformed or malicious.
+ * defensive ceiling. 16 MiB is the format's own structural cap on entry
+ * count regardless of any configured limit: at MIN_ENTRY_PAYLOAD_BYTES per
+ * entry it holds at most 99,273 entries, and small enough to flag anything
+ * wildly out of range as malformed or malicious.
  *
  * The manifest preserves entry order exactly as constructed — no
  * sorting, no deduplication. Two entries with the same path both
@@ -80,12 +81,62 @@ final class ArchiveManifest {
 	/**
 	 * Maximum permitted size of the JSON payload, in bytes (16 MiB).
 	 *
-	 * Covers roughly 50,000 entries with headroom. Anything larger
-	 * is rejected as a defensive ceiling.
+	 * At MIN_ENTRY_PAYLOAD_BYTES per entry this holds at most 99,273
+	 * entries — the format's own implicit entry-count cap, independent of
+	 * whatever {@see \Pontifex\Archive\Reader\ArchiveLimits::max_entry_count()}
+	 * is separately configured to. Anything larger is rejected as a
+	 * defensive ceiling.
 	 *
 	 * @var int
 	 */
 	public const MAX_PAYLOAD_SIZE = 16777216;
+
+	/**
+	 * Conservative bytes-per-entry threshold used to (a) estimate an upper
+	 * bound on entry count from a manifest's declared byte length alone,
+	 * before it is read or decoded (the pre-decode guard in
+	 * {@see \Pontifex\Archive\Reader\ArchiveReader}), and (b) project the
+	 * manifest size a pending export would produce from the real entries
+	 * about to be written, before a single byte reaches disk (see
+	 * {@see self::project_payload_bytes()}).
+	 *
+	 * This is deliberately NOT the format's absolute theoretical floor.
+	 * That floor is lower: a hand-forged, maximally degenerate entry (the
+	 * shortest kind, "file", a 1-character path, every numeric field at 0)
+	 * measures 145 bytes — proven by
+	 * {@see \Pontifex\Tests\Unit\Archive\Format\ArchiveManifestTest}. Using
+	 * that true floor here would falsely refuse a real, legitimate archive
+	 * whose declared length approaches MAX_PAYLOAD_SIZE with many small
+	 * entries (a database-chunk-heavy backup, say) — worse than the defect
+	 * this constant defends against. 169 sits above realistic per-entry
+	 * costs instead: a real archive's file entries measure roughly 158
+	 * bytes at a short (24-character) flat path, rising with path depth
+	 * (measured up to roughly 318 bytes at 160 characters), so genuine
+	 * archives never trip this estimate.
+	 *
+	 * The accepted trade-off is a residual gap: a manifest hand-forged
+	 * entirely from sub-169-byte entries can still slip past this cheap
+	 * estimate. Closing that is not this constant's job — the existing
+	 * post-parse entry-count check in {@see \Pontifex\Restore\RestoreRunner}
+	 * is defence in depth for exactly that case, catching it once the (by
+	 * then unavoidable) decode has already happened.
+	 *
+	 * @var int
+	 */
+	public const MIN_ENTRY_PAYLOAD_BYTES = 169;
+
+	/**
+	 * Fixed byte cost of the manifest's JSON array wrapper (`{"entries":[` + `]}`),
+	 * present once per manifest regardless of entry count.
+	 *
+	 * Used only by {@see self::project_payload_bytes()} to keep its estimate
+	 * honest about the one-time framing cost; negligible next to
+	 * MIN_ENTRY_PAYLOAD_BYTES at any entry count this format permits, but
+	 * omitting it would be an unexplained magic number in the projection.
+	 *
+	 * @var int
+	 */
+	private const ENTRIES_JSON_WRAPPER_BYTES = 14;
 
 	/**
 	 * Maximum nesting depth when decoding the canonical-JSON payload (PHP's default).
@@ -154,6 +205,44 @@ final class ArchiveManifest {
 	 */
 	public function entry_count(): int {
 		return count( $this->entries );
+	}
+
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_headers is documented as iterable<int, EntryHeader> because PHPStan level 6 requires the value type; this sniff cannot reduce an iterable<> generic to its base iterable hint the way it reduces array<> to array (matches the identical disable on ExportRunner::export()).
+	/**
+	 * Project the manifest payload size an export of these entries would produce.
+	 *
+	 * Computed from the entries' real identifiers (paths for file/directory/
+	 * symlink entries, a flat estimate for db_chunk entries, which carry no
+	 * path) rather than from entry count alone, because the byte cost moves
+	 * with path depth: a deep-path archive fills MAX_PAYLOAD_SIZE at far
+	 * fewer entries than a flat-path one. Every path-bearing entry is
+	 * estimated at (MIN_ENTRY_PAYLOAD_BYTES - 1) bytes of fixed overhead plus
+	 * its real path length — MIN_ENTRY_PAYLOAD_BYTES already assumes a
+	 * 1-character path, so the "- 1" swaps that assumed character for the
+	 * real one being added. A db_chunk entry (no path) is estimated flat at
+	 * MIN_ENTRY_PAYLOAD_BYTES, comfortably above its real measured cost
+	 * (roughly 155-165 bytes), keeping the estimate conservative rather than
+	 * an under-count.
+	 *
+	 * Lets a caller (the export engine) refuse an oversized backup BEFORE
+	 * writing a single byte, rather than discovering only after a
+	 * multi-hour export completes that the reader will refuse the result.
+	 *
+	 * @param iterable<int, EntryHeader> $entry_headers The archive's entry headers, in the order they will be written.
+	 * @return int The projected manifest payload size in bytes (never an under-estimate against real writer output, validated empirically).
+	 */
+	public static function project_payload_bytes( iterable $entry_headers ): int {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
+		$total = self::HEADER_SIZE + self::ENTRIES_JSON_WRAPPER_BYTES;
+
+		foreach ( $entry_headers as $header ) {
+			$path   = $header->path();
+			$total += null !== $path
+				? ( self::MIN_ENTRY_PAYLOAD_BYTES - 1 + strlen( $path ) )
+				: self::MIN_ENTRY_PAYLOAD_BYTES;
+		}
+
+		return $total;
 	}
 
 	/**
