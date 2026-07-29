@@ -54,12 +54,25 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *     and footer; throws if either is malformed).
  *  2. Read the manifest (validates the manifest's internal hash
  *     against the footer's recorded hash; throws on mismatch).
- *  3. For each ManifestEntry, in the order the manifest records:
+ *  3. restore() only (never verify(), which writes nothing): read the
+ *     header of every symlink entry the archive declares and hand the
+ *     whole set to {@see FileWriter::assert_symlink_targets_confined()},
+ *     which resolves each target the way the kernel would and refuses
+ *     the restore if any of them would reach out of the site. This has
+ *     to happen over the whole set, and before anything is written,
+ *     because the attack it closes needs two links to co-operate.
+ *  4. restore() only (never verify(), which writes nothing): before
+ *     touching the filesystem or the database, ask FileWriter whether
+ *     the destination has room for this restore
+ *     ({@see FileWriter::assert_free_space_for()}) — a full disk part-way
+ *     through is the most likely failure a restore can hit, needing no
+ *     attacker, just an ordinary full disk.
+ *  5. For each ManifestEntry, in the order the manifest records:
  *     a. Decode via EntryReader (verifies the entry's on-disk hash
  *        and decodes the payload through the codec).
  *     b. Route to FileWriter or DatabaseWriter based on the
  *        entry's kind.
- *  4. If any step throws, the restore halts immediately. Database
+ *  6. If any step throws, the restore halts immediately. Database
  *     changes never reach the live tables: every db_chunk replays into
  *     staging tables that are cut over atomically only after the whole
  *     walk succeeds (ADR 0009), and a failure drops the staging tables.
@@ -122,6 +135,17 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private int $entry_memory_budget;
 
 	/**
+	 * The runtime memory limit in bytes, or 0 for unlimited.
+	 *
+	 * Held undivided (unlike {@see self::$entry_memory_budget}) and handed to
+	 * every {@see ArchiveReader} this runner opens, so the reader can refuse a
+	 * manifest whose decode would not fit rather than letting it fatal.
+	 *
+	 * @var int
+	 */
+	private int $memory_limit_bytes;
+
+	/**
 	 * Fraction of the runtime memory limit a single entry's decoded payload may use.
 	 *
 	 * A quarter: reading an entry peaks at several coexisting copies (the buffered
@@ -146,6 +170,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		$this->file_writer         = $file_writer;
 		$this->database_writer     = $database_writer;
 		$this->limits              = $limits ?? ArchiveLimits::defaults();
+		$this->memory_limit_bytes  = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 ) ? $memory_limit_bytes : 0;
 		$this->entry_memory_budget = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 )
 			? intdiv( $memory_limit_bytes, self::MEMORY_BUDGET_DIVISOR )
 			: 0;
@@ -161,11 +186,22 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * supplied it is invoked once per entry, after that entry is written,
 	 * as `( int $done, int $total ): void`.
 	 *
+	 * Before any of that — before the database staging even begins, let
+	 * alone the entry walk — two things are settled up front, and neither
+	 * runs from verify(), which writes nothing and so has nothing to
+	 * preflight. Every symlink the archive declares is resolved and
+	 * confined ({@see FileWriter::assert_symlink_targets_confined()}), so a
+	 * hostile archive is refused with the site untouched rather than part
+	 * written; and the destination is asked whether it has room for this
+	 * restore ({@see FileWriter::assert_free_space_for()}), so a disk that
+	 * fills part-way through fails closed up front rather than leaving the
+	 * site half old, half new.
+	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed, hash verification fails, or any worker fails.
+	 * @throws RuntimeException         If the archive is malformed, hash verification fails, a declared symlink's target would reach out of the site, the destination lacks the free disk space this restore needs, or any worker fails.
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		// Reset the writer's staging state and sweep leftovers a crashed earlier
@@ -174,15 +210,37 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// under it, so the connection must speak it for the replay's duration or
 		// multibyte content is silently transcoded. Provenance is validated by
 		// the reader; the charset string itself is validated by the writer.
-		$reader     = new ArchiveReader( $archive_source );
+		$reader     = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$provenance = $reader->provenance();
+		$manifest   = $reader->manifest();
 
 		// Fail closed on an archive that lies about its own scope: one whose
 		// recorded scope declares a half absent while the manifest actually
 		// carries it (ADR 0016). Pontifex's own exports never contradict their
 		// scope, so this only catches a corrupt or hand-forged archive — refuse
 		// it rather than restore contents the scope says are not there.
-		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $reader->manifest() );
+		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $manifest );
+
+		// Decide every symlink the archive declares BEFORE the first byte is
+		// written. A symlink's target is the one archive field that says "go and
+		// read that other file instead", so a hostile archive can use it to point
+		// a web-readable file in uploads at wp-config.php — and the trick that
+		// does it needs two links working together, which means no single entry
+		// looks wrong on its own. Judging the whole set up front is therefore the
+		// only sound moment, and it is also the only SAFE moment: the walk below
+		// has no per-entry recovery, so a refusal part-way would leave a site that
+		// is neither the old one nor the archive's. See
+		// FileWriter::assert_symlink_targets_confined() for the attack and the
+		// resolution rule. verify() deliberately never runs this: it writes
+		// nothing, so there is nothing to confine.
+		$this->file_writer->assert_symlink_targets_confined( $this->declared_symlink_targets( $archive_source, $manifest ) );
+
+		// Refuse before anything is touched — filesystem or database — when the
+		// destination cannot hold this restore. FileWriter owns the destination
+		// directory, so it owns this estimate; see its own docblock for why the
+		// figure leans low rather than risk refusing a restore that would have
+		// succeeded.
+		$this->file_writer->assert_free_space_for( $manifest->entries() );
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
@@ -216,6 +274,57 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			}
 			throw $error;
 		}
+	}
+
+	/**
+	 * Collect every symlink the archive declares, as entry path => raw target.
+	 *
+	 * The manifest is already fully decoded by the time this runs, and it records
+	 * each entry's kind and byte offset — so this seeks straight to the symlink
+	 * entries and reads only those. A symlink entry's payload is empty (the target
+	 * lives in its header), which makes each read a seek and a few dozen bytes.
+	 * A real site has tens of thousands of files and a handful of links, so the
+	 * whole pass costs nothing measurable against a restore that is about to write
+	 * the site.
+	 *
+	 * Reading the entry rather than trusting the manifest is deliberate: the
+	 * manifest records an entry's path but not a symlink's target, and the target
+	 * is the field being judged. The read verifies the entry's hash on the way
+	 * past, exactly as the walk will, so a corrupt symlink entry now fails here
+	 * instead of part-way through the restore.
+	 *
+	 * @param resource        $archive_source A seekable, readable stream containing the archive.
+	 * @param ArchiveManifest $manifest       The archive's already-decoded manifest.
+	 * @return array<string, string> Each symlink's entry path mapped to its raw target.
+	 * @throws RuntimeException If a symlink entry cannot be read or fails hash verification.
+	 */
+	private function declared_symlink_targets( $archive_source, ArchiveManifest $manifest ): array {
+		$declared_links = array();
+
+		foreach ( $manifest->entries() as $manifest_entry ) {
+			if ( ! $manifest_entry->is_symlink() ) {
+				continue;
+			}
+
+			$result = $this->entry_reader->read_entry(
+				$archive_source,
+				$manifest_entry,
+				$this->limits->max_entry_bytes(),
+				null,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
+
+			$header = $result->header();
+			$path   = $header->path();
+			$target = $header->target();
+			if ( null === $path || null === $target ) {
+				continue;
+			}
+
+			$declared_links[ $path ] = $target;
+		}
+
+		return $declared_links;
 	}
 
 	/**
@@ -275,11 +384,18 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
-		$reader   = new ArchiveReader( $archive_source );
+		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$manifest = $reader->manifest();
 		$entries  = $manifest->entries();
 		$total    = count( $entries );
 
+		// The entry count is checked here, after the decode, because it cannot
+		// be checked before one: a count derived from the manifest's declared
+		// byte length either sits above the format's own structural cap (and
+		// so never fires) or falsely refuses legitimate archives whose entries
+		// have long paths. What ArchiveReader does check before decoding is
+		// whether the decode will fit in memory at all — a different question,
+		// and the one that actually protects the request.
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(
@@ -327,13 +443,20 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @throws RuntimeException If the archive is malformed, hash verification fails, a defensive limit is exceeded, or $handle fails.
 	 */
 	private function walk( $archive_source, ?callable $on_entry, callable $handle, ?callable $on_bytes = null ): void {
-		$reader   = new ArchiveReader( $archive_source );
+		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$manifest = $reader->manifest();
 
 		$entries = $manifest->entries();
 		$total   = count( $entries );
 		$done    = 0;
 
+		// The entry count is checked here, after the decode, because it cannot
+		// be checked before one: a count derived from the manifest's declared
+		// byte length either sits above the format's own structural cap (and
+		// so never fires) or falsely refuses legitimate archives whose entries
+		// have long paths. What ArchiveReader does check before decoding is
+		// whether the decode will fit in memory at all — a different question,
+		// and the one that actually protects the request.
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(

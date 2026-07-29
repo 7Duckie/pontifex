@@ -58,3 +58,13 @@ Thumbs.db
 # Local working state (Claude session context)
 STATE.md
 AUDIT-FINDINGS.md
+
+# Local planning and handoff documents. Deliberately NOT committed: they are
+# working notes about how the project is built rather than part of the plugin,
+# and they name the assistant tooling used to write it, which must not appear
+# anywhere in this repository's history. Kept out of `git status` so that an
+# accidental `git add -A` cannot sweep them into a commit.
+/CLAUDE.md
+/CLAUDE-CODE-KICKOFF-PROMPT.md
+/PONTIFEX-*.md
+/STATE.md

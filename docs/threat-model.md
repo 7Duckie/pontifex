@@ -288,7 +288,26 @@ defend against, and stating them explicitly keeps the model honest.
   modify the plugin's code, or replace archive files. Operators
   concerned about this case should rely on signed archives
   ([archive-format.md §11](./archive-format.md#11-optional-detached-signature))
-  and verify signatures against a key not stored on the host.
+  and verify signatures against a key not stored on the host — but
+  should know exactly how far that goes today, because it is not yet
+  everywhere. Signatures are enforced by `wp pontifex import` and
+  `wp pontifex verify` against a key given with `--public-key` or
+  pinned as `PONTIFEX_PUBLIC_KEY`, and in the browser on the upload
+  path, where an archive arriving from another server is refused
+  unless it is signed by the pinned key
+  ([ADR 0020](./adr/0020-signature-enforcement-on-the-upload-path.md)).
+  Two gaps remain, and both need the same attacker — one who can
+  already write files on the host. An archive placed **directly** in
+  `wp-content/pontifex/backups` never passes through the upload path,
+  so nothing checks its signature; and an archive checked at upload is
+  checked only *then*, so one modified afterwards restores on the
+  strength of unkeyed hashes the same attacker can recompute. Neither
+  gap can be closed by verifying later: once stored, an uploaded
+  archive is indistinguishable from one this site produced, and the
+  only origin claim it carries is written by whoever wrote the
+  archive. An operator who wants a signature checked against bytes
+  they are about to restore should run `wp pontifex verify
+  --public-key` immediately beforehand.
 - **Side-channel attacks against the PHP implementation.** Timing,
   cache, and similar side channels that leak information through
   non-functional behaviour of the runtime. PHP is not designed for

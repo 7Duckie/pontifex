@@ -55,9 +55,43 @@ final class ArchiveLimits {
 	/**
 	 * Default maximum number of entries an archive may declare.
 	 *
+	 * Set to 100,000. The previous value (50,000) refused legitimate sites for
+	 * no benefit: the manifest's own 16 MiB byte cap already bounds an archive
+	 * long before any realistic site reaches that count, so the lower ceiling
+	 * only turned readable archives away.
+	 *
+	 * Note what this number is NOT. Dividing
+	 * {@see \Pontifex\Archive\Format\ArchiveManifest::MAX_PAYLOAD_SIZE} by
+	 * {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}
+	 * gives roughly 99,273, but that is a deliberately conservative estimate
+	 * rather than a structural cap: measured against the real writer, the true
+	 * maximum an archive can express is about 114,912 entries. So 100,000 sits
+	 * BELOW the structural maximum and does bite, in the band between the two.
+	 * That is a real ceiling on entry count, not a formality — it simply sits
+	 * far enough out that the byte cap is what a real site meets first.
+	 *
+	 * Whatever this value is set to, it used
+	 * to be enforced too late to matter: the count was only checked AFTER
+	 * {@see \Pontifex\Archive\Reader\ArchiveReader::manifest()} had already
+	 * decoded every entry into memory, so a hostile or merely-large archive
+	 * had already been fully allocated before the limit could refuse it. The
+	 * real guard now is {@see \Pontifex\Archive\Format\ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES}'s
+	 * pre-decode estimate in ArchiveReader, checked against the manifest's
+	 * declared length BEFORE any byte is read or decoded; this count remains
+	 * a second, post-parse check (defence in depth).
+	 *
+	 * Memory, not count, is the true constraint on opening a large archive:
+	 * decoding a manifest costs roughly 1.6 KB of PHP memory per entry (the
+	 * JSON payload plus the ManifestEntry object graph it decodes into), so
+	 * an archive with entries near this ceiling needs a correspondingly
+	 * larger memory_limit on the destination to open at all — streaming the
+	 * manifest instead of decoding it whole would remove that requirement,
+	 * but is deliberately deferred to its own future slice rather than
+	 * bundled here.
+	 *
 	 * @var int
 	 */
-	public const DEFAULT_MAX_ENTRY_COUNT = 50000;
+	public const DEFAULT_MAX_ENTRY_COUNT = 100000;
 
 	/**
 	 * Default maximum decoded size of any single entry, in bytes (2 GiB).

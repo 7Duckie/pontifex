@@ -205,12 +205,34 @@ final class OperationLock {
 	 * immediately, so a request that fails to acquire never leaves the named
 	 * lock lingering behind it.
 	 *
-	 * @param string $kind One of {@see self::OP_BACKUP}, {@see self::OP_RESTORE}, {@see self::OP_ROLLBACK}.
+	 * A resume is the one caller allowed through a live backup, via
+	 * $adopting_active_backup. Without it, a backup killed outright (a SIGKILL
+	 * runs no shutdown handler, so the job stays active and the holder
+	 * transient stays set) could not be resumed at all: the lock guarding the
+	 * dead job refused the only command able to finish it, while the error
+	 * told the operator to "resume it, then retry". The exemption is narrow by
+	 * construction — it applies only when an export job is genuinely active,
+	 * and only one job can be active at a time, so the job being adopted is
+	 * necessarily the job that was blocking. It cannot be used to start a
+	 * second concurrent operation, because with no active export job there is
+	 * nothing to adopt and the normal checks apply unchanged.
+	 *
+	 * @param string $kind                   One of {@see self::OP_BACKUP}, {@see self::OP_RESTORE}, {@see self::OP_ROLLBACK}.
+	 * @param bool   $adopting_active_backup Optional. True when the caller is resuming the active export job rather than starting new work; defaults to false.
 	 * @return bool True if the lock was acquired; false if another operation already holds it.
 	 */
-	public function acquire( string $kind ): bool {
+	public function acquire( string $kind, bool $adopting_active_backup = false ): bool {
 		if ( ! $this->wordpress_context->acquire_named_lock( self::LOCK_NAME ) ) {
 			return false;
+		}
+
+		if ( $adopting_active_backup && $this->active_export_job_exists() ) {
+			// Taking over the job that is blocking us, not starting new work.
+			// Its progress transient belongs to the same job, so that check is
+			// skipped too — honouring it would refuse a resume attempted within
+			// seconds of the kill, which is exactly when one is attempted.
+			$this->claim( $kind );
+			return true;
 		}
 
 		if ( $this->backup_is_live() ) {
@@ -228,6 +250,17 @@ final class OperationLock {
 			return false;
 		}
 
+		$this->claim( $kind );
+		return true;
+	}
+
+	/**
+	 * Record this process as the lock's holder.
+	 *
+	 * @param string $kind The kind of operation now holding the lock.
+	 * @return void
+	 */
+	private function claim( string $kind ): void {
 		set_transient(
 			self::LOCK_NAME,
 			array(
@@ -237,7 +270,21 @@ final class OperationLock {
 			self::TTL
 		);
 		$this->held = true;
-		return true;
+	}
+
+	/**
+	 * Whether an export job is currently active.
+	 *
+	 * Narrower than {@see self::backup_is_live()}, which also treats fresh
+	 * progress from a synchronous run as a live backup. Only the job half is
+	 * relevant when deciding whether there is something for a resume to adopt.
+	 *
+	 * @return bool True when an active export job exists.
+	 */
+	private function active_export_job_exists(): bool {
+		$job = $this->job_store->active_job();
+
+		return null !== $job && Job::KIND_EXPORT === $job->kind();
 	}
 
 	/**

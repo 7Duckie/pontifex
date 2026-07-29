@@ -123,6 +123,8 @@ What follows from this choice — positive, negative, and neutral?
   yet written; it is not a gap in the record and is not available for reuse.
 - [ADR 0019](./0019-db-chunk-statement-containment.md) —
   db_chunk statements are anchored to the engine's own staging identifier by exact allow-listed shape, not by parsing a verb; CREATE VIEW is refused.
+- [ADR 0020](./0020-signature-enforcement-on-the-upload-path.md) —
+  A pinned trusted public key is enforced in the browser on the upload path, the only moment an archive's arrival from outside can be observed; local, scheduled and safety archives stay exempt so no recovery path can lock out.
 
 ## Further reading
 

@@ -201,6 +201,24 @@ final class JobTicker {
 		$this->reschedule();
 
 		try {
+			// A signed resumable export cannot be continued here. Signing needs the
+			// operator's private key on every tick, and that key is deliberately
+			// never stored with the job — so only the command that started it can
+			// finish it, with `wp pontifex export --resume`.
+			//
+			// Left untouched rather than failed. The job is fine and still
+			// resumable; before this check the runner refused the tick, the catch
+			// below treated that refusal as a failed backup, and a counter and a
+			// history row both recorded a failure that had not happened. A lie in
+			// the record is worse than the silence, because the record is where an
+			// operator looks when something has gone wrong. The cron chain is
+			// stopped too: firing again would only reach this same point.
+			if ( true === ( $job->payload()['signed'] ?? false ) ) {
+				$this->logger->info( 'Leaving a signed resumable backup for the command that started it; a signed export needs its key on every tick and cron does not have it.' );
+				wp_clear_scheduled_hook( self::CRON_HOOK );
+				return;
+			}
+
 			// Count the attempt before working; reset only on a clean end. Only
 			// consecutive unclean deaths accumulate, and past the ceiling the job
 			// is failed loudly instead of crash-looping forever.

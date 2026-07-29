@@ -79,11 +79,11 @@ final class ExportOptions {
 	/**
 	 * Construct an ExportOptions.
 	 *
-	 * @param string                 $output_path                Absolute path the archive is written to; must be non-empty.
-	 * @param EncryptionContext|null $encryption                 Encryption inputs, or null for an unencrypted archive.
-	 * @param SigningContext|null    $signing                    Signing inputs, or null for an unsigned archive.
-	 * @param string|null            $encryption_disabled_reason Reason recorded when the archive is unencrypted, or null.
-	 * @param Scope|null             $scope                      What the archive backs up, or null to record no scope.
+	 * @param string                 $output_path                       Absolute path the archive is written to; must be non-empty.
+	 * @param EncryptionContext|null $encryption                        Encryption inputs, or null for an unencrypted archive.
+	 * @param SigningContext|null    $signing                           Signing inputs, or null for an unsigned archive.
+	 * @param string|null            $encryption_disabled_reason        Reason recorded when the archive is unencrypted, or null.
+	 * @param Scope|null             $scope                             What the archive backs up, or null to record no scope.
 	 * @throws InvalidArgumentException If $output_path is the empty string.
 	 */
 	public function __construct(

@@ -11,6 +11,8 @@ namespace Pontifex\Tests\Unit\Export;
 
 use Mockery;
 use wpdb;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
@@ -22,6 +24,7 @@ use Throwable;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
@@ -127,6 +130,182 @@ final class ExportRunnerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
 		$leftover = glob( $this->temp_output_path . '.*.tmp' );
 		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'The temp export file is cleaned up on failure.' );
+	}
+
+	/**
+	 * An export whose entries would produce a too-large manifest must be
+	 * refused before the destination is opened — no output file, no temp
+	 * file left behind.
+	 *
+	 * A single entry with a deliberately enormous path is the fastest way to
+	 * push the projected manifest payload over MAX_PAYLOAD_SIZE without
+	 * building thousands of entries: {@see ArchiveManifest::project_payload_bytes()}
+	 * charges (MIN_ENTRY_PAYLOAD_BYTES - 1) plus the real path length per
+	 * path-bearing entry, so one ~17-million-character path alone exceeds
+	 * the 16 MiB cap.
+	 *
+	 * @return void
+	 */
+	public function test_export_refuses_before_opening_destination_when_manifest_would_be_too_large(): void {
+		$plans  = array( $this->file_plan( str_repeat( 'a', 17000000 ), 'x' ) );
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+			$this->fail( 'A manifest projected over MAX_PAYLOAD_SIZE must be refused.' );
+		} catch ( ManifestTooLargeException $e ) {
+			$this->assertStringContainsString( '1 entries', $e->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist( $this->temp_output_path, 'A refused export must never open the destination.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'A refusal before the temp file opens must leave nothing behind.' );
+	}
+
+	/**
+	 * A must-permit corpus: an ordinary site's archive must never trip the
+	 * manifest-size refusal, at every scale the exclusions guard is meant to
+	 * leave untouched.
+	 *
+	 * @param int $count How many entries to write.
+	 * @return void
+	 */
+	private function assert_export_permits_ordinary_site_sized_corpus( int $count ): void {
+		$plans = array();
+		for ( $i = 0; $i < $count; $i++ ) {
+			$plans[] = $this->file_plan( sprintf( 'wp-content/uploads/2026/07/file-%06d.jpg', $i ), 'x' );
+		}
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		$result = $runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+
+		$this->assertSame( $count, $result->entry_count() );
+		$this->assertFileExists( $this->temp_output_path );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Removing this pass's archive so the next scale's assertion starts clean.
+		unlink( $this->temp_output_path );
+	}
+
+	/**
+	 * A 10,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_ten_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 10000 );
+	}
+
+	/**
+	 * A 25,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_twenty_five_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 25000 );
+	}
+
+	/**
+	 * A 49,000-entry export must never trip the manifest-size refusal.
+	 *
+	 * @return void
+	 */
+	public function test_export_permits_forty_nine_thousand_entries(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( 49000 );
+	}
+
+	/**
+	 * Determine, from the real projection formula rather than a hand-guessed
+	 * constant, how many entries of this file's realistic path shape
+	 * (`wp-content/uploads/2026/07/file-NNNNNN.jpg`) it takes to sit right at
+	 * the manifest-size cliff.
+	 *
+	 * The must-permit corpus above tops out at 49,000 entries, which projects
+	 * to roughly 10.3 MB against the 16.78 MB cap — about 61% of it, nowhere
+	 * near the edge the conservatism margin actually has to hold at. Deriving
+	 * both counts from {@see ArchiveManifest::project_payload_bytes()} itself
+	 * (rather than hardcoding entry counts that would go stale the moment the
+	 * per-entry byte cost is ever retuned) keeps this test targeting the real
+	 * current cliff for as long as the format exists.
+	 *
+	 * @return array{permit: int, refuse: int} 'permit' sits about 5% under
+	 *         MAX_PAYLOAD_SIZE and must be allowed through; 'refuse' is the
+	 *         exact first entry count whose projection exceeds it and must be
+	 *         refused.
+	 */
+	private function manifest_cliff_entry_counts(): array {
+		$sample_path = sprintf( 'wp-content/uploads/2026/07/file-%06d.jpg', 0 );
+		$baseline    = ArchiveManifest::project_payload_bytes( array() );
+		$per_entry   = ArchiveManifest::project_payload_bytes(
+			array( EntryHeader::for_file( $sample_path, 1, 0o644, 1700000000, 'image/jpeg', 0 ) )
+		) - $baseline;
+
+		$last_fitting_count = intdiv( ArchiveManifest::MAX_PAYLOAD_SIZE - $baseline, $per_entry );
+
+		return array(
+			'permit' => (int) floor( $last_fitting_count * 0.95 ),
+			'refuse' => $last_fitting_count + 1,
+		);
+	}
+
+	/**
+	 * An export within about 5% of the manifest-size cap must still be
+	 * permitted — the conservatism margin has to hold right up to the edge,
+	 * not just far below it. The existing 10,000/25,000/49,000-entry cases sit
+	 * at roughly 12%, 31% and 61% of the real cap respectively; none of them
+	 * exercises the margin anywhere near where it would actually matter.
+	 *
+	 * Runs in a separate process: ~76,000 in-memory EntryPlans (each with its
+	 * own php://memory stream) push this single test's memory footprint well
+	 * above what the rest of the shared "unit" suite process needs, and
+	 * process isolation is the same convention
+	 * {@see \Pontifex\Tests\Unit\Restore\ScaleRoundTripTest} already uses for
+	 * its own tens-of-thousands-of-entries tests, so this scale test cannot
+	 * contaminate the memory budget of whatever else happens to run in the
+	 * same process under phpunit.xml.dist's `executionOrder="random"`.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_export_permits_just_under_the_manifest_cliff(): void {
+		$this->assert_export_permits_ordinary_site_sized_corpus( $this->manifest_cliff_entry_counts()['permit'] );
+	}
+
+	/**
+	 * The very next entry count past where the real projection first exceeds
+	 * MAX_PAYLOAD_SIZE must be refused — the exact boundary the pre-write
+	 * refusal exists to enforce, at a realistic archive shape (many ordinary
+	 * paths), rather than the single ~17-million-character path
+	 * {@see self::test_export_refuses_before_opening_destination_when_manifest_would_be_too_large()}
+	 * uses to reach the cap the fast way.
+	 *
+	 * Runs in a separate process for the same memory-isolation reason as
+	 * {@see self::test_export_permits_just_under_the_manifest_cliff()}: this
+	 * one builds roughly 80,000 in-memory EntryPlans too.
+	 *
+	 * @return void
+	 */
+	#[RunInSeparateProcess]
+	public function test_export_refuses_just_over_the_manifest_cliff(): void {
+		$count = $this->manifest_cliff_entry_counts()['refuse'];
+
+		$plans = array();
+		for ( $i = 0; $i < $count; $i++ ) {
+			$plans[] = $this->file_plan( sprintf( 'wp-content/uploads/2026/07/file-%06d.jpg', $i ), 'x' );
+		}
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+			$this->fail( 'A manifest projected just over MAX_PAYLOAD_SIZE must be refused.' );
+		} catch ( ManifestTooLargeException $e ) {
+			$this->assertStringContainsString( sprintf( '%d entries', $count ), $e->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist( $this->temp_output_path, 'A refused export must never open the destination.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'A refusal before the temp file opens must leave nothing behind.' );
 	}
 
 	/**

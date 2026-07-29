@@ -24,6 +24,7 @@ use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
@@ -374,6 +375,85 @@ final class ResumableExportRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A clean resume tick must not rewrite the progress log.
+	 *
+	 * When nothing was dropped, rewriting the log re-reads the whole file, decodes
+	 * every record, re-encodes them and moves a fresh file into place — to arrive
+	 * at exactly the bytes already on disk. On a large site that no-op is the most
+	 * expensive thing a clean tick does, and it is where the tick exhausts memory
+	 * first.
+	 *
+	 * Asserted on the inode rather than the contents, deliberately: a no-op rewrite
+	 * produces byte-identical contents, so a content assertion would pass whether or
+	 * not the work happened. JobProgressLog::truncate_to() writes a temp file and
+	 * renames it into place, so a rewrite always changes the inode and a skip never
+	 * does. Its twin below proves the assertion can fail.
+	 *
+	 * @return void
+	 */
+	public function test_a_clean_resume_tick_does_not_rewrite_the_progress_log(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		$log_path = $store->progress_log( $job->id() )->path();
+		clearstatcache( true, $log_path );
+		$inode_before = fileinode( $log_path );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		clearstatcache( true, $log_path );
+		$this->assertSame(
+			$inode_before,
+			fileinode( $log_path ),
+			'A tick that dropped no entries must leave the progress log untouched.'
+		);
+	}
+
+	/**
+	 * A resume that drops an entry must still rewrite the progress log.
+	 *
+	 * The twin of the test above, and the reason it means anything: if the skip
+	 * were unconditional the log would go stale, still claiming an entry the
+	 * archive no longer contains. Uses the torn-last-entry path, which is what
+	 * actually forces an entry to be dropped.
+	 *
+	 * @return void
+	 */
+	public function test_a_resume_that_drops_an_entry_rewrites_the_progress_log(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		// Truncate the archive mid-entry so the last logged entry cannot re-hash.
+		$temp = (string) $store->get( $job->id() )->payload()['temp'];
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filesize -- Measuring the test's own fixture.
+		$size = (int) filesize( $temp );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Truncating the test's own fixture to simulate a torn write.
+		$handle = fopen( $temp, 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftruncate -- Simulating a crash part-way through an entry.
+		ftruncate( $handle, max( 0, $size - 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Test fixture cleanup.
+		fclose( $handle );
+
+		$log_path = $store->progress_log( $job->id() )->path();
+		clearstatcache( true, $log_path );
+		$inode_before = fileinode( $log_path );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		clearstatcache( true, $log_path );
+		$this->assertNotSame(
+			$inode_before,
+			fileinode( $log_path ),
+			'A tick that stepped back over a torn entry must rewrite the progress log.'
+		);
+	}
+
+	/**
 	 * A logged entry whose bytes never fully flushed is stepped back and rewritten.
 	 *
 	 * @return void
@@ -464,6 +544,36 @@ final class ResumableExportRunnerTest extends TestCase {
 		$this->expectExceptionMessage( 'cannot be resumable' );
 
 		$runner->start( new ExportOptions( $this->output_path, $encryption ), '/tmp/wp/wp-content', 'wp-content', array(), 1700000000 );
+	}
+
+	/**
+	 * A tick whose scan would produce a too-large manifest must refuse
+	 * before the job's temp archive is even opened — no temp file left
+	 * behind, and the job is marked failed (so a subsequent --resume
+	 * correctly reports nothing to resume, rather than wedging).
+	 *
+	 * A single entry with a deliberately enormous path is the fastest way to
+	 * push the projected manifest payload over MAX_PAYLOAD_SIZE.
+	 *
+	 * @return void
+	 */
+	public function test_tick_refuses_before_opening_temp_when_manifest_would_be_too_large(): void {
+		$this->specs            = array( array( 'file', str_repeat( 'a', 17000000 ), 'x' ) );
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+		$temp                   = (string) $job->payload()['temp'];
+
+		$thrown = null;
+		try {
+			$runner->tick( $store->get( $job->id() ), 30.0 );
+		} catch ( ManifestTooLargeException $e ) {
+			$thrown = $e;
+		}
+
+		$this->assertNotNull( $thrown, 'A projected-oversized manifest must refuse with ManifestTooLargeException.' );
+		$this->assertStringContainsString( 'cannot be continued', $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $temp, 'The refusal must fire before the job\'s temp archive is opened.' );
+		$this->assertSame( Job::STATUS_FAILED, $store->get( $job->id() )->status() );
 	}
 
 	/**
