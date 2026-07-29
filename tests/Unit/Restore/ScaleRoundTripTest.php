@@ -161,17 +161,23 @@ final class ScaleRoundTripTest extends TestCase {
 		$old_ceiling_limits = new ArchiveLimits( 50000, 2147483648, 100, 1099511627776 );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the fixture archive back from its real temp file.
 		$stream = fopen( $this->archive_path, 'rb' );
+		// Captured rather than asserted inside the catch: PHPUnit's
+		// AssertionFailedError extends RuntimeException, so a fail() inside the
+		// try would be swallowed by the catch below and the test could never
+		// report the thing it exists to check.
+		$thrown = null;
 		try {
 			$this->make_verifying_runner( $old_ceiling_limits )->verify( $stream );
-			$this->fail( 'A 60,000-entry archive must be refused under the old 50,000-entry ceiling.' );
 		} catch ( RuntimeException $e ) {
-			// The pre-decode guard (checked from the declared manifest length
-			// alone) now fires before the post-parse count check ever gets a
-			// chance to run — both refuse the archive, but the cheaper,
-			// earlier one wins the race, which is the whole point of Part 1
-			// of this fix.
-			$this->assertStringContainsString( 'more than the 50000 entries this installation will read', $e->getMessage() );
+			$thrown = $e;
 		}
+
+		$this->assertInstanceOf(
+			RuntimeException::class,
+			$thrown,
+			'A 60,000-entry archive must be refused under the old 50,000-entry ceiling.'
+		);
+		$this->assertStringContainsString( 'exceeding the maximum of 50000', $thrown->getMessage() );
 
 		$raised_ceiling_limits = ArchiveLimits::defaults();
 		$this->assertSame( 100000, $raised_ceiling_limits->max_entry_count() );

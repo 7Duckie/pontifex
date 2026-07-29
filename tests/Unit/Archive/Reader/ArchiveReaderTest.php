@@ -564,26 +564,49 @@ final class ArchiveReaderTest extends TestCase {
 	}
 
 	/**
-	 * The pre-decode guard must refuse a manifest whose declared length alone
-	 * implies more entries than the configured maximum, before any manifest
-	 * byte is read.
+	 * A manifest whose decode cannot fit must be refused where the host
+	 * forbids raising the limit.
+	 *
+	 * The refusal branch is only reachable on a host that will not let the
+	 * request raise its own ceiling — where ini_set succeeds, the guard raises
+	 * and proceeds, which is the behaviour we want. Simulating that honestly
+	 * means a real child process with ini_set disabled, so this shells out
+	 * rather than pretending in-process.
+	 *
+	 * The declared length sits just UNDER MAX_PAYLOAD_SIZE so the existing
+	 * allocation cap cannot be what refuses it — otherwise this test would
+	 * pass for the wrong reason. That a catchable RuntimeException comes back
+	 * at all is itself proof no allocation happened: reading 16,000,000 bytes
+	 * under an 8 MiB ceiling would be an uncatchable fatal.
 	 *
 	 * @return void
 	 */
-	public function test_manifest_pre_decode_guard_refuses_hostile_declared_length(): void {
-		$path = tempnam( sys_get_temp_dir(), 'pontifex-hostile-' );
-		// max_entry_count = 100; a declared length of 1,000,000 bytes implies
-		// at least 1,000,000 / 169 = 5,917 entries — comfortably over.
-		self::write_hostile_declared_length_fixture( $path, 1000000 );
+	public function test_manifest_decode_refused_when_the_host_forbids_raising_the_limit(): void {
+		$path = tempnam( sys_get_temp_dir(), 'pontifex-oom-' );
+		self::write_hostile_declared_length_fixture( $path, 16000000 );
+
+		// Paths travel as environment variables rather than being interpolated
+		// into the snippet: nothing from this test then has to survive two
+		// levels of quoting, which is where scaffolding like this usually breaks.
+		$snippet = 'require getenv( "PONTIFEX_AUTOLOAD" );'
+			. ' $s = fopen( getenv( "PONTIFEX_FIXTURE" ), "rb" );'
+			. ' $r = new Pontifex\\Archive\\Reader\\ArchiveReader( $s, 8388608 );'
+			. ' try { $r->manifest(); echo "NO-REFUSAL"; } catch ( Throwable $e ) { echo $e->getMessage(); }';
+
+		$command = sprintf(
+			'PONTIFEX_AUTOLOAD=%s PONTIFEX_FIXTURE=%s php -d memory_limit=8M -d disable_functions=ini_set -r %s 2>&1',
+			escapeshellarg( dirname( __DIR__, 4 ) . '/vendor/autoload.php' ),
+			escapeshellarg( $path ),
+			escapeshellarg( $snippet )
+		);
 
 		try {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading a test fixture from a real file.
-			$stream = fopen( $path, 'rb' );
-			$reader = new ArchiveReader( $stream, new ArchiveLimits( 100, 2147483648, 100, 1099511627776 ) );
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec -- Test-only: the refusal branch is reachable only where ini_set is disabled, which cannot be simulated in-process; a real child process is the only honest way to exercise it.
+			$output = (string) shell_exec( $command );
 
-			$this->expectException( RuntimeException::class );
-			$this->expectExceptionMessage( 'implying at least 5917 entries' );
-			$reader->manifest();
+			$this->assertStringContainsString( 'Raise memory_limit on this server', $output );
+			$this->assertStringNotContainsString( 'NO-REFUSAL', $output );
+			$this->assertStringNotContainsString( 'Allowed memory size', $output, 'The guard must refuse cleanly, never fatal.' );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown; best-effort.
 			@unlink( $path );
@@ -591,40 +614,57 @@ final class ArchiveReaderTest extends TestCase {
 	}
 
 	/**
-	 * The pre-decode guard must fire — and so avoid the fread the old,
-	 * post-decode-only check could never prevent — even under a memory_limit
-	 * far too small to read the declared manifest length into memory.
+	 * The memory guard must not refuse an archive that fits.
 	 *
-	 * A 50 MiB declared length is chosen deliberately: attempting to fread()
-	 * that many bytes under an 8 MiB memory_limit is an uncatchable fatal
-	 * ("Allowed memory size exhausted"), the exact failure mode this guard
-	 * exists to make unreachable. Because the guard rejects the archive from
-	 * the declared length alone (cheap integer arithmetic on an 8-byte
-	 * field), it never attempts that fread, so the assertion below — a clean
-	 * RuntimeException, not a fatal that would abort the whole test process —
-	 * is proof the process never allocated the manifest.
+	 * The must-permit half, and the more important of the pair: a guard that
+	 * refuses too eagerly locks an operator out of their own recovery, which
+	 * is a worse failure for a backup tool than the one it defends against.
+	 * A real fixture archive read under a generous ceiling must open exactly
+	 * as it does with no limit supplied at all.
 	 *
 	 * @return void
 	 */
-	#[RunInSeparateProcess]
-	public function test_manifest_pre_decode_guard_fires_before_allocating_under_low_memory_limit(): void {
-		$path = tempnam( sys_get_temp_dir(), 'pontifex-hostile-oom-' );
-		self::write_hostile_declared_length_fixture( $path, 52428800 );
+	public function test_memory_guard_permits_an_archive_that_fits(): void {
+		$reader = new ArchiveReader( self::build_sample_archive_stream(), 268435456 );
 
-		try {
-			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Test-only, in the isolated child process #[RunInSeparateProcess] runs; there is no WordPress runtime here for wp_raise_memory_limit() to hook into.
-			ini_set( 'memory_limit', '8M' );
+		$this->assertSame( 0, $reader->manifest()->entry_count() );
+	}
 
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading a test fixture from a real file.
-			$stream = fopen( $path, 'rb' );
-			$reader = new ArchiveReader( $stream );
+	/**
+	 * The raise target must always clear the refusal threshold.
+	 *
+	 * The algorithm only terminates sensibly if a SUCCESSFUL raise is
+	 * guaranteed to satisfy the very check that triggered it. Were the
+	 * refusal factor ever set at or above the raise factor, the guard would
+	 * raise the limit and then refuse anyway — doing the work and still
+	 * failing. Pins the relationship rather than either number, because it is
+	 * the relationship that carries the correctness.
+	 *
+	 * @return void
+	 */
+	public function test_raise_factor_clears_the_refusal_threshold(): void {
+		$refusal = new \ReflectionClassConstant( ArchiveReader::class, 'REFUSAL_MEMORY_FACTOR' );
+		$raise   = new \ReflectionClassConstant( ArchiveReader::class, 'RAISE_MEMORY_FACTOR' );
 
-			$this->expectException( RuntimeException::class );
-			$this->expectExceptionMessage( 'more than the 100000 entries this installation will read' );
-			$reader->manifest();
-		} finally {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown; best-effort.
-			@unlink( $path );
-		}
+		$this->assertGreaterThan(
+			$refusal->getValue(),
+			$raise->getValue(),
+			'A successful raise must leave more headroom than the refusal threshold demands.'
+		);
+	}
+
+	/**
+	 * An unlimited memory limit must switch the guard off entirely.
+	 *
+	 * A CLI run reports memory_limit as -1, which the callers normalise to a
+	 * non-positive value; the reader must then skip the check rather than
+	 * compute headroom against a meaningless ceiling.
+	 *
+	 * @return void
+	 */
+	public function test_memory_guard_skipped_when_memory_is_unlimited(): void {
+		$reader = new ArchiveReader( self::build_sample_archive_stream(), -1 );
+
+		$this->assertSame( 0, $reader->manifest()->entry_count() );
 	}
 }

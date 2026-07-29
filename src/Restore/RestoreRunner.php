@@ -122,6 +122,17 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private int $entry_memory_budget;
 
 	/**
+	 * The runtime memory limit in bytes, or 0 for unlimited.
+	 *
+	 * Held undivided (unlike {@see self::$entry_memory_budget}) and handed to
+	 * every {@see ArchiveReader} this runner opens, so the reader can refuse a
+	 * manifest whose decode would not fit rather than letting it fatal.
+	 *
+	 * @var int
+	 */
+	private int $memory_limit_bytes;
+
+	/**
 	 * Fraction of the runtime memory limit a single entry's decoded payload may use.
 	 *
 	 * A quarter: reading an entry peaks at several coexisting copies (the buffered
@@ -146,6 +157,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		$this->file_writer         = $file_writer;
 		$this->database_writer     = $database_writer;
 		$this->limits              = $limits ?? ArchiveLimits::defaults();
+		$this->memory_limit_bytes  = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 ) ? $memory_limit_bytes : 0;
 		$this->entry_memory_budget = ( null !== $memory_limit_bytes && $memory_limit_bytes > 0 )
 			? intdiv( $memory_limit_bytes, self::MEMORY_BUDGET_DIVISOR )
 			: 0;
@@ -174,7 +186,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// under it, so the connection must speak it for the replay's duration or
 		// multibyte content is silently transcoded. Provenance is validated by
 		// the reader; the charset string itself is validated by the writer.
-		$reader     = new ArchiveReader( $archive_source, $this->limits );
+		$reader     = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$provenance = $reader->provenance();
 
 		// Fail closed on an archive that lies about its own scope: one whose
@@ -275,18 +287,18 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
-		$reader   = new ArchiveReader( $archive_source, $this->limits );
+		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$manifest = $reader->manifest();
 		$entries  = $manifest->entries();
 		$total    = count( $entries );
 
-		// Defence in depth, not the only line: ArchiveReader now refuses a
-		// declared manifest length that already implies too many entries
-		// BEFORE this manifest() call decodes anything (see
-		// ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES). That pre-decode estimate
-		// is deliberately conservative, so a manifest hand-forged from
-		// entries smaller than it assumes can still reach here; this check
-		// catches that residual case against the true, now-decoded count.
+		// The entry count is checked here, after the decode, because it cannot
+		// be checked before one: a count derived from the manifest's declared
+		// byte length either sits above the format's own structural cap (and
+		// so never fires) or falsely refuses legitimate archives whose entries
+		// have long paths. What ArchiveReader does check before decoding is
+		// whether the decode will fit in memory at all — a different question,
+		// and the one that actually protects the request.
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(
@@ -334,20 +346,20 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @throws RuntimeException If the archive is malformed, hash verification fails, a defensive limit is exceeded, or $handle fails.
 	 */
 	private function walk( $archive_source, ?callable $on_entry, callable $handle, ?callable $on_bytes = null ): void {
-		$reader   = new ArchiveReader( $archive_source, $this->limits );
+		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
 		$manifest = $reader->manifest();
 
 		$entries = $manifest->entries();
 		$total   = count( $entries );
 		$done    = 0;
 
-		// Defence in depth, not the only line: ArchiveReader now refuses a
-		// declared manifest length that already implies too many entries
-		// BEFORE this manifest() call decodes anything (see
-		// ArchiveManifest::MIN_ENTRY_PAYLOAD_BYTES). That pre-decode estimate
-		// is deliberately conservative, so a manifest hand-forged from
-		// entries smaller than it assumes can still reach here; this check
-		// catches that residual case against the true, now-decoded count.
+		// The entry count is checked here, after the decode, because it cannot
+		// be checked before one: a count derived from the manifest's declared
+		// byte length either sits above the format's own structural cap (and
+		// so never fires) or falsely refuses legitimate archives whose entries
+		// have long paths. What ArchiveReader does check before decoding is
+		// whether the decode will fit in memory at all — a different question,
+		// and the one that actually protects the request.
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(
