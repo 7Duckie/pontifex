@@ -11,9 +11,12 @@ namespace Pontifex\Tests\Unit\Restore;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
+use ReflectionProperty;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
 
 /**
@@ -37,11 +40,17 @@ use Pontifex\Restore\FileWriter;
  * Two FileWriter defences are intentionally NOT exercised here
  * because they cannot be reached through the public EntryHeader API:
  *
- *  - The "empty path" branch in resolve_safe_path() — EntryHeader's
- *    for_file, for_directory, and for_symlink factories all reject
- *    empty paths at construction. No valid EntryReadResult can carry
- *    an empty path. Same applies to the "empty target" branch in
- *    EntryHeader::for_symlink versus the equivalent check.
+ *  - The "empty path" branch in resolve_safe_path() that catches a RAW
+ *    empty string — EntryHeader's for_file, for_directory, and
+ *    for_symlink factories all reject empty paths at construction, and
+ *    normalise_entry_path() independently refuses a raw empty path
+ *    before resolve_safe_path() is ever reached from write_entry(). No
+ *    valid EntryReadResult can carry a raw-empty path. Same applies to
+ *    the "empty target" branch in EntryHeader::for_symlink versus the
+ *    equivalent check. (This is distinct from a path that COLLAPSES to
+ *    empty, such as "." or "./" — that IS reachable through the public
+ *    API and IS exercised; see the "A path normalising to empty"
+ *    section below.)
  *  - The "unsupported entry kind" branch at the end of write_entry()
  *    — EntryHeader's from_canonical_data and the four kind-specific
  *    factories enforce that kind is one of exactly four values, and
@@ -665,6 +674,698 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertTrue( is_link( $link ) );
 		$this->assertSame( 'new-target', readlink( $link ) );
+	}
+
+	// -------------------------------------------------------------------
+	// Case-sensitivity probe (destination_is_case_sensitive())
+	// -------------------------------------------------------------------
+
+	/**
+	 * The probe's answer agrees with an independent, direct check against the real filesystem.
+	 *
+	 * Writes two files whose names differ only by case directly, bypassing
+	 * FileWriter's own probe entirely, and counts how many distinct
+	 * directory entries result — the ground truth for whether THIS
+	 * filesystem folds case. That ground truth must match what the probe
+	 * itself reports for the very same destination_root, whatever the
+	 * answer turns out to be on the host actually running this test.
+	 *
+	 * @return void
+	 */
+	public function test_case_sensitivity_probe_agrees_with_the_real_filesystem(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$method = new ReflectionMethod( FileWriter::class, 'destination_is_case_sensitive' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Independent ground-truth probe, deliberately bypassing FileWriter's own probe under test.
+		file_put_contents( $this->fixture_root . '/groundtruth', 'a' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Independent ground-truth probe, deliberately bypassing FileWriter's own probe under test.
+		file_put_contents( $this->fixture_root . '/GROUNDTRUTH', 'b' );
+
+		$matching_entries             = array_filter(
+			(array) scandir( $this->fixture_root ),
+			static function ( string $entry ): bool {
+				return 0 === strcasecmp( $entry, 'groundtruth' );
+			}
+		);
+		$filesystem_is_case_sensitive = 2 === count( $matching_entries );
+
+		$probed = (bool) $method->invoke( $writer );
+
+		$this->assertSame( $filesystem_is_case_sensitive, $probed, 'The probe must agree with a direct, independent check of the same filesystem.' );
+	}
+
+	/**
+	 * The probe leaves no file behind in the destination root, on either branch.
+	 *
+	 * @return void
+	 */
+	public function test_case_sensitivity_probe_leaves_no_file_behind(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$method = new ReflectionMethod( FileWriter::class, 'destination_is_case_sensitive' );
+
+		$method->invoke( $writer );
+
+		$this->assertSame( array(), glob( $this->fixture_root . '/.*CaseProbe*' ), 'The probe file, in any case spelling, must always be removed.' );
+	}
+
+	/**
+	 * The probe's result is cached rather than re-probed on every call.
+	 *
+	 * A known value is seeded directly into the cache property by
+	 * reflection (bypassing a real probe entirely, so the test does not
+	 * depend on what this host's real answer happens to be), then the
+	 * destination_root is made unwritable. A second call that actually
+	 * re-probed would either error or fall back to the safe default
+	 * (case-insensitive, i.e. false) because its own write would fail
+	 * against the now read-only root — which would differ from the seeded
+	 * `true`. Getting the seeded `true` back proves the cache, not a fresh
+	 * probe, answered the second call.
+	 *
+	 * @return void
+	 */
+	public function test_case_sensitivity_probe_result_is_cached(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$property = new ReflectionProperty( FileWriter::class, 'case_sensitive_destination' );
+		$property->setValue( $writer, true );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test-only: breaking writability so a re-probe (if one happened) could not succeed.
+		chmod( $this->fixture_root, 0o500 );
+		try {
+			$method = new ReflectionMethod( FileWriter::class, 'destination_is_case_sensitive' );
+			$result = (bool) $method->invoke( $writer );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring writability so tearDown can clean up the fixture.
+			chmod( $this->fixture_root, 0o755 );
+		}
+
+		$this->assertTrue( $result, 'The cached value must be returned unchanged; a re-probe against an unwritable root could not have produced true.' );
+	}
+
+	// -------------------------------------------------------------------
+	// Pontifex working-directory refusal
+	// -------------------------------------------------------------------
+
+	/**
+	 * An entry at wp-content/pontifex itself is refused on a content-only restore.
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_working_directory_refused_with_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::directory_result( 'wp-content/pontifex' ) );
+	}
+
+	/**
+	 * An entry at wp-content/pontifex itself is refused even on a whole-site restore.
+	 *
+	 * The guard is structural, not scope-dependent: it must fire even when
+	 * assert_within_required_prefix() is a no-op because no prefix is set.
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_working_directory_refused_without_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::directory_result( 'wp-content/pontifex' ) );
+	}
+
+	/**
+	 * A file nested inside wp-content/pontifex/ is refused.
+	 *
+	 * Uses a realistic path — a safety archive left behind by a previous
+	 * rollback — to ground the abstract guard in the concrete asset it
+	 * protects.
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_working_directory_nested_file_refused(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex/rollback/pre-import-rollback-99991231T235959Z.wpmig', 'forged' ) );
+	}
+
+	/**
+	 * A sibling directory that merely starts with "pontifex" is NOT refused.
+	 *
+	 * The off-by-one FileScanner's own docblock calls out: "wp-content/pontifex-foo"
+	 * is a different directory and must be written normally.
+	 *
+	 * @return void
+	 */
+	public function test_pontifex_lookalike_sibling_is_permitted(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex-foo/file.txt', 'data' ) );
+
+		$path = $this->fixture_root . '/wp-content/pontifex-foo/file.txt';
+		$this->assertFileExists( $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'data', file_get_contents( $path ) );
+	}
+
+	/**
+	 * Every path FileScanner prunes from a scan, FileWriter's guard also refuses — in both filesystem-case branches.
+	 *
+	 * FileWriter and FileScanner are independent implementations by design
+	 * (FileWriter must not depend on the Manifest namespace at runtime).
+	 * is_pontifex_working_path() now takes the destination's case
+	 * sensitivity as an explicit parameter (see its docblock), so this test
+	 * drives BOTH branches directly by reflection rather than depending on
+	 * whichever filesystem happens to run the suite:
+	 *
+	 *  - case-sensitive: FileWriter is byte-exact, identical to FileScanner
+	 *    — for these fixture paths the two sets are exactly equal.
+	 *  - case-insensitive: FileWriter refuses MORE than FileScanner prunes,
+	 *    because it also catches case-varied paths the scanner — byte-exact
+	 *    by design — would never itself emit.
+	 *
+	 * In both branches the one direction that matters for safety always
+	 * holds, and is what this test asserts: scanner-pruned paths are a
+	 * subset of writer-refused paths. FileScanner controls what a
+	 * legitimate archive can ever contain, so nothing it prunes should ever
+	 * slip past the writer's guard on the way back in. The reverse (the
+	 * writer refusing something the scanner would have kept) is fine on a
+	 * case-insensitive destination, and is exercised separately by
+	 * {@see self::test_case_sensitive_branch_permits_case_variants()} and
+	 * {@see self::test_case_insensitive_branch_refuses_case_variants()}.
+	 *
+	 * Both methods are private, so reflection is used to invoke each
+	 * directly without needing a full write_entry()/scan() round trip.
+	 *
+	 * @return void
+	 */
+	public function test_writer_refuses_everything_the_scanner_prunes(): void {
+		$scanner_pruned_paths = array(
+			'wp-content/pontifex',
+			'wp-content/pontifex/logs',
+			'wp-content/pontifex/exports/x',
+		);
+		$scanner_kept_paths   = array(
+			'wp-content/pontifex-foo',
+			'wp-content',
+			'wp-content/uploads/a.jpg',
+			'pontifex',
+		);
+
+		$writer_method  = new ReflectionMethod( FileWriter::class, 'is_pontifex_working_path' );
+		$scanner_method = new ReflectionMethod( FileScanner::class, 'is_pontifex_working_path' );
+
+		foreach ( array( true, false ) as $case_sensitive ) {
+			foreach ( $scanner_pruned_paths as $path ) {
+				$this->assertTrue( (bool) $scanner_method->invoke( null, $path ), sprintf( 'precondition: FileScanner must prune "%s".', $path ) );
+				$this->assertTrue(
+					(bool) $writer_method->invoke( null, $path, $case_sensitive ),
+					sprintf( 'FileWriter (case_sensitive=%s) must refuse everything FileScanner prunes, but accepted "%s".', $case_sensitive ? 'true' : 'false', $path )
+				);
+			}
+
+			foreach ( $scanner_kept_paths as $path ) {
+				$this->assertFalse( (bool) $scanner_method->invoke( null, $path ), sprintf( 'precondition: FileScanner must keep "%s".', $path ) );
+				$this->assertFalse(
+					(bool) $writer_method->invoke( null, $path, $case_sensitive ),
+					sprintf( 'FileWriter (case_sensitive=%s) must not refuse an ordinary path FileScanner keeps: "%s".', $case_sensitive ? 'true' : 'false', $path )
+				);
+			}
+		}
+	}
+
+	// -------------------------------------------------------------------
+	// is_pontifex_working_path() — case-sensitivity branch matrix (by reflection)
+	// -------------------------------------------------------------------
+
+	/**
+	 * On a case-sensitive destination, only the byte-exact "pontifex" is refused; case variants are PERMITTED.
+	 *
+	 * This is the false-refusal fix itself, pinned directly. Before this
+	 * fix, is_pontifex_working_path() folded case UNCONDITIONALLY, so a
+	 * genuine "wp-content/Pontifex/" directory — scanned faithfully into a
+	 * legitimate archive by the byte-exact FileScanner, which never prunes
+	 * it — was refused on restore to a case-sensitive destination (the
+	 * common case on Linux/ext4 hosting), making that backup unrestorable
+	 * with no attacker involved. Driven by reflection with
+	 * case_sensitive_filesystem=true so this is proven deterministically
+	 * regardless of which filesystem actually runs the suite.
+	 *
+	 * @return void
+	 */
+	public function test_case_sensitive_branch_permits_case_variants(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'is_pontifex_working_path' );
+
+		$this->assertTrue( (bool) $method->invoke( null, 'wp-content/pontifex', true ), 'The byte-exact path must still be refused.' );
+		$this->assertFalse( (bool) $method->invoke( null, 'wp-content/Pontifex', true ), 'A case-varied path must be PERMITTED on a case-sensitive destination -- the false-refusal fix.' );
+		$this->assertFalse( (bool) $method->invoke( null, 'wp-content/PONTIFEX', true ), 'A case-varied path must be PERMITTED on a case-sensitive destination -- the false-refusal fix.' );
+	}
+
+	/**
+	 * On a case-insensitive destination, the byte-exact path and every case variant are all refused.
+	 *
+	 * Unchanged from before this fix: on APFS/NTFS, "wp-content/PONTIFEX/…"
+	 * and "wp-content/pontifex/…" name the same on-disk directory, so a
+	 * forged archive spelling its way past a byte-exact check would still
+	 * land inside the real working directory.
+	 *
+	 * @return void
+	 */
+	public function test_case_insensitive_branch_refuses_case_variants(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'is_pontifex_working_path' );
+
+		$this->assertTrue( (bool) $method->invoke( null, 'wp-content/pontifex', false ) );
+		$this->assertTrue( (bool) $method->invoke( null, 'wp-content/Pontifex', false ) );
+		$this->assertTrue( (bool) $method->invoke( null, 'wp-content/PONTIFEX', false ) );
+	}
+
+	/**
+	 * A lookalike sibling that merely starts with "pontifex" is permitted in both branches.
+	 *
+	 * Guards against a regression that turns either branch's comparison
+	 * into a bare prefix/substring match with no slash boundary.
+	 *
+	 * @return void
+	 */
+	public function test_lookalike_sibling_permitted_in_both_case_sensitivity_branches(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'is_pontifex_working_path' );
+
+		foreach ( array( true, false ) as $case_sensitive ) {
+			$this->assertFalse( (bool) $method->invoke( null, 'wp-content/pontifex-foo', $case_sensitive ), sprintf( 'case_sensitive=%s', $case_sensitive ? 'true' : 'false' ) );
+			$this->assertFalse( (bool) $method->invoke( null, 'wp-content/PONTIFEX-FOO', $case_sensitive ), sprintf( 'case_sensitive=%s', $case_sensitive ? 'true' : 'false' ) );
+		}
+	}
+
+	// -------------------------------------------------------------------
+	// Case-insensitive working-directory refusal (APFS / NTFS bypass)
+	// -------------------------------------------------------------------
+	//
+	// The case-VARIED end-to-end scenarios formerly here (an upper-cased
+	// "PONTIFEX", a mixed-case "Pontifex/.htaccess", each combined with a
+	// "." or doubled "/") assumed is_pontifex_working_path() folded case
+	// UNCONDITIONALLY. Since the case-sensitivity probe, whether such a
+	// path is refused depends on the REAL destination filesystem — on a
+	// case-sensitive host (ext4, the common Linux/hosting case) it is
+	// correctly PERMITTED, so an unconditional "always refused" assertion
+	// would be flaky at best and simply wrong at worst on such a host. That
+	// behaviour is now pinned deterministically, on any host, by the
+	// reflection-driven branch matrix above
+	// ({@see self::test_case_sensitive_branch_permits_case_variants()} and
+	// {@see self::test_case_insensitive_branch_refuses_case_variants()}).
+	// What remains here, end-to-end, is only what is refused on EVERY
+	// host regardless of case sensitivity: the byte-exact lower-case path
+	// (below, and throughout the surrounding sections) and the lookalike
+	// siblings that must never be refused in either branch.
+
+	/**
+	 * A ".." segment that would climb back into a lower-case "pontifex" via an upper-case detour stays refused.
+	 *
+	 * "wp-content/pontifex/../pontifex/x" contains a parent-directory
+	 * segment and must be refused by that rule regardless of case, before
+	 * the working-directory guard is even reached.
+	 *
+	 * @return void
+	 */
+	public function test_parent_segment_through_pontifex_stays_refused_regardless_of_case(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex/../pontifex/x', 'forged' ) );
+	}
+
+	/**
+	 * The same ".."-through-"pontifex" path stays refused with no required prefix too.
+	 *
+	 * @return void
+	 */
+	public function test_parent_segment_through_pontifex_stays_refused_regardless_of_case_without_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex/../pontifex/x', 'forged' ) );
+	}
+
+	/**
+	 * An upper-cased lookalike sibling, "PONTIFEX-FOO", is still permitted.
+	 *
+	 * The case-insensitivity fix must not turn into over-matching: only the
+	 * exact "pontifex" directory name (in any case) is refused, not any
+	 * directory that happens to start with it.
+	 *
+	 * @return void
+	 */
+	public function test_upper_case_lookalike_sibling_is_permitted(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$writer->write_entry( self::file_result( 'wp-content/PONTIFEX-FOO/notes.txt', 'data' ) );
+
+		$path = $this->fixture_root . '/wp-content/PONTIFEX-FOO/notes.txt';
+		$this->assertFileExists( $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'data', file_get_contents( $path ) );
+	}
+
+	/**
+	 * A lower-case lookalike sibling, "pontifex-foo", is still permitted.
+	 *
+	 * Pinned alongside the upper-case sibling above so a regression that
+	 * makes the comparison over-match (e.g. a bare case-insensitive
+	 * substring check with no slash boundary) would be caught either way.
+	 *
+	 * @return void
+	 */
+	public function test_lower_case_lookalike_sibling_is_permitted(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex-foo/notes.txt', 'data' ) );
+
+		$path = $this->fixture_root . '/wp-content/pontifex-foo/notes.txt';
+		$this->assertFileExists( $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'data', file_get_contents( $path ) );
+	}
+
+	// -------------------------------------------------------------------
+	// Path normalisation — closing the "." / doubled-"/" bypass
+	// -------------------------------------------------------------------
+
+	/**
+	 * A "." segment placed just before "pontifex" does not defeat the working-directory guard.
+	 *
+	 * The exact bypass this guard closes: a literal strncmp() against
+	 * "wp-content/pontifex/" would not match "wp-content/./pontifex/…" as
+	 * text, even though the filesystem resolves the two identically. Without
+	 * normalisation the entry would be written straight into the site's
+	 * own rollback archive directory.
+	 *
+	 * @return void
+	 */
+	public function test_dot_segment_before_pontifex_does_not_bypass_the_working_directory_guard(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content/./pontifex/rollback/evil.wpmig', 'forged' ) );
+	}
+
+	/**
+	 * A doubled "/" before "pontifex" does not defeat the working-directory guard.
+	 *
+	 * The doubled-slash sibling of the previous test: "wp-content//pontifex/…"
+	 * does not textually match "wp-content/pontifex/" either, but resolves
+	 * to the same place on disk.
+	 *
+	 * @return void
+	 */
+	public function test_doubled_slash_before_pontifex_does_not_bypass_the_working_directory_guard(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content//pontifex/rollback/evil.wpmig', 'forged' ) );
+	}
+
+	/**
+	 * A "." segment before "pontifex" does not allow overwriting its .htaccess.
+	 *
+	 * The concrete, highest-stakes instance of the bypass: pontifex/.htaccess
+	 * is what keeps the whole-database safety archives out of web access.
+	 * Overwriting it through this gap would be the primitive that exposes
+	 * them.
+	 *
+	 * @return void
+	 */
+	public function test_dot_segment_before_pontifex_does_not_permit_overwriting_htaccess(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content/./pontifex/.htaccess', 'Allow from all' ) );
+	}
+
+	/**
+	 * A doubled "/" before "pontifex" does not permit overwriting its .htaccess.
+	 *
+	 * @return void
+	 */
+	public function test_doubled_slash_before_pontifex_does_not_permit_overwriting_htaccess(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content//pontifex/.htaccess', 'Allow from all' ) );
+	}
+
+	/**
+	 * A "." segment placed AFTER "pontifex" was already refused before this fix; pin it.
+	 *
+	 * "wp-content/pontifex/./rollback/evil.wpmig" already begins with the
+	 * literal prefix "wp-content/pontifex/", so the unnormalised guard
+	 * already caught this shape. This test exists purely to guard against a
+	 * future regression in normalise_entry_path() accidentally un-refusing
+	 * it.
+	 *
+	 * @return void
+	 */
+	public function test_dot_segment_after_pontifex_stays_refused(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'own working directory' );
+
+		$writer->write_entry( self::file_result( 'wp-content/pontifex/./rollback/evil.wpmig', 'forged' ) );
+	}
+
+	/**
+	 * A "." segment in an ordinary, legitimate path is collapsed away by normalise_entry_path().
+	 *
+	 * Proves normalisation is not just a refusal engine: a harmless "."
+	 * segment in an otherwise-fine path is collapsed away, leaving the path
+	 * it would have been without the "." present.
+	 *
+	 * Asserted by reflection on the STRING normalise_entry_path() returns,
+	 * not by writing the entry and checking the file lands in the right
+	 * place. A file-existence assertion here would prove nothing: the
+	 * kernel resolves a "." path segment itself, so "wp-content/./uploads/photo.jpg"
+	 * and "wp-content/uploads/photo.jpg" name the identical file to
+	 * fopen()/file_put_contents() regardless of whether normalise_entry_path()
+	 * ever ran. A version of this test built that way passed even with
+	 * normalise_entry_path() gutted to `return $relative_path;` — it killed
+	 * zero mutants. Checking the returned string directly is the only way
+	 * to actually pin the collapsing behaviour.
+	 *
+	 * @return void
+	 */
+	public function test_dot_segment_in_ordinary_path_is_permitted_and_normalised(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+		$method = new ReflectionMethod( FileWriter::class, 'normalise_entry_path' );
+
+		$normalised = $method->invoke( $writer, 'wp-content/./uploads/photo.jpg' );
+
+		$this->assertSame( 'wp-content/uploads/photo.jpg', $normalised );
+	}
+
+	/**
+	 * A doubled "/" in an ordinary, legitimate path is collapsed to one by normalise_entry_path().
+	 *
+	 * See {@see self::test_dot_segment_in_ordinary_path_is_permitted_and_normalised()}
+	 * for why this is asserted on the returned string by reflection, not by
+	 * writing the entry and checking where the file lands: the kernel
+	 * collapses a doubled "/" itself, so a file-existence assertion cannot
+	 * tell whether normalise_entry_path() actually did anything.
+	 *
+	 * @return void
+	 */
+	public function test_doubled_slash_in_ordinary_path_is_permitted_and_normalised(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+		$method = new ReflectionMethod( FileWriter::class, 'normalise_entry_path' );
+
+		$normalised = $method->invoke( $writer, 'wp-content//uploads/photo.jpg' );
+
+		$this->assertSame( 'wp-content/uploads/photo.jpg', $normalised );
+	}
+
+	/**
+	 * A ".." segment that would climb from uploads into pontifex is refused by normalise_entry_path() itself.
+	 *
+	 * Normalisation collapses "." and doubled "/", but must never collapse
+	 * ".." — this path is refused for containing a parent-directory
+	 * segment, the same as any other traversal attempt, well before the
+	 * Pontifex-working-path guard would even get a chance to run.
+	 *
+	 * The exception message asserted here is normalise_entry_path()'s own
+	 * distinct wording, not resolve_safe_path()'s byte-identical
+	 * "…contains a parent-directory segment." fallback message. The two
+	 * methods make the same refusal for defence-in-depth (resolve_safe_path()
+	 * is a deliberate second guard), so asserting only the shared substring
+	 * would let a bug that deletes normalise_entry_path()'s own ".." check
+	 * pass this test silently — resolve_safe_path() would still catch the
+	 * escape and the test would still go green, having proven nothing about
+	 * the method it claims to pin.
+	 *
+	 * @return void
+	 */
+	public function test_parent_segment_climbing_into_pontifex_is_refused(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+
+		$writer->write_entry( self::file_result( 'wp-content/uploads/../pontifex/evil.wpmig', 'forged' ) );
+	}
+
+	/**
+	 * A ".." chain that would climb all the way to wp-config.php is refused by normalise_entry_path() itself.
+	 *
+	 * See {@see self::test_parent_segment_climbing_into_pontifex_is_refused()}
+	 * for why the distinct message, not the shared "parent-directory
+	 * segment" substring, is what this test asserts.
+	 *
+	 * @return void
+	 */
+	public function test_parent_segment_chain_climbing_to_wp_config_is_refused(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+
+		$writer->write_entry( self::file_result( 'wp-content/uploads/../../wp-config.php', 'malicious' ) );
+	}
+
+	// -------------------------------------------------------------------
+	// resolve_safe_path() receives the normalised value, not the raw header path
+	// -------------------------------------------------------------------
+
+	/**
+	 * The write_entry() method feeds resolve_safe_path() the NORMALISED path, not the raw header path.
+	 *
+	 * Pins the guarantee stated on write_entry()'s own docblock: every
+	 * guard, including resolve_safe_path(), evaluates the same normalised
+	 * value that becomes the write target. A trailing "/" makes this
+	 * observable in a way a "." or doubled "/" cannot: normalise_entry_path()'s
+	 * segment-split-and-filter strips a trailing slash as a side effect (an
+	 * empty final segment is dropped the same as a "." segment — see its
+	 * docblock), but a LITERAL trailing slash carried through to a real
+	 * filesystem call asserts "this must be a directory" — POSIX refuses to
+	 * open a path ending in "/" as a regular file. If write_entry() were
+	 * ever changed to feed resolve_safe_path() the raw header path
+	 * ("notes.txt/") instead of the already-normalised one ("notes.txt"),
+	 * this write would fail with "could not write file" instead of
+	 * succeeding. Unlike "." or doubled "/" (see the reflection-based
+	 * normalisation tests above), the kernel does NOT resolve this
+	 * particular difference away, so it is a genuine, portable pin — not
+	 * something that happens to pass because path resolution absorbs it.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_feeds_resolve_safe_path_the_normalised_value(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::file_result( 'notes.txt/', 'trailing-slash-header-path' ) );
+
+		$path = $this->fixture_root . '/notes.txt';
+		$this->assertFileExists( $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'trailing-slash-header-path', file_get_contents( $path ) );
+	}
+
+	// -------------------------------------------------------------------
+	// A path normalising to empty ("." / "./" / a run of such segments) is refused
+	// -------------------------------------------------------------------
+
+	/**
+	 * A raw path of exactly "." normalises to empty and is refused, for a file entry.
+	 *
+	 * Closes the gap resolve_safe_path()'s docblock now describes: "."
+	 * is non-empty on input, so it is not caught by the raw-input empty
+	 * check, but collapses to "" once its "." segment is dropped — and an
+	 * empty relative path joined onto destination_root resolves to
+	 * destination_root ITSELF.
+	 *
+	 * @return void
+	 */
+	public function test_dot_path_normalising_to_empty_is_refused_for_file(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalises to an empty path' );
+
+		$writer->write_entry( self::file_result( '.', 'forged' ) );
+	}
+
+	/**
+	 * A raw path of "./" (trailing slash) normalises to empty and is refused, for a file entry.
+	 *
+	 * @return void
+	 */
+	public function test_dot_slash_path_normalising_to_empty_is_refused_for_file(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalises to an empty path' );
+
+		$writer->write_entry( self::file_result( './', 'forged' ) );
+	}
+
+	/**
+	 * A run of dot-and-slash segments (".//./.") normalises to empty and is refused, for a file entry.
+	 *
+	 * @return void
+	 */
+	public function test_multiple_dot_segments_normalising_to_empty_is_refused_for_file(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalises to an empty path' );
+
+		$writer->write_entry( self::file_result( './/./.', 'forged' ) );
+	}
+
+	/**
+	 * A raw path of exactly "." normalises to empty and is refused, for a DIRECTORY entry.
+	 *
+	 * The concrete, demonstrated failure mode this guard closes: without
+	 * it, a directory entry at the collapsed-empty path would apply the
+	 * archive's mode to destination_root ITSELF — chmod'ing the WordPress
+	 * root to whatever the archive specifies (0000 has been demonstrated).
+	 *
+	 * @return void
+	 */
+	public function test_dot_path_normalising_to_empty_is_refused_for_directory(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalises to an empty path' );
+
+		$writer->write_entry( self::directory_result( '.', 0o000 ) );
+	}
+
+	/**
+	 * A run of dot-and-slash segments (".//./.") normalises to empty and is refused, for a DIRECTORY entry.
+	 *
+	 * @return void
+	 */
+	public function test_multiple_dot_segments_normalising_to_empty_is_refused_for_directory(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'normalises to an empty path' );
+
+		$writer->write_entry( self::directory_result( './/./.', 0o000 ) );
 	}
 
 	// -------------------------------------------------------------------
