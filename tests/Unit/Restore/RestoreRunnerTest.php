@@ -148,13 +148,14 @@ final class RestoreRunnerTest extends TestCase {
 	 *
 	 * @param FakeDbAdapter|null $db                    Optional adapter; if null, a fresh one is created.
 	 * @param bool               $allow_unsafe_symlinks Optional. Allow escaping symlink targets (default false).
+	 * @param callable|null      $symlink_probe         Optional symlink-capability probe forwarded to FileWriter's fifth constructor parameter; null (default) uses the real, uninjected probe.
 	 * @return RestoreRunner Ready to call restore() on.
 	 */
-	private function make_runner( ?FakeDbAdapter $db = null, bool $allow_unsafe_symlinks = false ): RestoreRunner {
+	private function make_runner( ?FakeDbAdapter $db = null, bool $allow_unsafe_symlinks = false, ?callable $symlink_probe = null ): RestoreRunner {
 		$db = $db ?? new FakeDbAdapter();
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
-			new FileWriter( $this->fixture_root, $allow_unsafe_symlinks ),
+			new FileWriter( $this->fixture_root, $allow_unsafe_symlinks, null, null, $symlink_probe ),
 			new DatabaseWriter( $db )
 		);
 	}
@@ -829,6 +830,96 @@ final class RestoreRunnerTest extends TestCase {
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root file.
 			@unlink( $outside );
+		}
+	}
+
+	/**
+	 * A host that cannot create symlinks must be refused before any entry is written — the wiring proof.
+	 *
+	 * Deleting the single `$this->file_writer->assert_symlinks_creatable(...)`
+	 * call from RestoreRunner::restore() left the full suite green — nothing
+	 * pinned that restore() calls the guard at all. A refusing probe with one
+	 * declared symlink must both throw FileWriter's documented refusal and
+	 * leave the file entry that follows it in the archive completely
+	 * unwritten, which proves the preflight runs before the entry walk
+	 * begins rather than merely existing somewhere in the class.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_before_any_write_when_host_cannot_create_symlinks(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner(
+			$db,
+			false,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe ignores which directory is being asked about and always refuses.
+			static function ( string $directory ): bool {
+				return false;
+			}
+		);
+		$plans = array(
+			self::symlink_plan( 'link', 'target.txt' ),
+			self::file_plan( 'somefile.txt', 'content' ),
+		);
+
+		$thrown = null;
+		try {
+			$runner->restore( self::build_archive_stream( $plans ) );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$this->assertStringContainsString( 'this host could not create a test symlink', $thrown->getMessage() );
+		$this->assertFileDoesNotExist(
+			$this->fixture_root . '/somefile.txt',
+			'A restore refused for lacking symlink capability must not have written the file entry that follows the symlink in the archive.'
+		);
+		$this->assertSame( array(), $db->executed_statements() );
+	}
+
+	/**
+	 * When both symlink preflights would refuse, the capability refusal wins — the ordering proof.
+	 *
+	 * RestoreRunner::restore() calls
+	 * {@see FileWriter::assert_symlinks_creatable()} before
+	 * {@see FileWriter::assert_symlink_targets_confined()}: there is no point
+	 * judging whether an escaping target is SAFE on a host that could never
+	 * create the link in the first place. An escaping target combined with a
+	 * refusing probe must surface the "could not create a test symlink"
+	 * message, never the "escapes the restore root" message.
+	 *
+	 * @return void
+	 */
+	public function test_restore_capability_refusal_wins_over_confinement_refusal(): void {
+		$outside = sys_get_temp_dir() . '/pontifex-capability-order-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture: an out-of-root directory the archive's escaping target points at.
+		mkdir( $outside, 0o755, true );
+
+		try {
+			$runner = $this->make_runner(
+				null,
+				false,
+				// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe ignores which directory is being asked about and always refuses.
+				static function ( string $directory ): bool {
+					return false;
+				}
+			);
+			$plans = array( self::symlink_plan( 'breakout', $outside ) );
+
+			$thrown = null;
+			try {
+				$runner->restore( self::build_archive_stream( $plans ) );
+			} catch ( RuntimeException $error ) {
+				$thrown = $error;
+			}
+
+			$this->assertInstanceOf( RuntimeException::class, $thrown );
+			$message = $thrown->getMessage();
+			$this->assertStringContainsString( 'this host could not create a test symlink', $message );
+			$this->assertStringNotContainsString( 'escapes the restore root', $message );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
+			@rmdir( $outside );
 		}
 	}
 
