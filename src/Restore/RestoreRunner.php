@@ -54,25 +54,33 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *     and footer; throws if either is malformed).
  *  2. Read the manifest (validates the manifest's internal hash
  *     against the footer's recorded hash; throws on mismatch).
- *  3. restore() only (never verify(), which writes nothing): read the
+ *  3. restore() only (never verify(), which writes nothing): probe whether
+ *     this host can create a symlink at all
+ *     ({@see FileWriter::assert_symlinks_creatable()}) — a host with
+ *     "symlink" in disable_functions (common on shared hosting) would
+ *     otherwise walk the whole tree, overwriting files, and only then die
+ *     on the archive's first symlink entry. Runs before step 4, because
+ *     there is no point judging whether a target is SAFE on a host that
+ *     could never create the link in the first place.
+ *  4. restore() only (never verify(), which writes nothing): read the
  *     header of every symlink entry the archive declares and hand the
  *     whole set to {@see FileWriter::assert_symlink_targets_confined()},
  *     which resolves each target the way the kernel would and refuses
  *     the restore if any of them would reach out of the site. This has
  *     to happen over the whole set, and before anything is written,
  *     because the attack it closes needs two links to co-operate.
- *  4. restore() only (never verify(), which writes nothing): before
+ *  5. restore() only (never verify(), which writes nothing): before
  *     touching the filesystem or the database, ask FileWriter whether
  *     the destination has room for this restore
  *     ({@see FileWriter::assert_free_space_for()}) — a full disk part-way
  *     through is the most likely failure a restore can hit, needing no
  *     attacker, just an ordinary full disk.
- *  5. For each ManifestEntry, in the order the manifest records:
+ *  6. For each ManifestEntry, in the order the manifest records:
  *     a. Decode via EntryReader (verifies the entry's on-disk hash
  *        and decodes the payload through the codec).
  *     b. Route to FileWriter or DatabaseWriter based on the
  *        entry's kind.
- *  6. If any step throws, the restore halts immediately. Database
+ *  7. If any step throws, the restore halts immediately. Database
  *     changes never reach the live tables: every db_chunk replays into
  *     staging tables that are cut over atomically only after the whole
  *     walk succeeds (ADR 0009), and a failure drops the staging tables.
@@ -187,21 +195,25 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * as `( int $done, int $total ): void`.
 	 *
 	 * Before any of that — before the database staging even begins, let
-	 * alone the entry walk — two things are settled up front, and neither
-	 * runs from verify(), which writes nothing and so has nothing to
-	 * preflight. Every symlink the archive declares is resolved and
-	 * confined ({@see FileWriter::assert_symlink_targets_confined()}), so a
-	 * hostile archive is refused with the site untouched rather than part
-	 * written; and the destination is asked whether it has room for this
-	 * restore ({@see FileWriter::assert_free_space_for()}), so a disk that
-	 * fills part-way through fails closed up front rather than leaving the
-	 * site half old, half new.
+	 * alone the entry walk — three things are settled up front, and none of
+	 * them run from verify(), which writes nothing and so has nothing to
+	 * preflight. This host is asked whether it can create a symlink at all
+	 * ({@see FileWriter::assert_symlinks_creatable()}), because a host with
+	 * symlinks disabled cannot be trusted to finish the walk once it reaches
+	 * the archive's first symlink entry; every symlink the archive declares
+	 * is then resolved and confined
+	 * ({@see FileWriter::assert_symlink_targets_confined()}), so a hostile
+	 * archive is refused with the site untouched rather than part written;
+	 * and the destination is asked whether it has room for this restore
+	 * ({@see FileWriter::assert_free_space_for()}), so a disk that fills
+	 * part-way through fails closed up front rather than leaving the site
+	 * half old, half new.
 	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed, hash verification fails, a declared symlink's target would reach out of the site, the destination lacks the free disk space this restore needs, or any worker fails.
+	 * @throws RuntimeException         If the archive is malformed, hash verification fails, this host cannot create the symlinks the archive declares, a declared symlink's target would reach out of the site, the destination lacks the free disk space this restore needs, or any worker fails.
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		// Reset the writer's staging state and sweep leftovers a crashed earlier
@@ -221,6 +233,20 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// it rather than restore contents the scope says are not there.
 		$this->assert_scope_consistent_with_manifest( $provenance->scope(), $manifest );
 
+		// Read every symlink entry the archive declares ONCE, so both preflights
+		// below judge the same set without a second pass over the archive.
+		$declared_symlink_targets = $this->declared_symlink_targets( $archive_source, $manifest );
+
+		// Establish the host CAN create a symlink at all before spending any
+		// work deciding whether the declared targets are SAFE. A host with
+		// "symlink" disabled would otherwise be discovered only once the walk
+		// below reaches the archive's first symlink entry — by which point
+		// every file entry ahead of it has already overwritten the live site.
+		// See FileWriter::assert_symlinks_creatable() for the full reasoning.
+		// verify() deliberately never runs this: it writes nothing, so there is
+		// nothing to create.
+		$this->file_writer->assert_symlinks_creatable( $declared_symlink_targets );
+
 		// Decide every symlink the archive declares BEFORE the first byte is
 		// written. A symlink's target is the one archive field that says "go and
 		// read that other file instead", so a hostile archive can use it to point
@@ -233,7 +259,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// FileWriter::assert_symlink_targets_confined() for the attack and the
 		// resolution rule. verify() deliberately never runs this: it writes
 		// nothing, so there is nothing to confine.
-		$this->file_writer->assert_symlink_targets_confined( $this->declared_symlink_targets( $archive_source, $manifest ) );
+		$this->file_writer->assert_symlink_targets_confined( $declared_symlink_targets );
 
 		// Refuse before anything is touched — filesystem or database — when the
 		// destination cannot hold this restore. FileWriter owns the destination
