@@ -139,7 +139,7 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 == Upgrade Notice ==
 
 = 1.0.0 =
-The stable release: the public API and the archive format are now locked. A restore is refused up front on a host that cannot finish it, rather than stopping part-way. If you ever used `export --passphrase` believing it encrypted a backup, it did not — the flag does not exist; use `--encrypt` and re-take that backup.
+The stable release: the public API and archive format are now locked. If you ever ran `export --passphrase` believing it encrypted a backup, it did not — that flag never existed. Use `--encrypt` and re-take that backup. A restore is now also refused up front on a host that cannot finish it.
 
 = 0.4.6 =
 Distribution readiness and internationalisation; no functional changes to backup or restore.
