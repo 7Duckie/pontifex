@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.9.5
+Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -94,6 +94,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.0.0 =
+* The stable release. From here the public API is frozen and the `.wpmig` archive format specification is locked, so a backup taken today stays readable by every future version of Pontifex and can always be opened without the plugin. Fixed: a restore on a host that cannot create symbolic links — common on shared hosting — used to overwrite files and then stop part-way, leaving a site that was neither the old one nor the backup; it is now refused before anything is changed, and a backup containing no symbolic links is never affected. Also fixed: three untrue statements in this readme. It told you to encrypt with `export --passphrase`, a flag that has never existed, so following it produced an UNENCRYPTED backup with no error — the real flags are `--encrypt` and `--passphrase-stdin`, so re-take any backup you believed was encrypted. It said Pontifex never contacts any remote service, which stopped being true when offsite SFTP destinations shipped in 0.8.0. And it pointed you at the Overview screen to check your environment, which no admin screen does — that is `wp pontifex doctor`, which now also reports whether this host supports symbolic links. No breaking changes.
+
 = 0.9.5 =
 * Security release. If you ever restore or import an archive you did not create yourself, upgrade before you do it again. A restored symbolic link could point outside your site: a backup could plant a file under uploads that pointed at wp-config.php, and because web servers follow such links, an ordinary web request then returned your database password and authentication salts. Measured before the fix, eight of ten hostile shapes were written and five of them handed the secret back. Links are now resolved the way the operating system resolves them, across the whole backup, before anything is written; layouts that legitimately point outside wp-content, such as Composer-managed sites, keep working. A forged backup can also no longer write into Pontifex's own folder, where your safety archives and the rule keeping database backups off the web live. **Breaking:** if your site pins a trusted signing key in PONTIFEX_PUBLIC_KEY, an uploaded backup must now be signed with it — unsigned or differently-signed uploads are refused. A site with no key configured is unaffected. Also: a backup too large for this installation to read back is refused before it is written rather than after; a restore that would run out of disk is stopped before it changes anything; a force-killed backup can be resumed again; opening a large backup no longer dies without explanation; and the scheduler no longer records failures that never happened.
 
@@ -134,6 +137,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.0.0 =
+The stable release: the public API and the archive format are now locked. A restore is refused up front on a host that cannot finish it, rather than stopping part-way. If you ever used `export --passphrase` believing it encrypted a backup, it did not — the flag does not exist; use `--encrypt` and re-take that backup.
 
 = 0.4.6 =
 Distribution readiness and internationalisation; no functional changes to backup or restore.

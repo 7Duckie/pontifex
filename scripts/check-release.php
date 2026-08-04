@@ -95,7 +95,17 @@ if ($expected !== null) {
 echo "\n";
 
 if ($failures === 0) {
-    echo "All good — safe to tag v{$version} (remember: pre-release, since it is below v1.0.0).\n";
+    // Below v1.0.0 every release is published as a GitHub pre-release. This
+    // reminder used to be unconditional, written when that was true of every
+    // version there had ever been — so on the v1.0.0 assembly it cheerfully
+    // advised publishing the first stable release as a pre-release, on the
+    // stated grounds that 1.0.0 is below 1.0.0.
+    $is_pre_release = version_compare($version, '1.0.0', '<');
+    $reminder = $is_pre_release
+        ? ' (remember: pre-release, since it is below v1.0.0)'
+        : ' (a full release, NOT a pre-release — this is v1.0.0 or later)';
+
+    echo "All good — safe to tag v{$version}{$reminder}.\n";
     exit(0);
 }
 
