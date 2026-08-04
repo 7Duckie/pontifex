@@ -111,6 +111,26 @@ final class FileWriter {
 	private const MAX_SYMLINK_HOPS = 40;
 
 	/**
+	 * How many distinct directories {@see self::assert_symlinks_creatable()} will probe.
+	 *
+	 * Every declared link's parent directory collapses, via
+	 * {@see self::symlink_creation_probe_directories()}, to at most one probe —
+	 * so a real archive, which clusters its links into a handful of
+	 * directories at most (see the Composer-layout example in
+	 * {@see self::assert_symlink_targets_confined()}'s docblock), never comes
+	 * close to this. It exists only for a hostile or malformed archive built
+	 * to declare links across as many distinct directories as it can, which
+	 * would otherwise turn this preflight itself into thousands of real
+	 * filesystem operations before the restore even starts. Sixty-four is
+	 * comfortably above any legitimate layout while still cheap to probe in
+	 * full, so a count above it is refused outright rather than silently
+	 * probing only the first sixty-four and guessing at the rest.
+	 *
+	 * @var int
+	 */
+	private const MAX_SYMLINK_PROBE_DIRECTORIES = 64;
+
+	/**
 	 * Bytes in one megabyte, used only to render a disk-space shortfall in human terms.
 	 *
 	 * Matches the literal {@see \Pontifex\Archive\Reader\ArchiveReader} already
@@ -194,6 +214,26 @@ final class FileWriter {
 	private Closure $disk_free_space;
 
 	/**
+	 * Guard probing whether this host can create a symlink in a given directory.
+	 *
+	 * The reading {@see self::assert_symlinks_creatable()} refuses the restore
+	 * over. It runs first, ahead of the entry walk, so the only filesystem
+	 * change it can itself have made by the time it refuses is its own probe
+	 * symlink — created and removed again before the throw. Held behind a
+	 * seam (defaulting to {@see self::probe_symlink_creation()}, the real
+	 * create-then-remove attempt), the same way {@see self::$disk_free_space}
+	 * is, only so unit tests — which cannot reliably make a real host refuse
+	 * to create a symlink — can substitute a controlled outcome; production
+	 * always probes the real filesystem. Called once per distinct directory
+	 * {@see self::symlink_creation_probe_directories()} resolves the
+	 * archive's declared links down to — not once per link, and not always
+	 * $this->destination_root; see that method's docblock for why.
+	 *
+	 * @var Closure(string): bool
+	 */
+	private Closure $symlink_probe;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
@@ -204,10 +244,11 @@ final class FileWriter {
 	 * @param bool          $allow_unsafe_symlinks Optional. Allow symlink targets that escape the root (default false).
 	 * @param string|null   $required_prefix       Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
 	 * @param callable|null $disk_free_space       Optional free-space reader used by {@see self::assert_free_space_for()}, called as `( string $path ): float|false`; defaults to disk_free_space().
+	 * @param callable|null $symlink_probe         Optional symlink-capability probe used by {@see self::assert_symlinks_creatable()}, called as `( string $directory ): bool` once per distinct directory a declared link would actually be created in; defaults to {@see self::probe_symlink_creation()}, a real create-then-remove attempt against that directory.
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null ) {
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null, ?callable $symlink_probe = null ) {
 		$this->allow_unsafe_symlinks = $allow_unsafe_symlinks;
 		$this->required_prefix       = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
 		$this->disk_free_space       = null !== $disk_free_space
@@ -215,6 +256,11 @@ final class FileWriter {
 			: static function ( string $path ) {
 				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled or restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
 				return @disk_free_space( $path );
+			};
+		$this->symlink_probe         = null !== $symlink_probe
+			? Closure::fromCallable( $symlink_probe )
+			: static function ( string $probe_directory ): bool {
+				return self::probe_symlink_creation( $probe_directory );
 			};
 
 		if ( '' === $destination_root ) {
@@ -417,6 +463,345 @@ final class FileWriter {
 					(int) floor( $free / self::BYTES_PER_MEGABYTE )
 				)
 			);
+		}
+	}
+
+	/**
+	 * Refuse a restore this host cannot finish because it cannot create symlinks where they are needed.
+	 *
+	 * Called once by the caller (RestoreRunner::restore()), immediately BEFORE
+	 * {@see self::assert_symlink_targets_confined()} — never from a verify-only
+	 * walk, which writes nothing and so has nothing to preflight. Also never
+	 * probes at all when $declared_links is empty: an archive with no symlinks
+	 * restores perfectly well on a host that cannot make them, and a false
+	 * refusal of an ordinary, link-free restore would be worse than the defect
+	 * this preflight closes. The early return states that intent where a reader
+	 * will look for it; it is not what enforces it, since an empty set yields no
+	 * probe directories and the loop below would not run anyway. Deleting it
+	 * changes no behaviour — do not mistake it for the guard.
+	 *
+	 * The only filesystem change this method can
+	 * itself make, on either outcome, is its own probe symlink — created and
+	 * removed again before it ever returns or throws; see
+	 * {@see self::probe_symlink_creation()}.
+	 *
+	 * WHY THIS EXISTS, in plain terms. {@see self::write_symlink()} calls PHP's
+	 * symlink() and throws when it fails. Without this preflight, that throw is
+	 * the FIRST moment a host with "symlink" listed in disable_functions —
+	 * common on shared hosting — discovers it cannot finish the job: by then
+	 * the walk has already overwritten every file entry ahead of the archive's
+	 * first symlink entry, and it stops there, leaving a site that is neither
+	 * the old one nor the archive's. Every other refusal restore() can make is
+	 * already decided this way, up front, for exactly this reason — a symlink
+	 * target escaping the site ({@see self::assert_symlink_targets_confined()})
+	 * and the destination lacking room ({@see self::assert_free_space_for()})
+	 * are both settled before the walk starts, because the walk itself has no
+	 * per-entry recovery: a refusal part-way through is strictly worse than a
+	 * refusal up front that changes nothing. This one runs FIRST of the two
+	 * symlink checks, because there is no point judging whether a target is
+	 * SAFE on a host that could never create the link at all.
+	 *
+	 * WHERE THIS PROBES, and why it is not simply $this->destination_root. A
+	 * content-only restore's destination root is the WHOLE WordPress
+	 * installation (ABSPATH) — required_prefix, not destination_root, is what
+	 * confines a content-only restore to wp-content — so every entry this
+	 * restore actually writes lands under wp-content, several directories
+	 * below the root, never in the root itself. A host can perfectly well
+	 * refuse a symlink at its installation root while permitting one inside
+	 * wp-content/uploads (the standard hardened posture: root read-only,
+	 * wp-content writable) — or the reverse, permit one at the root while
+	 * uploads itself is the directory that is locked down. Probing the root
+	 * answers neither question correctly, in either direction: it can refuse a
+	 * restore that would have worked, or pass one that will fail part-way
+	 * through the very walk this preflight exists to protect. So this probes
+	 * each declared link's OWN eventual parent directory instead — see
+	 * {@see self::symlink_creation_probe_directories()} for how that set is
+	 * derived, deduplicated, and resolved to directories that already exist
+	 * (the walk itself creates the rest as it goes; this preflight never
+	 * creates a directory merely to probe it).
+	 *
+	 * WHY A PROBE, NOT MERELY function_exists(). Checking function_exists('symlink')
+	 * alone would miss a filesystem that cannot hold symbolic links at all,
+	 * an open_basedir restriction scoped to one particular directory, and an
+	 * ordinary permissions failure — all of which fail exactly the way
+	 * write_symlink() would fail, mid-restore, if this preflight stopped at
+	 * introspection. So {@see self::probe_symlink_creation()}, the default
+	 * behind {@see self::$symlink_probe}, attempts the real thing: it creates
+	 * a genuine, uniquely-named symlink inside the directory being judged and
+	 * removes it again, judging that outcome instead of a guess about it.
+	 * Contrast {@see \Pontifex\Cli\DoctorCommand::check_symlink_support()},
+	 * which deliberately introspects instead of probing — it has no
+	 * destination to write a test link into, being a read-only diagnostic
+	 * that can run before any restore is even chosen.
+	 *
+	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target — see {@see self::assert_symlink_targets_confined()} for what is done with the targets themselves.
+	 * @return void
+	 * @throws RuntimeException If $declared_links is non-empty and this host cannot create a symlink in one of the directories a declared link would actually be written into, or the archive declares links across more distinct directories than this preflight will probe.
+	 */
+	public function assert_symlinks_creatable( array $declared_links ): void {
+		if ( array() === $declared_links ) {
+			return;
+		}
+
+		foreach ( $this->symlink_creation_probe_directories( $declared_links ) as $directory ) {
+			if ( ( $this->symlink_probe )( $directory ) ) {
+				continue;
+			}
+
+			throw new RuntimeException(
+				sprintf(
+					'FileWriter: this archive contains %d symbolic link(s), but this host could not create a test symlink in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
+					count( $declared_links ),
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $directory is plugin-derived (built from the destination root and the archive's own already-normalised declared paths), not web output; reported verbatim for diagnostic context.
+					$directory
+				)
+			);
+		}
+	}
+
+	/**
+	 * The distinct, real directories a declared link would actually be created in.
+	 *
+	 * Each declared path's PARENT directory is what matters here — a symlink
+	 * is created IN a directory, so that is where the capability actually
+	 * needs to exist — derived via {@see self::parent_of()} (never PHP's own
+	 * dirname(), for the same "link" -> "." reason its docblock explains) on
+	 * the same normalised path {@see self::assert_symlink_targets_confined()}
+	 * computes, so a malformed or hostile PATH (as opposed to target) is
+	 * skipped here exactly as it is skipped there: harmlessly, because
+	 * write_entry() refuses that same entry, with its own message, when the
+	 * walk actually reaches it, so no symlink is ever created there for this
+	 * preflight to have judged.
+	 *
+	 * The result is deduplicated twice over. First, naturally: every parent
+	 * directory is folded into a set (an associative array keyed by the
+	 * directory itself), so ten links sharing one directory contribute one
+	 * entry, not ten. Second, after resolution: a parent directory that does
+	 * not exist yet — the walk creates directories as entries are written,
+	 * so at preflight time a link's own directory may not exist on disk at
+	 * all — is walked up, via {@see self::deepest_existing_ancestor()}, to
+	 * the nearest directory that already does, and that resolved directory is
+	 * what actually gets deduplicated on. A real archive's links overwhelmingly
+	 * collapse this way to one or two directories (its own wp-content root, or
+	 * uploads), which is what keeps this preflight cheap.
+	 *
+	 * Entries the walk would refuse anyway are skipped, not probed: a path
+	 * outside {@see self::$required_prefix}, or one reaching into Pontifex's own
+	 * working directory, never reaches {@see self::write_symlink()}, so probing
+	 * its directory can only produce a misdiagnosis — telling an operator their
+	 * HOST cannot create symbolic links when the real fault is one mis-scoped
+	 * entry in the archive.
+	 *
+	 * An archive whose links are spread across a great many distinct directories
+	 * falls back to probing their deepest common ancestor rather than probing
+	 * each one, so the work stays bounded without ever refusing. Refusing was
+	 * tried first and was wrong twice over. It broke recovery: a pnpm-shaped
+	 * tree puts a link in a directory per package, and because directories that
+	 * do not exist yet collapse to a single probe, the SAME archive restored
+	 * onto a fresh server (nothing exists, one probe) but was refused onto the
+	 * site it came from (everything exists, nothing collapses) — the rollback
+	 * path, and the one moment a user cannot be told no. And it bought nothing:
+	 * the count can only be known after every path has been resolved and walked,
+	 * so the filesystem work a ceiling claims to prevent has already happened by
+	 * the time it could refuse, while 1,000 real probes cost about a tenth of a
+	 * second.
+	 *
+	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
+	 * @return array<int, string> The distinct absolute directories to probe.
+	 */
+	private function symlink_creation_probe_directories( array $declared_links ): array {
+		$directories = array();
+
+		foreach ( array_keys( $declared_links ) as $raw_path ) {
+			try {
+				$relative_path = $this->normalise_entry_path( (string) $raw_path );
+				$this->assert_within_required_prefix( $relative_path );
+				$this->assert_not_pontifex_working_path( $relative_path );
+			} catch ( InvalidArgumentException | RuntimeException $entry_the_walk_would_refuse ) {
+				unset( $entry_the_walk_would_refuse );
+				continue;
+			}
+
+			$relative_parent = self::parent_of( $relative_path );
+			$absolute_parent = '' === $relative_parent
+				? $this->destination_root
+				: $this->destination_root . '/' . $relative_parent;
+
+			$directories[ $this->deepest_existing_ancestor( $absolute_parent ) ] = true;
+		}
+
+		if ( count( $directories ) > self::MAX_SYMLINK_PROBE_DIRECTORIES ) {
+			return array( self::deepest_common_ancestor( array_keys( $directories ) ) );
+		}
+
+		return array_keys( $directories );
+	}
+
+	/**
+	 * The deepest directory every one of $directories lies within.
+	 *
+	 * Used only as the bounded fallback above
+	 * {@see self::MAX_SYMLINK_PROBE_DIRECTORIES}: probing one shared ancestor
+	 * answers the same question conservatively — if links cannot be created
+	 * there, they almost certainly cannot be created in the tree beneath it —
+	 * without the work growing with the archive. It is a weaker answer than
+	 * probing each directory, which is precisely why it is the fallback and not
+	 * the rule.
+	 *
+	 * Every input is already an existing absolute directory at or beneath
+	 * $this->destination_root (each came from
+	 * {@see self::deepest_existing_ancestor()}), so the common prefix can never
+	 * climb above the destination root.
+	 *
+	 * @param array<int, string> $directories Absolute directories, each at or beneath the destination root.
+	 * @return string The deepest shared absolute directory.
+	 */
+	private static function deepest_common_ancestor( array $directories ): string {
+		$shared = explode( '/', (string) array_shift( $directories ) );
+
+		foreach ( $directories as $directory ) {
+			$segments = explode( '/', $directory );
+			$common   = array();
+
+			foreach ( $shared as $index => $segment ) {
+				if ( ! isset( $segments[ $index ] ) || $segments[ $index ] !== $segment ) {
+					break;
+				}
+
+				$common[] = $segment;
+			}
+
+			$shared = $common;
+		}
+
+		return implode( '/', $shared );
+	}
+
+	/**
+	 * Walk up from $absolute_directory to the nearest ancestor (itself included) that already exists.
+	 *
+	 * The restore walk creates directories on demand as entries are written
+	 * ({@see self::ensure_parent_directory()}), so a declared link's own
+	 * parent directory can easily not exist yet at preflight time — only
+	 * $this->destination_root, created by the constructor, is guaranteed to
+	 * be there. Probing a directory that does not exist would have to create
+	 * it first, which would test a question the real restore never asks (can
+	 * THIS PREFLIGHT create a directory) instead of the one that matters (can
+	 * this HOST create a symlink where the walk will actually put one), and
+	 * would leave a stray empty directory behind on refusal. So this method
+	 * only ever climbs; it never creates anything.
+	 *
+	 * The climb is guaranteed to terminate at or before
+	 * $this->destination_root: every path handed in is built from a relative
+	 * path that has already passed {@see self::normalise_entry_path()}, which
+	 * refuses ".." segments outright, so it can only ever descend from the
+	 * root, never climb above it — and the constructor already guarantees the
+	 * root itself exists.
+	 *
+	 * @param string $absolute_directory An absolute directory at or under $this->destination_root that may not exist yet.
+	 * @return string The nearest existing ancestor, at or below $absolute_directory.
+	 */
+	private function deepest_existing_ancestor( string $absolute_directory ): string {
+		$candidate = rtrim( $absolute_directory, '/' );
+
+		while ( $candidate !== $this->destination_root && ! is_dir( $candidate ) ) {
+			$parent = dirname( $candidate );
+
+			// dirname() is its own fixed point at the filesystem root, and
+			// rtrim( '/', '/' ) is the empty string, whose dirname is also
+			// itself — so a candidate that ever reached either would spin here
+			// forever rather than fail. No caller can produce one today (every
+			// path is built from the destination root and normalise_entry_path()
+			// bars ".."), which is exactly why this belongs here: the climb's
+			// termination should be guaranteed by the loop itself, not by an
+			// invariant maintained in another method. Under WP-CLI, which has no
+			// execution time limit, the alternative failure is a silent hang.
+			if ( '' === $candidate || $parent === $candidate ) {
+				return $this->destination_root;
+			}
+
+			$candidate = $parent;
+		}
+
+		return $candidate;
+	}
+
+	/**
+	 * The real symlink-capability probe: create a uniquely-named symlink in $directory, then remove it.
+	 *
+	 * The default behind {@see self::$symlink_probe}; injectable only for
+	 * tests, which cannot otherwise make a real host reliably refuse to create
+	 * a symlink. Called once per distinct directory
+	 * {@see self::symlink_creation_probe_directories()} resolves the archive's
+	 * declared links down to, which need not be $this->destination_root — see
+	 * that method's docblock for why.
+	 *
+	 * function_exists('symlink') is checked FIRST, and the real attempt is
+	 * made only when it passes. Calling a function removed by disable_functions
+	 * does not merely warn — PHP raises an Error for a call to an undefined
+	 * function, and the `@` operator does not suppress an Error — so skipping
+	 * straight to the real attempt would crash the very restore this preflight
+	 * exists to protect. The real attempt still runs alongside that check, not
+	 * instead of it, because function_exists() alone cannot see the failure
+	 * modes that matter just as much: a filesystem that cannot hold symbolic
+	 * links at all, an open_basedir restriction scoped to this directory
+	 * specifically, or an ordinary permissions failure.
+	 *
+	 * Cleanup runs in a finally block so the probe artefact never survives
+	 * either outcome — including when creation itself failed and there is
+	 * nothing to remove — because orphaned temp artefacts are already a known,
+	 * open complaint on this project, and this probe must not add to it.
+	 * Unlink is tried first, then rmdir as a defence-in-depth fallback: the
+	 * probe's target is a sibling name chosen to never exist (see below),
+	 * which on Windows is unambiguously the FILE-symlink case, so unlink()
+	 * ought always to be the right call — but if that assumption is ever
+	 * wrong on some platform, the fallback still leaves nothing behind rather
+	 * than an orphaned artefact this project already has a standing complaint
+	 * about.
+	 *
+	 * The link's target names a sibling file that is never created — never
+	 * ".", the probe's own parent directory, as an earlier version of this
+	 * probe used. That is deliberate, not incidental, for two reasons: this
+	 * probe asks only whether symlink() itself succeeds, never whether the
+	 * target exists, so a target that resolves to nothing is exactly as valid
+	 * a thing to test as one that resolves to something; and on Windows,
+	 * where symlink() must be told at creation time whether it is making a
+	 * FILE or DIRECTORY link and decides by checking whether the target
+	 * currently resolves to a directory, a target guaranteed not to exist is
+	 * unambiguously the file case — so the artefact this probe leaves behind,
+	 * however briefly, is always removable with unlink(), never requiring
+	 * rmdir() instead.
+	 *
+	 * @param string $directory Absolute path of the directory to probe.
+	 * @return bool True if a symlink could be created (and was then removed) in $directory.
+	 */
+	private static function probe_symlink_creation( string $directory ): bool {
+		if ( ! function_exists( 'symlink' ) ) {
+			return false;
+		}
+
+		// Named to match the project's temp-artefact shape (*.pontifex-*.tmp, as
+		// built by self::temp_sibling_path() and its siblings elsewhere) rather
+		// than a shape of its own. The finally below removes it on every normal
+		// outcome, but a SIGKILL between the symlink() and the finally cannot be
+		// caught by anything — and an orphan nobody sweeps would then sit under
+		// wp-content forever and be recorded as a dangling symlink by the next
+		// backup. Matching the known shape is what lets a sweep find it at all.
+		$probe_name   = '.symlink-probe.' . uniqid( 'pontifex-', true ) . '.tmp';
+		$probe_path   = $directory . '/' . $probe_name;
+		$probe_target = $probe_name . '.target';
+
+		try {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- One-off capability probe run before a restore; a filesystem/open_basedir/permissions failure is exactly what this probe exists to detect, not to surface as a PHP warning.
+			return @symlink( $probe_target, $probe_path );
+		} finally {
+			if ( is_link( $probe_path ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of the probe artefact; its own failure must not mask the probe result already computed.
+				if ( ! @unlink( $probe_path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Defence in depth: Windows PHP requires rmdir(), not unlink(), to remove a DIRECTORY symlink; the probe's target is chosen to never resolve as one, so this should be unreachable, but it keeps the probe artefact from surviving even if that assumption is ever wrong.
+					@rmdir( $probe_path );
+				}
+			}
 		}
 	}
 
@@ -1570,15 +1955,36 @@ final class FileWriter {
 	 * restore root (or is absolute) is refused — a hostile archive could otherwise
 	 * plant an escaping link that later code follows.
 	 *
+	 * function_exists('symlink') is checked before the real call, for the same
+	 * reason {@see self::probe_symlink_creation()} checks it: a disable_functions
+	 * entry makes the bare call an undefined-function Error, which the `@`
+	 * operator cannot silence, so an unguarded call here would crash the
+	 * restore instead of raising the documented RuntimeException below. In the
+	 * normal sequence this is unreachable — {@see self::assert_symlinks_creatable()}
+	 * already refused any restore on a symlink-disabled host before the walk
+	 * began — but that preflight is built from
+	 * {@see \Pontifex\Restore\RestoreRunner::declared_symlink_targets()}, which
+	 * SKIPS any symlink entry whose header records a null path or target, so a
+	 * malformed entry of that exact shape can still reach this method with the
+	 * preflight none the wiser. This guard is what keeps that shape a clean,
+	 * documented refusal rather than a raw PHP Error.
+	 *
 	 * @param string $target_path Absolute path where the link should be created.
 	 * @param string $link_target The string the link should point at.
-	 * @throws RuntimeException If the target escapes the root (and is not allowed), or the link cannot be created.
+	 * @throws RuntimeException If the target escapes the root (and is not allowed), symlink() is unavailable on this host, or the link cannot be created.
 	 */
 	private function write_symlink( string $target_path, string $link_target ): void {
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: refusing symlink "%s" whose target "%s" escapes the restore root. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
+			);
+		}
+
+		if ( ! function_exists( 'symlink' ) ) {
+			throw new RuntimeException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
+				sprintf( 'FileWriter: could not create symlink "%s" -> "%s": symlink() is not available on this host, commonly because it is listed in disable_functions.', $target_path, $link_target )
 			);
 		}
 

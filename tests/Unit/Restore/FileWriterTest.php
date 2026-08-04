@@ -2489,4 +2489,374 @@ final class FileWriterTest extends TestCase {
 		$this->expectExceptionMessage( 'parent-directory segment' );
 		$writer->write_entry( self::file_result( '../escape.bin', 'forged' ) );
 	}
+
+	// -------------------------------------------------------------------
+	// assert_symlinks_creatable() — the host symlink-capability preflight
+	//
+	// A separate concern from assert_symlink_targets_confined() above: that
+	// method asks whether a declared target is SAFE; this one asks whether
+	// this host can create a symlink AT ALL. The corpus below injects a fake
+	// probe via the constructor's fifth parameter for the pass/refuse cases
+	// (a real host cannot be made to reliably refuse symlink() on demand),
+	// and separately exercises the real, uninjected probe to prove it leaves
+	// no artefact behind.
+	// -------------------------------------------------------------------
+
+	/**
+	 * An archive declaring NO symlinks is permitted even when the probe itself would refuse.
+	 *
+	 * This is the false-refusal guard and the single most important test in
+	 * this section: an archive with no symlinks at all must restore
+	 * perfectly well on a host that cannot create them, so the probe must
+	 * never even run when there is nothing to create. Counting calls rather
+	 * than asserting the return value (a void method's assertNull() can never
+	 * fail, so it would prove nothing) is what actually pins that: the
+	 * injected fake always returns false, which would refuse every OTHER test
+	 * in this section, so zero calls is the only honest evidence that an
+	 * empty array short-circuits before the probe is ever consulted.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_permits_empty_declared_links_even_when_probe_would_refuse(): void {
+		$probe_calls = 0;
+		$writer      = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe counts calls via the captured $probe_calls reference and never needs to inspect which directory was asked about.
+			static function ( string $directory ) use ( &$probe_calls ): bool {
+				++$probe_calls;
+				return false;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( array() );
+
+		$this->assertSame( 0, $probe_calls, 'An archive with no declared symlinks must never consult the probe, whatever it would have said.' );
+	}
+
+	/**
+	 * A refusing probe with at least one declared link refuses the restore, naming what is wrong.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_refuses_when_probe_refuses(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe ignores which destination root is being asked about and always answers with the fixed outcome under test.
+			static function ( string $destination_root ): bool {
+				return false;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'this host could not create a test symlink' );
+
+		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/link' => 'target.txt' ) );
+	}
+
+	/**
+	 * The probe asks about the directory each link is created in, never the destination root.
+	 *
+	 * This is the test that pins the whole preflight to the right question, and
+	 * it exists because the first implementation asked the wrong one. The
+	 * destination root is the WordPress installation root: a content-only
+	 * restore never writes there at all, because every entry lands under
+	 * wp-content and each symlink is created in its own parent directory. So
+	 * probing the root gets the answer wrong in BOTH directions, and both were
+	 * reproduced on a real filesystem. An installation root at 0o555 with
+	 * wp-content at 0o755 — the standard WordPress hardening posture — restores
+	 * symlinks under wp-content perfectly well, yet a root-probing preflight
+	 * refuses it, and that refusal then cascades: the safety archive has already
+	 * been taken, recovery builds another writer on the same root, hits the same
+	 * refusal, and the operator is told their site may be partially restored
+	 * when nothing whatsoever was touched. The mirror case is worse: a writable
+	 * root with an unwritable uploads directory PASSES a root probe, overwrites
+	 * live files, and then dies mid-walk on the first symlink — the exact
+	 * half-restored site this preflight exists to prevent.
+	 *
+	 * The two links share a directory deliberately: asserting the probe was
+	 * consulted exactly ONCE also pins the deduplication, so an archive with
+	 * thousands of links in one directory cannot turn the preflight into
+	 * thousands of filesystem writes.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_probes_the_links_own_directory_not_the_destination_root(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; WP_Filesystem is not available in PHPUnit context.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		// FileWriter resolves its destination root, so the expected probe path must be
+		// resolved too: on macOS /var is a symlink to /private/var, and comparing an
+		// unresolved fixture path against a resolved one fails for a reason that has
+		// nothing to do with the behaviour under test.
+		$link_parent = realpath( $this->fixture_root ) . '/wp-content/uploads';
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable(
+			array(
+				'wp-content/uploads/first'  => 'a.txt',
+				'wp-content/uploads/second' => 'b.txt',
+			)
+		);
+
+		$this->assertSame(
+			array( $link_parent ),
+			$probed,
+			'The preflight must probe the directory the links are actually created in, exactly once, not the destination root.'
+		);
+	}
+
+	/**
+	 * A link whose own directory does not exist yet is probed at its nearest existing ancestor.
+	 *
+	 * The walk creates directories as it goes, so a link's parent routinely
+	 * does not exist when the preflight runs. Probing a directory that is not
+	 * there would fail for a reason that has nothing to do with symlink
+	 * capability — a false refusal of a restore that would have succeeded,
+	 * which is the failure mode this project has shipped three times and must
+	 * not ship again. Walking up to the nearest directory that DOES exist keeps
+	 * the answer meaningful: it is the same filesystem and the same permission
+	 * regime the new directory will inherit.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_probes_the_nearest_existing_ancestor_when_the_parent_does_not_exist_yet(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; the uploads/ tree below this is deliberately absent, as it would be mid-restore.
+		mkdir( $this->fixture_root . '/wp-content', 0o755, true );
+		// Resolved, for the same reason as the sibling test above.
+		$existing_ancestor = realpath( $this->fixture_root ) . '/wp-content';
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/not/created/yet/link' => 'a.txt' ) );
+
+		$this->assertSame(
+			array( $existing_ancestor ),
+			$probed,
+			'A link whose parent does not exist yet must be probed at the nearest existing ancestor, never at a path that is not there.'
+		);
+	}
+
+	/**
+	 * A directory already sitting where a link is declared does not become the probed directory.
+	 *
+	 * The link's PARENT is what must be probed, never the link's own path. Every
+	 * other test here is blind to the difference, because a link's own path does
+	 * not normally exist on disk, so the ancestor walk climbs to the parent
+	 * anyway and both readings agree. They diverge exactly when a directory
+	 * already occupies the link's path — routine after a linker change, when a
+	 * package manager replaces a real directory with a symlink — and there the
+	 * wrong reading probes the wrong filesystem location and answers the wrong
+	 * question. Giving that directory permissions its parent does not have is
+	 * what makes the two readings give opposite verdicts.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_probes_the_parent_even_when_a_directory_occupies_the_links_own_path(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; a directory standing where the archive declares a symlink.
+		mkdir( $this->fixture_root . '/wp-content/uploads/occupied', 0o755, true );
+		$expected_parent = realpath( $this->fixture_root ) . '/wp-content/uploads';
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/occupied' => 'a.txt' ) );
+
+		$this->assertSame(
+			array( $expected_parent ),
+			$probed,
+			'A directory standing where the link will be created must not be probed in place of the link\'s parent.'
+		);
+	}
+
+	/**
+	 * Links spread across more directories than the ceiling fall back to a common ancestor, never a refusal.
+	 *
+	 * Refusing here was tried and was wrong: it broke the one path a user cannot
+	 * be turned away from. Because directories that do not exist yet collapse to
+	 * a single probe, a link-per-directory archive — a pnpm-shaped tree is
+	 * exactly this — restored happily onto a fresh server where nothing existed,
+	 * and was refused onto the site it was taken from, where every directory
+	 * already existed and nothing collapsed. That is the rollback path. The
+	 * fallback keeps the work bounded without ever producing that refusal.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_falls_back_to_a_common_ancestor_beyond_the_probe_ceiling(): void {
+		$links = array();
+		$total = 200;
+
+		for ( $index = 0; $index < $total; $index++ ) {
+			$package_directory = 'wp-content/plugins/shop/node_modules/.pnpm/pkg-' . $index;
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; every directory exists, as it would when restoring over the site the archive came from.
+			mkdir( $this->fixture_root . '/' . $package_directory, 0o755, true );
+			$links[ $package_directory . '/link' ] = 'target.txt';
+		}
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( $links );
+
+		$this->assertSame(
+			array( realpath( $this->fixture_root ) . '/wp-content/plugins/shop/node_modules/.pnpm' ),
+			$probed,
+			'Beyond the ceiling the preflight must probe one shared ancestor, not refuse and not probe each directory.'
+		);
+	}
+
+	/**
+	 * The refusal says nothing has changed, names the archive's symlink count, and suggests no false remedy.
+	 *
+	 * Neither raising a limit nor re-running with a flag actually fixes a
+	 * host that structurally cannot create symlinks, so the message must not
+	 * imply either one is a way forward.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_refusal_message_names_the_problem_and_no_false_remedy(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe ignores which destination root is being asked about and always answers with the fixed outcome under test.
+			static function ( string $destination_root ): bool {
+				return false;
+			}
+		);
+		$thrown = null;
+
+		try {
+			$writer->assert_symlinks_creatable(
+				array(
+					'wp-content/uploads/link'  => 'target.txt',
+					'wp-content/uploads/link2' => 'target2.txt',
+				)
+			);
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( '2 symbolic link', $message );
+		$this->assertStringContainsString( 'Nothing has been changed', $message );
+		$this->assertStringNotContainsStringIgnoringCase( '--allow-unsafe-symlinks', $message );
+		$this->assertStringNotContainsStringIgnoringCase( 'raise', $message );
+		$this->assertStringNotContainsStringIgnoringCase( 'increase', $message );
+	}
+
+	/**
+	 * A succeeding probe with declared links permits the restore to proceed, having actually been consulted.
+	 *
+	 * Counting calls rather than asserting the return value proves more than
+	 * a void method's assertNull() ever could (that assertion is a
+	 * tautology — it can never fail): a single declared link, in one
+	 * directory, must consult the probe exactly once, neither skipping it
+	 * nor probing it repeatedly.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_permits_when_probe_succeeds(): void {
+		$probe_calls = 0;
+		$writer      = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): bool contract; this fake probe counts calls via the captured $probe_calls reference and never needs to inspect which directory was asked about.
+			static function ( string $directory ) use ( &$probe_calls ): bool {
+				++$probe_calls;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/link' => 'target.txt' ) );
+
+		$this->assertSame( 1, $probe_calls, 'A single declared link in one directory must consult the probe exactly once.' );
+	}
+
+	/**
+	 * The real (uninjected) probe leaves the destination root clean after a successful run.
+	 *
+	 * Exercises FileWriter's own default probe against the real filesystem —
+	 * the fake-probe tests above never touch disk at all, so only this test
+	 * can catch a leaked ".pontifex-symlink-probe-*" artefact.
+	 *
+	 * @return void
+	 */
+	public function test_real_symlink_probe_leaves_no_artefact_behind_on_success(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/link' => 'target.txt' ) );
+
+		$remaining = array_values( array_diff( scandir( $this->fixture_root ), array( '.', '..' ) ) );
+		$this->assertSame( array(), $remaining, 'the real probe must remove its own artefact from the destination root' );
+	}
+
+	/**
+	 * The real probe implementation returns false, and leaves nothing behind, when the symlink() call itself fails.
+	 *
+	 * Points the probe at a destination fragment that was never created, so
+	 * the real symlink() call fails for want of a parent directory —
+	 * exercising probe_symlink_creation() directly (it is private and static)
+	 * to prove its finally block neither throws nor leaves anything behind
+	 * when there was never anything to remove.
+	 *
+	 * @return void
+	 */
+	public function test_real_symlink_probe_returns_false_and_leaves_no_artefact_when_symlink_call_fails(): void {
+		$missing_directory = $this->fixture_root . '/does-not-exist';
+		$this->assertDirectoryDoesNotExist( $missing_directory );
+
+		$reflection = new ReflectionMethod( FileWriter::class, 'probe_symlink_creation' );
+		$result     = $reflection->invoke( null, $missing_directory );
+
+		$this->assertFalse( $result );
+		$this->assertDirectoryDoesNotExist( $missing_directory, 'the probe must not have created the missing parent directory, or left anything inside it' );
+	}
 }
