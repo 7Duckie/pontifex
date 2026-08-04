@@ -1,8 +1,8 @@
 # Pontifex Archive Format Specification
 
 **File extension:** `.wpmig`
-**Version:** 1.1 (DRAFT) — adds the optional `scope` and `table_prefix` provenance fields; v1.0 readers accept v1.1 archives unchanged.
-**Status:** Draft — finalised when Pontifex 0.1.0 ships. Until that point, this specification may change with each minor version release.
+**Version:** 1.1 — adds the optional `scope` and `table_prefix` provenance fields; v1.0 readers accept v1.1 archives unchanged.
+**Status:** Locked at Pontifex 1.0.0. A v1.1 archive will remain readable by every future Pontifex version; any change this specification cannot accommodate needs a new major specification version, never a silent revision of v1.
 **Licence:** This specification is published under CC BY 4.0. Implementations of the format are not restricted; the spec text itself may be redistributed with attribution.
 
 ---

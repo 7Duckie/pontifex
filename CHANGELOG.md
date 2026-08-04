@@ -17,6 +17,60 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [1.0.0] — 2026-08-05 — Stable surface
+
+The commitment release. From here the public API is frozen: a breaking change
+requires a major version, and the `.wpmig` format specification is **locked at
+specification version 1.1** — a v1.1 archive will remain readable by every
+future version of Pontifex, and a change the specification cannot accommodate
+needs a new major specification version rather than a silent revision of v1.
+That commitment is the point of publishing the format at all: it is what makes
+"a backup is never hostage to the plugin" enforceable rather than aspirational.
+
+This is also the version submitted to the WordPress.org plugin directory.
+
+There are no breaking changes. Every v0.9.x archive restores unchanged.
+
+### Fixed
+
+- **A restore is refused on a host that could not finish it.** A restore that
+  reached a symbolic link on a host where PHP's `symlink()` is unavailable —
+  common on shared hosting, where it is often listed in `disable_functions` —
+  overwrote every file ahead of that point and then stopped where the link
+  should have gone, leaving a site that was neither the old one nor the
+  archive's. Every link the archive declares is now resolved to the directory
+  it would be created in and tested for real before the first byte is written,
+  so the restore is refused with nothing changed rather than abandoned
+  part-way. A backup containing no symbolic links is never tested and never
+  affected.
+- **Documentation that was not true.** The readme told you to encrypt a backup
+  with `export --passphrase`, a flag that has never existed, so following it
+  produced an unencrypted backup and no error; the real flags are `--encrypt`
+  and `--passphrase-stdin`. It said Pontifex never contacts any remote service,
+  which stopped being true when offsite SFTP destinations shipped in v0.8.0 —
+  Pontifex still runs no service and contacts nothing on its own initiative,
+  but a destination you configure yourself is a real exception and is now
+  described as one. And it pointed you at the Overview screen to check your
+  environment, which no admin screen does; that check is `wp pontifex doctor`.
+
+### Added
+
+- **`wp pontifex doctor` reports symbolic-link support.** Whether this host can
+  create symbolic links (needed to restore an archive containing them) and read
+  them (needed to back up a site that has them) is now stated in the readout,
+  so you learn it before you need it rather than during a restore. It is
+  reported as a warning, never a failure: a site with no symbolic links backs up
+  and restores perfectly well without either.
+
+### Changed
+
+- The archive format specification graduates from draft to locked, at
+  specification version 1.1. See
+  [`docs/archive-format.md`](docs/archive-format.md).
+- Development and CI dependencies updated: `actions/setup-node` 6 to 7,
+  `@wordpress/env` 11.11.0 to 11.12.0, `wp-phpunit/wp-phpunit` 7.0.1 to 7.0.2.
+  None ships in the plugin.
+
 ## [0.9.5] — 2026-07-29 — An archive can no longer reach outside the site it restores into
 
 A security release, and the one that finishes what v0.9.4 started. v0.9.4 stopped an
@@ -1106,6 +1160,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[1.0.0]: https://github.com/7Duckie/pontifex/compare/v0.9.5...v1.0.0
 [0.9.5]: https://github.com/7Duckie/pontifex/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/7Duckie/pontifex/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/7Duckie/pontifex/compare/v0.9.0...v0.9.3

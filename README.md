@@ -179,14 +179,22 @@ truth — including why each deferred item waits — is
     auto-uploaded.
   - Per-transfer log files — a self-contained log per transfer, beside the
     archive on export and in the log directory on import.
-- **v0.5.0 and beyond — Admin UI and operational maturity. Planned.**
-  An admin UI for non-CLI users; resumable exports (surviving PHP timeouts
-  and lost SSH sessions); scheduled exports; push/pull host-to-host
-  transports; selective content (export-without-database, single-table,
-  content-type filters); multisite support.
-- **v1.0.0 — Stable surface. Planned.** The public API frozen;
-  submission to the WordPress.org plugin directory; the `.wpmig` spec
-  graduating from DRAFT to LOCKED with published test vectors.
+- **v0.5.0 to v0.9.5 — Admin UI and operational maturity. Shipped.**
+  An admin UI for non-CLI users (Overview, Backup, Verify,
+  Restore/Rollback); resumable exports, surviving PHP timeouts and lost
+  SSH sessions; scheduled exports; selective content (`--exclude`,
+  `--exclude-table`, `--files-only`, `--db-only`); offsite SFTP
+  destinations on a server you own; and the hardening releases that
+  stop an archive's SQL and its files reaching outside the site they
+  restore into.
+- **v1.0.0 — Stable surface. Planned.** The public API frozen; the
+  `.wpmig` specification locked (see
+  [`docs/archive-format.md`](docs/archive-format.md), locked at
+  specification version 1.1); and submission to the WordPress.org
+  plugin directory.
+- **Not yet committed to a release.** Push/pull host-to-host transports;
+  multisite support; published test vectors for the format
+  specification.
 - **v2.0 — Go reference reader. Planned.** A standalone Go CLI
   implementing read, verify, list and conversion from the format spec —
   independent verification and emergency recovery without a working

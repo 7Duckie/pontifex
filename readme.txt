@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 0.9.5
+Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -15,7 +15,7 @@ Back up and migrate WordPress — your content and the whole database — in one
 Pontifex packs your WordPress content — everything under `wp-content` (themes, plugins, uploads) and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
 
 * **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
-* **It never touches the cloud.** Pontifex runs entirely on your own infrastructure. It never uploads your data, never phones home, and needs no account.
+* **No cloud service of ours.** Pontifex runs no service of its own, phones home to nothing, and needs no account. The only way a backup ever leaves your server is an SFTP destination you configure yourself, pointing at a server you own — set none up, and nothing leaves your disk.
 
 Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access. A finished backup can also be sent offsite to a **server you own**, over SFTP — still no cloud service, no account, and no phone-home; it's your server and your credentials, only when you command it.
 
@@ -26,7 +26,7 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 * `wp pontifex verify` — check an archive's integrity (and its signature, if signed) without restoring.
 * `wp pontifex rollback` — undo the most recent import from its safety archive.
 * `wp pontifex keygen` with `export --sign` and `verify/import --public-key` — Ed25519 signing and verification.
-* `export --passphrase` — optional AES-256-GCM encryption with an Argon2id-derived key.
+* `export --encrypt` — optional AES-256-GCM encryption with an Argon2id-derived key (or `--passphrase-stdin` to supply the passphrase non-interactively, for scripts).
 * `import --url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
 * `wp pontifex stats`, `diagnostics`, and `doctor` — observability and a sanitised, never-uploaded diagnostics bundle.
 * `export --resumable` and `export --resume` — an export that survives timeouts, lost connections, and killed processes, continued from where it stopped.
@@ -39,11 +39,12 @@ Pontifex runs inside live websites, on data its author never sees. It refuses ho
 
 == Installation ==
 
-Pontifex is a WP-CLI plugin.
+Pontifex works from your WordPress dashboard — no terminal needed — and, if you have shell access, from WP-CLI as well.
 
 1. Install and activate the plugin (upload the ZIP via Plugins → Add New, or run `wp plugin install`).
-2. Run `wp pontifex doctor` to check your environment.
-3. Run `wp pontifex export --output=/path/to/backup.wpmig` to create a backup.
+2. Go to **Pontifex → Backup** and click "Create backup" to take your first backup (or run `wp pontifex export --output=/path/to/backup.wpmig`).
+
+If you have shell access, `wp pontifex doctor` reports what this host can and cannot do.
 
 Requires PHP 8.2 or newer and WordPress 6.5 or newer.
 
@@ -51,7 +52,7 @@ Requires PHP 8.2 or newer and WordPress 6.5 or newer.
 
 = Does Pontifex upload my data anywhere? =
 
-No. Pontifex never contacts any remote service. Everything happens on your own server.
+Not unless you tell it to. Pontifex runs no service of its own and contacts nothing on its own initiative — everything happens on your own server. The one exception is an offsite SFTP destination you configure yourself, described below; set none up, and nothing ever leaves the machine.
 
 = Can I read a backup without the plugin? =
 
@@ -67,7 +68,7 @@ Yes, with `wp pontifex import --url=…`, which rewrites the database safely (in
 
 = Are backups encrypted? =
 
-Optionally. Pass `export --passphrase` for AES-256-GCM encryption with an Argon2id-derived key. Archives can also be signed with Ed25519 keys.
+Optionally. Pass `export --encrypt` for AES-256-GCM encryption with an Argon2id-derived key, or `export --passphrase-stdin` to supply the passphrase non-interactively, for scripts. Archives can also be signed with Ed25519 keys.
 
 = Can backups run automatically on a schedule? =
 
@@ -92,6 +93,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 == Changelog ==
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
+
+= 1.0.0 =
+* The stable release. From here the public API is frozen and the `.wpmig` archive format specification is locked, so a backup taken today stays readable by every future version of Pontifex and can always be opened without the plugin. Fixed: a restore on a host that cannot create symbolic links — common on shared hosting — used to overwrite files and then stop part-way, leaving a site that was neither the old one nor the backup; it is now refused before anything is changed, and a backup containing no symbolic links is never affected. Also fixed: three untrue statements in this readme. It told you to encrypt with `export --passphrase`, a flag that has never existed, so following it produced an UNENCRYPTED backup with no error — the real flags are `--encrypt` and `--passphrase-stdin`, so re-take any backup you believed was encrypted. It said Pontifex never contacts any remote service, which stopped being true when offsite SFTP destinations shipped in 0.8.0. And it pointed you at the Overview screen to check your environment, which no admin screen does — that is `wp pontifex doctor`, which now also reports whether this host supports symbolic links. No breaking changes.
 
 = 0.9.5 =
 * Security release. If you ever restore or import an archive you did not create yourself, upgrade before you do it again. A restored symbolic link could point outside your site: a backup could plant a file under uploads that pointed at wp-config.php, and because web servers follow such links, an ordinary web request then returned your database password and authentication salts. Measured before the fix, eight of ten hostile shapes were written and five of them handed the secret back. Links are now resolved the way the operating system resolves them, across the whole backup, before anything is written; layouts that legitimately point outside wp-content, such as Composer-managed sites, keep working. A forged backup can also no longer write into Pontifex's own folder, where your safety archives and the rule keeping database backups off the web live. **Breaking:** if your site pins a trusted signing key in PONTIFEX_PUBLIC_KEY, an uploaded backup must now be signed with it — unsigned or differently-signed uploads are refused. A site with no key configured is unaffected. Also: a backup too large for this installation to read back is refused before it is written rather than after; a restore that would run out of disk is stopped before it changes anything; a force-killed backup can be resumed again; opening a large backup no longer dies without explanation; and the scheduler no longer records failures that never happened.
@@ -133,6 +137,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.0.0 =
+The stable release: the public API and archive format are now locked. If you ever ran `export --passphrase` believing it encrypted a backup, it did not — that flag never existed. Use `--encrypt` and re-take that backup. A restore is now also refused up front on a host that cannot finish it.
 
 = 0.4.6 =
 Distribution readiness and internationalisation; no functional changes to backup or restore.
