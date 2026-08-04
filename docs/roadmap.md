@@ -523,16 +523,59 @@ numbered release:
 
 ## v1.0.0 — Stable surface
 
-v1.0.0 is the commitment release. From this point:
+v1.0.0 is the commitment release: the point Pontifex stops behaving like a
+project still finding its final shape and starts keeping promises across
+versions.
 
-- The public API is frozen. Breaking changes require a major version
-  bump.
-- The plugin is submitted to the WordPress.org plugin directory,
+### What ships
+
+- **The public API is frozen.** Constructors, method signatures and return
+  types across the public surface are stable from here; a breaking change
+  now requires a major version bump.
+- **A restore checks whether the current host can actually finish it before
+  changing anything** — symbolic-link support and disk space — rather
+  than discovering part-way through that it cannot and leaving a site
+  part-restored. `wp pontifex doctor` reports symbolic-link support
+  alongside its other environment checks.
+- **The documentation was brought in line with the plugin it describes.**
+  The readme no longer claims Pontifex never contacts a remote service —
+  false since the optional offsite SFTP destination shipped in v0.8.0 — and
+  says plainly what actually happens: no service of Pontifex's own, no
+  account, nothing sent unless an SFTP destination is configured.
+- **The archive format specification is locked**, independent of the
+  plugin's own version number: the current specification version, 1.1,
+  moves from draft to locked status. A v1.1 archive remains readable by
+  every future Pontifex version, and any change the specification cannot
+  accommodate needs a new major specification version rather than a silent
+  revision — the guarantee the "a backup is never hostage to the plugin"
+  promise depends on (the specification reached 1.1 before the lock, so
+  the lock applies at 1.1 rather than the 1.0 originally anticipated).
+- **The plugin is submitted to the WordPress.org plugin directory**,
   providing the "active installs" adoption signal (idea-bank Idea 001).
-- Security updates follow standard semver-patch cadence, with the full
+- **Security updates follow standard semver-patch cadence**, with the full
   triage protocol from [`../.github/SECURITY.md`](../.github/SECURITY.md).
-- The format spec graduates from DRAFT to LOCKED at v1.0 of the spec
-  itself (which is independent of the plugin's version number).
+
+### What is deliberately deferred
+
+- **`verify()` can still report a sound archive that `restore()` then
+  refuses.** The three refusals `restore()` raises up front — the host
+  symlink-capability probe, symlink confinement, and the disk-space
+  check — are true preflights, so none of those three specifically can
+  leave a part-written site. But
+  `verify()` runs none of them, so its verdict and a later restore's
+  outcome can still disagree — and because that disagreement can only
+  surface mid-walk, it leaves exactly the merged tree the next item
+  describes, not merely a legibility gap.
+- **A restore that fails part-way through the file walk leaves a merged
+  tree.** The database cuts over atomically, but files already written
+  are not rolled back.
+- **Orphaned `*.pontifex-*.tmp` files are never swept.** An interrupted
+  write can leave a temporary file behind with nothing to clean it up
+  afterwards.
+- **The test-adequacy programme is substantially untouched**, above all a
+  completeness oracle: a test asserting set equality between a real
+  filesystem tree and the archive's entry paths, driven through the real
+  scanner rather than a hand-built list.
 
 ## v2.0 — Go reference reader
 
