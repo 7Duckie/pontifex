@@ -178,6 +178,7 @@ final class DoctorCommand {
 		$check_rows[] = $this->check_wp_cron();
 		$check_rows[] = $this->check_upload_max_filesize();
 		$check_rows[] = $this->check_open_basedir();
+		$check_rows[] = $this->check_symlink_support();
 
 		// PHP extensions Pontifex needs.
 		$check_rows[] = $this->check_extension_present( 'zlib', true, 'Required: gzip compression fallback.' );
@@ -408,6 +409,74 @@ final class DoctorCommand {
 			self::STATUS_WARN,
 			'open_basedir restrictions can prevent Pontifex writing snapshots outside web root.'
 		);
+	}
+
+	/**
+	 * Report whether this host has the two PHP primitives symlinks depend on.
+	 *
+	 * Unlike {@see \Pontifex\Restore\FileWriter::assert_symlinks_creatable()},
+	 * this check deliberately INTROSPECTS rather than probes — it asks
+	 * function_exists() rather than attempting a real symlink() call. That is
+	 * a considered decision, not an inconsistency with FileWriter's own,
+	 * stricter preflight: doctor is a read-only diagnostic readout with no
+	 * destination root in hand (it can run before any restore, or any archive,
+	 * is even chosen), and every sibling check in this class works the same
+	 * way — see, for example, {@see self::check_open_basedir()} and
+	 * {@see self::check_uploads_dir_writable()}. FileWriter's preflight probes
+	 * for real because it actually has somewhere to write and a wrong "yes"
+	 * there would overwrite a live site part-way through an actual restore;
+	 * doctor only ever informs.
+	 *
+	 * Two distinct primitives are checked, because they guard two distinct
+	 * operations: 'symlink' is needed to RESTORE an archive that contains
+	 * symbolic links; 'readlink' is needed to BACK UP a site that already has
+	 * some (it is used while scanning — see
+	 * {@see \Pontifex\Manifest\FileScanner}, which reads a symlink's target
+	 * with readlink()). A host can be missing either one independently (both
+	 * are disable_functions entries an operator can toggle separately), so
+	 * both are reported, and the note names whichever operation is actually
+	 * at risk.
+	 *
+	 * The readlink() note deliberately says the backup will FAIL, not that the
+	 * link will be gracefully left out of it: FileScanner calls readlink()
+	 * with no function_exists() guard of its own, so on a host missing it, an
+	 * export of a site that contains even one symlink dies outright with an
+	 * undefined-function error rather than skipping that one entry. The note
+	 * must not promise a soft-exclusion behaviour the export path does not
+	 * actually have.
+	 *
+	 * Status is WARN, never FAIL, for both: a site with no symbolic links at
+	 * all restores and backs up perfectly well without either primitive, so
+	 * this must never make doctor's overall exit code non-zero for an
+	 * otherwise healthy site — the same reasoning
+	 * {@see self::check_open_basedir()} and
+	 * {@see self::check_action_scheduler_presence()} already apply to an
+	 * unused capability.
+	 *
+	 * @return array<string, string>
+	 */
+	private function check_symlink_support(): array {
+
+		$can_create_symlinks = $this->environment->function_exists( 'symlink' );
+		$can_read_symlinks   = $this->environment->function_exists( 'readlink' );
+
+		if ( $can_create_symlinks && $can_read_symlinks ) {
+			return $this->build_row( 'PHP config', 'Symlink support', 'available', self::STATUS_OK, '' );
+		}
+
+		$notes = array();
+		if ( ! $can_create_symlinks ) {
+			$notes[] = 'symlink() is unavailable: an archive containing symbolic links cannot be restored on this host.';
+		}
+		if ( ! $can_read_symlinks ) {
+			$notes[] = 'readlink() is unavailable: a backup of a site that contains symbolic links will fail on this host.';
+		}
+
+		$value = $can_create_symlinks
+			? 'unavailable (readlink)'
+			: ( $can_read_symlinks ? 'unavailable (symlink)' : 'unavailable (symlink, readlink)' );
+
+		return $this->build_row( 'PHP config', 'Symlink support', $value, self::STATUS_WARN, implode( ' ', $notes ) );
 	}
 
 	/**
