@@ -411,9 +411,22 @@ final class DatabaseWriter {
 		// whose creation failed half-way through its first chunk.
 		$this->staged_tables[ $dest_table ] = true;
 
+		// Split BEFORE rewriting, so the rewrite can be anchored to the start of
+		// each statement. Rewriting the whole payload first meant an unanchored
+		// str_replace() over row data as well as identifiers, and backticks are
+		// not escape characters inside a MySQL string literal, so a value that
+		// merely CONTAINED the backticked table name was rewritten too — a post
+		// about its own database, a stored query in a maintenance plugin. The
+		// staged name is longer, so any such text inside a PHP-serialised value
+		// also had its `s:NN:` byte count invalidated and stopped unserialising:
+		// the classic serialised-length corruption this project defends against
+		// properly elsewhere, reintroduced by the restore itself. Silent, too —
+		// hashes still matched and verify still reported sound.
 		$staged_table   = self::STAGING_PREFIX . $dest_table;
-		$payload        = $this->rewrite_table_identifier( $source_table, $staged_table, $result->payload() );
-		$statements     = self::split_statements( $payload );
+		$statements     = array_map(
+			fn ( string $statement ): string => $this->rewrite_leading_table_identifier( $source_table, $staged_table, $statement ),
+			self::split_statements( $result->payload() )
+		);
 		$declared_count = (int) $header->statement_count();
 		$parsed_count   = count( $statements );
 
@@ -962,23 +975,40 @@ final class DatabaseWriter {
 	}
 
 	/**
-	 * Rewrite a chunk's table identifier to its staging form.
+	 * Rewrite one statement's leading table identifier to its staging form.
 	 *
-	 * The chunk's one table name — always backtick-quoted in the
-	 * DROP/CREATE/INSERT the export emits, where row values are single-quoted —
-	 * is swapped for the staged destination form. Matching the full
-	 * backtick-quoted identifier keeps the rewrite from touching a
-	 * single-quoted value or a prefix-substring sibling table.
+	 * Only the FIRST occurrence is replaced, and only in a single statement.
+	 * The previous version rewrote every occurrence across the whole payload
+	 * and justified it by saying that matching the full backtick-quoted
+	 * identifier could not touch a single-quoted value. That was wrong:
+	 * backticks are not escape characters inside a MySQL string literal, and
+	 * neither prepare() nor the adapter's escaping escapes them, so a row value
+	 * that merely CONTAINED the backticked table name was rewritten as if it
+	 * were an identifier — permanently, surviving the cut-over, with hashes
+	 * still matching and verify still reporting the archive sound.
 	 *
 	 * @param string $source_table The chunk's table name, from the entry header.
 	 * @param string $staged_table The staging-prefixed destination name to install.
-	 * @param string $payload      The chunk's decoded SQL bytes.
-	 * @return string The payload with the table identifier rewritten.
+	 * @param string $statement    One statement from the chunk's decoded SQL.
+	 * @return string The statement with its leading table identifier rewritten.
 	 */
-	private function rewrite_table_identifier( string $source_table, string $staged_table, string $payload ): string {
+	private function rewrite_leading_table_identifier( string $source_table, string $staged_table, string $statement ): string {
 		$from = '`' . self::escape_identifier( $source_table ) . '`';
 		$to   = '`' . self::escape_identifier( $staged_table ) . '`';
-		return str_replace( $from, $to, $payload );
+
+		// Every statement the exporter emits names the table in its opening
+		// bytes — `DROP TABLE IF EXISTS `T``, `CREATE TABLE `T` (`,
+		// `INSERT INTO `T` [(cols)] VALUES (` — and the shape guard downstream
+		// refuses anything that does not. So the only identifier needing a
+		// rewrite is the first occurrence, and it is always in the fixed prefix
+		// before any row data can begin. Replacing just that one cannot reach a
+		// value, whatever the value happens to contain.
+		$at = strpos( $statement, $from );
+		if ( false === $at ) {
+			return $statement;
+		}
+
+		return substr_replace( $statement, $to, $at, strlen( $from ) );
 	}
 
 	/**
