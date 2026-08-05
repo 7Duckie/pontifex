@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Schedule;
 
+use Pontifex\Export\ExportCounters;
+
 use DateTimeImmutable;
 use Throwable;
 use Pontifex\Admin\BackupStore;
@@ -182,13 +184,12 @@ final class ScheduledExporter {
 	 * @return void
 	 */
 	private function bump_attempted(): void {
-		$current = $this->wordpress_context->option_value( 'pontifex_export_stats', array() );
-		$current = is_array( $current ) ? $current : array();
-		$merged  = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
-			$merged[ $key ] = isset( $current[ $key ] ) && is_numeric( $current[ $key ] ) ? (int) $current[ $key ] : 0;
-		}
-		++$merged['attempted'];
-		$this->wordpress_context->save_option( 'pontifex_export_stats', $merged );
+		$this->wordpress_context->save_option(
+			ExportCounters::OPTION,
+			ExportCounters::merge(
+				$this->wordpress_context->option_value( ExportCounters::OPTION, array() ),
+				array( 'attempted' => 1 )
+			)
+		);
 	}
 }

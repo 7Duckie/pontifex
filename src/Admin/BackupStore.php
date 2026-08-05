@@ -13,6 +13,7 @@ use DateTimeImmutable;
 use DateTimeZone;
 use Pontifex\Filesystem\ProtectedDirectory;
 use RuntimeException;
+use Pontifex\Archive\ArchiveName;
 
 /**
  * Manages `wp-content/pontifex/backups/` and the backups within it.
@@ -67,9 +68,14 @@ final class BackupStore {
 	 * Anchored at both ends and admitting only the prefix, a `Ymd\THis\Z` UTC
 	 * stamp, and the extension — nothing that could carry a path separator.
 	 *
+	 * Deferred to {@see ArchiveName::PATTERN} so this and remote retention
+	 * cannot drift: retention's sort treats name order as age order, which holds
+	 * only for this shape, and the two used to hold separate copies of the rule
+	 * while the SFTP adapter accepted any `.wpmig` at all.
+	 *
 	 * @var string
 	 */
-	private const NAME_PATTERN = '/^pontifex-backup-\d{8}T\d{6}Z\.wpmig$/';
+	private const NAME_PATTERN = ArchiveName::PATTERN;
 
 	/**
 	 * The format a backup's UTC timestamp is encoded with in its name.
@@ -249,10 +255,27 @@ final class BackupStore {
 
 		$real_path = realpath( $path );
 		$real_dir  = realpath( $this->directory );
-		if ( false === $real_path || false === $real_dir || 0 !== strpos( $real_path, $real_dir . '/' ) ) {
+		if ( false === $real_path || false === $real_dir ) {
 			return null;
 		}
 
+		// Compare on forward slashes regardless of platform. $this->directory is
+		// built with forward slashes, but realpath() answers in the platform's
+		// own separator -- a backslash on Windows -- so a hard-coded '/' here
+		// could never prefix a real Windows path. The guard fired on every
+		// legitimate file, and because this method is the single gate behind
+		// Download, Delete, Verify, Restore and Preview, all five answered "that
+		// backup could not be found" for backups plainly listed on the screen.
+		// Creating one still worked, since that path never calls resolve(), so
+		// the site produced backups it then refused to touch.
+		$separator_free_path = str_replace( '\\', '/', $real_path );
+		$separator_free_dir  = str_replace( '\\', '/', $real_dir );
+		if ( 0 !== strpos( $separator_free_path, $separator_free_dir . '/' ) ) {
+			return null;
+		}
+
+		// The real path is returned unnormalised: callers hand it to the
+		// filesystem, which wants the platform's own separator back.
 		return $real_path;
 	}
 

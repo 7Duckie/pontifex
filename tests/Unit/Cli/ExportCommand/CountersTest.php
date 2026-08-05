@@ -159,44 +159,4 @@ final class CountersTest extends TestCase {
 		$this->assertArrayNotHasKey( 'mystery', $merged );
 		$this->assertCount( 6, $merged );
 	}
-
-	// -------------------------------------------------------------------------
-	// counter_int
-	// -------------------------------------------------------------------------
-
-	/**
-	 * A present integer value is returned as-is.
-	 *
-	 * @return void
-	 */
-	public function test_counter_int_reads_present_integer(): void {
-		$this->assertSame( 42, $this->invoke_static( 'counter_int', array( 'k' => 42 ), 'k' ) );
-	}
-
-	/**
-	 * A numeric string is coerced to an integer.
-	 *
-	 * @return void
-	 */
-	public function test_counter_int_coerces_numeric_string(): void {
-		$this->assertSame( 42, $this->invoke_static( 'counter_int', array( 'k' => '42' ), 'k' ) );
-	}
-
-	/**
-	 * A missing key returns zero.
-	 *
-	 * @return void
-	 */
-	public function test_counter_int_missing_key_is_zero(): void {
-		$this->assertSame( 0, $this->invoke_static( 'counter_int', array(), 'k' ) );
-	}
-
-	/**
-	 * A non-numeric value returns zero.
-	 *
-	 * @return void
-	 */
-	public function test_counter_int_non_numeric_is_zero(): void {
-		$this->assertSame( 0, $this->invoke_static( 'counter_int', array( 'k' => 'abc' ), 'k' ) );
-	}
 }

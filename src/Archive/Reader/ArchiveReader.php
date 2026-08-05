@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Archive\Reader;
 
+use Pontifex\Exception\HostCannotComply;
+
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Crypto\Ed25519Verifier;
@@ -622,7 +624,7 @@ final class ArchiveReader {
 	 *
 	 * @param int $length The declared manifest block length in bytes.
 	 * @return void
-	 * @throws RuntimeException If the decode cannot fit even after attempting to raise the limit.
+	 * @throws HostCannotComply If this runtime has too little memory left to hold the manifest.
 	 */
 	private function assert_manifest_decode_fits_in_memory( int $length ): void {
 		if ( 0 === $this->memory_limit_bytes ) {
@@ -672,7 +674,7 @@ final class ArchiveReader {
 			return;
 		}
 
-		throw new RuntimeException(
+		throw new HostCannotComply(
 			sprintf(
 				'ArchiveReader: this archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server; the admin screens usually have less memory available than WP-CLI does.',
 				(int) ceil( $required / 1048576 ),

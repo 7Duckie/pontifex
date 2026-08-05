@@ -14,6 +14,7 @@ use Pontifex\Admin\BackupStore;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Export\ExportCounters;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
@@ -454,13 +455,7 @@ final class JobTicker {
 	 * @return void
 	 */
 	private function bump_counters( array $delta ): void {
-		$current = $this->wordpress_context->option_value( 'pontifex_export_stats', array() );
-		$current = is_array( $current ) ? $current : array();
-		$merged  = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
-			$stored         = isset( $current[ $key ] ) && is_numeric( $current[ $key ] ) ? (int) $current[ $key ] : 0;
-			$merged[ $key ] = $stored + (int) ( $delta[ $key ] ?? 0 );
-		}
-		$this->wordpress_context->save_option( 'pontifex_export_stats', $merged );
+		$merged = ExportCounters::merge( $this->wordpress_context->option_value( ExportCounters::OPTION, array() ), $delta );
+		$this->wordpress_context->save_option( ExportCounters::OPTION, $merged );
 	}
 }

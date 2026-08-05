@@ -13,6 +13,7 @@ use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Lock\BackupProgress;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
@@ -287,6 +288,64 @@ final class OperationLockTest extends TestCase {
 
 		$rollback_lock = new OperationLock( $context, $this->jobs(), $now );
 		$this->assertFalse( $rollback_lock->acquire( OperationLock::OP_ROLLBACK ), 'An active export job must refuse a rollback regardless of the holder transient.' );
+	}
+
+	/**
+	 * The lock reads the very transient the backup screen writes.
+	 *
+	 * OperationLock decides whether a backup is genuinely live partly by reading
+	 * this transient, which makes the key a safety predicate: read the wrong one
+	 * and the lock stops seeing live backups, so a restore can start on a site a
+	 * backup is halfway through. The key and its staleness floor used to be
+	 * declared independently in each class that touched them — the key twice,
+	 * the floor three times — with nothing tying the copies together and no test
+	 * asserting they matched. Renaming the transient on the writing side would
+	 * have left the reader watching a key nobody writes, silently.
+	 *
+	 * Asserting through the shared constant is the point: if a future change
+	 * gives either side its own copy again, this stops compiling rather than
+	 * quietly passing.
+	 *
+	 * @return void
+	 */
+	public function test_the_lock_reads_the_transient_the_backup_screen_writes(): void {
+		$this->jobs();
+
+		// Write progress exactly as the backup screen does, through the shared key.
+		$this->transients[ BackupProgress::TRANSIENT_KEY ] = array(
+			'phase' => 'writing',
+			'at'    => 1_700_000_000,
+		);
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 1 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertFalse(
+			$lock->acquire( OperationLock::OP_RESTORE ),
+			'Fresh progress under the shared key must read as a live backup and refuse a restore.'
+		);
+	}
+
+	/**
+	 * Progress older than the shared staleness floor stops counting as live.
+	 *
+	 * The counterweight. Without it, a lock that treated ANY progress value as
+	 * live — ignoring the floor entirely — would pass the test above, and a
+	 * crashed backup would hold the lock until its transient expired.
+	 *
+	 * @return void
+	 */
+	public function test_progress_older_than_the_shared_floor_is_not_live(): void {
+		$this->transients[ BackupProgress::TRANSIENT_KEY ] = array(
+			'phase' => 'writing',
+			'at'    => 1_700_000_000 - ( BackupProgress::STALE_SECONDS + 1 ),
+		);
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 0 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertTrue(
+			$lock->acquire( OperationLock::OP_RESTORE ),
+			'Progress past the staleness floor means the writing request has died; the lock must not treat it as live.'
+		);
 	}
 
 	/**

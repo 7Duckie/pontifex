@@ -16,6 +16,9 @@ jobs:
   quality-gates:
     name: Quality gates (PHP ${{ matrix.php_version }})
     runs-on: ubuntu-latest
+    # A hung job otherwise runs to GitHub's six-hour default. Weakening the
+    # symlink hop ceiling, for one, makes the suite hang rather than fail.
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -24,7 +27,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -59,8 +62,21 @@ jobs:
 
           echo "Tag $tag_version matches both header ($header_version) and constant ($constant_version). OK."
 
+          # ADR 0007 says tags live on main. Until now that was convention:
+          # the guard compared version strings only, so a tag pushed from any
+          # branch whose pontifex.php already carried the matching version --
+          # exactly the state dev is in after a back-merge -- went green while
+          # publishing unfinished work.
+          git fetch --no-tags --depth=1 origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$(git rev-parse FETCH_HEAD)"; then
+            echo "::error::Tagged commit $GITHUB_SHA is not an ancestor of main. Tags are cut on main only (ADR 0007)."
+            exit 1
+          fi
+
+          echo "Tagged commit is on main. OK."
+
       - name: Set up PHP ${{ matrix.php_version }}
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php_version }}
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -68,7 +84,7 @@ jobs:
           tools: composer:v2
 
       - name: Cache Composer downloads
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.composer/cache
           key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
@@ -77,6 +93,25 @@ jobs:
 
       - name: Validate composer.json (strict)
         run: composer validate --strict
+
+      - name: Release consistency (scripts/check-release.php)
+        if: github.base_ref == 'staging' || github.base_ref == 'main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          # This script is the only enforcement of the constraints WordPress.org
+          # rejects a submission over: the readme's Stable tag agreeing with the
+          # plugin version, the 150-character short description, the
+          # 300-character ceiling on every upgrade notice, the five-tag limit,
+          # and the changelog section and link. Nothing else in this workflow
+          # looks at any of them -- a 318-character upgrade notice once passed
+          # every gate here and was caught only because someone ran this by
+          # hand. A release tripwire that depends on memory is not a gate.
+          if [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+            php scripts/check-release.php "${GITHUB_REF#refs/tags/v}"
+          else
+            php scripts/check-release.php
+          fi
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
@@ -98,19 +133,20 @@ jobs:
         run: composer audit --abandoned=report
 
       - name: OSV-Scanner (cross-ecosystem advisories)
-        uses: google/osv-scanner-action/osv-scanner-action@v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
             --lockfile=composer.lock
 
       - name: Gitleaks (committed-secret scan)
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   integration:
     name: Integration suite (PHP ${{ matrix.php_version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     # Tiered gates (ADR 0007, as amended 2026-07-11): the real-database
     # round-trip suite runs on EVERY pull request — the unit suite mocks
@@ -133,10 +169,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up PHP ${{ matrix.php_version }}
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php_version }}
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -144,7 +180,7 @@ jobs:
           tools: composer:v2
 
       - name: Cache Composer downloads
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.composer/cache
           key: composer-${{ matrix.php_version }}-${{ hashFiles('composer.json') }}
@@ -155,7 +191,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '20'
           cache: 'npm'
@@ -189,6 +225,7 @@ jobs:
   plugin-check:
     name: Plugin Check (built package)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     # Plugin Check posts its summary as a pull-request comment, so this job
     # needs pull-requests: write. Scoped to this job only — the others keep the
@@ -209,10 +246,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up PHP 8.3
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: '8.3'
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -242,7 +279,7 @@ jobs:
           ls -la build
 
       - name: Run Plugin Check on the built package
-        uses: wordpress/plugin-check-action@v1
+        uses: wordpress/plugin-check-action@98a1788320d0add90df2d8183934ecccbc4e05d2 # v1
         with:
           build-dir: ./build
           slug: pontifex
@@ -252,3 +289,23 @@ jobs:
           # green on warnings, which let four sanitisation warnings ride
           # through v0.6.0 and v0.7.0 unnoticed.
           strict: true
+
+      # Publish only AFTER Plugin Check has passed, so the artifact that exists
+      # is one that was verified. Until now the job built the distributable,
+      # checked it, and threw it away -- and the ZIP actually submitted was
+      # rebuilt by hand on a macOS host through a different pipeline, which has
+      # already shipped a non---no-dev vendor tree once. The bytes users install
+      # should be the bytes CI verified, and nobody should have to reconstruct
+      # after the fact which they were.
+      - name: Publish the verified package as an artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # The commit SHA, not the ref name: a pull request's ref_name is
+          # "<number>/merge", and a slash is not allowed in an artifact name --
+          # so this failed on every PR while working on tags. The SHA is also the
+          # better identifier for the job this artifact exists to do, which is
+          # knowing exactly which bytes were verified.
+          name: pontifex-${{ github.sha }}
+          path: ${{ runner.temp }}/pontifex.tar.gz
+          if-no-files-found: error
+          retention-days: 90

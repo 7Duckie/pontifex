@@ -8,11 +8,11 @@ Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Back up and migrate WordPress, your content and the whole database, in one openly documented .wpmig archive. CLI and admin UI; never phones home.
+Back up and migrate WordPress, your content and its database tables, in one openly documented .wpmig archive. CLI and admin UI; never phones home.
 
 == Description ==
 
-Pontifex packs your WordPress content — everything under `wp-content` (themes, plugins, uploads) and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
+Pontifex packs your WordPress content — what is under `wp-content` (themes, plugins, uploads) and every database table belonging to the site — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
 
 * **The format is documented — and, since 1.0.0, locked.** The `.wpmig` archive format is publicly specified and now locked: a backup taken today stays readable by every future version of Pontifex, so a backup is never hostage to the plugin — it can be read, verified, or recovered without Pontifex at all.
 * **No cloud service of ours.** Pontifex runs no service of its own, phones home to nothing, and needs no account. The only way a backup ever leaves your server is an SFTP destination you configure yourself, pointing at a server you own — set none up, and nothing leaves your disk.

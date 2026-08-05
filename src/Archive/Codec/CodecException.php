@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Archive\Codec;
 
+use Pontifex\Exception\PontifexException;
+
 use RuntimeException;
 
 /**
@@ -25,5 +27,5 @@ use RuntimeException;
  * (e.g. MalformedInputCodecException) when their callers benefit from
  * finer-grained distinctions.
  */
-class CodecException extends RuntimeException {
+class CodecException extends RuntimeException implements PontifexException {
 }

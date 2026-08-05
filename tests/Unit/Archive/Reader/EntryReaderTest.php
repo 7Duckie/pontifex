@@ -105,6 +105,35 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
+	 * Locate the first payload byte inside a written entry record.
+	 *
+	 * A record is header_length(4B) || header_JSON || codec_id(2B) || nonce(12B)
+	 * || payload || hash(32B). Tests that must corrupt the PAYLOAD (never the
+	 * header) need this computed from the record's own declared header length,
+	 * not guessed at — a guess such as "the record's midpoint" lands inside the
+	 * JSON header on a small fixture and so is refused for the wrong reason
+	 * ("entry header is malformed") instead of the hash reason the test claims
+	 * to cover.
+	 *
+	 * @param string $record_bytes The full on-disk entry record.
+	 * @return int Byte offset of the first payload byte within $record_bytes.
+	 */
+	private static function payload_offset( string $record_bytes ): int {
+		$header_length = ByteOrder::unpack_uint32( substr( $record_bytes, 0, EntryHeader::LENGTH_PREFIX_SIZE ) );
+		return EntryHeader::LENGTH_PREFIX_SIZE + $header_length + ByteOrder::UINT16_SIZE + EntryWriter::NONCE_SIZE;
+	}
+
+	/**
+	 * Flip one byte to a value guaranteed to differ from what it already holds.
+	 *
+	 * @param string $byte The single byte to flip.
+	 * @return string A different single byte.
+	 */
+	private static function flip_byte( string $byte ): string {
+		return "\x00" === $byte ? "\xFF" : "\x00";
+	}
+
+	/**
 	 * Write a file entry with EntryWriter and return [stream, ManifestEntry] for reading back.
 	 *
 	 * @param string $path     Relative path on the entry.
@@ -318,20 +347,68 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
-	 * Rejects an entry whose bytes no longer match its recorded hash.
+	 * Rejects an entry whose payload no longer matches its own trailing hash.
+	 *
+	 * This is the first of verify_entry()'s two independent hash checks: the
+	 * record's trailing 32-byte digest against the bytes actually read back —
+	 * the on-disk corruption defence. The manifest's recorded entry_hash is
+	 * left exactly as the writer produced it, so only the first comparison can
+	 * be the one that refuses; {@see
+	 * self::test_verify_entry_rejects_when_computed_hash_disagrees_with_manifest_entry_hash()}
+	 * pins the second, independent comparison. The tampered byte is computed
+	 * from the record's own header length so it is positively inside the
+	 * payload, not guessed at the record's midpoint (which on this small
+	 * fixture would land inside the JSON header and be refused for the wrong
+	 * reason).
 	 *
 	 * @return void
 	 */
-	public function test_verify_entry_rejects_a_tampered_entry(): void {
+	public function test_verify_entry_rejects_a_payload_tampered_against_its_own_trailing_hash(): void {
 		$fixture = self::write_file_entry_to_fixture( 'note.txt', 'integrity matters', RawCodec::ID );
 		$bytes   = self::read_all( $fixture[0] );
-		// Flip a byte inside the hashed region (the header), leaving the recorded manifest hash intact.
-		$flipped = "\x00" === $bytes[20] ? "\xFF" : "\x00";
-		$corrupt = substr_replace( $bytes, $flipped, 20, 1 );
+		$offset  = self::payload_offset( $bytes );
+		$corrupt = substr_replace( $bytes, self::flip_byte( $bytes[ $offset ] ), $offset, 1 );
 		$stream  = self::memory_stream( $corrupt );
 
 		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'entry hash does not match the bytes on disk' );
+
 		self::make_reader()->verify_entry( $stream, $fixture[1] );
+	}
+
+	/**
+	 * Rejects an entry whose computed hash agrees with its own trailing hash
+	 * but disagrees with the manifest's recorded entry_hash.
+	 *
+	 * The second of verify_entry()'s two independent hash checks — defence in
+	 * depth against coordinated tampering where both the payload and its
+	 * trailing hash were rewritten consistently but the manifest was not
+	 * updated to match. The on-disk record here is completely untouched (the
+	 * writer's own bytes, unmodified); only the manifest's copy of the hash is
+	 * wrong, so the first comparison must pass before the second is ever
+	 * reached and this test can tell the two apart.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_when_computed_hash_disagrees_with_manifest_entry_hash(): void {
+		$fixture             = self::write_file_entry_to_fixture( 'note.txt', 'integrity matters', RawCodec::ID );
+		$stream              = $fixture[0];
+		$real_manifest_entry = $fixture[1];
+
+		$real_hash    = $real_manifest_entry->entry_hash();
+		$forged_entry = ManifestEntry::for_file(
+			$real_manifest_entry->index(),
+			$real_manifest_entry->offset(),
+			$real_manifest_entry->length(),
+			'note.txt',
+			RawCodec::ID,
+			self::flip_byte( $real_hash[0] ) . substr( $real_hash, 1 )
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'on-disk entry hash does not match the manifest entry_hash' );
+
+		self::make_reader()->verify_entry( $stream, $forged_entry );
 	}
 
 	/**
@@ -430,25 +507,74 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
-	 * The read_entry method must reject an entry whose recorded hash disagrees with the on-disk bytes.
+	 * The read_entry method must reject a record whose payload no longer
+	 * matches its own trailing hash.
+	 *
+	 * This is the first of read_entry()'s two independent hash checks: the
+	 * record's trailing 32-byte digest against the bytes actually read back —
+	 * the on-disk corruption defence. The manifest's recorded entry_hash is
+	 * left exactly as the writer produced it, so only the first comparison can
+	 * be the one that refuses; {@see
+	 * self::test_read_entry_rejects_when_computed_hash_disagrees_with_manifest_entry_hash()}
+	 * pins the second, independent comparison. The tampered byte is computed
+	 * from the record's own header length so it is positively inside the
+	 * payload — a guess such as "the record's midpoint" lands inside the JSON
+	 * header on this small fixture and would be refused for the wrong reason
+	 * ("entry header is malformed"), not the hash reason this test claims.
 	 *
 	 * @return void
 	 */
-	public function test_read_entry_rejects_hash_mismatch(): void {
+	public function test_read_entry_rejects_a_payload_tampered_against_its_own_trailing_hash(): void {
 		$fixture             = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
 		$stream              = $fixture[0];
 		$real_manifest_entry = $fixture[1];
 
-		// Flip a byte in the middle of the on-disk record (mutates the payload area).
 		$bytes    = self::read_all( $stream );
-		$middle   = (int) ( strlen( $bytes ) / 2 );
-		$tampered = substr( $bytes, 0, $middle ) . "\xFF" . substr( $bytes, $middle + 1 );
+		$offset   = self::payload_offset( $bytes );
+		$tampered = substr_replace( $bytes, self::flip_byte( $bytes[ $offset ] ), $offset, 1 );
 
 		$tampered_stream = self::memory_stream( $tampered );
 
 		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'entry hash does not match the bytes on disk' );
 
 		self::make_reader()->read_entry( $tampered_stream, $real_manifest_entry );
+	}
+
+	/**
+	 * The read_entry method must reject an entry whose computed hash agrees
+	 * with its own trailing hash but disagrees with the manifest's recorded
+	 * entry_hash.
+	 *
+	 * The second of read_entry()'s two independent hash checks — defence in
+	 * depth against coordinated tampering where both the payload and its
+	 * trailing hash were rewritten consistently but the manifest was not
+	 * updated to match. The on-disk record here is completely untouched (the
+	 * writer's own bytes, unmodified); only the manifest's copy of the hash is
+	 * wrong, so the first comparison must pass before the second is ever
+	 * reached and this test can tell the two apart.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_rejects_when_computed_hash_disagrees_with_manifest_entry_hash(): void {
+		$fixture             = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		$stream              = $fixture[0];
+		$real_manifest_entry = $fixture[1];
+
+		$real_hash    = $real_manifest_entry->entry_hash();
+		$forged_entry = ManifestEntry::for_file(
+			$real_manifest_entry->index(),
+			$real_manifest_entry->offset(),
+			$real_manifest_entry->length(),
+			'a.txt',
+			RawCodec::ID,
+			self::flip_byte( $real_hash[0] ) . substr( $real_hash, 1 )
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'on-disk entry hash does not match the manifest entry_hash' );
+
+		self::make_reader()->read_entry( $stream, $forged_entry );
 	}
 
 	/**

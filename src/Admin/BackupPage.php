@@ -130,7 +130,7 @@ final class BackupPage {
 		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Create a backup', 'pontifex' ) );
 		printf(
 			'<p class="pontifex-lead">%s</p>',
-			esc_html__( 'A backup packs every file and the whole database into one .wpmig archive, written to a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download.', 'pontifex' )
+			esc_html__( 'A backup is written to one .wpmig archive, in a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download.', 'pontifex' )
 		);
 
 		$this->render_scope_summary();
@@ -175,7 +175,7 @@ final class BackupPage {
 	private function render_scope_summary(): void {
 		printf(
 			'<p class="pontifex-lead">%s</p>',
-			esc_html__( 'This backup covers your content — everything in wp-content — and the whole database. (Whole-site backups, including WordPress core, are a command-line operation.)', 'pontifex' )
+			esc_html__( 'This backup covers your content — what is in wp-content, apart from the exclusions below — and every database table belonging to this WordPress site. Tables another application keeps in the same database are not included. (Whole-site backups, adding WordPress core, are a command-line operation.)', 'pontifex' )
 		);
 
 		$defaults = ExclusionRules::default_v010()->patterns();
