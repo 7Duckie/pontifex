@@ -4,7 +4,7 @@ For developers, sysadmins and agency engineers. For a step-by-step
 introduction aimed at site owners, see [Using Pontifex](guide.md). For failure
 behaviour, see [When Pontifex refuses](when-pontifex-refuses.md).
 
-Applies to Pontifex 1.0.1. The public API was frozen at v1.0.0: a
+Applies to Pontifex 1.0.2. The public API was frozen at v1.0.0: a
 breaking change requires a major version bump.
 
 ---

@@ -527,6 +527,56 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
+## v1.0.2 — The rest of what the audit found
+
+Closes the remaining findings from the audit that produced v1.0.1. Two could
+lose or damage something a user cares about, and one made the admin screens
+unusable on an entire platform. No breaking changes.
+
+### What ships
+
+- **Offsite pruning only rotates backups Pontifex named.** Retention sorts by
+  name and deletes from the front, which is age order only for the canonical
+  `pontifex-backup-<UTC>.wpmig` shape — an invariant two docblocks asserted and
+  nothing enforced. A backup the operator named themselves sorted ahead of every
+  dated name and was deleted as the oldest. The naming rule now has one master
+  that both the admin store and retention defer to.
+- **A read-only directory no longer stops a restore part-way.** Directory
+  entries sort ahead of their contents, so a recorded `0555` made the directory
+  unwritable before the files inside it arrived. Modes are applied after the
+  walk, deepest first, and a late failure is reported rather than thrown — by
+  then every byte is in place, and throwing would report a finished restore as a
+  failure over a permission bit.
+- **The admin backup screen works on Windows.** Path confinement compared
+  against a hard-coded forward slash while `realpath()` answers in the platform
+  separator, so every action behind that single gate refused every file.
+- **Four surfaces stop overstating what a backup contains.** Only tables
+  belonging to this WordPress site are captured, so a site sharing a database
+  with another application does not have those tables backed up — which the
+  Backup screen, both CLI scope lines, the verify verdict and the readme all
+  implied otherwise.
+- **Refusals carry their kind** ([ADR 0022](./adr/0022-exception-taxonomy.md)):
+  an untrustworthy archive, a host that cannot comply, or an invalid request.
+  Adopted incrementally, with the SPL parents kept so no existing handler
+  changes.
+- **Release integrity.** The check enforcing the WordPress.org submission limits
+  now runs in CI rather than depending on memory; the tag guard requires the
+  tagged commit to be on `main`; the verified package is published rather than
+  discarded; every action is pinned to a commit; every job has a timeout.
+- **Guards that could be deleted with a green suite are pinned**, including
+  signature enforcement, both entry-hash comparisons, and a completeness oracle
+  comparing a real directory tree against the archive built from it.
+
+### What is deliberately deferred
+
+- Converting the remaining bare SPL exceptions across the safety core. ADR 0022
+  records why adoption is staged: a sweep of that size, for a benefit that is
+  diagnostic rather than behavioural, is the shape of change that introduces a
+  defect while fixing nothing.
+- The smaller structural findings — a duplicated WordPress-root derivation
+  across three commands, unobservable best-effort deletions, and namespace
+  layering for three domain classes.
+
 ## v1.0.1 — Three defects a full-build audit found
 
 A security and correctness patch. An audit of the released v1.0.0 build —
