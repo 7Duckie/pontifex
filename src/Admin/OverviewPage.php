@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Admin;
 
+use Pontifex\Export\ExportCounters;
+
 use DateTimeImmutable;
 use DateTimeZone;
 use Pontifex\Cli\TransferHistory;
@@ -38,7 +40,7 @@ final class OverviewPage {
 	 *
 	 * @var string
 	 */
-	private const EXPORT_STATS_OPTION = 'pontifex_export_stats';
+	private const EXPORT_STATS_OPTION = ExportCounters::OPTION;
 
 	/**
 	 * The wp_options key holding the import counters (mirrors ImportCommand).

@@ -121,24 +121,29 @@ final class OperationLock {
 	/**
 	 * The transient key holding the running backup's progress.
 	 *
-	 * Owned by the backup screen's progress reporting, not by this class; read
-	 * here only as a liveness signal for a synchronous (non-job-backed) run
-	 * that has not yet — or will never — become an active job.
+	 * Deferred to {@see BackupProgress::TRANSIENT_KEY}, the one master both this
+	 * class and the writing side read. Written by the backup screen's progress
+	 * reporting; read here only as a liveness signal for a synchronous
+	 * (non-job-backed) run that has not yet — or will never — become an active
+	 * job. Holding a private copy of the key meant a rename on the writing side
+	 * would have left this reading a transient nobody writes.
 	 *
 	 * @var string
 	 */
-	private const BACKUP_PROGRESS_KEY = 'pontifex_backup_progress';
+	private const BACKUP_PROGRESS_KEY = BackupProgress::TRANSIENT_KEY;
 
 	/**
 	 * Age, in seconds, past which the backup progress transient is distrusted.
 	 *
-	 * Mirrors the admin Backup controller's own staleness floor: refreshed
-	 * several times a second by the request driving the backup, so a value
-	 * older than this while no active job exists means that request has died.
+	 * Deferred to {@see BackupProgress::STALE_SECONDS} rather than mirrored:
+	 * the transient is refreshed several times a second by the request driving
+	 * the backup, so a value older than this while no active job exists means
+	 * that request has died. Both sides must agree on the figure, so both read
+	 * the same one.
 	 *
 	 * @var int
 	 */
-	private const PROGRESS_STALE_SECONDS = 10;
+	private const PROGRESS_STALE_SECONDS = BackupProgress::STALE_SECONDS;
 
 	/**
 	 * Progress phase reported when no backup is running.
