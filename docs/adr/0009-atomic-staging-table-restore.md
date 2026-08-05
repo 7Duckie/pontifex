@@ -1,6 +1,6 @@
 # 0009 — restore: replay into staging tables, cut over with one atomic RENAME
 
-- **Status:** Proposed, 2026-07-11.
+- **Status:** Accepted, 2026-07-11. Implemented and shipped in v0.5.0.
 - **Deciders:** 7Duckie (v0.5.0 hardening).
 
 ## Context

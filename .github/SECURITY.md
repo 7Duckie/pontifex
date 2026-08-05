@@ -2,15 +2,14 @@
 
 ## Supported versions
 
-Pontifex is in pre-alpha (v0.0.x). No version is yet production-ready,
-and no version is yet receiving formal security patches. This will
-change at v0.1.0 (Phase 1 complete), at which point security updates
-will follow the standard semver-patch cadence.
+Pontifex reached **v1.0.0** on 2026-08-05 — the commitment release (see
+[`docs/roadmap.md`](../docs/roadmap.md)): the public API is frozen and
+the `.wpmig` archive format is locked at specification version 1.1.
 
-That said, we triage and respond to every reported vulnerability
-regardless of release status. Pre-v0.1.0 reports may be addressed by a
-direct commit to `main` rather than a numbered patch release, with the
-fix landing in the next pre-release tag.
+Security fixes ship on the current `1.x` line as a patch release. A
+report found against a `0.x` pre-release is still triaged and answered
+— see "How we triage" below — but the fix lands on `1.x`; there are no
+backports to the `0.x` tags.
 
 ## Reporting a vulnerability
 
@@ -104,9 +103,25 @@ well-formed archive you chose to restore. Therefore:
   user accounts, password hashes, secret keys — so keep it outside the
   web root and delete it securely when you are done with it.
 
-Cross-URL migration (with the serialised-data defences it requires)
-arrives in v0.2.0; archive verification (`wp pontifex verify`) and
-optional signing are planned — see [`docs/roadmap.md`](../docs/roadmap.md).
+Cross-URL migration (`import --url=`, with the serialised-data
+defences it requires), archive verification (`wp pontifex verify`),
+and optional Ed25519 signing (`wp pontifex keygen`, `export --sign`,
+`--public-key` on `verify`/`import`) have all shipped.
+
+Signature enforcement is opt-in and it engages the moment you declare
+a trusted key. On the CLI, supplying `--public-key` to `import` or
+`verify`, or pinning `PONTIFEX_PUBLIC_KEY` in `wp-config.php`, makes
+the signature mandatory: an unsigned archive — including one whose
+signature was stripped, which is byte-for-byte indistinguishable from
+never-signed — is refused rather than warned about
+([ADR 0012](../docs/adr/0012-signature-enforcement-policy.md)). In the
+browser the pin alone is the trigger, and it is applied at upload, the
+one point where an archive of unknown origin crosses into the site;
+once a file is on disk an uploaded and a locally-produced backup are
+indistinguishable, so admin Restore, Verify and rollback deliberately
+do not check signatures
+([ADR 0020](../docs/adr/0020-signature-enforcement-on-the-upload-path.md)).
+See [`docs/roadmap.md`](../docs/roadmap.md) for what is still ahead.
 
 ## Threat model
 

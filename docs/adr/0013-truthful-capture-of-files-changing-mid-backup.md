@@ -1,6 +1,6 @@
 # 0013 — export: record what was actually read when a file changes mid-backup
 
-- **Status:** Proposed, 2026-07-12.
+- **Status:** Accepted, 2026-07-12. Implemented and shipped in v0.5.0.
 - **Deciders:** 7Duckie (v0.5.0 hardening).
 
 ## Context
