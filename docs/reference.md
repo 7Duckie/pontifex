@@ -92,6 +92,13 @@ Restores an archive over the current site.
 symlink preflights, which live in the restore path. A clean dry run is not a
 promise a real restore will proceed.
 
+A refused or failed import prints a verdict rather than propagating the
+exception: which of the three kinds of refusal it was (ADR 0022 — the archive
+cannot be trusted, this host cannot comply, or the request needs correcting),
+the engine's own message with absolute paths redacted, and then exit 1. A
+failure carrying none of those types is reported as a failure rather than a
+refusal, because claiming a refusal would assert an intent that was not there.
+
 ### `wp pontifex verify <archive>`
 
 | Flag | Effect |
