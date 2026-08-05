@@ -11,6 +11,7 @@
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       pontifex
+ * Network:           false
  *
  * @package Pontifex
  */
@@ -76,6 +77,36 @@ if ( version_compare( PHP_VERSION, $pontifex_minimum_php_version, '<' ) ) {
 				),
 				esc_html( $pontifex_minimum_php_version ),
 				esc_html( PHP_VERSION )
+			);
+			printf( '<div class="notice notice-error"><p>%s</p></div>', $message ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		}
+	);
+
+	return; // Stop loading the rest of the plugin. Crucial.
+}
+
+if ( function_exists( 'is_multisite' ) && is_multisite() ) {
+	/*
+	 * Multisite detected. Register an admin notice and stop loading.
+	 *
+	 * Pontifex has no multisite handling at all: it reads one table prefix
+	 * and one wp-content, and a network has a shared prefix plus a
+	 * per-site one. Loaded on a network it would quietly back up and
+	 * restore the wrong set of tables — the failure a backup tool must
+	 * never have, because it looks like success until the day it is
+	 * needed. Multisite support is a deferred roadmap item, and refusing
+	 * to load is what makes that deferral honest rather than silent.
+	 *
+	 * Hard (stop loading) rather than soft, unlike the WordPress version
+	 * floor: an old WordPress still backs up correctly, whereas here the
+	 * plugin cannot see most of the network it appears to be protecting.
+	 */
+	add_action(
+		'admin_notices',
+		static function () {
+			$message = esc_html__(
+				'Pontifex does not support WordPress multisite, so it has not been loaded. It reads a single table prefix, and a network has more than one — running it here would back up part of the network while appearing to back up all of it. Multisite support is planned; until then, use Pontifex on single-site installations only.',
+				'pontifex'
 			);
 			printf( '<div class="notice notice-error"><p>%s</p></div>', $message ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		}
