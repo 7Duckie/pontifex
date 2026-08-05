@@ -17,6 +17,47 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [1.0.3] — 2026-08-05 — Exclusion patterns are kept as you typed them
+
+Closes the last of the findings from the full-build audit that produced
+v1.0.1 and v1.0.2. One of them was quietly leaving files out of backups. No
+breaking changes.
+
+### Fixed
+
+- **The Backup screen silently rewrote your exclusion patterns, and left
+  out more than you asked it to.** Anything you typed into "Also leave out"
+  was passed through a WordPress text sanitiser that strips every percent
+  sign followed by two hex digits — a sensible thing to do to a web address,
+  and the wrong thing entirely to do to a file path, where those are just
+  characters in a name. So `wp-content/uploads/2024%2F*` became
+  `wp-content/uploads/2024*`, which excludes vastly more than the pattern you
+  wrote, and the files it swallowed were missing from every backup after
+  that. A scheduled backup stores the pattern, so the rewritten version was
+  reused by every unattended run from then on, and nothing anywhere said so.
+  Patterns are now kept exactly as typed. **If you use exclusion patterns
+  containing a percent sign, open the Backup screen and check they still read
+  the way you wrote them**, then take a fresh backup.
+- **Automatic pruning of an offsite destination now says when a deletion
+  failed.** Pruning reported how many old backups it removed but nothing at
+  all about the ones it could not — so a destination quietly filling up,
+  because the server was refusing deletions, looked exactly like a
+  destination being kept tidy. Failures are now recorded in the log.
+
+### Internal
+
+- The WordPress installation root that a restore confines every write
+  against — the value every path check downstream is measured from — existed
+  as six identical copies. None had drifted, but nothing would have noticed
+  if one had. It has one home now.
+- The release check additionally verifies the two readme headers that are
+  hard errors in the directory's own validator and were checked nowhere, and
+  the coding-standards configuration now enables the input-sanitisation
+  sniff that the directory's tooling enforces and the previous local
+  configuration omitted — a finding of that kind could previously only
+  surface at a release gate, on work every local gate had already called
+  clean.
+
 ## [1.0.2] — 2026-08-05 — The rest of what the audit found
 
 Closes the remaining findings from the same full-build audit that produced
@@ -1270,6 +1311,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[1.0.3]: https://github.com/7Duckie/pontifex/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/7Duckie/pontifex/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/7Duckie/pontifex/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/7Duckie/pontifex/compare/v0.9.5...v1.0.0
