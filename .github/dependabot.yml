@@ -1,3 +1,10 @@
+# NOTE: `target-branch` below applies to routine version bumps only. GitHub
+# IGNORES it for SECURITY updates, which always open against the DEFAULT branch
+# — `main` here. Two such PRs (#209, #210) arrived that way; merging one would
+# have put a commit on `main` present in neither `staging` nor `dev`, which the
+# promotion model in ADR 0007 exists to prevent. ALWAYS check the base of a
+# Dependabot PR before merging, and retarget with `gh pr edit <n> --base dev`.
+
 version: 2
 updates:
 

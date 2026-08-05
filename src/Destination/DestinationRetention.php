@@ -10,6 +10,8 @@ declare(strict_types=1);
 namespace Pontifex\Destination;
 
 use Pontifex\Archive\ArchiveName;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * Prunes an offsite destination down to its configured number of archives.
@@ -54,14 +56,23 @@ final class DestinationRetention {
 	private int $keep;
 
 	/**
+	 * Records deletions that could not be carried out.
+	 *
+	 * @var LoggerInterface
+	 */
+	private LoggerInterface $logger;
+
+	/**
 	 * Construct a destination-retention pruner.
 	 *
-	 * @param DestinationAdapter $adapter The destination to prune.
-	 * @param int                $keep    How many archives to keep; below MIN_RETENTION keeps all.
+	 * @param DestinationAdapter   $adapter The destination to prune.
+	 * @param int                  $keep    How many archives to keep; below MIN_RETENTION keeps all.
+	 * @param LoggerInterface|null $logger  Optional. Records deletions that could not be carried out; defaults to discarding them. Trailing and optional, so no existing caller changes.
 	 */
-	public function __construct( DestinationAdapter $adapter, int $keep ) {
+	public function __construct( DestinationAdapter $adapter, int $keep, ?LoggerInterface $logger = null ) {
 		$this->adapter = $adapter;
 		$this->keep    = $keep;
+		$this->logger  = $logger ?? new NullLogger();
 	}
 
 	/**
@@ -110,6 +121,17 @@ final class DestinationRetention {
 				$deleted[] = $object->name();
 			} catch ( DestinationException $e ) {
 				// Best-effort: leave this one in place and keep pruning the rest.
+				// Recorded rather than swallowed, though — a prune that reports
+				// "removed 2" while silently failing to remove three more leaves
+				// the operator believing retention is holding when the
+				// destination is quietly filling up.
+				$this->logger->warning(
+					'Could not delete an archive from the destination; it remains in place.',
+					array(
+						'archive' => $object->name(),
+						'reason'  => $e->getMessage(),
+					)
+				);
 				continue;
 			}
 		}
