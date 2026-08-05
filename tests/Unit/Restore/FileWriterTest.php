@@ -628,7 +628,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'escapes the restore root' );
+		$this->expectExceptionMessage( 'escapes the site' );
 
 		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
 	}
@@ -642,7 +642,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'escapes the restore root' );
+		$this->expectExceptionMessage( 'escapes the site' );
 
 		$writer->write_entry( self::symlink_result( 'uploads/link', '../../../../etc/passwd' ) );
 	}
@@ -882,7 +882,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined(
 			array(
@@ -908,7 +908,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'passed through more than 40 symlinks' );
+		$this->expectExceptionMessage( 'passed through more than 40 links' );
 
 		$writer->assert_symlink_targets_confined(
 			array(
@@ -931,7 +931,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../..' ) );
 	}
@@ -945,7 +945,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../../../etc/passwd' ) );
 	}
@@ -2611,7 +2611,7 @@ final class FileWriterTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'this host could not create a test symlink' );
+		$this->expectExceptionMessage( 'this host could not create a test link' );
 
 		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/link' => 'target.txt' ) );
 	}

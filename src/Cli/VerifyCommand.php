@@ -24,6 +24,7 @@ use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\WordPress\RealWordPressContext;
@@ -249,15 +250,38 @@ final class VerifyCommand {
 			// is BROKEN; signed-but-no-key warns and stays sound.
 			$this->check_signature( $source, $public_key );
 
+			// 8. Every hash checked out, so the archive is not DAMAGED. That is a
+			// narrower fact than an operator hears in the word "sound", and the gap
+			// between the two was doing real harm: an archive that would plant a
+			// symbolic link outside the site verified as sound and was then refused
+			// by the very restore the verification was supposed to vouch for. Run
+			// the restore's own read-only preflights and report them properly.
+			$report = $this->preflight_report( $restore_runner, $source );
+
+			if ( $report->archive_is_refused() ) {
+				$this->logger->error(
+					'Verify complete: the archive is intact but a restore would refuse it.',
+					array(
+						'archive'  => $archive_path,
+						'entries'  => $entry_total,
+						'findings' => $report->archive_findings(),
+					)
+				);
+				$this->print_refused( $archive_path, $report );
+				WP_CLI::halt( 1 );
+			}
+
 			$this->logger->info(
 				'Verify complete: archive is sound.',
 				array(
-					'archive' => $archive_path,
-					'entries' => $entry_total,
+					'archive'          => $archive_path,
+					'entries'          => $entry_total,
+					'host_can_restore' => ! $report->host_cannot_restore(),
 				)
 			);
 
 			$this->print_sound( $archive_path, $entry_total, $this->describe_archive_scope( $source ) );
+			$this->print_restorability( $report );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Verify failed: archive is not sound.',
@@ -598,6 +622,126 @@ final class VerifyCommand {
 			return ScopeSummary::unreadable();
 		}
 		return ScopeSummary::describe( $scope );
+	}
+
+	/**
+	 * Run the restore's read-only preflights over the verified archive.
+	 *
+	 * The preflight comes from the runner that just did the verifying, so it is
+	 * pointed at exactly the destination a restore here would write to. That is
+	 * a real consequence worth being plain about: the confinement check resolves
+	 * through symbolic links that already exist on this site, so the same archive
+	 * can in principle report differently on two machines. It is the right trade
+	 * — "would this escape YOUR site" is the only version of the question worth
+	 * answering — but it means a verification is a statement about an archive AND
+	 * a destination.
+	 *
+	 * A runner that is not the real engine (a test fake) has no preflight to
+	 * offer, and an empty report is returned rather than one invented from
+	 * separately-built collaborators that might not agree about the destination.
+	 *
+	 * A failure to run the preflights at all is not a failure of the archive:
+	 * every hash has already been checked by the time this runs. An empty report
+	 * is returned then too, so an unreadable provenance or an unexpected error
+	 * cannot turn a sound archive into a refused one.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that verified the archive.
+	 * @param resource               $source         The archive stream, already verified.
+	 * @return PreflightReport What a restore on this host would find.
+	 */
+	private function preflight_report( RestoreRunnerInterface $restore_runner, $source ): PreflightReport {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return new PreflightReport( array() );
+		}
+
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the archive stream resource before the preflight re-reads it; not a WP_Filesystem operation.
+			rewind( $source );
+			$reader   = new ArchiveReader( $source );
+			$manifest = $reader->manifest();
+			$scope    = $reader->provenance()->scope();
+
+			return $restore_runner->preflight()->read_only_report( $source, $manifest, $scope );
+		} catch ( Throwable $error ) {
+			// Nothing in here may escape. This runs AFTER every hash has already
+			// been checked, so an exception getting out would be caught by the
+			// outer handler and reported as a BROKEN archive — turning a
+			// successful verification into a false alarm about a file that is
+			// demonstrably intact. Even the logging is guarded, because a logger
+			// that throws would do exactly that.
+			try {
+				$this->logger->warning(
+					'Verify: the restore preflights could not be run; the integrity result stands on its own.',
+					array( 'exception' => $error )
+				);
+			} catch ( Throwable $logging_failed ) {
+				unset( $logging_failed );
+			}
+			return new PreflightReport( array() );
+		}
+	}
+
+	/**
+	 * Print the refused verdict: intact bytes, but a restore would not accept it.
+	 *
+	 * Kept distinct from BROKEN on purpose. "Broken" tells somebody their backup
+	 * is damaged, which sends them to delete it and trust another copy. This
+	 * archive is not damaged — every hash matched — it is unsafe, and the right
+	 * response is completely different: find out where it came from, because a
+	 * Pontifex export never produces one.
+	 *
+	 * @param string          $archive_path The archive that was verified.
+	 * @param PreflightReport $report       The findings that condemn it.
+	 * @return void
+	 */
+	private function print_refused( string $archive_path, PreflightReport $report ): void {
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::log(
+			sprintf(
+				/* translators: %s: the archive path */
+				__( 'Archive is REFUSED: every hash matched, so the file is not damaged — but a restore would refuse it. (%s)', 'pontifex' ),
+				$redactor->redact( $archive_path )
+			)
+		);
+		foreach ( $report->archive_findings() as $message ) {
+			WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+		}
+		WP_CLI::log(
+			__( 'Pontifex never produces an archive like this. Treat it as untrusted and find out where it came from.', 'pontifex' )
+		);
+	}
+
+	/**
+	 * Print what a restore on THIS host would still hit, without changing the verdict.
+	 *
+	 * Deliberately never fails the command. A full disk or a host that cannot
+	 * create symbolic links says nothing about the backup — and reporting it as a
+	 * verification failure would tell somebody their only copy was bad, which is
+	 * the one message capable of talking a person out of a good backup.
+	 *
+	 * The host's symbolic-link capability is not among these: establishing it
+	 * requires creating a link, and verify writes nothing. `wp pontifex doctor`
+	 * answers that question, and `import --dry-run` settles it for a specific
+	 * archive.
+	 *
+	 * @param PreflightReport $report The findings.
+	 * @return void
+	 */
+	private function print_restorability( PreflightReport $report ): void {
+		if ( ! $report->host_cannot_restore() ) {
+			return;
+		}
+
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::warning(
+			__( 'The backup is fine, but this host could not restore it right now:', 'pontifex' )
+		);
+		foreach ( $report->host_findings() as $message ) {
+			WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+		}
+		WP_CLI::log(
+			__( 'This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore.', 'pontifex' )
+		);
 	}
 
 	/**

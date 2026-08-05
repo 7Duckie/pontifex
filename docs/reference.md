@@ -88,9 +88,12 @@ Restores an archive over the current site.
 | `--passphrase-stdin` | Read the decryption passphrase from stdin. |
 | `--public-key=<path>` | Require a valid signature from this key. |
 
-`--dry-run` runs the signature and scope gates but **not** the disk-space or
-symlink preflights, which live in the restore path. A clean dry run is not a
-promise a real restore will proceed.
+`--dry-run` is a full rehearsal: it runs every gate and every preflight a real
+restore runs — signature, scope, host symlink capability, symlink target
+confinement, free space — and writes nothing. The host capability probe creates
+and removes one test symbolic link, which is the only thing a dry run touches
+and the only check `verify` cannot perform. See
+[ADR 0023](adr/0023-verify-and-restorability.md).
 
 ### `wp pontifex verify <archive>`
 
@@ -101,9 +104,28 @@ promise a real restore will proceed.
 | `--passphrase-stdin` | Read a passphrase from stdin. |
 | `--public-key=<path>` | Require a valid signature from this key. |
 
-Verify checks structure, the entry-count ceiling, and per-entry hashes. It does
-not decode payloads, so it does not test a passphrase and does not run the
-restore-time preflights. See [section 5](#5-the-restore-pipeline).
+Verify checks structure, the entry-count ceiling, and per-entry hashes, then
+runs every restore preflight that writes nothing: scope-versus-manifest,
+symlink target confinement, and free space. Three outcomes, distinguished by
+exit code and wording:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| Sound | 0 | Undamaged, and a restore would accept it. |
+| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, or contents contradicting the recorded scope. |
+| Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
+
+A finding against the **host** — no free space — is reported as a warning
+alongside a sound verdict, never as the verdict: a full disk is not a damaged
+backup. The host symlink-capability probe is not run, because establishing it
+requires creating a link; use `doctor`, or `import --dry-run` for a specific
+archive. Verify does not decode payloads, so it still does not test a
+passphrase.
+
+Because confinement is resolved against this site's own root, a verification is
+a statement about an archive **and** a destination. See
+[ADR 0023](adr/0023-verify-and-restorability.md) and
+[section 5](#5-the-restore-pipeline).
 
 ### `wp pontifex rollback`
 
