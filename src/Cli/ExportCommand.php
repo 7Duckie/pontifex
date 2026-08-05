@@ -1201,10 +1201,10 @@ final class ExportCommand {
 			return;
 		}
 		if ( $db_only ) {
-			WP_CLI::log( __( 'Scope: database-only (the full database, no files). Its restore writes only the database.', 'pontifex' ) );
+			WP_CLI::log( __( 'Scope: database-only (every table belonging to this WordPress site, no files). Its restore writes only the database.', 'pontifex' ) );
 			return;
 		}
-		WP_CLI::log( __( 'Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone.', 'pontifex' ) );
+		WP_CLI::log( __( 'Scope: content-only (wp-content plus every table belonging to this WordPress site). Use --whole-site for a full-site clone.', 'pontifex' ) );
 	}
 
 	/**
