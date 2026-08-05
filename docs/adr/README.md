@@ -127,6 +127,11 @@ What follows from this choice — positive, negative, and neutral?
   A pinned trusted public key is enforced in the browser on the upload path, the only moment an archive's arrival from outside can be observed; local, scheduled and safety archives stay exempt so no recovery path can lock out.
 - [ADR 0021](./0021-symlink-target-confinement.md) —
   A symlink's target, not just its path, is confined to the site root by resolving it the way the kernel would, over the archive's whole declared set of links at once, before the first byte of a restore is written.
+- [ADR 0022](./0022-exception-taxonomy.md) —
+  Three kinds of refusal — an untrustworthy archive, a host that cannot
+  comply, an invalid request — under one marker interface, so a caller can
+  tell them apart instead of collapsing every failure into one message.
+  Adopted incrementally; the SPL parents are kept so no existing catch changes.
 
 ## Further reading
 

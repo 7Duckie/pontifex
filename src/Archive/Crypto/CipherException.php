@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Archive\Crypto;
 
+use Pontifex\Exception\PontifexException;
+
 use RuntimeException;
 
 /**
@@ -27,5 +29,5 @@ use RuntimeException;
  * Not marked `final`, mirroring {@see \Pontifex\Archive\Codec\CodecException}:
  * a caller that benefits from a finer-grained distinction may subclass it.
  */
-class CipherException extends RuntimeException {
+class CipherException extends RuntimeException implements PontifexException {
 }
