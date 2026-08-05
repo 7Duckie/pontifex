@@ -1944,6 +1944,63 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A directory the archive records as unwritable still receives its contents.
+	 *
+	 * Directory entries sort ahead of the files inside them, so applying a
+	 * restrictive mode when the directory is written made it unwritable before
+	 * those files arrived. A source site with a hardened
+	 * `wp-content/uploads/private` at 0555 — a documented WordPress lockdown
+	 * step, and what several security plugins apply — exported happily, because
+	 * 0555 is readable, and then failed its own restore on the very next entry.
+	 *
+	 * Nothing preflights directory modes, so the refusal landed mid-walk: the
+	 * one place with no recovery, because the file half is a merge with no
+	 * per-entry undo. Everything sorting before that directory was already the
+	 * archive's content and everything after was still the old site.
+	 *
+	 * @return void
+	 */
+	public function test_a_read_only_directory_still_receives_the_files_inside_it(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'wp-content/uploads/private', 0o555 ) );
+		$writer->write_entry( self::file_result( 'wp-content/uploads/private/secret.txt', 'kept' ) );
+
+		$path = $this->fixture_root . '/wp-content/uploads/private/secret.txt';
+		$this->assertFileExists( $path, 'A file inside a 0555 directory must still be restored.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading a fixture file from the temp tree; not an HTTP request.
+		$this->assertSame( 'kept', file_get_contents( $path ) );
+	}
+
+	/**
+	 * The recorded mode is applied once the walk finishes, not before.
+	 *
+	 * The counterweight: holding the mode back must not mean losing it. A
+	 * directory the archive says is 0555 has to end up 0555, or the restore has
+	 * quietly relaxed the source site's permissions.
+	 *
+	 * @return void
+	 */
+	public function test_a_held_back_directory_mode_is_applied_after_the_walk(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'wp-content/uploads/private', 0o555 ) );
+		$writer->write_entry( self::file_result( 'wp-content/uploads/private/secret.txt', 'kept' ) );
+
+		$dir = $this->fixture_root . '/wp-content/uploads/private';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- Asserting the real mode on the temp fixture tree is the behaviour under test.
+		$this->assertTrue( is_writable( $dir ), 'The directory stays writable while the walk is in progress.' );
+
+		$this->assertSame( array(), $writer->finalise_directory_modes(), 'Every held-back mode applies cleanly here.' );
+
+		clearstatcache( true, $dir );
+		$this->assertSame( 0o555, fileperms( $dir ) & 0o777, 'The archive\'s recorded mode is what the directory ends at.' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test teardown: the fixture tree must be removable.
+		chmod( $dir, 0o755 );
+	}
+
+	/**
 	 * A raw path of exactly "." normalises to empty and is refused, for a DIRECTORY entry.
 	 *
 	 * The concrete, demonstrated failure mode this guard closes: without

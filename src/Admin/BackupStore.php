@@ -13,6 +13,7 @@ use DateTimeImmutable;
 use DateTimeZone;
 use Pontifex\Filesystem\ProtectedDirectory;
 use RuntimeException;
+use Pontifex\Archive\ArchiveName;
 
 /**
  * Manages `wp-content/pontifex/backups/` and the backups within it.
@@ -67,9 +68,14 @@ final class BackupStore {
 	 * Anchored at both ends and admitting only the prefix, a `Ymd\THis\Z` UTC
 	 * stamp, and the extension — nothing that could carry a path separator.
 	 *
+	 * Deferred to {@see ArchiveName::PATTERN} so this and remote retention
+	 * cannot drift: retention's sort treats name order as age order, which holds
+	 * only for this shape, and the two used to hold separate copies of the rule
+	 * while the SFTP adapter accepted any `.wpmig` at all.
+	 *
 	 * @var string
 	 */
-	private const NAME_PATTERN = '/^pontifex-backup-\d{8}T\d{6}Z\.wpmig$/';
+	private const NAME_PATTERN = ArchiveName::PATTERN;
 
 	/**
 	 * The format a backup's UTC timestamp is encoded with in its name.
