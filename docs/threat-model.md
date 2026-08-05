@@ -113,9 +113,12 @@ is untrusted.
   runs regardless. Before any of this is even judged, the host is asked
   whether it can create a symlink at all, once per distinct directory a
   declared link would land in — collapsed to the nearest directory that
-  already exists, since the walk creates the rest as it goes, and
-  bounded so a hostile archive cannot turn the preflight itself into
-  thousands of filesystem operations
+  already exists, since the walk creates the rest as it goes. Every
+  declared link is resolved and walked before this cap is even
+  consulted, so the cap bounds only the number of real
+  create-a-test-symlink probes, not that per-link resolution work:
+  above 64 distinct directories the preflight probes their deepest
+  common ancestor instead of each one individually
   (`FileWriter::assert_symlinks_creatable()`) — a host with `symlink`
   in `disable_functions` (common on shared hosting) would otherwise be
   discovered only once the write walk reached the archive's first
@@ -444,7 +447,10 @@ defend against, and stating them explicitly keeps the model honest.
   the preflight, a host restriction the preflight did not anticipate, a
   hard kill of the PHP process). The default pre-import safety archive
   (ADR 0005) is the recovery path for a restore that fails this way, not
-  an in-flight undo.
+  an in-flight undo — and it is itself a merge, not a reversal: replaying
+  it puts back what it captured but removes nothing the failed restore
+  wrote that the site never had, so a site must be inspected after a
+  failed restore rather than assumed restored.
 - **Denial of service against the running plugin.** An administrator
   can disable a misbehaving plugin from wp-admin; a non-admin should
   not have reach into the plugin's endpoints at all. DoS-grade bugs

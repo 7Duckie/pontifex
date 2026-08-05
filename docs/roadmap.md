@@ -398,8 +398,9 @@ line already honoured.
   with no key configured is unaffected.
 
 - **Pontifex's own working directory is refused as a restore destination** — that
-  namespace holds the safety archives a restore creates as its undo, the `.htaccess`
-  keeping whole-database backups out of web reach, and the admin backup list.
+  namespace holds the safety archives a restore creates as its undo, the
+  best-effort `.htaccess` that keeps whole-database backups out of web reach on
+  Apache, and the admin backup list.
 
 - **Backups you can read back** — the export refuses before writing an archive its own
   reader could not open, the entry ceiling rises from 50,000 to 100,000, and the

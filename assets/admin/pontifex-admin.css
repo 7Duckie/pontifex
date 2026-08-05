@@ -531,9 +531,10 @@
 /*
  * The browser's native file control is replaced entirely with the Swiss
  * vocabulary. The real input is visually hidden (but remains the accessible,
- * focusable control); a sharp outlined label triggers it — ink hairline, no
- * fill, inverting to ink on hover, distinct from the solid-accent primary
- * "Upload" button — and the chosen filename shows as a muted caption.
+ * focusable control); a sharp outlined label triggers it — muted hairline, no
+ * fill, darkening to an ink hairline over a subtle fill tint on hover,
+ * distinct from the solid-accent primary "Upload" button — and the chosen
+ * filename shows as a muted caption.
  */
 .pontifex-admin .pontifex-upload-field {
 	display: flex;
@@ -583,10 +584,10 @@
 /* Relink checkbox ----------------------------------------------------------- */
 
 /*
- * The opt-in relink control: a sharp square box (ink hairline, filling with the
- * accent and a white tick when ticked) beside its label, replacing the rounded
- * OS checkbox. Restraint over alarm — the accent marks the active state, nothing
- * signals warning.
+ * The opt-in relink control: a sharp square box (muted hairline at rest,
+ * filling with the accent and a white tick when ticked) beside its label,
+ * replacing the rounded OS checkbox. Restraint over alarm — the accent marks
+ * the active state, nothing signals warning.
  */
 .pontifex-admin .pontifex-action-toggle {
 	display: flex;
