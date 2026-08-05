@@ -219,6 +219,16 @@
 		hashes.textContent = cfg.strings.assuranceHashes;
 		panel.appendChild( hashes );
 
+		// Whether THIS server could restore it is a separate statement from whether
+		// the backup is intact, and is rendered as one so it can never be read as
+		// part of the verdict. A full disk is not a damaged backup.
+		if ( proof.restorability ) {
+			var restorability = document.createElement( 'p' );
+			restorability.className = 'pontifex-proof-assurance';
+			restorability.textContent = proof.restorability;
+			panel.appendChild( restorability );
+		}
+
 		var documented = document.createElement( 'p' );
 		documented.className = 'pontifex-proof-assurance';
 		documented.appendChild( document.createTextNode( cfg.strings.assuranceDocumented + ' ' ) );
@@ -248,6 +258,33 @@
 		clearProof();
 
 		panel.appendChild( verdictLine( cfg.strings.verdictBroken ) );
+
+		if ( message ) {
+			var detail = document.createElement( 'p' );
+			detail.className = 'pontifex-proof-assurance';
+			detail.textContent = message;
+			panel.appendChild( detail );
+		}
+
+		panel.hidden = false;
+	}
+
+	/**
+	 * Render the panel for a refused verify — intact bytes a restore will not accept.
+	 *
+	 * Its own verdict rather than a variant of broken, because the two call for
+	 * opposite actions from whoever reads them.
+	 *
+	 * @param {string} message The refused verdict's message from the server.
+	 */
+	function renderRefused( message ) {
+		var panel = proofEl();
+		if ( ! panel ) {
+			return;
+		}
+		clearProof();
+
+		panel.appendChild( verdictLine( cfg.strings.verdictRefused ) );
 
 		if ( message ) {
 			var detail = document.createElement( 'p' );
@@ -433,6 +470,17 @@
 		if ( res && res.success && data && true === data.sound ) {
 			setText( 'pontifex-verify-result', '' );
 			renderProof( data.proof );
+			return;
+		}
+
+		// Refused is not broken, and must not be shown as broken. "Broken" tells
+		// somebody their backup is damaged, which sends them to delete it and reach
+		// for another copy. A refused archive is undamaged and unsafe — every hash
+		// matched — and the right response is the opposite: keep it, do not restore
+		// it, and find out where it came from.
+		if ( res && res.success && data && false === data.sound && true === data.refused ) {
+			setText( 'pontifex-verify-result', '' );
+			renderRefused( data.message );
 			return;
 		}
 

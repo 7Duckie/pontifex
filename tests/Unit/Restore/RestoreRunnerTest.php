@@ -869,7 +869,7 @@ final class RestoreRunnerTest extends TestCase {
 		}
 
 		$this->assertInstanceOf( RuntimeException::class, $thrown );
-		$this->assertStringContainsString( 'this host could not create a test symlink', $thrown->getMessage() );
+		$this->assertStringContainsString( 'this host could not create a test link', $thrown->getMessage() );
 		$this->assertFileDoesNotExist(
 			$this->fixture_root . '/somefile.txt',
 			'A restore refused for lacking symlink capability must not have written the file entry that follows the symlink in the archive.'
@@ -886,7 +886,7 @@ final class RestoreRunnerTest extends TestCase {
 	 * judging whether an escaping target is SAFE on a host that could never
 	 * create the link in the first place. An escaping target combined with a
 	 * refusing probe must surface the "could not create a test symlink"
-	 * message, never the "escapes the restore root" message.
+	 * message, never the "escapes the site" message.
 	 *
 	 * @return void
 	 */
@@ -915,8 +915,8 @@ final class RestoreRunnerTest extends TestCase {
 
 			$this->assertInstanceOf( RuntimeException::class, $thrown );
 			$message = $thrown->getMessage();
-			$this->assertStringContainsString( 'this host could not create a test symlink', $message );
-			$this->assertStringNotContainsString( 'escapes the restore root', $message );
+			$this->assertStringContainsString( 'this host could not create a test link', $message );
+			$this->assertStringNotContainsString( 'escapes the site', $message );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the out-of-root target.
 			@rmdir( $outside );

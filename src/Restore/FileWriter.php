@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\HostCannotComply;
 
 use Closure;
@@ -458,7 +459,7 @@ final class FileWriter {
 		if ( $free < $needed ) {
 			throw new HostCannotComply(
 				sprintf(
-					'FileWriter: the restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
+					'The restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->destination_root is plugin-derived, not web output; reported verbatim for diagnostic context.
 					$this->destination_root,
 					(int) ceil( $needed / self::BYTES_PER_MEGABYTE ),
@@ -552,7 +553,7 @@ final class FileWriter {
 
 			throw new HostCannotComply(
 				sprintf(
-					'FileWriter: this archive contains %d symbolic link(s), but this host could not create a test symlink in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
+					'This backup contains %d symbolic link(s), but this host could not create a test link in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
 					count( $declared_links ),
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $directory is plugin-derived (built from the destination root and the archive's own already-normalised declared paths), not web output; reported verbatim for diagnostic context.
 					$directory
@@ -875,7 +876,7 @@ final class FileWriter {
 	 *
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
 	 * @return void
-	 * @throws RuntimeException If any declared link's target resolves somewhere this restore will not allow.
+	 * @throws ArchiveNotTrustworthy If any declared link's target resolves somewhere this restore will not allow.
 	 */
 	public function assert_symlink_targets_confined( array $declared_links ): void {
 		if ( $this->allow_unsafe_symlinks ) {
@@ -955,17 +956,17 @@ final class FileWriter {
 	 * @param array<array-key, string>      $exact       Every declared link, keyed by its exact normalised path.
 	 * @param array<array-key, string|null> $folded      The same, keyed by lower-cased path; null marks a key whose spellings disagree.
 	 * @return void
-	 * @throws RuntimeException If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
+	 * @throws ArchiveNotTrustworthy If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
 	 */
 	private function assert_symlink_target_confined( string $link_path, string $raw_target, array $exact, array $folded ): void {
 		if ( self::is_absolute_path( $raw_target ) ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" is an absolute path, so it is not confined to this site at all. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" is an absolute path, so it is not confined to this site at all. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$root_components = self::path_components( $this->destination_root );
@@ -996,13 +997,13 @@ final class FileWriter {
 			++$hops;
 			if ( $hops > self::MAX_SYMLINK_HOPS ) {
 				$message = sprintf(
-					'FileWriter: refusing symlink "%s": resolving its target "%s" passed through more than %d symlinks, so the archive contains a symlink loop or a chain no filesystem would follow.',
+					'Refusing the symbolic link "%s": resolving its target "%s" passed through more than %d links, so this backup contains a loop or a chain no filesystem would follow.',
 					$link_path,
 					$raw_target,
 					self::MAX_SYMLINK_HOPS
 				);
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-				throw new RuntimeException( $message );
+				throw new ArchiveNotTrustworthy( $message );
 			}
 
 			// An absolute target restarts resolution at the filesystem root, which
@@ -1045,7 +1046,7 @@ final class FileWriter {
 	 * @param string                        $link_path       The link being judged, for the diagnostic message only.
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
-	 * @throws RuntimeException If two declared spellings of one path disagree, or an on-disk link cannot be read.
+	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1061,13 +1062,13 @@ final class FileWriter {
 			if ( array_key_exists( $folded_key, $folded ) ) {
 				if ( null === $folded[ $folded_key ] ) {
 					$message = sprintf(
-						'FileWriter: refusing symlink "%s": resolving its target "%s" reaches "%s", which the archive declares more than once with different targets, differing only in letter case. Which one a destination filesystem would keep cannot be decided, so this archive is refused.',
+						'Refusing the symbolic link "%s": resolving its target "%s" reaches "%s", which this backup declares more than once with different targets, differing only in letter case. Which one a filesystem would keep cannot be decided, so the backup is refused.',
 						$link_path,
 						$raw_target,
 						$relative
 					);
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link paths and targets for diagnostic context; exception path, not HTML output.
-					throw new RuntimeException( $message );
+					throw new ArchiveNotTrustworthy( $message );
 				}
 				return $folded[ $folded_key ];
 			}
@@ -1085,13 +1086,13 @@ final class FileWriter {
 			// is a component whose destination is unknown, and an unknown here is
 			// indistinguishable from an escape.
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": resolving its target "%s" reaches the existing symlink "%s", whose own target could not be read, so where this link would point cannot be established.',
+				'Refusing the symbolic link "%s": resolving its target "%s" reaches the existing link "%s", whose own target could not be read, so where this link would point cannot be established.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		return $on_disk_target;
@@ -1133,7 +1134,7 @@ final class FileWriter {
 	 * @param array<int, string> $resolved        Where the target finally landed, as absolute components.
 	 * @param array<int, string> $root_components The destination root, as components.
 	 * @return void
-	 * @throws RuntimeException If the resolved target is not a strict descendant of the root, or is one of the named locations.
+	 * @throws ArchiveNotTrustworthy If the resolved target is not a strict descendant of the root, or is one of the named locations.
 	 */
 	private function assert_resolved_target_confined( string $link_path, string $raw_target, array $resolved, array $root_components ): void {
 		$root_depth = count( $root_components );
@@ -1141,14 +1142,14 @@ final class FileWriter {
 
 		if ( count( $resolved ) <= $root_depth || array_slice( $resolved, 0, $root_depth ) !== $root_components ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", which is not inside the restore root "%s". Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", which is not inside the site at "%s". Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute,
 				$this->destination_root
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus plugin-derived paths, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		foreach ( $this->wp_config_paths() as $wp_config_path ) {
@@ -1156,25 +1157,25 @@ final class FileWriter {
 				continue;
 			}
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", this site\'s own wp-config.php, which holds the database password and the authentication salts. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", this site\'s own wp-config.php, which holds the database password and the authentication salts. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$relative = implode( '/', array_slice( $resolved, $root_depth ) );
 		if ( self::is_pontifex_working_path( $relative, $this->destination_is_case_sensitive() ) ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", inside Pontifex\'s own working directory, where this site\'s stored backups live. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", inside Pontifex\'s own working directory, where this site\'s stored backups live. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 	}
 
@@ -2043,7 +2044,7 @@ final class FileWriter {
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: refusing symlink "%s" whose target "%s" escapes the restore root. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
+				sprintf( 'Refusing the symbolic link "%s" whose target "%s" escapes the site. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
 			);
 		}
 

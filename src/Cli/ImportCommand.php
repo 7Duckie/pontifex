@@ -472,6 +472,16 @@ final class ImportCommand {
 				$restore_runner->verify( $source, $on_entry );
 				$this->progress->finish();
 
+				// A dry run is a rehearsal, so it settles the same questions the real
+				// import settles — including the ones that need this host, and
+				// including the symlink capability probe, which briefly creates and
+				// removes a test link. That probe is the one thing a dry run does
+				// that `verify` cannot: verify promises to write nothing, and a
+				// rehearsal of a restore has made no such promise. Without it,
+				// --dry-run was running strictly FEWER checks than the operation it
+				// claimed to rehearse, which is the opposite of what the flag is for.
+				$this->rehearse_restore( $restore_runner, $source, $archive_path );
+
 				$this->logger->info(
 					'Import dry-run complete.',
 					array(
@@ -1215,6 +1225,59 @@ final class ImportCommand {
 				$archive_path
 			)
 		);
+	}
+
+	/**
+	 * Rehearse the restore's own preflights, so a dry run answers the real question.
+	 *
+	 * `--dry-run` used to call verify() and nothing else, which meant it ran
+	 * strictly FEWER checks than the import it claimed to rehearse: an archive
+	 * whose symbolic links escape the site, or a host with no room and no ability
+	 * to create a link, all passed the dry run and were then refused by the real
+	 * thing. A rehearsal that cannot fail where the performance fails is not a
+	 * rehearsal.
+	 *
+	 * So this runs everything the import runs, in the same order, and lets the
+	 * refusals throw exactly as they would then — including the host capability
+	 * probe, which briefly creates and removes a test symbolic link. That single
+	 * transient write is the whole difference between a dry run and a verify, and
+	 * it is legitimate here: someone asking to rehearse a restore has not been
+	 * promised that nothing at all will be touched.
+	 *
+	 * The preflight is taken from the runner that would have done the restore,
+	 * never rebuilt. Rebuilding it would mean constructing a second FileWriter
+	 * over a separately-derived destination root, and two objects that are
+	 * supposed to describe the same directory but derive it independently is a
+	 * disagreement nothing would catch. A runner that is not the real engine — a
+	 * test fake — has no preflight to offer and no restore to rehearse, so the
+	 * rehearsal is skipped rather than faked.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that would have restored.
+	 * @param resource               $archive_source The open archive stream.
+	 * @param string                 $archive_path   The archive path, for the log.
+	 * @return void
+	 * @throws \Pontifex\Exception\ArchiveNotTrustworthy If the archive would be refused.
+	 * @throws \Pontifex\Exception\HostCannotComply      If this host could not complete the restore.
+	 */
+	private function rehearse_restore( RestoreRunnerInterface $restore_runner, $archive_source, string $archive_path ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the preflights re-read it; not a WP_Filesystem operation.
+		rewind( $archive_source );
+		$reader   = new ArchiveReader( $archive_source );
+		$manifest = $reader->manifest();
+		$scope    = $reader->provenance()->scope();
+
+		$preflight = $restore_runner->preflight();
+
+		$preflight->assert_scope_consistent_with_manifest( $scope, $manifest );
+		$declared_links = $preflight->assert_host_can_write( $archive_source, $manifest );
+		$preflight->assert_symlink_targets_confined( $declared_links );
+		$preflight->assert_free_space_for( $manifest );
+
+		$this->logger->info( 'Import dry-run: every restore preflight passed.', array( 'archive' => $archive_path ) );
 	}
 
 	/**
