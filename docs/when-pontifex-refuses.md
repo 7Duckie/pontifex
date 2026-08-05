@@ -268,6 +268,25 @@ whether the bytes about to overwrite your live site are the bytes you backed
 up. Skipping it would not repair the archive — the damage already happened — it
 would just turn a loud, safe failure into a silent one.
 
+### "This backup could not be read, so it was not checked"
+
+**An access problem, not a damaged backup — and the distinction matters.**
+
+**What happened.** The file is there, but this site cannot open it. Almost
+always a permissions or ownership problem: a backup written by one user and
+read by another, which happens easily when some backups are taken on the
+command line and others through the browser.
+
+**Your backup is very probably fine.** Nothing about its contents has been
+checked, because nothing could be read. Do not replace it, and do not go back
+to an older one on the strength of this message.
+
+**What to do.** Check the ownership and permissions of the backup file and of
+`wp-content/pontifex`. The web server user needs to be able to read both. If
+you have shell access, `wp pontifex verify` will often succeed where the
+browser cannot, because it runs as a different user — and that succeeding is
+itself the diagnosis.
+
 ### "this archive's manifest needs about N MB to open"
 
 **Common on shared hosting with large sites. An environment problem.**

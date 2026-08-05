@@ -363,11 +363,24 @@ final class OperationLock {
 	 * export job and no fresh progress — is not a live backup, whatever the
 	 * holder transient claims.
 	 *
+	 * A SIGNED resumable export is the one active job that is not live. Signing
+	 * needs the operator's private key on every tick and that key is never
+	 * stored with the job, so {@see \Pontifex\Schedule\JobTicker} deliberately
+	 * parks such a job and stops the cron chain: only the command that started
+	 * it can finish it, with `wp pontifex export --resume`. The job stays active
+	 * because it is genuinely still resumable — but nothing is advancing it, and
+	 * counting it as live held this lock for as long as the job existed. Every
+	 * backup, restore and rollback was then refused indefinitely, on both
+	 * surfaces, with no message anywhere saying why or how to clear it. Parked
+	 * is not running. `--resume` reaches its own job through
+	 * $adopting_active_backup, so releasing the lock here does not let anything
+	 * else interfere with it.
+	 *
 	 * @return bool True when a backup is currently running.
 	 */
 	private function backup_is_live(): bool {
 		$job = $this->job_store->active_job();
-		if ( null !== $job && Job::KIND_EXPORT === $job->kind() ) {
+		if ( null !== $job && Job::KIND_EXPORT === $job->kind() && ! self::is_parked_signed_export( $job ) ) {
 			return true;
 		}
 
@@ -382,6 +395,24 @@ final class OperationLock {
 		}
 
 		return ( ( $this->now )() - $this->counter_int( $progress, 'at' ) ) <= self::PROGRESS_STALE_SECONDS;
+	}
+
+	/**
+	 * Whether this active export job is a signed resumable one that cron has parked.
+	 *
+	 * Such a job is still perfectly resumable — but only by the command that
+	 * started it, which holds the signing key. No background tick will ever
+	 * advance it, so it must not be read as a backup in progress.
+	 *
+	 * The payload flag is the same one {@see \Pontifex\Schedule\JobTicker} reads
+	 * when it decides to park the job, so the two cannot disagree about which
+	 * jobs this covers.
+	 *
+	 * @param Job $job The active export job.
+	 * @return bool True when the job is a signed resumable export awaiting its operator.
+	 */
+	private static function is_parked_signed_export( Job $job ): bool {
+		return true === ( $job->payload()['signed'] ?? false );
 	}
 
 	/**
