@@ -11,7 +11,6 @@
  * License:           GPL-2.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       pontifex
- * Network:           false
  *
  * @package Pontifex
  */
@@ -100,6 +99,14 @@ if ( function_exists( 'is_multisite' ) && is_multisite() ) {
 	 * Hard (stop loading) rather than soft, unlike the WordPress version
 	 * floor: an old WordPress still backs up correctly, whereas here the
 	 * plugin cannot see most of the network it appears to be protecting.
+	 *
+	 * This check is the whole protection. There is deliberately no
+	 * `Network:` header — WordPress accepts that field only as `true`,
+	 * meaning "must be network-activated", and omitting it is how a plugin
+	 * declines. `Network: false` is rejected outright by Plugin Check. The
+	 * check here is the stronger guarantee in any case: it fires on a
+	 * multisite install however the plugin was activated, rather than only
+	 * refusing one route onto it.
 	 */
 	add_action(
 		'admin_notices',
