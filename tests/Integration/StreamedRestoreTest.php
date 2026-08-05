@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Integration;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use PHPUnit\Framework\AssertionFailedError;
 use RuntimeException;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 use Pontifex\Archive\Codec\CodecRegistry;
@@ -113,11 +114,63 @@ final class StreamedRestoreTest extends TestCase {
 	}
 
 	/**
-	 * A tampered large entry is refused with nothing written to the destination.
+	 * A tampered large entry is refused by the incremental hash check.
+	 *
+	 * Asserts the exact refusal message, not just the exception class: a
+	 * message-less expectException(RuntimeException::class) would also be
+	 * satisfied by an unrelated RuntimeException raised anywhere else on the
+	 * restore path, which would let this test keep passing after the hash
+	 * guard itself was deleted.
 	 *
 	 * @return void
 	 */
 	public function test_tampered_large_entry_is_refused_before_any_write(): void {
+		$tampered = self::tampered_archive();
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'EntryReader: entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
+
+		$this->runner()->restore( $tampered );
+	}
+
+	/**
+	 * A tampered large entry's refusal leaves nothing written to the destination.
+	 *
+	 * Split out of {@see self::test_tampered_large_entry_is_refused_before_any_write()}
+	 * because an assertion placed after an expectException()-triggering call
+	 * never runs — PHPUnit unwinds the test method the instant the expected
+	 * exception fires, so the "nothing was written" claim needs its own
+	 * try/catch. PHPUnit's own AssertionFailedError extends RuntimeException,
+	 * so it is rethrown first, before the RuntimeException catch below can see
+	 * it — otherwise a missing refusal would make self::fail() throw
+	 * AssertionFailedError, that would be caught as if it were the expected
+	 * RuntimeException, and this test would pass for the wrong reason.
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if restore() failed to throw (see the catch block below); never swallowed.
+	 */
+	public function test_tampered_large_entry_writes_nothing_to_the_destination(): void {
+		$tampered = self::tampered_archive();
+
+		try {
+			$this->runner()->restore( $tampered );
+			$this->fail( 'A tampered entry must be refused by the hash check.' );
+		} catch ( AssertionFailedError $bug ) {
+			throw $bug;
+		} catch ( RuntimeException $refusal ) {
+			unset( $refusal );
+		}
+
+		$this->assertFileDoesNotExist( $this->fixture_root . '/tampered.bin', 'Nothing may be written before the stored bytes verify.' );
+	}
+
+	/**
+	 * Build the shared tampered-large-entry fixture: one byte flipped inside the
+	 * stored payload of an otherwise-valid large file entry.
+	 *
+	 * @return resource A readable, seekable stream containing the tampered archive.
+	 */
+	private function tampered_archive() {
 		$contents = self::big_contents();
 		$archive  = $this->archive_with_file( 'tampered.bin', $contents, RawCodec::ID );
 
@@ -128,16 +181,7 @@ final class StreamedRestoreTest extends TestCase {
 		$marker = strpos( $bytes, 'PONTIFEX-TAMPER-MARKER-' );
 		$this->assertNotFalse( $marker, 'The fixture marker must be present in the raw payload.' );
 		$bytes[ $marker + 3 ] = 'X';
-		$tampered             = self::memory_stream( $bytes );
-
-		try {
-			$this->runner()->restore( $tampered );
-			$this->fail( 'A tampered entry must be refused by the hash check.' );
-		} catch ( RuntimeException $refusal ) {
-			$this->assertStringContainsString( 'hash', $refusal->getMessage() );
-		}
-
-		$this->assertFileDoesNotExist( $this->fixture_root . '/tampered.bin', 'Nothing may be written before the stored bytes verify.' );
+		return self::memory_stream( $bytes );
 	}
 
 	/**

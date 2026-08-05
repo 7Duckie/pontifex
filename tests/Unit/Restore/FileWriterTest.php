@@ -2704,6 +2704,65 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * Several distinct directories comfortably inside the ceiling are each probed individually, never folded together.
+	 *
+	 * The companion, from below, of
+	 * {@see self::test_assert_symlinks_creatable_falls_back_to_a_common_ancestor_beyond_the_probe_ceiling()}
+	 * just below, which pins the ceiling from above with 200 directories — a
+	 * count that clears any ceiling from 1 up to 199, so on its own it cannot
+	 * tell a ceiling of 64 apart from a ceiling of 1. Five distinct,
+	 * already-existing directories is the real Composer/pnpm-shaped layout this
+	 * preflight's own docblock describes — not a hostile archive — and MUST
+	 * still be probed one directory at a time: that is the precise
+	 * per-directory capability check ADR 0021 depends on, and the whole reason
+	 * the fallback below is a fallback rather than the rule. If the ceiling
+	 * were silently lowered to, say, 1, this legitimate five-directory archive
+	 * would collapse to the single, weaker deepest-common-ancestor probe
+	 * instead — a host can permit symlink creation under one of the five
+	 * directories while refusing it under another, and only probing each one
+	 * separately can tell them apart.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_probes_several_directories_individually_within_the_ceiling(): void {
+		$expected_directories = array();
+		$links                = array();
+
+		for ( $index = 0; $index < 5; $index++ ) {
+			$package_directory = 'wp-content/plugins/shop/node_modules/.pnpm/pkg-' . $index;
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; every directory exists, as it would when restoring over the site the archive came from.
+			mkdir( $this->fixture_root . '/' . $package_directory, 0o755, true );
+			$links[ $package_directory . '/link' ] = 'target.txt';
+			$expected_directories[]                = realpath( $this->fixture_root ) . '/' . $package_directory;
+		}
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( $links );
+
+		$this->assertCount(
+			5,
+			$probed,
+			'Five distinct directories inside the ceiling must each be probed once; a single, folded-together probe means the fallback fired when it must not have.'
+		);
+		$this->assertEqualsCanonicalizing(
+			$expected_directories,
+			$probed,
+			'Inside the ceiling, every distinct directory must be probed on its own — the shared-ancestor fallback is reserved for archives that exceed it.'
+		);
+	}
+
+	/**
 	 * Links spread across more directories than the ceiling fall back to a common ancestor, never a refusal.
 	 *
 	 * Refusing here was tried and was wrong: it broke the one path a user cannot

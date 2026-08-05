@@ -628,7 +628,7 @@ final class InvokeBranchesTest extends TestCase {
 	 * @return void
 	 */
 	public function test_invoke_refuses_an_unsigned_archive_when_a_key_is_supplied(): void {
-		self::write_archive_to( $this->temp_archive_path, null );
+		self::write_archive_to( $this->temp_archive_path, null, Scope::content_only( array() ) );
 		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
 
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
@@ -676,7 +676,7 @@ final class InvokeBranchesTest extends TestCase {
 	 */
 	public function test_invoke_refuses_a_stripped_signature_when_a_key_is_supplied(): void {
 		$keypair = SigningKeypair::generate();
-		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ), Scope::content_only( array() ) );
 		SigningKeys::write_keypair( $keypair, $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
 		self::strip_signature( $this->temp_archive_path );
 
@@ -805,7 +805,7 @@ final class InvokeBranchesTest extends TestCase {
 	 */
 	public function test_invoke_aborts_before_restore_on_a_bad_signature(): void {
 		$keypair = SigningKeypair::generate();
-		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ) );
+		self::write_archive_to( $this->temp_archive_path, SigningContext::from_keypair( $keypair ), Scope::content_only( array() ) );
 		// A different keypair's public key — so the signature will not verify.
 		SigningKeys::write_keypair( SigningKeypair::generate(), $this->temp_archive_path . '.key', $this->temp_archive_path . '.pub' );
 
