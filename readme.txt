@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 1.0.2
+Stable tag: 1.0.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.0.3 =
+* Closes the last of the findings from the audit behind 1.0.1 and 1.0.2. Fixed: the Backup screen silently rewrote the exclusion patterns you typed, stripping every percent sign followed by two hex digits — sensible for a web address, wrong for a file path, where those are just characters in a name. `wp-content/uploads/2024%2F*` became `wp-content/uploads/2024*`, which leaves out vastly more than you asked, and those files were missing from every backup afterwards; a scheduled backup stores the pattern, so every unattended run reused the rewritten version. If you use exclusion patterns containing a percent sign, check them on the Backup screen and take a fresh backup. Fixed: pruning an offsite destination reported how many old backups it removed but nothing about the ones it could not, so a destination quietly filling up looked like a destination being kept tidy. No breaking changes.
+
 = 1.0.2 =
 * Closes the rest of the findings from the audit behind 1.0.1. Fixed: automatic pruning of offsite backups could delete the NEWEST one if you had named it yourself rather than letting Pontifex name it — the backup you took just before an upgrade was exactly the shape at risk, so re-check any offsite destination you prune. Fixed: a restore stopped part-way through if the backup contained a read-only directory, such as a hardened uploads folder, leaving a site that was neither the old one nor the backup. Fixed: on Windows, downloading, deleting, verifying or restoring from the admin screen all reported the backup could not be found, even though it was listed there. Fixed: several screens said a backup contains the whole database — it contains the tables belonging to this WordPress site, so tables another application keeps in the same database are not included. Pontifex can also now tell you which kind of problem it hit rather than one generic message. No breaking changes.
 
@@ -151,6 +154,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.0.3 =
+If you use exclusion patterns containing a percent sign, check them on the Backup screen: they were being silently rewritten to exclude far more than you asked, so files were missing from every backup. Pruning an offsite destination now reports deletions it could not make.
 
 = 1.0.2 =
 Pruning of offsite backups could delete the newest one if you named it yourself; re-check any destination you prune. A read-only directory in a backup could stop a restore part-way. The admin backup screen did not work on Windows at all. No breaking changes.
