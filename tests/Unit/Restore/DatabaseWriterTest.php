@@ -65,6 +65,82 @@ final class DatabaseWriterTest extends TestCase {
 	}
 
 	/**
+	 * Row content that mentions the table in backticks must survive untouched.
+	 *
+	 * The staging rewrite used to run as an unanchored str_replace() over the
+	 * whole decoded payload, before it was split into statements. Backticks are
+	 * not escape characters inside a MySQL string literal, so a VALUE containing
+	 * the backticked table name was rewritten along with the identifier — a post
+	 * about its own database, a stored query in a maintenance plugin. The user's
+	 * content came back with `pontifexstg_` welded into it, permanently, and it
+	 * survived the cut-over. Nothing reported it: hashes matched and verify
+	 * called the archive sound.
+	 *
+	 * @return void
+	 */
+	public function test_row_content_naming_the_table_is_not_rewritten(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+		$sql     = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES (1, 'Run SELECT * FROM `wp_posts` WHERE ID = 1')\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 1, $sql ) );
+
+		$executed = $adapter->executed_statements();
+		$this->assertCount( 1, $executed );
+		$this->assertStringStartsWith(
+			'INSERT INTO `pontifexstg_wp_posts`',
+			$executed[0],
+			'The leading identifier is still staged.'
+		);
+		$this->assertStringContainsString(
+			"'Run SELECT * FROM `wp_posts` WHERE ID = 1'",
+			$executed[0],
+			'The row VALUE must reach the database exactly as the user wrote it.'
+		);
+		$this->assertStringNotContainsString(
+			'pontifexstg_wp_posts` WHERE ID',
+			$executed[0],
+			'The staging prefix must never appear inside restored content.'
+		);
+	}
+
+	/**
+	 * A serialised value naming the table keeps its declared byte lengths.
+	 *
+	 * The sharper half of the same defect. The staged name is twelve bytes
+	 * longer, so rewriting inside a PHP-serialised string invalidated its
+	 * `s:NN:` length and the value stopped unserialising altogether — plugin
+	 * settings silently reverting to defaults, days after the migration, with
+	 * nothing connecting it to the restore.
+	 *
+	 * @return void
+	 */
+	public function test_a_serialised_value_naming_the_table_still_unserialises(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- Building the exact shape of a real WordPress option value, which is what this test is about.
+		$serialised = serialize( array( 'cleanup_query' => 'DELETE FROM `wp_options` WHERE autoload = 0' ) );
+		$sql        = "INSERT INTO `wp_options` (`option_value`) VALUES ('" . $serialised . "')\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$executed = $adapter->executed_statements();
+		$this->assertCount( 1, $executed );
+
+		$start = strpos( $executed[0], "('" );
+		$this->assertNotFalse( $start );
+		$value = substr( $executed[0], $start + 2, strrpos( $executed[0], "')" ) - $start - 2 );
+
+		$this->assertSame( $serialised, $value, 'The serialised bytes must be unchanged.' );
+		$this->assertNotFalse(
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize -- Asserting the restored value still unserialises is the point of the test.
+			unserialize( $value ),
+			'A serialised value whose declared lengths were rewritten stops unserialising — the classic migration corruption.'
+		);
+	}
+
+	/**
 	 * A multi-statement chunk must execute every statement in order.
 	 *
 	 * @return void

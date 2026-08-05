@@ -1,6 +1,6 @@
 # 0019 — restore: anchor db_chunk statements to the engine's own identifier, not a parsed verb
 
-- **Status:** Proposed, 2026-07-28.
+- **Status:** Accepted, 2026-07-28. Implemented and shipped in v0.9.4.
 - **Deciders:** 7Duckie (security hardening, db_chunk containment fix).
 
 ## Context

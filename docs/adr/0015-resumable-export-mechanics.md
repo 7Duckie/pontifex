@@ -1,6 +1,6 @@
 # 0015 — resumable exports: the progress log is the truth, and drift is refused
 
-- **Status:** Proposed, 2026-07-13.
+- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.6.0.
 - **Deciders:** 7Duckie (v0.6.0).
 
 ## Context

@@ -1,6 +1,6 @@
 # 0011 — export: dump the database inside a consistent snapshot on its own connection
 
-- **Status:** Proposed, 2026-07-12.
+- **Status:** Accepted, 2026-07-12. Implemented and shipped in v0.5.0.
 - **Deciders:** 7Duckie (v0.5.0 hardening).
 
 ## Context

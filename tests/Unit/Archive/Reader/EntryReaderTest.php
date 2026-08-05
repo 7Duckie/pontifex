@@ -222,6 +222,81 @@ final class EntryReaderTest extends TestCase {
 	}
 
 	/**
+	 * An entry whose manifest kind disagrees with its record kind is refused.
+	 *
+	 * The manifest and the record each carry the kind, and different parts of a
+	 * restore read different copies: the whole-archive symlink confinement
+	 * preflight (ADR 0021) picks which entries to judge from the MANIFEST, while
+	 * FileWriter decides what to create from the RECORD. While nothing compared
+	 * them, an archive could describe a symlink record as a file in the manifest
+	 * alone — the record and its SHA-256 untouched, so every integrity check
+	 * still passed — and the link was never shown to the preflight, was routed
+	 * as a file, and was created as a symlink regardless. Driving the real
+	 * restore proved it: the escaping link landed on disk, the restore reported
+	 * success, and verify() called the archive sound. Two bytes of manifest
+	 * reopened the guarantee v0.9.5 was cut to make.
+	 *
+	 * The record here is a genuine symlink written by the real writer, with the
+	 * real hash — only the manifest lies. That is the whole point: no integrity
+	 * check can catch this, so an explicit comparison has to.
+	 *
+	 * @return void
+	 */
+	public function test_a_manifest_kind_that_contradicts_the_record_is_refused(): void {
+		$dest   = self::memory_stream();
+		$source = self::memory_stream();
+		$header = EntryHeader::for_symlink( 'wp-content/uploads/leak', '../../../wp-config.php', 0 );
+		$result = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		// The manifest calls the very same record a file. Offset, length,
+		// codec_id and entry hash are all the writer's own, so nothing else
+		// about this archive is inconsistent.
+		$lying_entry = ManifestEntry::for_file(
+			0,
+			0,
+			$result->total_entry_length(),
+			'wp-content/uploads/leak',
+			RawCodec::ID,
+			$result->entry_hash()
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'entry kind mismatch' );
+
+		self::make_reader()->read_entry( $dest, $lying_entry );
+	}
+
+	/**
+	 * The same contradiction is refused on the verify path, which never decodes.
+	 *
+	 * Verifying is what an operator runs to decide whether to trust an archive.
+	 * If it passed a forged archive that restore would then act on, the check
+	 * would be reporting soundness it had not established.
+	 *
+	 * @return void
+	 */
+	public function test_verify_also_refuses_a_manifest_kind_that_contradicts_the_record(): void {
+		$dest   = self::memory_stream();
+		$source = self::memory_stream();
+		$header = EntryHeader::for_symlink( 'wp-content/uploads/leak', '../../../wp-config.php', 0 );
+		$result = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$lying_entry = ManifestEntry::for_file(
+			0,
+			0,
+			$result->total_entry_length(),
+			'wp-content/uploads/leak',
+			RawCodec::ID,
+			$result->entry_hash()
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'entry kind mismatch' );
+
+		self::make_reader()->verify_entry( $dest, $lying_entry );
+	}
+
+	/**
 	 * Passes a sound entry and reports every record byte to the callback.
 	 *
 	 * @return void
