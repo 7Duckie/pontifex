@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Pontifex\Exception\ArchiveNotTrustworthy;
+
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -393,7 +395,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param Scope|null      $scope    The recorded scope, or null for a legacy archive.
 	 * @param ArchiveManifest $manifest The archive's manifest.
 	 * @return void
-	 * @throws RuntimeException If the scope declares a half absent that the manifest carries.
+	 * @throws ArchiveNotTrustworthy If the archive's recorded scope contradicts the entries it carries.
 	 */
 	private function assert_scope_consistent_with_manifest( ?Scope $scope, ArchiveManifest $manifest ): void {
 		if ( null === $scope ) {
@@ -414,10 +416,10 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		}
 
 		if ( ! $scope->includes_database() && $has_db ) {
-			throw new RuntimeException( 'RestoreRunner: the archive records a files-only scope but carries database chunks. Refusing this inconsistent archive.' );
+			throw new ArchiveNotTrustworthy( 'RestoreRunner: the archive records a files-only scope but carries database chunks. Refusing this inconsistent archive.' );
 		}
 		if ( ! $scope->includes_files() && $has_files ) {
-			throw new RuntimeException( 'RestoreRunner: the archive records a database-only scope but carries file entries. Refusing this inconsistent archive.' );
+			throw new ArchiveNotTrustworthy( 'RestoreRunner: the archive records a database-only scope but carries file entries. Refusing this inconsistent archive.' );
 		}
 	}
 

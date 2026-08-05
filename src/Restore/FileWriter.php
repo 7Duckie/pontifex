@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Pontifex\Exception\HostCannotComply;
+
 use Closure;
 use InvalidArgumentException;
 use RuntimeException;
@@ -404,7 +406,7 @@ final class FileWriter {
 	 *
 	 * @param array<int, ManifestEntry> $manifest_entries Every entry the restore is about to write.
 	 * @return void
-	 * @throws RuntimeException If free space is known and smaller than what this restore needs.
+	 * @throws HostCannotComply If the destination does not have room for this restore.
 	 */
 	public function assert_free_space_for( array $manifest_entries ): void {
 		$largest_entry_length = 0;
@@ -454,7 +456,7 @@ final class FileWriter {
 		}
 
 		if ( $free < $needed ) {
-			throw new RuntimeException(
+			throw new HostCannotComply(
 				sprintf(
 					'FileWriter: the restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->destination_root is plugin-derived, not web output; reported verbatim for diagnostic context.
@@ -536,7 +538,7 @@ final class FileWriter {
 	 *
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target — see {@see self::assert_symlink_targets_confined()} for what is done with the targets themselves.
 	 * @return void
-	 * @throws RuntimeException If $declared_links is non-empty and this host cannot create a symlink in one of the directories a declared link would actually be written into, or the archive declares links across more distinct directories than this preflight will probe.
+	 * @throws HostCannotComply If this host cannot create the symbolic links the archive declares.
 	 */
 	public function assert_symlinks_creatable( array $declared_links ): void {
 		if ( array() === $declared_links ) {
@@ -548,7 +550,7 @@ final class FileWriter {
 				continue;
 			}
 
-			throw new RuntimeException(
+			throw new HostCannotComply(
 				sprintf(
 					'FileWriter: this archive contains %d symbolic link(s), but this host could not create a test symlink in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
 					count( $declared_links ),
