@@ -527,6 +527,42 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
+## v1.0.3 — Exclusion patterns are kept as you typed them
+
+Closes the last of the findings from the audit that produced v1.0.1 and
+v1.0.2, which brings that backlog to a close. No breaking changes.
+
+- **Exclusion patterns are no longer rewritten behind the operator's back.**
+  The Backup screen read them through WordPress's text-field sanitiser, which
+  strips every percent sign followed by two hex digits — correct for input
+  that might be percent-encoded, wrong for a filesystem path, where those are
+  ordinary characters in a name. `wp-content/uploads/2024%2F*` became
+  `wp-content/uploads/2024*`, which excludes far more than was asked, and the
+  files it swallowed were absent from every subsequent backup with nothing
+  reporting it. A scheduled backup persists the pattern, so each unattended
+  run reused the rewritten version. Patterns now have control characters
+  removed and nothing else.
+- **Failed offsite deletions are recorded.** Retention reported what it
+  removed and said nothing about what it could not, so a destination filling
+  up because the server was refusing deletions was indistinguishable from a
+  destination being kept tidy.
+- **One derivation of the installation root.** The value a restore confines
+  every write against existed as six identical copies. None had drifted;
+  nothing would have noticed if one had.
+- **The local coding-standards gate sees what the directory's tooling sees.**
+  `WordPress-Extra` omits the input-sanitisation sniff that Plugin Check
+  enforces, so a finding of that kind could only ever appear at a release
+  gate, on work every local gate had already reported clean. One did, on this
+  release's own assembly.
+
+### What is deliberately deferred
+
+- Namespace layering for three domain classes that sit in surface namespaces,
+  and the seam breaches at the scope-summary boundary. Both are internal
+  shape, not behaviour, and neither has a user-visible consequence.
+- Broadening the OSV scan beyond `composer.lock`, and first tests for four
+  production classes referenced nowhere in the suite.
+
 ## v1.0.2 — The rest of what the audit found
 
 Closes the remaining findings from the audit that produced v1.0.1. Two could
