@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Cli;
 
+use Pontifex\Export\ExportCounters;
+
 use WP_CLI;
 use WP_CLI\Formatter;
 use Pontifex\WordPress\RealWordPressContext;
@@ -58,7 +60,7 @@ final class StatsCommand {
 	 *
 	 * @var string
 	 */
-	private const EXPORT_STATS_OPTION = 'pontifex_export_stats';
+	private const EXPORT_STATS_OPTION = ExportCounters::OPTION;
 
 	/**
 	 * The wp_options key under which import counters are stored.

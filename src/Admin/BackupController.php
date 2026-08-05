@@ -22,6 +22,8 @@ use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Export\ExportCounters;
+use Pontifex\Lock\BackupProgress;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
@@ -71,7 +73,7 @@ final class BackupController {
 	 *
 	 * @var string
 	 */
-	private const PROGRESS_TRANSIENT = 'pontifex_backup_progress';
+	private const PROGRESS_TRANSIENT = BackupProgress::TRANSIENT_KEY;
 
 	/**
 	 * How long the progress transient lives, in seconds (15 minutes).
@@ -154,7 +156,7 @@ final class BackupController {
 	 *
 	 * @var int
 	 */
-	private const PROGRESS_STALE_SECONDS = 10;
+	private const PROGRESS_STALE_SECONDS = BackupProgress::STALE_SECONDS;
 
 	/**
 	 * Minimum interval, in seconds, between progress transient writes.
@@ -173,7 +175,7 @@ final class BackupController {
 	 *
 	 * @var string
 	 */
-	private const STATS_OPTION = 'pontifex_export_stats';
+	private const STATS_OPTION = ExportCounters::OPTION;
 
 	/**
 	 * Mode applied to a written backup: owner read/write only.
