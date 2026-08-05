@@ -300,7 +300,12 @@ jobs:
       - name: Publish the verified package as an artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pontifex-${{ github.ref_name }}
+          # The commit SHA, not the ref name: a pull request's ref_name is
+          # "<number>/merge", and a slash is not allowed in an artifact name --
+          # so this failed on every PR while working on tags. The SHA is also the
+          # better identifier for the job this artifact exists to do, which is
+          # knowing exactly which bytes were verified.
+          name: pontifex-${{ github.sha }}
           path: ${{ runner.temp }}/pontifex.tar.gz
           if-no-files-found: error
           retention-days: 90
