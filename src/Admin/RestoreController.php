@@ -24,6 +24,7 @@ use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
@@ -744,7 +745,67 @@ final class RestoreController {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
 			return false;
 		}
+
+		// Hashes matching is not the same as a restore accepting the archive, and
+		// this gate stands immediately before one. Running the restore's own
+		// read-only preflights here means an archive the restore would refuse is
+		// refused NOW — before the safety archive is taken, which on a large site
+		// is minutes of work and a second full copy of it on disk, all of it spent
+		// to arrive at a refusal that was knowable up front.
+		//
+		// Only findings against the ARCHIVE stop the gate. A host finding is left
+		// to the restore itself: free space measured here can be gone by the time
+		// the safety archive has been written, so refusing on it now would trade a
+		// real refusal later for a guess made early.
+		$report = $this->preflight_report( $runner, $source );
+		if ( $report->archive_is_refused() ) {
+			$this->logger->warning(
+				'Admin restore: the archive is intact but a restore would refuse it; nothing was written.',
+				array( 'findings' => $report->archive_findings() )
+			);
+			return false;
+		}
+
 		return true;
+	}
+
+	/**
+	 * Run the restore's read-only preflights, never letting their own failure count.
+	 *
+	 * An empty report is returned when the preflights cannot be run at all. That
+	 * keeps this gate honest in the safe direction: an unanswered question must
+	 * not block a restore, because the restore runs every one of these checks
+	 * again for real and fails closed on each of them. This is an early warning,
+	 * not the guard.
+	 *
+	 * @param RestoreRunnerInterface $runner The engine that will do the restore.
+	 * @param resource               $source The open archive stream, already verified.
+	 * @return PreflightReport What a restore would find.
+	 */
+	private function preflight_report( RestoreRunnerInterface $runner, $source ): PreflightReport {
+		if ( ! $runner instanceof RestoreRunner ) {
+			return new PreflightReport( array() );
+		}
+
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource before the preflight re-reads it; not a WP_Filesystem operation.
+			rewind( $source );
+			$reader   = new ArchiveReader( $source );
+			$manifest = $reader->manifest();
+			$scope    = $reader->provenance()->scope();
+
+			return $runner->preflight()->read_only_report( $source, $manifest, $scope );
+		} catch ( Throwable $error ) {
+			try {
+				$this->logger->warning(
+					'Admin restore: the preflights could not be run before the restore; the restore will run them itself.',
+					array( 'exception' => $error )
+				);
+			} catch ( Throwable $logging_failed ) {
+				unset( $logging_failed );
+			}
+			return new PreflightReport( array() );
+		}
 	}
 
 	/**

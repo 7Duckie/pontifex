@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\HostCannotComply;
 
 use Closure;
@@ -875,7 +876,7 @@ final class FileWriter {
 	 *
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
 	 * @return void
-	 * @throws RuntimeException If any declared link's target resolves somewhere this restore will not allow.
+	 * @throws ArchiveNotTrustworthy If any declared link's target resolves somewhere this restore will not allow.
 	 */
 	public function assert_symlink_targets_confined( array $declared_links ): void {
 		if ( $this->allow_unsafe_symlinks ) {
@@ -955,7 +956,7 @@ final class FileWriter {
 	 * @param array<array-key, string>      $exact       Every declared link, keyed by its exact normalised path.
 	 * @param array<array-key, string|null> $folded      The same, keyed by lower-cased path; null marks a key whose spellings disagree.
 	 * @return void
-	 * @throws RuntimeException If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
+	 * @throws ArchiveNotTrustworthy If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
 	 */
 	private function assert_symlink_target_confined( string $link_path, string $raw_target, array $exact, array $folded ): void {
 		if ( self::is_absolute_path( $raw_target ) ) {
@@ -965,7 +966,7 @@ final class FileWriter {
 				$raw_target
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$root_components = self::path_components( $this->destination_root );
@@ -1002,7 +1003,7 @@ final class FileWriter {
 					self::MAX_SYMLINK_HOPS
 				);
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-				throw new RuntimeException( $message );
+				throw new ArchiveNotTrustworthy( $message );
 			}
 
 			// An absolute target restarts resolution at the filesystem root, which
@@ -1045,7 +1046,7 @@ final class FileWriter {
 	 * @param string                        $link_path       The link being judged, for the diagnostic message only.
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
-	 * @throws RuntimeException If two declared spellings of one path disagree, or an on-disk link cannot be read.
+	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1067,7 +1068,7 @@ final class FileWriter {
 						$relative
 					);
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link paths and targets for diagnostic context; exception path, not HTML output.
-					throw new RuntimeException( $message );
+					throw new ArchiveNotTrustworthy( $message );
 				}
 				return $folded[ $folded_key ];
 			}
@@ -1091,7 +1092,7 @@ final class FileWriter {
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		return $on_disk_target;
@@ -1133,7 +1134,7 @@ final class FileWriter {
 	 * @param array<int, string> $resolved        Where the target finally landed, as absolute components.
 	 * @param array<int, string> $root_components The destination root, as components.
 	 * @return void
-	 * @throws RuntimeException If the resolved target is not a strict descendant of the root, or is one of the named locations.
+	 * @throws ArchiveNotTrustworthy If the resolved target is not a strict descendant of the root, or is one of the named locations.
 	 */
 	private function assert_resolved_target_confined( string $link_path, string $raw_target, array $resolved, array $root_components ): void {
 		$root_depth = count( $root_components );
@@ -1148,7 +1149,7 @@ final class FileWriter {
 				$this->destination_root
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus plugin-derived paths, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		foreach ( $this->wp_config_paths() as $wp_config_path ) {
@@ -1162,7 +1163,7 @@ final class FileWriter {
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$relative = implode( '/', array_slice( $resolved, $root_depth ) );
@@ -1174,7 +1175,7 @@ final class FileWriter {
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 	}
 

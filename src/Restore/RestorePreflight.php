@@ -145,13 +145,26 @@ final class RestorePreflight {
 		$checks_run       = array();
 		$archive_findings = array();
 		$host_findings    = array();
+		$inconclusive     = array();
 
-		$record = function ( string $check, Throwable $refusal ) use ( &$archive_findings, &$host_findings ): void {
+		// Only a refusal one of the checks DECIDED counts as a finding. Anything
+		// else that goes wrong on the way — a stream that will not seek, a
+		// collaborator that cannot be built — means the question was never
+		// answered, and an unanswered question must not be reported as a refusal.
+		// Getting that wrong would tell somebody a good backup was hostile, which
+		// is a far worse error than staying silent: a restore still runs these
+		// same checks and still fails closed, so this report is advice, never the
+		// last line of defence.
+		$record = function ( string $check, Throwable $refusal ) use ( &$archive_findings, &$host_findings, &$inconclusive ): void {
+			if ( $refusal instanceof ArchiveNotTrustworthy ) {
+				$archive_findings[ $check ] = $refusal->getMessage();
+				return;
+			}
 			if ( PreflightReport::is_host_finding( $refusal ) ) {
 				$host_findings[ $check ] = $refusal->getMessage();
 				return;
 			}
-			$archive_findings[ $check ] = $refusal->getMessage();
+			$inconclusive[ $check ] = $refusal->getMessage();
 		};
 
 		$checks_run[] = self::CHECK_SCOPE;
@@ -161,16 +174,11 @@ final class RestorePreflight {
 			$record( self::CHECK_SCOPE, $refusal );
 		}
 
-		// Reading the declared links can itself fail — a corrupt symlink entry, or
-		// one whose hash does not match. That is an archive finding, and it also
-		// means the confinement question cannot be answered at all, so the check is
-		// recorded as having run and found the read failure rather than silently
-		// reporting a confinement it never established.
-		$declared_links = array();
-		$checks_run[]   = self::CHECK_SYMLINK_CONFINEMENT;
+		$checks_run[] = self::CHECK_SYMLINK_CONFINEMENT;
 		try {
-			$declared_links = $this->declared_symlink_targets( $archive_source, $manifest );
-			$this->file_writer->assert_symlink_targets_confined( $declared_links );
+			$this->file_writer->assert_symlink_targets_confined(
+				$this->declared_symlink_targets( $archive_source, $manifest )
+			);
 		} catch ( Throwable $refusal ) {
 			$record( self::CHECK_SYMLINK_CONFINEMENT, $refusal );
 		}
@@ -182,7 +190,7 @@ final class RestorePreflight {
 			$record( self::CHECK_FREE_SPACE, $refusal );
 		}
 
-		return new PreflightReport( $checks_run, $archive_findings, $host_findings );
+		return new PreflightReport( $checks_run, $archive_findings, $host_findings, $inconclusive );
 	}
 
 	/**

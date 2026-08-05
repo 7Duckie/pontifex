@@ -55,6 +55,21 @@ final class PreflightReport {
 	private array $host_findings;
 
 	/**
+	 * Checks that were attempted but never reached a decision, as check name => reason.
+	 *
+	 * A third outcome, and a necessary one. A check that could not be evaluated —
+	 * a stream that would not seek, a collaborator that could not be built — has
+	 * NOT found the archive wanting; it has found nothing at all. Folding that
+	 * into either of the other two would state something untrue, and in the
+	 * archive's direction it would be an accusation: telling somebody their
+	 * backup is hostile because a check failed to run is far worse than saying
+	 * nothing, since a restore still runs the same checks and still fails closed.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $inconclusive;
+
+	/**
 	 * The checks that were actually run, so a caller can say what it did not check.
 	 *
 	 * @var array<int, string>
@@ -67,11 +82,13 @@ final class PreflightReport {
 	 * @param array<int, string>    $checks_run       Names of the checks that ran.
 	 * @param array<string, string> $archive_findings Check name => message, for findings that condemn the archive.
 	 * @param array<string, string> $host_findings    Check name => message, for findings that condemn only this host, right now.
+	 * @param array<string, string> $inconclusive     Check name => reason, for checks that never reached a decision.
 	 */
-	public function __construct( array $checks_run, array $archive_findings = array(), array $host_findings = array() ) {
+	public function __construct( array $checks_run, array $archive_findings = array(), array $host_findings = array(), array $inconclusive = array() ) {
 		$this->checks_run       = array_values( $checks_run );
 		$this->archive_findings = $archive_findings;
 		$this->host_findings    = $host_findings;
+		$this->inconclusive     = $inconclusive;
 	}
 
 	/**
@@ -80,7 +97,18 @@ final class PreflightReport {
 	 * @return bool
 	 */
 	public function is_clear(): bool {
-		return array() === $this->archive_findings && array() === $this->host_findings;
+		return array() === $this->archive_findings
+			&& array() === $this->host_findings
+			&& array() === $this->inconclusive;
+	}
+
+	/**
+	 * Checks that were attempted but reached no decision, as check name => reason.
+	 *
+	 * @return array<string, string>
+	 */
+	public function inconclusive(): array {
+		return $this->inconclusive;
 	}
 
 	/**
