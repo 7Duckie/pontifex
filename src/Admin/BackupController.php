@@ -948,7 +948,7 @@ final class BackupController {
 		// hostile thing a textarea can carry here. Everything else is left as
 		// the operator typed it, and first_invalid_pattern() still judges
 		// whether the result is a usable pattern.
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() at the top of create() before this runs.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- The nonce is verified in is_authorised() at the top of create() before this runs. The input IS sanitised, by strip_control_characters() on this line; the sniff recognises a fixed list of WordPress sanitisers and cannot see a project one. The recognised sanitiser for this input, sanitize_textarea_field(), is the very function that corrupts these patterns, for the reason set out above. The value never reaches SQL (it is matched against file paths by the scanner) and never reaches output unescaped (the Backup screen re-renders it through esc_textarea()).
 		$raw   = self::strip_control_characters( wp_unslash( (string) $_POST['exclusions'] ) );
 		$lines = preg_split( '/\R/', $raw );
 		if ( false === $lines ) {
