@@ -325,6 +325,66 @@ final class VerifyControllerTest extends TestCase {
 	}
 
 	/**
+	 * An unreadable backup is reported as a file-access problem, not a broken one.
+	 *
+	 * These are two different situations with two different remedies, and they
+	 * shared one message. A backup the site cannot open because of a permissions
+	 * or ownership problem is very probably intact — telling its owner it "did
+	 * not verify" is the one message that could talk somebody out of a good
+	 * backup and into restoring an older one.
+	 *
+	 * The distinction is made on readability rather than on the exception type,
+	 * because the file can also become unreadable part-way through a verify, and
+	 * because an open_basedir restriction defeats a pre-flight readability check
+	 * while still landing in the same handler.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reports_an_unreadable_backup_as_an_access_problem(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$path = $store->directory() . '/' . $name;
+		$this->write_plain_archive( $path );
+		$_POST['file'] = $name;
+
+		// Take away read permission: the file resolves and is listed, but cannot
+		// be opened. This is the shape of the real-world case — a backup written
+		// by one user and read by another.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture: making a file genuinely unreadable is the condition under test; WP_Filesystem cannot express it.
+		chmod( $path, 0o000 );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'error' )->once();
+
+		try {
+			$this->controller( null, $logger )->verify();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture teardown; restores the mode so the temp tree can be removed.
+			chmod( $path, 0o644 );
+			unset( $_POST['file'] );
+		}
+
+		$this->assertFalse( $this->json['data']['sound'], 'An unreadable backup still is not a sound verdict.' );
+		$this->assertStringContainsString(
+			'could not be read',
+			$this->json['data']['message'],
+			'An unreadable backup must be reported as unread, not as verified-and-broken.'
+		);
+		$this->assertStringNotContainsString(
+			'Broken',
+			$this->json['data']['message'],
+			'Calling an unreadable backup "Broken" sends its owner to replace a file that is probably fine.'
+		);
+	}
+
+	/**
 	 * Refuses a second verification while one is already running.
 	 *
 	 * The single-runner lock stops two concurrent checks fighting over the shared
