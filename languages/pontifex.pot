@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-08-05T20:50:02+00:00\n"
+"POT-Creation-Date: 2026-08-05T23:15:07+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
@@ -1087,7 +1087,7 @@ msgstr ""
 
 #. translators: %s: the kind of operation currently running
 #: src/Cli/ExportCommand.php:408
-#: src/Cli/ImportCommand.php:423
+#: src/Cli/ImportCommand.php:444
 #: src/Cli/RollbackCommand.php:256
 #, php-format
 msgid "Another Pontifex operation is already running (%s). Wait for it to finish, or resume it, then retry."
@@ -1231,86 +1231,138 @@ msgid "Exported %1$d entries (%2$s) to %3$s"
 msgstr ""
 
 #. translators: %s: the archive path
-#: src/Cli/ImportCommand.php:388
+#: src/Cli/ImportCommand.php:401
 #, php-format
 msgid "Restore %s over the current site?"
 msgstr ""
 
-#: src/Cli/ImportCommand.php:518
+#: src/Cli/ImportCommand.php:543
 msgid "The import failed, so your site was automatically rolled back to its state before the import."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:520
+#: src/Cli/ImportCommand.php:545
 msgid "The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:549
+#: src/Cli/ImportCommand.php:580
 msgid "An archive path is required: wp pontifex import <archive>."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:569
+#: src/Cli/ImportCommand.php:600
 msgid "--url requires a new site URL, e.g. --url=https://new-site.example."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:935
+#: src/Cli/ImportCommand.php:966
 msgid "This archive includes WordPress core and wp-config.php (it is a whole-site or legacy archive). A default restore is content-only and will not overwrite them. Re-run with --whole-site to restore the entire site — only onto a fresh, empty destination."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1009
+#: src/Cli/ImportCommand.php:1040
 msgid "A trusted public key was supplied, but this archive is NOT signed — and a stripped signature looks exactly like this. The signature is the only tamper defence (integrity hashes detect corruption, not tampering), so this restore is refused. If you trust this archive, re-run without --public-key (and without a PONTIFEX_PUBLIC_KEY pin); to make backups verifiable, sign exports with --sign."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1015
+#: src/Cli/ImportCommand.php:1046
 msgid "This archive is signed, but its signature was NOT verified (no --public-key supplied). Proceeding with the restore."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1020
+#: src/Cli/ImportCommand.php:1051
 msgid "The Ed25519 signature did not verify against the supplied public key; refusing to restore (wrong key, or the archive was modified after signing)."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1023
+#: src/Cli/ImportCommand.php:1054
 #: src/Cli/VerifyCommand.php:486
 msgid "Signature verified against the supplied public key."
 msgstr ""
 
-#: src/Cli/ImportCommand.php:1102
+#: src/Cli/ImportCommand.php:1133
 msgid "Restoring to the same site URL; no URL rewriting."
 msgstr ""
 
 #. translators: %s: the target site URL
-#: src/Cli/ImportCommand.php:1105
+#: src/Cli/ImportCommand.php:1136
 #, php-format
 msgid "Restoring, then migrating the site URL to %s."
 msgstr ""
 
 #. translators: 1: the source URL, 2: the target URL
-#: src/Cli/ImportCommand.php:1143
+#: src/Cli/ImportCommand.php:1174
 #, php-format
 msgid "Migrating URLs from %1$s to %2$s."
 msgstr ""
 
 #. translators: 1: source URL, 2: target URL, 3: values rewritten, 4: rows changed, 5: tables skipped, 6: values kept unchanged
-#: src/Cli/ImportCommand.php:1158
+#: src/Cli/ImportCommand.php:1189
 #, php-format
 msgid "Migrated %1$s to %2$s: rewrote %3$d value(s) across %4$d row(s); %5$d table(s) skipped (no single-column key); %6$d value(s) kept unchanged for safety."
 msgstr ""
 
 #. translators: 1: number of entries, 2: human-readable size, 3: the archive path
-#: src/Cli/ImportCommand.php:1181
+#: src/Cli/ImportCommand.php:1212
 #, php-format
 msgid "Restored %1$d entries (%2$s) from %3$s"
 msgstr ""
 
 #. translators: %s: the target site URL
-#: src/Cli/ImportCommand.php:1200
+#: src/Cli/ImportCommand.php:1231
 #, php-format
 msgid "The site URL would be migrated to %s after a real restore."
 msgstr ""
 
 #. translators: 1: number of entries, 2: the archive path, 3: optional migration note
-#: src/Cli/ImportCommand.php:1205
+#: src/Cli/ImportCommand.php:1236
 #, php-format
 msgid "Dry run complete: %1$d entries verified in %2$s. No changes were made.%3$s"
+msgstr ""
+
+#. translators: 1: the reason the archive was refused, 2: the archive path
+#: src/Cli/ImportCommand.php:1276
+#, php-format
+msgid "This archive cannot be trusted: %1$s (%2$s)"
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1281
+msgid "Do not restore this archive — fetch a fresh copy of the backup."
+msgstr ""
+
+#. translators: 1: the reason this host could not comply, 2: the archive path
+#: src/Cli/ImportCommand.php:1289
+#, php-format
+msgid "This host cannot complete the restore: %1$s (%2$s)"
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1294
+msgid "The archive may be perfectly good — the problem is this server, and it is usually fixable."
+msgstr ""
+
+#. translators: %s: what was wrong with the command that was run
+#: src/Cli/ImportCommand.php:1302
+#, php-format
+msgid "The request needs correcting: %s"
+msgstr ""
+
+#. translators: 1: the failure message, 2: the archive path
+#: src/Cli/ImportCommand.php:1312
+#, php-format
+msgid "The failure was: %1$s (%2$s)"
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1317
+msgid "Full details are in the Pontifex log: wp-content/pontifex/logs/pontifex.log"
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1336
+msgid "Dry run: this restore would be refused. Your site was not changed."
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1337
+msgid "Dry run: this restore failed. Your site was not changed."
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1341
+msgid "Import refused."
+msgstr ""
+
+#: src/Cli/ImportCommand.php:1342
+msgid "Import failed."
 msgstr ""
 
 #. translators: %s: the key id in hex

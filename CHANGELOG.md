@@ -14,8 +14,23 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward the next operational increment begins after this
-tag. See [`docs/roadmap.md`](docs/roadmap.md).
+### Fixed
+
+- **A failed `wp pontifex import` showed a PHP stack trace and told you your
+  website had a critical error.** Every failure — a truncated archive, a
+  server with no room, a mistyped flag — was re-thrown out of the command and
+  landed in WordPress's own fatal handler, which printed the internal call
+  stack, leaked the server's absolute directory paths, and finished with
+  "There has been a critical error on this website." That sentence says
+  Pontifex is broken, when what had usually happened is that Pontifex spotted
+  something wrong with the archive and stopped on purpose. The import now
+  reports what happened in one readable verdict and says which of the three
+  kinds of refusal it was — the archive cannot be trusted, this host cannot
+  complete the restore, or the request needs correcting — with server paths
+  replaced by placeholders, exactly as `wp pontifex verify` already did. The
+  exit code is unchanged (non-zero), so scripts and scheduled jobs behave as
+  before; the log entry, the failure counters, the transfer history and the
+  automatic rollback from the safety archive all continue as before too.
 
 ## [1.0.3] — 2026-08-05 — Exclusion patterns are kept as you typed them
 
