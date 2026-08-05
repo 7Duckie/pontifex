@@ -527,6 +527,50 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
+## v1.0.1 — Three defects a full-build audit found
+
+A security and correctness patch. An audit of the released v1.0.0 build —
+which had passed every quality gate this project has — found three defects,
+each proven by building a hostile archive or driving a real restore rather
+than by reading the code. No breaking changes; every v1.0.0 archive restores
+unchanged.
+
+### What ships
+
+- **An archive whose index contradicts its own contents is refused.** An
+  entry's kind is recorded twice, in the manifest and in the record, and
+  nothing compared them. The symbolic-link confinement preflight
+  ([ADR 0021](./adr/0021-symlink-target-confinement.md)) chooses which
+  entries to judge from the manifest, while the writer acts on the record.
+  Relabelling a symlink as a file in the manifest alone — leaving the record
+  and its hash untouched, so every integrity check passed and `verify`
+  reported the archive sound — was enough for the link to be created without
+  the preflight ever seeing it. Two bytes reopened the guarantee v0.9.5 was
+  cut to establish.
+- **A restore no longer alters content that names its own database table.**
+  The staging rename was applied to a whole chunk rather than only to the
+  table identifier, so any row whose value contained the table name in
+  backticks came back with the staging prefix written into it — permanently,
+  surviving the cut-over. Inside a serialised value the longer name
+  invalidated the declared byte length and the value stopped unserialising
+  altogether, so the plugin owning it silently reverted to defaults.
+- **Verification runs the same checks however it is called.** The entry
+  header was only parsed when a decoded-byte budget was supplied, so
+  verification could report an archive sound that a restore would then
+  refuse.
+- **Pontifex refuses to load on WordPress multisite.** It reads a single
+  table prefix and a network has more than one, so it would have backed up
+  part of a network while appearing to back up all of it. Multisite support
+  remains deferred; refusing to load is what makes that deferral honest.
+
+### What is deliberately deferred
+
+- The remaining findings from the same audit — largely test adequacy and
+  release process, including that the CLI signature-enforcement guard has no
+  test that can fail for the reason it claims, and that no test derives its
+  expectation from the real filesystem rather than a hand-written list.
+  Queued for v1.0.2.
+
 ## v1.0.0 — Stable surface
 
 v1.0.0 is the commitment release: the point Pontifex stops behaving like a
