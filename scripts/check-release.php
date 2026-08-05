@@ -181,6 +181,36 @@ if (!is_file($readme_file)) {
         }
     }
 
+    // 3a. Contributors and Tested up to. Both are hard errors in the
+    // directory's own readme validator at submission, and neither can be
+    // fully settled from inside this repository: Contributors must name a
+    // real wordpress.org account, and Tested up to is rejected if it is
+    // greater than the current WordPress release. What CAN be checked here
+    // is that they are present and well-formed, which catches the version
+    // of this that actually happens -- a field left blank, or a "Tested up
+    // to" carrying a patch component the validator does not accept.
+    if (preg_match('/^Contributors:\s*(.*)$/mi', $readme, $m)) {
+        $contributors = array_filter(array_map('trim', explode(',', $m[1])));
+        $check(
+            'readme.txt Contributors is set',
+            $contributors !== [],
+            $contributors === [] ? 'empty — must name a real wordpress.org account' : implode(', ', $contributors)
+        );
+    } else {
+        $check('readme.txt Contributors header present', false, 'not found');
+    }
+
+    if (preg_match('/^Tested up to:\s*(\S+)/mi', $readme, $m)) {
+        $tested = $m[1];
+        $check(
+            'readme.txt Tested up to is a major.minor version',
+            (bool) preg_match('/^\d+\.\d+$/', $tested),
+            $tested . ' (the directory rejects a patch component, and any version newer than the current WordPress release)'
+        );
+    } else {
+        $check('readme.txt Tested up to header present', false, 'not found');
+    }
+
     // 3. Tag count from the "Tags:" header.
     $tag_count = null;
     if (preg_match('/^Tags:\s*(.+)$/mi', $readme, $m)) {
