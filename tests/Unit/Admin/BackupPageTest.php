@@ -160,7 +160,9 @@ final class BackupPageTest extends TestCase {
 		$page->render();
 		$output = (string) ob_get_clean();
 
-		$this->assertStringContainsString( 'everything in wp-content', $output, 'The effective scope is shown before acting.' );
+		$this->assertStringContainsString( 'apart from the exclusions below', $output, 'The effective scope is shown before acting, without overclaiming that everything is captured.' );
+		$this->assertStringContainsString( 'Tables another application keeps in the same database are not included', $output, 'A site sharing its database must not be told those tables are backed up.' );
+		$this->assertStringNotContainsString( 'the whole database', $output, 'Only this site\'s own prefixed tables are captured.' );
 		$this->assertStringContainsString( 'Always left out:', $output, 'The always-applied defaults are shown.' );
 		$this->assertStringContainsString( '<code>wp-content/pontifex/**</code>', $output, 'The curated default patterns are listed.' );
 		$this->assertStringContainsString( 'id="pontifex-backup-exclusions"', $output, 'An exclusions field is offered.' );

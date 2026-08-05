@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-08-05T12:58:01+00:00\n"
+"POT-Creation-Date: 2026-08-05T14:27:32+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
@@ -130,7 +130,7 @@ msgid "Create a backup"
 msgstr ""
 
 #: src/Admin/BackupPage.php:133
-msgid "A backup packs every file and the whole database into one .wpmig archive, written to a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download."
+msgid "A backup is written to one .wpmig archive, in a protected folder that is never exposed on the web. It can take a while on a large site; the progress is shown below, and the finished backup appears in the list to download."
 msgstr ""
 
 #: src/Admin/BackupPage.php:138
@@ -163,7 +163,7 @@ msgid "Backup progress"
 msgstr ""
 
 #: src/Admin/BackupPage.php:178
-msgid "This backup covers your content — everything in wp-content — and the whole database. (Whole-site backups, including WordPress core, are a command-line operation.)"
+msgid "This backup covers your content — what is in wp-content, apart from the exclusions below — and every database table belonging to this WordPress site. Tables another application keeps in the same database are not included. (Whole-site backups, adding WordPress core, are a command-line operation.)"
 msgstr ""
 
 #: src/Admin/BackupPage.php:186
@@ -843,7 +843,7 @@ msgid "files only (wp-content), with no database"
 msgstr ""
 
 #: src/Archive/ScopeSummary.php:45
-msgid "your content — wp-content and the whole database"
+msgid "your content — wp-content and this site's database tables"
 msgstr ""
 
 #: src/Archive/ScopeSummary.php:59
@@ -1193,11 +1193,11 @@ msgid "Scope: files-only (wp-content, no database). Its restore writes only file
 msgstr ""
 
 #: src/Cli/ExportCommand.php:1204
-msgid "Scope: database-only (the full database, no files). Its restore writes only the database."
+msgid "Scope: database-only (every table belonging to this WordPress site, no files). Its restore writes only the database."
 msgstr ""
 
 #: src/Cli/ExportCommand.php:1207
-msgid "Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone."
+msgid "Scope: content-only (wp-content plus every table belonging to this WordPress site). Use --whole-site for a full-site clone."
 msgstr ""
 
 #: src/Cli/ExportCommand.php:1219
