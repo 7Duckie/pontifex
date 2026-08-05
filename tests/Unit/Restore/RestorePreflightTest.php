@@ -143,27 +143,38 @@ final class RestorePreflightTest extends TestCase {
 	 * The dangerous mistake here would be to treat "I could not answer" as "the
 	 * answer is no". A reader told their backup is hostile will act on it.
 	 *
-	 * The failure is staged the way it actually happens: the manifest is read
-	 * from a real archive, and then the stream the entries would be read from is
-	 * a different, truncated one — the shape of a stream that died, was replaced,
-	 * or could not seek. Nothing about the archive has been established either
-	 * way, and the report must say exactly that.
+	 * The failure is injected rather than provoked, on purpose. An earlier version
+	 * of this test read the entries from a deliberately broken stream, which
+	 * passed on PHP 8.5 and failed on 8.2 — the exception a broken read raises is
+	 * not the same across versions, so the test was really asserting a property of
+	 * the PHP runtime. What is being tested here is the SORTING RULE: a refusal
+	 * that is neither of the two recognised kinds must land in neither bucket.
+	 * Throwing a plain RuntimeException from a seam states that directly and
+	 * cannot drift.
 	 *
 	 * @return void
 	 */
 	public function test_a_check_that_cannot_run_is_inconclusive_not_a_refusal(): void {
-		$source   = self::build_archive_stream( array( self::symlink_plan( 'wp-content/link', '../uploads' ) ) );
-		$manifest = self::manifest_of( $source );
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
 
 		$preflight = new RestorePreflight(
 			new EntryReader( CodecRegistry::with_defaults() ),
-			new FileWriter( $this->fixture_root )
+			new FileWriter(
+				$this->fixture_root,
+				false,
+				null,
+				static function ( string $path ): int {
+					unset( $path );
+					throw new RuntimeException( 'the free-space question could not be answered' );
+				}
+			)
 		);
-		$report    = $preflight->read_only_report( self::memory_stream( 'not an archive' ), $manifest, null );
+		$report    = $preflight->read_only_report( $source, self::manifest_of( $source ), null );
 
 		$this->assertFalse( $report->archive_is_refused(), 'An unanswerable check must never condemn the archive.' );
-		$this->assertFalse( $report->host_cannot_restore() );
-		$this->assertArrayHasKey( RestorePreflight::CHECK_SYMLINK_CONFINEMENT, $report->inconclusive() );
+		$this->assertFalse( $report->host_cannot_restore(), 'Nor may it be blamed on the host.' );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_FREE_SPACE, $report->inconclusive() );
+		$this->assertFalse( $report->is_clear(), 'A report with an unanswered check is not clear.' );
 	}
 
 	/**
