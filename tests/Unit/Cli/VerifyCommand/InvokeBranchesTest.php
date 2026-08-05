@@ -40,9 +40,10 @@ use RuntimeException;
  *
  *  1. A sound archive logs success, prints its verdict, and does NOT halt —
  *     the command exits 0 by returning normally.
- *  2. A broken archive does NOT propagate the engine's exception (unlike
- *     import, which re-throws); it swallows it, logs an error, and halts
- *     non-zero so a script sees a failing exit code.
+ *  2. A broken archive does NOT propagate the engine's exception; it swallows
+ *     it, logs an error, and halts non-zero so a script sees a failing exit
+ *     code. Import handles a failure the same way, with a verdict per kind of
+ *     refusal; the difference is that verify has no site state to recover.
  *  3. Verify drives the engine's verify() walk, never restore() — the
  *     "writes nothing" contract.
  *
