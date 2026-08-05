@@ -1918,6 +1918,16 @@ final class FileWriter {
 	}
 
 	/**
+	 * Directory modes held back until the walk finishes, as absolute path => mode.
+	 *
+	 * Only directories whose recorded mode lacks owner-write appear here; every
+	 * other directory gets its mode immediately and needs no second pass.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $deferred_directory_modes = array();
+
+	/**
 	 * Create a directory at $target_path with the given mode.
 	 *
 	 * Idempotent: if the directory already exists, its mode is
@@ -1929,22 +1939,76 @@ final class FileWriter {
 	 */
 	private function write_directory( string $target_path, int $mode ): void {
 		$this->remove_conflicting_symlink( $target_path );
+
+		// Keep the directory owner-writable for the duration of the walk, and
+		// apply its recorded mode only once every entry is in place.
+		//
+		// Directory entries sort ahead of the files inside them (FileScanner
+		// orders by path, and a directory's path is a strict prefix of its
+		// contents), so applying a restrictive mode here made the directory
+		// unwritable BEFORE the files that live in it were written. A source
+		// site with a hardened `wp-content/uploads/private` at 0555 — a
+		// documented WordPress lockdown step, and what several security plugins
+		// apply — exported perfectly happily (0555 is readable) and then failed
+		// its own restore on the very next entry. Nothing preflights directory
+		// modes, so the refusal landed mid-walk: the one place with no recovery,
+		// because the file half is a merge with no per-entry undo. Everything
+		// sorting before that directory was already the archive's content and
+		// everything after was still the old site.
+		$working_mode = $mode | 0o700;
+
 		if ( ! is_dir( $target_path ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-			if ( ! @mkdir( $target_path, $mode, true ) && ! is_dir( $target_path ) ) {
+			if ( ! @mkdir( $target_path, $working_mode, true ) && ! is_dir( $target_path ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 					sprintf( 'FileWriter: could not create directory "%s".', $target_path )
 				);
 			}
 		}
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve POSIX mode bits.
-		if ( ! @chmod( $target_path, $mode ) ) {
+		if ( ! @chmod( $target_path, $working_mode ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'FileWriter: could not chmod directory "%s".', $target_path )
 			);
 		}
+
+		if ( $working_mode !== $mode ) {
+			$this->deferred_directory_modes[ $target_path ] = $mode;
+		}
+	}
+
+	/**
+	 * Apply the directory modes held back during the walk.
+	 *
+	 * Called once every entry is written. Deepest path first, so a parent is
+	 * never made unwritable before its own children have been adjusted.
+	 *
+	 * A failure here is reported, not thrown. By this point every byte is
+	 * already on disk and the restore has succeeded; throwing would report a
+	 * complete restore as a failed one, and send the operator to a rollback
+	 * they do not need. A directory left more permissive than the archive
+	 * recorded is worth telling them about, and worth no more than that.
+	 *
+	 * @return array<int, string> The directories whose recorded mode could not be applied.
+	 */
+	public function finalise_directory_modes(): array {
+		$paths = array_keys( $this->deferred_directory_modes );
+		usort( $paths, static fn ( string $a, string $b ): int => strlen( $b ) <=> strlen( $a ) );
+
+		$failed = array();
+		foreach ( $paths as $path ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve POSIX mode bits.
+			if ( ! @chmod( $path, $this->deferred_directory_modes[ $path ] ) ) {
+				$failed[] = $path;
+			}
+		}
+
+		$this->deferred_directory_modes = array();
+
+		return $failed;
 	}
 
 	/**

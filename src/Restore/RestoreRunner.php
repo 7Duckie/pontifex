@@ -9,6 +9,9 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+
 use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
@@ -135,6 +138,13 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private ArchiveLimits $limits;
 
 	/**
+	 * Records what a completed restore should still tell the operator.
+	 *
+	 * @var LoggerInterface
+	 */
+	private LoggerInterface $logger;
+
+	/**
 	 * The per-entry decoded-byte budget derived from the runtime memory limit, or 0
 	 * for no memory-derived cap.
 	 *
@@ -167,13 +177,15 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	/**
 	 * Construct a RestoreRunner with its collaborators and optional limits.
 	 *
-	 * @param EntryReader        $entry_reader      Decodes individual entry records.
-	 * @param FileWriter         $file_writer       Writes filesystem entries to disk.
-	 * @param DatabaseWriter     $database_writer   Replays db_chunk entries into the database.
-	 * @param ArchiveLimits|null $limits            Defensive limits to enforce; null applies the conservative defaults.
-	 * @param int|null           $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
+	 * @param EntryReader          $entry_reader      Decodes individual entry records.
+	 * @param FileWriter           $file_writer       Writes filesystem entries to disk.
+	 * @param DatabaseWriter       $database_writer   Replays db_chunk entries into the database.
+	 * @param ArchiveLimits|null   $limits            Defensive limits to enforce; null applies the conservative defaults.
+	 * @param int|null             $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
+	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded. Defaults to discarding them; trailing and optional, so no existing caller changes.
 	 */
-	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null ) {
+	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null, ?LoggerInterface $logger = null ) {
+		$this->logger              = $logger ?? new NullLogger();
 		$this->entry_reader        = $entry_reader;
 		$this->file_writer         = $file_writer;
 		$this->database_writer     = $database_writer;
@@ -289,6 +301,22 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			// restore(), never verify(), which writes nothing.
 			$this->database_writer->finalise_prefix_rewrite();
 			$this->database_writer->commit_staged_tables();
+
+			// Apply the directory modes FileWriter held back during the walk. A
+			// directory the archive records as unwritable — a hardened uploads
+			// tree, say — cannot be made unwritable while its own contents are
+			// still being written, so its mode waits until here. Deliberately
+			// after the database cut-over and inside the try: the restore is
+			// complete either way, and a mode that will not apply is reported
+			// rather than thrown, so a finished restore is never announced as a
+			// failure over a permission bit.
+			$unapplied = $this->file_writer->finalise_directory_modes();
+			foreach ( $unapplied as $path ) {
+				$this->logger->warning(
+					'Restored, but this directory kept a more permissive mode than the backup recorded.',
+					array( 'path' => $path )
+				);
+			}
 		} catch ( Throwable $error ) {
 			// The cut-over never happened (or failed atomically), so the live
 			// tables are untouched; remove the half-built staging tables. Cleanup

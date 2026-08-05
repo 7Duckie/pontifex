@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Destination;
 
+use Pontifex\Archive\ArchiveName;
+
 /**
  * Prunes an offsite destination down to its configured number of archives.
  *
@@ -73,7 +75,26 @@ final class DestinationRetention {
 			return array();
 		}
 
-		$objects = $this->adapter->list();
+		// Only ever rotate archives Pontifex named itself. Sorting by name is
+		// age order ONLY for the canonical `pontifex-backup-<UTC>.wpmig` shape,
+		// and that was asserted in docblocks while nothing enforced it: the SFTP
+		// adapter lists anything ending `.wpmig`, and `export --destination`
+		// uploads under whatever basename --output was given. A file called
+		// `before-upgrade.wpmig` therefore joined the set, sorted ahead of every
+		// timestamped name, and was deleted as "the oldest" — the backup taken
+		// minutes earlier precisely so it would be there if the upgrade went
+		// wrong, reported in the log as pruning an old archive.
+		//
+		// Anything not matching the generated form is left strictly alone. It is
+		// not part of this rotation, so it is not ours to delete; a keep-count is
+		// a promise about the backups Pontifex made, not about every file that
+		// happens to share the directory.
+		$objects = array_values(
+			array_filter(
+				$this->adapter->list(),
+				static fn ( RemoteObject $remote ): bool => ArchiveName::is_generated( $remote->name() )
+			)
+		);
 
 		usort( $objects, static fn ( RemoteObject $a, RemoteObject $b ): int => strcmp( $a->name(), $b->name() ) );
 
