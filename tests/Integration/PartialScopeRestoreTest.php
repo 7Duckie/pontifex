@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Integration;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use PHPUnit\Framework\AssertionFailedError;
 use RuntimeException;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 use Pontifex\Archive\Codec\CodecRegistry;
@@ -197,6 +198,36 @@ final class PartialScopeRestoreTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessageMatches( '/inconsistent archive/' );
 		$this->runner()->restore( $archive );
+	}
+
+	/**
+	 * A refused db-only-scope-carrying-files archive writes no files.
+	 *
+	 * Split out of {@see self::test_a_db_only_scope_carrying_files_is_refused()}:
+	 * an assertion placed after an expectException()-triggering call never
+	 * runs — PHPUnit unwinds the test method the instant the expected
+	 * exception fires, so restore()'s throw there made the original
+	 * assertFileDoesNotExist() at the end of that test dead code that always
+	 * passed without ever executing. Proving "writes nothing" needs its own
+	 * try/catch, with PHPUnit's own AssertionFailedError (which extends
+	 * RuntimeException) rethrown first so a missing refusal cannot be
+	 * swallowed by the very catch block that is supposed to observe it.
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if restore() failed to throw (see the catch block below); never swallowed.
+	 */
+	public function test_a_refused_db_only_scope_writes_no_files(): void {
+		$plans   = array( self::file_plan( 'wp-content/uploads/stray.txt', "should not be here\n" ) );
+		$archive = self::build_partial_archive( $plans, Scope::db_only( array() ) );
+
+		try {
+			$this->runner()->restore( $archive );
+			$this->fail( 'A scope contradiction must be refused.' );
+		} catch ( AssertionFailedError $bug ) {
+			throw $bug;
+		} catch ( RuntimeException $refusal ) {
+			$this->assertMatchesRegularExpression( '/inconsistent archive/', $refusal->getMessage() );
+		}
 
 		$this->assertFileDoesNotExist( $this->restore_root . '/wp-content/uploads/stray.txt', 'A refused archive writes nothing.' );
 	}
