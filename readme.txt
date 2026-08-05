@@ -4,15 +4,15 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 1.0.1
+Stable tag: 1.0.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Back up and migrate WordPress, your content and the whole database, in one openly documented .wpmig archive. CLI and admin UI; never phones home.
+Back up and migrate WordPress, your content and its database tables, in one openly documented .wpmig archive. CLI and admin UI; never phones home.
 
 == Description ==
 
-Pontifex packs your WordPress content — everything under `wp-content` (themes, plugins, uploads) and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
+Pontifex packs your WordPress content — what is under `wp-content` (themes, plugins, uploads) and every database table belonging to the site — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
 
 * **The format is documented — and, since 1.0.0, locked.** The `.wpmig` archive format is publicly specified and now locked: a backup taken today stays readable by every future version of Pontifex, so a backup is never hostage to the plugin — it can be read, verified, or recovered without Pontifex at all.
 * **No cloud service of ours.** Pontifex runs no service of its own, phones home to nothing, and needs no account. The only way a backup ever leaves your server is an SFTP destination you configure yourself, pointing at a server you own — set none up, and nothing leaves your disk.
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.0.2 =
+* Closes the rest of the findings from the audit behind 1.0.1. Fixed: automatic pruning of offsite backups could delete the NEWEST one if you had named it yourself rather than letting Pontifex name it — the backup you took just before an upgrade was exactly the shape at risk, so re-check any offsite destination you prune. Fixed: a restore stopped part-way through if the backup contained a read-only directory, such as a hardened uploads folder, leaving a site that was neither the old one nor the backup. Fixed: on Windows, downloading, deleting, verifying or restoring from the admin screen all reported the backup could not be found, even though it was listed there. Fixed: several screens said a backup contains the whole database — it contains the tables belonging to this WordPress site, so tables another application keeps in the same database are not included. Pontifex can also now tell you which kind of problem it hit rather than one generic message. No breaking changes.
+
 = 1.0.1 =
 * A security and correctness release, from an audit of 1.0.0 that found three defects every quality gate had passed. Fixed: an archive could disguise a symbolic link as an ordinary file and slip past the check that keeps links inside your site — changing two bytes of the archive's index was enough, and every integrity check still passed, so restoring an archive from someone else could create a link pointing at wp-config.php. Fixed: a restore altered content that mentioned its own database table in backticks, writing `pontifexstg_` permanently into posts and stored settings, and where that text sat inside a settings array the array stopped being readable and its plugin silently reverted to defaults. Fixed: verification skipped one of its checks unless given a memory budget, so it could call an archive sound that restoring would refuse. Changed: Pontifex now refuses to load on WordPress multisite, which it has never supported — it reads one table prefix and a network has more, so it would have backed up part of a network while appearing to back up all of it. No breaking changes.
 
@@ -148,6 +151,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.0.2 =
+Pruning of offsite backups could delete the newest one if you named it yourself; re-check any destination you prune. A read-only directory in a backup could stop a restore part-way. The admin backup screen did not work on Windows at all. No breaking changes.
 
 = 1.0.1 =
 Security and correctness. A crafted archive could plant a symbolic link pointing outside your site, and a restore could write `pontifexstg_` into posts and settings that name a table. Upgrade before restoring an archive you did not create. Multisite is now refused.

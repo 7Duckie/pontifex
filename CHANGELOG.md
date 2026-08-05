@@ -17,6 +17,68 @@ v0.0.x decision log for the reasoning.
 Nothing yet. Work toward the next operational increment begins after this
 tag. See [`docs/roadmap.md`](docs/roadmap.md).
 
+## [1.0.2] — 2026-08-05 — The rest of what the audit found
+
+Closes the remaining findings from the same full-build audit that produced
+v1.0.1. Two of them could lose or damage something you care about, and one
+made the admin screens unusable on an entire platform. No breaking changes.
+
+### Fixed
+
+- **Automatic pruning could delete the newest backup on an offsite
+  destination.** Pontifex decides which offsite copies to keep by sorting
+  their names, which is oldest-first only for the names Pontifex generates
+  itself. A backup you named yourself — `wp pontifex export
+  --output=/backups/before-upgrade.wpmig --destination=nas`, say — joined
+  that rotation, sorted ahead of every dated name, and was deleted as "the
+  oldest": the backup taken minutes earlier, precisely so it would be there
+  if the upgrade went wrong. Pruning now only ever touches backups Pontifex
+  named, and leaves anything else alone.
+- **A restore stopped part-way through when the backup contained a
+  read-only directory.** Locking down a directory such as
+  `wp-content/uploads/private` is a documented WordPress hardening step.
+  Pontifex recreated that directory with its recorded permissions before
+  writing the files inside it, so the very next file could not be written
+  and the restore stopped — at the one point where there is nothing to undo,
+  leaving a site that was neither the old one nor the backup. Directory
+  permissions are now applied once everything is in place.
+- **The admin backup screen did not work on Windows.** Downloading,
+  deleting, verifying or restoring a backup all reported that it could not
+  be found — for backups listed on the screen in front of you — because the
+  path check assumed a forward slash. Creating a backup still worked, so a
+  Windows site produced backups it then refused to touch.
+- **Several screens overstated what a backup contains.** The Backup screen
+  said a backup packs "every file and the whole database" and then
+  contradicted itself three lines later. A backup covers your content in
+  `wp-content`, minus the exclusions shown, and the database tables
+  belonging to this WordPress site — **tables another application keeps in
+  the same database are not included**, which matters if your site shares a
+  database with something else.
+
+### Changed
+
+- **Pontifex can now say which kind of problem it hit.** Until now every
+  failure arrived as the same shape, so the admin screens could only offer
+  one generic sentence whether your archive was corrupt or your disk was
+  simply full. Refusals now carry that distinction — the archive cannot be
+  trusted, this host cannot do it, or the request was wrong — which is what
+  lets the screens tell you something useful. See
+  [ADR 0022](docs/adr/0022-exception-taxonomy.md).
+
+### Internal
+
+- The release check that enforces the WordPress.org submission limits now
+  runs in CI rather than depending on somebody remembering it; the tag guard
+  additionally requires the tagged commit to be on `main`; the package CI
+  verifies is published rather than discarded; every workflow action is
+  pinned to an exact commit; and every job has a timeout.
+- Guards that could previously be deleted with the whole suite still passing
+  are now pinned by tests, including signature enforcement, both entry-hash
+  comparisons, and a completeness check that compares a real directory tree
+  against the archive built from it.
+- Two facts that several files each kept their own copy of — the backup
+  progress contract and the export counter schema — now have one home each.
+
 ## [1.0.1] — 2026-08-05 — Three defects a full-build audit found
 
 A security and correctness release. An audit of the released v1.0.0 build,
@@ -1208,6 +1270,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[1.0.2]: https://github.com/7Duckie/pontifex/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/7Duckie/pontifex/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/7Duckie/pontifex/compare/v0.9.5...v1.0.0
 [0.9.5]: https://github.com/7Duckie/pontifex/compare/v0.9.4...v0.9.5

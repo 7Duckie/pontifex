@@ -42,7 +42,7 @@ final class ScopeSummary {
 			case Scope::SUMMARY_FILES_ONLY:
 				return __( 'files only (wp-content), with no database', 'pontifex' );
 			default:
-				return __( 'your content — wp-content and the whole database', 'pontifex' );
+				return __( 'your content — wp-content and this site\'s database tables', 'pontifex' );
 		}
 	}
 

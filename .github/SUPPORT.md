@@ -33,8 +33,8 @@ diagnosis questions without waiting on anyone:
 | Request a feature | [Open a feature request](https://github.com/7Duckie/pontifex/issues/new?template=feature_request.yml) — but skim the [roadmap](../docs/roadmap.md) and [idea bank](../docs/idea-bank.md) first |
 | Report a security vulnerability | **Privately** — see [`SECURITY.md`](SECURITY.md). Never in a public issue. |
 
-Pontifex 1.0.0 has been submitted to the WordPress.org plugin
-directory; until that listing is live, install from GitHub.
+Pontifex is not yet listed in the WordPress.org plugin directory —
+install from GitHub in the meantime.
 
 ## Before you ask
 

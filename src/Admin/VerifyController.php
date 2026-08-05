@@ -17,6 +17,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
+use Pontifex\Lock\BackupProgress;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
@@ -125,7 +126,7 @@ final class VerifyController {
 	 *
 	 * @var int
 	 */
-	private const PROGRESS_STALE_SECONDS = 10;
+	private const PROGRESS_STALE_SECONDS = BackupProgress::STALE_SECONDS;
 
 	/**
 	 * The Environment abstraction (constant reads).

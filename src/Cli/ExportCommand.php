@@ -22,6 +22,7 @@ use Pontifex\Destination\DestinationSpec;
 use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Export\ExportCounters;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportResult;
 use Pontifex\Export\ExportRunner;
@@ -164,7 +165,7 @@ final class ExportCommand {
 	 * the stats are written occasionally and read almost never, so
 	 * they have no business in the alloptions cache.
 	 */
-	private const STATS_OPTION = 'pontifex_export_stats';
+	private const STATS_OPTION = ExportCounters::OPTION;
 
 	/**
 	 * The reason recorded in provenance when the archive is written unencrypted.
@@ -1154,25 +1155,7 @@ final class ExportCommand {
 	 * @return array<string, int> The merged counters.
 	 */
 	private static function merge_counters( array $current, array $delta ): array {
-		$merged = array();
-		foreach ( array( 'attempted', 'succeeded', 'failed', 'bytes_exported', 'files_changed', 'media_type_unresolved' ) as $key ) {
-			$merged[ $key ] = self::counter_int( $current, $key ) + self::counter_int( $delta, $key );
-		}
-		return $merged;
-	}
-
-	/**
-	 * Read one counter from an array as a non-negative-safe integer.
-	 *
-	 * Returns 0 when the key is absent or its value is non-numeric,
-	 * so corrupt stored data degrades to zero rather than a type error.
-	 *
-	 * @param array<array-key, mixed> $values The array to read from.
-	 * @param string                  $key    The counter key.
-	 * @return int The value as an int, or 0.
-	 */
-	private static function counter_int( array $values, string $key ): int {
-		return isset( $values[ $key ] ) && is_numeric( $values[ $key ] ) ? (int) $values[ $key ] : 0;
+		return ExportCounters::merge( $current, $delta );
 	}
 
 	// -------------------------------------------------------------------------
@@ -1201,10 +1184,10 @@ final class ExportCommand {
 			return;
 		}
 		if ( $db_only ) {
-			WP_CLI::log( __( 'Scope: database-only (the full database, no files). Its restore writes only the database.', 'pontifex' ) );
+			WP_CLI::log( __( 'Scope: database-only (every table belonging to this WordPress site, no files). Its restore writes only the database.', 'pontifex' ) );
 			return;
 		}
-		WP_CLI::log( __( 'Scope: content-only (wp-content plus the full database). Use --whole-site for a full-site clone.', 'pontifex' ) );
+		WP_CLI::log( __( 'Scope: content-only (wp-content plus every table belonging to this WordPress site). Use --whole-site for a full-site clone.', 'pontifex' ) );
 	}
 
 	/**

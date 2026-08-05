@@ -1944,6 +1944,63 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A directory the archive records as unwritable still receives its contents.
+	 *
+	 * Directory entries sort ahead of the files inside them, so applying a
+	 * restrictive mode when the directory is written made it unwritable before
+	 * those files arrived. A source site with a hardened
+	 * `wp-content/uploads/private` at 0555 — a documented WordPress lockdown
+	 * step, and what several security plugins apply — exported happily, because
+	 * 0555 is readable, and then failed its own restore on the very next entry.
+	 *
+	 * Nothing preflights directory modes, so the refusal landed mid-walk: the
+	 * one place with no recovery, because the file half is a merge with no
+	 * per-entry undo. Everything sorting before that directory was already the
+	 * archive's content and everything after was still the old site.
+	 *
+	 * @return void
+	 */
+	public function test_a_read_only_directory_still_receives_the_files_inside_it(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'wp-content/uploads/private', 0o555 ) );
+		$writer->write_entry( self::file_result( 'wp-content/uploads/private/secret.txt', 'kept' ) );
+
+		$path = $this->fixture_root . '/wp-content/uploads/private/secret.txt';
+		$this->assertFileExists( $path, 'A file inside a 0555 directory must still be restored.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading a fixture file from the temp tree; not an HTTP request.
+		$this->assertSame( 'kept', file_get_contents( $path ) );
+	}
+
+	/**
+	 * The recorded mode is applied once the walk finishes, not before.
+	 *
+	 * The counterweight: holding the mode back must not mean losing it. A
+	 * directory the archive says is 0555 has to end up 0555, or the restore has
+	 * quietly relaxed the source site's permissions.
+	 *
+	 * @return void
+	 */
+	public function test_a_held_back_directory_mode_is_applied_after_the_walk(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$writer->write_entry( self::directory_result( 'wp-content/uploads/private', 0o555 ) );
+		$writer->write_entry( self::file_result( 'wp-content/uploads/private/secret.txt', 'kept' ) );
+
+		$dir = $this->fixture_root . '/wp-content/uploads/private';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- Asserting the real mode on the temp fixture tree is the behaviour under test.
+		$this->assertTrue( is_writable( $dir ), 'The directory stays writable while the walk is in progress.' );
+
+		$this->assertSame( array(), $writer->finalise_directory_modes(), 'Every held-back mode applies cleanly here.' );
+
+		clearstatcache( true, $dir );
+		$this->assertSame( 0o555, fileperms( $dir ) & 0o777, 'The archive\'s recorded mode is what the directory ends at.' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test teardown: the fixture tree must be removable.
+		chmod( $dir, 0o755 );
+	}
+
+	/**
 	 * A raw path of exactly "." normalises to empty and is refused, for a DIRECTORY entry.
 	 *
 	 * The concrete, demonstrated failure mode this guard closes: without
@@ -2700,6 +2757,65 @@ final class FileWriterTest extends TestCase {
 			array( $expected_parent ),
 			$probed,
 			'A directory standing where the link will be created must not be probed in place of the link\'s parent.'
+		);
+	}
+
+	/**
+	 * Several distinct directories comfortably inside the ceiling are each probed individually, never folded together.
+	 *
+	 * The companion, from below, of
+	 * {@see self::test_assert_symlinks_creatable_falls_back_to_a_common_ancestor_beyond_the_probe_ceiling()}
+	 * just below, which pins the ceiling from above with 200 directories — a
+	 * count that clears any ceiling from 1 up to 199, so on its own it cannot
+	 * tell a ceiling of 64 apart from a ceiling of 1. Five distinct,
+	 * already-existing directories is the real Composer/pnpm-shaped layout this
+	 * preflight's own docblock describes — not a hostile archive — and MUST
+	 * still be probed one directory at a time: that is the precise
+	 * per-directory capability check ADR 0021 depends on, and the whole reason
+	 * the fallback below is a fallback rather than the rule. If the ceiling
+	 * were silently lowered to, say, 1, this legitimate five-directory archive
+	 * would collapse to the single, weaker deepest-common-ancestor probe
+	 * instead — a host can permit symlink creation under one of the five
+	 * directories while refusing it under another, and only probing each one
+	 * separately can tell them apart.
+	 *
+	 * @return void
+	 */
+	public function test_assert_symlinks_creatable_probes_several_directories_individually_within_the_ceiling(): void {
+		$expected_directories = array();
+		$links                = array();
+
+		for ( $index = 0; $index < 5; $index++ ) {
+			$package_directory = 'wp-content/plugins/shop/node_modules/.pnpm/pkg-' . $index;
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; every directory exists, as it would when restoring over the site the archive came from.
+			mkdir( $this->fixture_root . '/' . $package_directory, 0o755, true );
+			$links[ $package_directory . '/link' ] = 'target.txt';
+			$expected_directories[]                = realpath( $this->fixture_root ) . '/' . $package_directory;
+		}
+
+		$probed = array();
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			static function ( string $directory ) use ( &$probed ): bool {
+				$probed[] = $directory;
+				return true;
+			}
+		);
+
+		$writer->assert_symlinks_creatable( $links );
+
+		$this->assertCount(
+			5,
+			$probed,
+			'Five distinct directories inside the ceiling must each be probed once; a single, folded-together probe means the fallback fired when it must not have.'
+		);
+		$this->assertEqualsCanonicalizing(
+			$expected_directories,
+			$probed,
+			'Inside the ceiling, every distinct directory must be probed on its own — the shared-ancestor fallback is reserved for archives that exceed it.'
 		);
 	}
 

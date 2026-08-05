@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Destination;
 
+use Pontifex\Exception\PontifexException;
+
 use RuntimeException;
 
 /**
@@ -19,5 +21,5 @@ use RuntimeException;
  * a failed upload, download, listing, or delete. The message is safe to show a
  * user — adapters never place a secret in it.
  */
-final class DestinationException extends RuntimeException {
+final class DestinationException extends RuntimeException implements PontifexException {
 }

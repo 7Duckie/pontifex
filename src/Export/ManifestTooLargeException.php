@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Export;
 
+use Pontifex\Exception\PontifexException;
+
 use RuntimeException;
 
 /**
@@ -26,5 +28,5 @@ use RuntimeException;
  * message, instead of the generic "check the log" sentence every other
  * export failure gets.
  */
-final class ManifestTooLargeException extends RuntimeException {
+final class ManifestTooLargeException extends RuntimeException implements PontifexException {
 }
