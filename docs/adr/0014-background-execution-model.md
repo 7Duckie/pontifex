@@ -1,6 +1,6 @@
 # 0014 — background work: WP-Cron plus a self-continuing step runner, no job-queue library
 
-- **Status:** Proposed, 2026-07-13.
+- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.6.0.
 - **Deciders:** 7Duckie (v0.6.0 planning).
 
 ## Context

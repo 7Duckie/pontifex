@@ -17,13 +17,16 @@ A few principles shape every release:
 - **Round-trip first.** A feature is not shipped until both halves
   exist: anything that writes must be paired with something that
   reads. This is the strongest correctness check the format can have.
-- **Public API stability across commits within a release.** Once a
-  release begins, public APIs (constructors, method signatures,
-  return types) are designed upfront to their final shape and stay
-  stable across the build. Internal implementation details remain
-  rewritable. This is stricter than the typical pre-v1.0 project; it
-  suits an audience that will care about stability the moment v0.1.0
-  ships.
+- **Public API stability — within a release before v1.0.0, across
+  releases after it.** Once a release begins, public APIs
+  (constructors, method signatures, return types) are designed
+  upfront to their final shape and stay stable across the build.
+  Internal implementation details remain rewritable. Before v1.0.0
+  this was already stricter than the typical pre-1.0 project —
+  stability within a release, even though the API could still move
+  between releases. v1.0.0 graduated the promise: the public API is
+  now frozen across releases too, and a breaking change needs a
+  major version bump.
 - **Defaults exist, defaults are visible, defaults are overridable.**
   Every default behaviour can be justified to a user who asks, is
   surfaced at runtime before any action, and has a documented
@@ -45,8 +48,8 @@ and [ADR 0006](./adr/0006-cross-url-via-post-restore-search-replace.md).
 
 ### What ships
 
-- `wp pontifex export <path>` — produces a `.wpmig` archive from the
-  current site.
+- `wp pontifex export --output=<path>` — produces a `.wpmig` archive
+  from the current site.
 - `wp pontifex import <path>` — restores a `.wpmig` archive onto a
   WordPress at the **same URL**. No URL rewriting in v0.1.0
   (ADR 0004); this is a backup-and-restore baseline, and the command
@@ -123,7 +126,8 @@ features can ship quickly and on their own.
   the current site before it restores (`--no-rollback-archive` to skip),
   and `wp pontifex rollback` restores the most recent one — the undo
   button for a destructive import. Safety archives are owner-only, named
-  by UTC timestamp, with the most recent retained.
+  by UTC timestamp, with the most recent retained (the floor was later
+  raised to two — see ADR 0005 as amended).
 
 Alongside the two features, v0.2.0 carries the repository-hardening and
 open-source-health work done since v0.1.0: a protected `main`
@@ -373,7 +377,8 @@ line already honoured.
 
 ### What ships
 
-- **Symlink target confinement** (recorded in the design study behind this release) —
+- **Symlink target confinement**
+  ([ADR 0021](./adr/0021-symlink-target-confinement.md)) —
   a restored symlink is resolved the way the kernel resolves it, over the whole
   archive, before the first byte is written. Resolving a target as a string does not
   work, because the archive supplies the intermediate link: `hop -> ".."` followed by
@@ -550,8 +555,6 @@ versions.
   revision — the guarantee the "a backup is never hostage to the plugin"
   promise depends on (the specification reached 1.1 before the lock, so
   the lock applies at 1.1 rather than the 1.0 originally anticipated).
-- **The plugin is submitted to the WordPress.org plugin directory**,
-  providing the "active installs" adoption signal (idea-bank Idea 001).
 - **Security updates follow standard semver-patch cadence**, with the full
   triage protocol from [`../.github/SECURITY.md`](../.github/SECURITY.md).
 
@@ -610,8 +613,8 @@ each is in [`idea-bank.md`](./idea-bank.md).
   GitHub release-download counts together prove insufficient for
   responsible-disclosure planning.
 - **Full behavioural test coverage of CLI commands' `__invoke`**
-  (idea-bank Idea 007) — best fit is a dedicated follow-up commit
-  after v0.1.0 ships, possibly v0.1.1.
+  (idea-bank Idea 007) — partially covered since it was first raised
+  (Sprint 1, 2026-05-26); the remaining gap has no committed release.
 - **Remote opt-in error reporting (Sentry-style)** (idea-bank Idea 003) —
   deferred indefinitely. Reconsider post-v1.0 only if a real need
   emerges that the local diagnostic-bundle workflow cannot meet.
