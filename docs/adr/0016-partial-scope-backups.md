@@ -1,6 +1,6 @@
 # 0016 — files-only and database-only backups, and how a partial archive stays honest
 
-- **Status:** Proposed, 2026-07-13.
+- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.7.0.
 - **Deciders:** 7Duckie (v0.7.0).
 
 ## Context

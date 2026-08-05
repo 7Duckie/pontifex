@@ -1,6 +1,6 @@
 # 0017 — offsite destinations: uploading a finished backup to storage the user owns
 
-- **Status:** Proposed, 2026-07-13.
+- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.8.0.
 - **Deciders:** 7Duckie (v0.8.0).
 - **Revised:** 2026-07-14 — v0.8.0 ships **SFTP only**; the S3 adapter is deferred. See "Revision" at the end.
 

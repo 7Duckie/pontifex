@@ -14,7 +14,7 @@ Back up and migrate WordPress — your content and the whole database — in one
 
 Pontifex packs your WordPress content — everything under `wp-content` (themes, plugins, uploads) and the whole database — into a single `.wpmig` archive, and restores it onto another WordPress. Pass `--whole-site` to capture the entire installation, WordPress core included, for cloning onto a bare server. Two promises set it apart:
 
-* **The format is documented.** The `.wpmig` archive format is publicly specified, so a backup is never hostage to the plugin: an archive can be read, verified, or recovered without Pontifex.
+* **The format is documented — and, since 1.0.0, locked.** The `.wpmig` archive format is publicly specified and now locked: a backup taken today stays readable by every future version of Pontifex, so a backup is never hostage to the plugin — it can be read, verified, or recovered without Pontifex at all.
 * **No cloud service of ours.** Pontifex runs no service of its own, phones home to nothing, and needs no account. The only way a backup ever leaves your server is an SFTP destination you configure yourself, pointing at a server you own — set none up, and nothing leaves your disk.
 
 Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the admin screens — Overview, Backup, Verify, and Restore — added in v0.5.0 for sites without shell access. A finished backup can also be sent offsite to a **server you own**, over SFTP — still no cloud service, no account, and no phone-home; it's your server and your credentials, only when you command it.
@@ -35,7 +35,7 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 
 = Built for other people's live sites =
 
-Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks, over-budget entries), restores the database atomically — a failed restore leaves your live tables untouched — takes a safety archive before every restore, and never does naive search-replace over serialised data.
+Pontifex runs inside live websites, on data its author never sees. It refuses hostile input (decompression bombs, path-traversal symlinks, over-budget entries), restores the database atomically — a failed restore leaves your live tables untouched — takes a safety archive before every restore (unless skipped with `--no-rollback-archive` on the CLI), and never does naive search-replace over serialised data.
 
 == Installation ==
 
@@ -58,6 +58,10 @@ Not unless you tell it to. Pontifex runs no service of its own and contacts noth
 
 Yes. The `.wpmig` format is publicly documented, so an archive can be inspected and recovered independently of Pontifex.
 
+= Will a backup I take today still open in a future version of Pontifex? =
+
+Yes. Since 1.0.0 the `.wpmig` format specification is locked: an archive written today stays readable by every future version of Pontifex. Any change the format cannot accommodate gets a new major specification version, never a silent revision of this one — so your existing backups are never left behind by an update.
+
 = Is there an admin UI? =
 
 Yes, since v0.5.0: Overview, Backup, Verify, and Restore/Rollback screens, plus uploading a backup taken on another site. WP-CLI remains fully supported and is still the way to script Pontifex.
@@ -78,13 +82,17 @@ Yes. Set a daily or weekly schedule — from the Backup screen or with `wp ponti
 
 A backup started from the admin screen runs as a persisted job: if the page is closed or the request dies, reloading the screen re-attaches to the running backup, and a background tick continues a job whose request was killed. On the CLI, `wp pontifex export --resumable` makes the export continuable with `wp pontifex export --resume` after any interruption, and the finished archive is byte-identical to an uninterrupted one.
 
+= What happens if a restore fails part-way through? =
+
+Your database is safe either way: a restore replays into staging tables and only cuts them over to the live tables in one atomic step, once the whole archive has been read and verified, so the restore itself never leaves your live tables half-changed. (A `--url` migration runs afterwards, directly against the live database, so a failure during that step can leave it partly rewritten.) Files are written directly as the restore goes, so a failure part-way through can leave some already written. For that reason Pontifex takes a safety archive of your site before every restore (unless you pass `--no-rollback-archive` on the CLI, which skips it — and with it, the automatic recovery) and, if the restore then fails, automatically replays it, putting back every file and table it captured. Files the failed restore had already written that were not part of your site before are left in place, so check the site afterwards. If that automatic recovery cannot finish — a full disk, say — you are told plainly, and you can replay the same safety archive yourself: the Roll back control on the Pontifex → Restore screen, or `wp pontifex rollback` on the CLI.
+
 = Can Pontifex store backups offsite? =
 
 Yes. `wp pontifex destination add` configures a named SFTP destination on a server you own, and `wp pontifex export --destination=<name>` uploads the finished archive there after writing it locally. `wp pontifex destination pull` fetches an archive back for recovery after a local loss.
 
 = Does uploading a backup phone home? =
 
-No. An offsite upload is a plain SFTP connection to the server you configured, using credentials you supply — Pontifex runs no service in between and holds none of your data. It only connects when you run an export with `--destination` or pull an archive back; it never connects on its own.
+No. An offsite upload is a plain SFTP connection to the server you configured, using credentials you supply — Pontifex runs no service in between and holds none of your data. It connects only when you tell it to — an export with `--destination`, or a `wp pontifex destination test`, `archives`, `pull` or `prune`. It never connects on its own, and `wp pontifex doctor` checks your destinations without connecting at all.
 
 = Does a backup include my .git directory? =
 

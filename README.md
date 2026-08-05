@@ -1,67 +1,105 @@
 # Pontifex
 
-A free, open-source WordPress migration and backup plugin built around
-a documented archive format (`.wpmig`). Every import takes a safety
-archive first, so it can be rolled back.
+Pontifex packs a WordPress site — your content under `wp-content` (themes,
+plugins, uploads) plus every WordPress-prefixed database table — into one
+file, a `.wpmig` archive, and restores it onto another WordPress. Pass
+`--whole-site` to capture the entire installation, WordPress core included,
+for cloning onto a bare server. An import takes a safety archive of the
+current site first by default, so it can be rolled back with one command.
 
-**Status: pre-alpha.** Pontifex is in early development. Today it can
-audit an environment (`wp pontifex doctor`), pack your content and
-database into a single `.wpmig` archive (`wp pontifex export`, or
-`--whole-site` for the entire installation), restore that archive
-onto a WordPress at the same URL (`wp pontifex import`, which takes a
-safety archive first), migrate a site to a new URL
-(`wp pontifex import --url=`) with serialised-data-safe search-replace,
-check an archive without restoring it (`wp pontifex verify`), and undo a
-mistaken import (`wp pontifex rollback`) — the round trip is proven
-end-to-end by an integration test against a real WordPress. The admin UI
-and the operational features (scheduling, transports, multisite) are still
-to come; see the roadmap. Do not rely on Pontifex for production data yet.
+**Status: v1.0.0, released — the first stable release.** From here the
+public API is frozen (a breaking change now needs a major version), and
+the `.wpmig` format specification is locked at specification version 1.1:
+a v1.1 archive stays readable by every future Pontifex, and a change the
+specification cannot accommodate needs a new major specification version,
+never a silent revision. Pontifex is being submitted to the
+WordPress.org plugin directory. See [`CHANGELOG.md`](CHANGELOG.md) for
+the full release history.
 
-## What Pontifex will be
+Pontifex runs no service of its own: it phones home to nothing, needs no
+account, and contacts nothing on its own initiative. The only way a byte
+ever leaves the machine is an offsite SFTP destination you configure
+yourself, pointing at a server you own — configure none, and nothing is
+ever sent.
 
-Pontifex aims to be the WordPress migration plugin that does it right:
+## Why Pontifex
 
 1. **Genuinely free at every capability level.** No file-size caps, no
    bandwidth caps, no Pro tier behind which the features you actually
    need are hidden.
-2. **Documented, versioned archive format.** The `.wpmig` format is a
-   public specification ([`docs/archive-format.md`](docs/archive-format.md)).
-   Your migration artefacts belong to you, not to a vendor.
-3. **Rollback as a first-class feature.** Before any destructive import,
-   Pontifex takes an automatic safety archive of the current site, with
-   one command (`wp pontifex rollback`) to restore it.
+2. **Documented, versioned, locked archive format.** The `.wpmig` format
+   is a public specification
+   ([`docs/archive-format.md`](docs/archive-format.md)), locked at
+   specification version 1.1 as of v1.0.0. Your migration artefacts
+   belong to you, not to a vendor.
+3. **Rollback as a first-class feature.** Before a destructive import,
+   Pontifex takes an automatic safety archive of the current site by
+   default, with one command (`wp pontifex rollback`) to restore it.
 
-## What works today
+## What it does
 
-Pontifex is pre-alpha, so what the *format specification* describes and
-what the *plugin* actually does are not yet the same thing. This table
-is the honest difference, updated at every release.
+Pontifex is driven two ways: WP-CLI (`wp pontifex …`), or the admin
+screens under **Pontifex** in wp-admin (Overview, Backup, Verify,
+Restore) for sites without shell access.
 
-| Capability | In the spec | In the plugin today |
-|---|---|---|
-| Environment audit (`wp pontifex doctor`) | — | ✅ |
-| Export a site to `.wpmig` (`wp pontifex export`) | ✅ | ✅ |
-| Import / restore (`wp pontifex import`, same URL) | ✅ | ✅ |
-| Round trip proven end-to-end | — | ✅ — same-URL, integration-tested |
-| Rollback (pre-import safety archive + undo) | — | ✅ |
-| Archive verification (`wp pontifex verify`) | — | ✅ |
-| Cross-URL migration (`wp pontifex import --url=`) | ✅ | ✅ — serialised-safe search-replace + gadget defences |
-| zstd compression (codec `0x0002`) | ✅ | ✅ — when `ext-zstd` is present, else gzip |
-| Encryption (`--encrypt`) | ✅ | ✅ — AES-256-GCM, Argon2id-derived key; `--encrypt` / `--passphrase-stdin` |
-| Ed25519 signatures | ✅ | ✅ — `wp pontifex keygen` + `export --sign`; `--public-key` verification on `verify` / `import` |
-| Activity readout (`wp pontifex stats`) | — | ✅ — export/import counters + recent-transfer history; `--format=json` |
-| Support bundle (`wp pontifex diagnostics`) | — | ✅ — sanitised tar.gz (redacted; never auto-uploads) |
-| Per-transfer log files | — | ✅ — beside the archive on export; in the log dir on import |
+- `wp pontifex doctor` — read-only environment audit (memory limit,
+  execution time, symbolic-link support, disk space, MySQL/MariaDB
+  version, and more); `--format=json`, `--fields=`.
+- `wp pontifex export --output=<path>` — pack the site into a `.wpmig`
+  archive. The default scope is content-only (`wp-content` plus every
+  WordPress-prefixed database table); `--whole-site` adds WordPress
+  core. `--files-only` / `--db-only` capture just one half;
+  `--exclude` / `--exclude-table` /
+  `--exclude-file` leave out named files, tables, or patterns (`.git` is
+  left out by default at any depth). `--encrypt` (or
+  `--passphrase-stdin` for scripts) encrypts with AES-256-GCM under an
+  Argon2id-derived key. `--sign --signing-key=<path>` adds an Ed25519
+  signature. `--resumable` / `--resume` survive an interrupted export.
+  `--destination=<name>` uploads the finished archive to a configured
+  offsite destination.
+- `wp pontifex import <archive>` — restore an archive, taking an
+  automatic safety archive first (skip with `--no-rollback-archive`).
+  Restores content-only to the same URL by default; `--whole-site`
+  restores WordPress core too — intended only for a fresh, empty
+  destination; `--url=<new-url>` migrates the site with
+  serialised-data-safe search-replace; `--dry-run` verifies without
+  writing anything; `--public-key=<path>` makes signature verification
+  mandatory.
+- `wp pontifex verify <archive>` — check an archive's integrity without
+  restoring anything; `--list` prints its contents. Pass
+  `--public-key=<path>` (or pin `PONTIFEX_PUBLIC_KEY`) to also verify an
+  Ed25519 signature and make it mandatory — without a key, a signed
+  archive is hash-checked only, with a warning that its signature was
+  not verified.
+- `wp pontifex rollback` — undo the most recent import from its safety
+  archive; `--dry-run`, `--yes`.
+- `wp pontifex keygen` — generate an Ed25519 keypair for signing
+  archives.
+- `wp pontifex stats` / `wp pontifex diagnostics` — a local
+  export/import activity readout and a sanitised, never-uploaded
+  support bundle.
+- `wp pontifex schedule set|show|off` — run backups automatically on a
+  daily or weekly UTC hour, with retention pruning and per-schedule
+  exclusions; also configurable from the Backup screen.
+- `wp pontifex destination add|list|test|archives|pull|prune|remove` —
+  configure an SFTP server you own as an offsite destination for
+  `export --destination=<name>`, and pull an archive back for recovery.
+  See [`docs/using-destinations.md`](docs/using-destinations.md).
 
-**What Pontifex is _not_ yet:** a scheduled-backup system (no cron, no
-retention policies) or a point-and-click tool (the admin UI lands in
-v0.5.0). If you need those today, pair Pontifex with tools that have them —
-and watch the table above as it fills in.
+The admin screens cover the everyday operations for sites without shell
+access: live progress and cancel on Backup, re-attaching to a running
+job after a page reload, a pre-restore safety archive on Restore, and
+chunked upload of a backup taken on another site. Whole-site backups,
+encryption, signing and offsite destinations stay command-line
+features — the admin refuses an encrypted or whole-site archive and
+points at the matching command.
+
+Run `wp pontifex <command> --help` for any command's full options.
 
 ## Requirements
 
 - PHP 8.2 or newer
-- WordPress 6.5 or newer
+- WordPress 6.5 or newer (tested up to 7.0)
 - MySQL 5.7+ or MariaDB 10.4+
 
 ## Installation (development)
@@ -76,16 +114,19 @@ Then symlink or copy the directory into `wp-content/plugins/` and
 activate.
 
 For a reproducible, throwaway WordPress to develop against, the repo
-ships a [wp-env](https://www.npmjs.com/package/@wordpress/env) config.
-With Docker running:
+ships a [wp-env](https://www.npmjs.com/package/@wordpress/env)
+configuration, pinned in `package.json`. With Docker running:
 
 ```bash
+npm ci
 npx @wordpress/env start
 ```
 
 This gives you WordPress on `http://localhost:8910` with Pontifex
-already active, plus a separate test site on `http://localhost:8911`
-for the integration suite.
+already active. The integration suite runs against a second, separate
+wp-env configuration (`.wp-env.tests.json`, port 8911) — see
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) for the exact
+commands.
 
 ## Usage
 
@@ -106,11 +147,18 @@ wp pontifex import /path/to/site.wpmig             # restore (prompts before wri
 
 # Restore, then migrate the site to a new URL (serialised-data-safe)
 wp pontifex import /path/to/site.wpmig --url=https://new-site.example
+
+# Check an archive without restoring it, or undo an import you just made
+wp pontifex verify /path/to/site.wpmig
+wp pontifex rollback
 ```
 
-`import` restores to the **same URL** by default; pass `--url=<new-url>`
-to also migrate the site to a new URL with serialised-data-safe
-search-replace (the defences behind it are recorded in
+`import` restores **content-only** (`wp-content` plus every
+WordPress-prefixed database table) to the **same URL** by default; pass
+`--whole-site` to also restore WordPress core — intended only for a
+fresh, empty destination — and `--url=<new-url>` to migrate the site
+to a new URL with serialised-data-safe search-replace (the defences
+behind it are recorded in
 [ADR 0006](docs/adr/0006-cross-url-via-post-restore-search-replace.md)).
 See the [roadmap](docs/roadmap.md) for what ships when.
 
@@ -187,14 +235,12 @@ truth — including why each deferred item waits — is
   destinations on a server you own; and the hardening releases that
   stop an archive's SQL and its files reaching outside the site they
   restore into.
-- **v1.0.0 — Stable surface. Planned.** The public API frozen; the
+- **v1.0.0 — Stable surface. ✅ Released.** The public API frozen, and the
   `.wpmig` specification locked (see
   [`docs/archive-format.md`](docs/archive-format.md), locked at
-  specification version 1.1); and submission to the WordPress.org
-  plugin directory.
+  specification version 1.1).
 - **Not yet committed to a release.** Push/pull host-to-host transports;
-  multisite support; published test vectors for the format
-  specification.
+  multisite support.
 - **v2.0 — Go reference reader. Planned.** A standalone Go CLI
   implementing read, verify, list and conversion from the format spec —
   independent verification and emergency recovery without a working
@@ -205,12 +251,35 @@ version-by-version roadmap is [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Documentation
 
+**Start here.**
+
+- [**Using Pontifex**](docs/guide.md) — a step-by-step guide in plain
+  English, for site owners rather than developers. Installing, your first
+  backup, checking it is good, moving a site, restoring, undoing a
+  restore, scheduling, and sending backups offsite. No shell required.
+- [**When Pontifex refuses, and what to do**](docs/when-pontifex-refuses.md)
+  — Pontifex refuses things deliberately, and a refusal looks exactly like
+  a bug from the outside. This is every refusal it makes: what it means,
+  whether it is protecting you or is something you can fix, the correct
+  remedy, and the plausible-looking wrong one. Read this before working
+  around anything.
+- [**Technical reference**](docs/reference.md) — the complete CLI surface,
+  the export and restore pipelines, integrity and encryption, concurrency,
+  limits, and what is configurable.
+
+**Reference.**
+
 - [`docs/archive-format.md`](docs/archive-format.md) — `.wpmig` format
-  specification (the bytes-on-disk contract).
+  specification (the bytes-on-disk contract), locked at specification
+  version 1.1.
 - [`docs/archive-format-design.md`](docs/archive-format-design.md) —
   rationale behind format decisions (the *why*).
 - [`docs/threat-model.md`](docs/threat-model.md) — plugin attack-surface
   ranking with CVE-priority guidance.
+- [`docs/using-destinations.md`](docs/using-destinations.md) —
+  configuring an offsite SFTP destination.
+- [`docs/PRIVACY.md`](docs/PRIVACY.md) — exactly what Pontifex does, and
+  does not, send over the network.
 - [`docs/roadmap.md`](docs/roadmap.md) — release-by-release scope.
 - [`docs/idea-bank.md`](docs/idea-bank.md) — ideas under consideration,
   with deferral and rejection reasoning.
