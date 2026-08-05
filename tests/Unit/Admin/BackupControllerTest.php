@@ -79,6 +79,48 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	/**
+	 * A percent sign in an exclusion pattern survives unaltered.
+	 *
+	 * These were read through sanitize_textarea_field(), whose underlying
+	 * WordPress helper strips every percent sign followed by two hex digits to
+	 * remove percent-encoding from what it assumes is URL-ish input. An
+	 * exclusion pattern is a filesystem path, where those bytes are just bytes,
+	 * so `wp-content/uploads/2024%2F*` silently became
+	 * `wp-content/uploads/2024*` — a far broader exclusion than the operator
+	 * asked for, quietly leaving files out of every backup. Scheduled backups
+	 * persist the pattern, so the mangled version would be reused by every
+	 * unattended run thereafter.
+	 *
+	 * @return void
+	 */
+	public function test_a_percent_sign_in_an_exclusion_pattern_is_preserved(): void {
+		$method  = new \ReflectionMethod( BackupController::class, 'strip_control_characters' );
+		$pattern = 'wp-content/uploads/2024%2F*';
+		$this->assertSame( $pattern, $method->invoke( null, $pattern ), 'A percent-encoded-looking path must survive byte for byte.' );
+
+		$this->assertSame(
+			'wp-content/cache-%41%42/**',
+			$method->invoke( null, 'wp-content/cache-%41%42/**' ),
+			'Several percent sequences in one pattern must all survive.'
+		);
+	}
+
+	/**
+	 * Control characters are still removed, including a NUL.
+	 *
+	 * The counterweight: keeping the operator's bytes must not mean keeping
+	 * bytes no real path can contain. A NUL is the classic way to truncate a
+	 * path inside a C-level call.
+	 *
+	 * @return void
+	 */
+	public function test_control_characters_are_stripped_from_exclusion_patterns(): void {
+		$method = new \ReflectionMethod( BackupController::class, 'strip_control_characters' );
+		$this->assertSame( 'wp-content/uploads', $method->invoke( null, "wp-content/up\x00loads" ), 'A NUL byte must not survive.' );
+		$this->assertSame( "a\nb", $method->invoke( null, "a\nb" ), 'Newlines survive: the caller splits on them.' );
+	}
+
+	/**
 	 * Refuses to create a backup without the managing capability.
 	 *
 	 * @return void

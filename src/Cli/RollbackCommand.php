@@ -29,6 +29,7 @@ use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
+use Pontifex\WordPress\WordPressRoot;
 
 /**
  * `wp pontifex rollback` — undo the most recent import by restoring its safety archive.
@@ -444,10 +445,7 @@ final class RollbackCommand {
 	 * @throws RuntimeException If ABSPATH is not defined (should never happen inside a WordPress request).
 	 */
 	private function resolve_wordpress_root(): string {
-		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
-			throw new RuntimeException( 'RollbackCommand: ABSPATH is not defined; is WordPress loaded?' );
-		}
-		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+		return WordPressRoot::resolve( $this->environment );
 	}
 
 	/**

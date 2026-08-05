@@ -33,6 +33,18 @@
     <rule ref="WordPress-Docs"/>
 
     <!--
+        WordPress-Extra includes four of the five WordPress security sniffs
+        but NOT ValidatedSanitizedInput, which flags superglobal input used
+        without a recognised sanitiser. Plugin Check — the gate a plugin must
+        pass to be listed in the directory — does include it, so a finding it
+        raises could only ever surface at the staging gate, after the local
+        gates had already said the change was clean. One did, on the v1.0.3
+        assembly. Enabling it here means `composer lint` sees what the
+        directory's own tooling sees.
+    -->
+    <rule ref="WordPress.Security.ValidatedSanitizedInput"/>
+
+    <!--
         File-naming rules: PSR-4 vs traditional WordPress.
 
         WPCS by default requires files in the WordPress style:

@@ -24,6 +24,7 @@ use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\WordPress\WordPressContext;
+use Pontifex\WordPress\WordPressRoot;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -418,10 +419,7 @@ final class VerifyController {
 	 * @throws RuntimeException If ABSPATH is not defined (should never happen in an admin request).
 	 */
 	private function resolve_wordpress_root(): string {
-		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
-			throw new RuntimeException( 'VerifyController: ABSPATH is not defined; is WordPress loaded?' );
-		}
-		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+		return WordPressRoot::resolve( $this->environment );
 	}
 
 	/**

@@ -933,8 +933,23 @@ final class BackupController {
 		if ( ! isset( $_POST['exclusions'] ) ) {
 			return array();
 		}
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() at the top of create() before this runs.
-		$raw   = sanitize_textarea_field( wp_unslash( (string) $_POST['exclusions'] ) );
+		// Deliberately NOT sanitize_textarea_field(): WordPress's text-field
+		// sanitiser strips every percent sign followed by two hex digits, to
+		// remove percent-encoding from what it assumes is URL-ish input. An
+		// exclusion pattern is a filesystem path, where those bytes are just
+		// bytes — so `wp-content/uploads/2024%2F*` silently became
+		// `wp-content/uploads/2024*`, quietly excluding far more than the
+		// operator asked for, and files they meant to keep were left out of
+		// every backup from then on. Scheduled backups persist the pattern, so
+		// the mangled version would be reused by every unattended run.
+		//
+		// What actually needs removing from a filesystem pattern is control
+		// characters, which cannot appear in a legitimate path and are the only
+		// hostile thing a textarea can carry here. Everything else is left as
+		// the operator typed it, and first_invalid_pattern() still judges
+		// whether the result is a usable pattern.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- The nonce is verified in is_authorised() at the top of create() before this runs. The input IS sanitised, by strip_control_characters() on this line; the sniff recognises a fixed list of WordPress sanitisers and cannot see a project one. The recognised sanitiser for this input, sanitize_textarea_field(), is the very function that corrupts these patterns, for the reason set out above. The value never reaches SQL (it is matched against file paths by the scanner) and never reaches output unescaped (the Backup screen re-renders it through esc_textarea()).
+		$raw   = self::strip_control_characters( wp_unslash( (string) $_POST['exclusions'] ) );
 		$lines = preg_split( '/\R/', $raw );
 		if ( false === $lines ) {
 			return array();
@@ -947,6 +962,33 @@ final class BackupController {
 			}
 		}
 		return $patterns;
+	}
+
+	/**
+	 * Remove control characters from operator-supplied pattern text.
+	 *
+	 * Everything a filesystem path can legitimately contain is kept, including
+	 * a literal percent sign, spaces and non-ASCII bytes. Only C0 and C1
+	 * control characters and NUL are dropped: none can appear in a real path,
+	 * and a NUL is the classic way to truncate one inside a C-level call.
+	 *
+	 * Tabs, carriage returns and newlines survive, because the caller splits on
+	 * line breaks and trims each line afterwards.
+	 *
+	 * @param string $text The raw textarea contents.
+	 * @return string The same text with control characters removed.
+	 */
+	private static function strip_control_characters( string $text ): string {
+		$cleaned = preg_replace( '/[^\P{C}\t\r\n]/u', '', $text );
+
+		// A non-UTF-8 byte sequence makes the unicode-aware pattern return null.
+		// Fall back to the ASCII-range strip rather than silently returning
+		// nothing, which would drop every exclusion the operator entered.
+		if ( null === $cleaned ) {
+			$cleaned = preg_replace( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text );
+		}
+
+		return null === $cleaned ? '' : $cleaned;
 	}
 
 	/**

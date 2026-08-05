@@ -36,6 +36,7 @@ use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
+use Pontifex\WordPress\WordPressRoot;
 
 /**
  * `wp pontifex import` — restore a Pontifex archive over the current WordPress site.
@@ -879,10 +880,7 @@ final class ImportCommand {
 	 * @throws RuntimeException If ABSPATH is not defined (should never happen inside a WordPress request).
 	 */
 	private function resolve_wordpress_root(): string {
-		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
-			throw new RuntimeException( 'ImportCommand: ABSPATH is not defined; is WordPress loaded?' );
-		}
-		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' );
+		return WordPressRoot::resolve( $this->environment );
 	}
 
 	/**
