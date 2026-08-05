@@ -255,10 +255,27 @@ final class BackupStore {
 
 		$real_path = realpath( $path );
 		$real_dir  = realpath( $this->directory );
-		if ( false === $real_path || false === $real_dir || 0 !== strpos( $real_path, $real_dir . '/' ) ) {
+		if ( false === $real_path || false === $real_dir ) {
 			return null;
 		}
 
+		// Compare on forward slashes regardless of platform. $this->directory is
+		// built with forward slashes, but realpath() answers in the platform's
+		// own separator -- a backslash on Windows -- so a hard-coded '/' here
+		// could never prefix a real Windows path. The guard fired on every
+		// legitimate file, and because this method is the single gate behind
+		// Download, Delete, Verify, Restore and Preview, all five answered "that
+		// backup could not be found" for backups plainly listed on the screen.
+		// Creating one still worked, since that path never calls resolve(), so
+		// the site produced backups it then refused to touch.
+		$separator_free_path = str_replace( '\\', '/', $real_path );
+		$separator_free_dir  = str_replace( '\\', '/', $real_dir );
+		if ( 0 !== strpos( $separator_free_path, $separator_free_dir . '/' ) ) {
+			return null;
+		}
+
+		// The real path is returned unnormalised: callers hand it to the
+		// filesystem, which wants the platform's own separator back.
 		return $real_path;
 	}
 

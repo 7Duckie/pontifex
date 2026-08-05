@@ -137,6 +137,46 @@ final class BackupStoreTest extends TestCase {
 	}
 
 	/**
+	 * The confinement check does not depend on the platform's path separator.
+	 *
+	 * `$this->directory` is built with forward slashes, but `realpath()` answers
+	 * in the platform's own separator — a backslash on Windows. The guard used a
+	 * hard-coded `/`, which can never prefix a real Windows path, so `resolve()`
+	 * returned null for every legitimate backup. This method is the single gate
+	 * behind Download, Delete, Verify, Restore and Preview, so on Windows all
+	 * five answered "that backup could not be found" for backups listed on the
+	 * screen in front of the operator. Creating one still worked, because that
+	 * path never calls `resolve()` — so the site produced backups it then
+	 * refused to touch.
+	 *
+	 * The separator logic is asserted directly rather than through the
+	 * filesystem, because a separator defect is invisible on the platform that
+	 * does not have the separator: this suite runs where DIRECTORY_SEPARATOR is
+	 * already `/`, so only a Windows-shaped pair of paths can show it.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_holds_for_windows_shaped_paths(): void {
+		$directory = 'C:\\inetpub\\wwwroot\\wp-content\\pontifex\\backups';
+		$inside    = $directory . '\\pontifex-backup-20260101T000000Z.wpmig';
+		$sibling   = 'C:\\inetpub\\wwwroot\\wp-content\\pontifex\\backups-other\\stolen.wpmig';
+
+		$normalise = static fn ( string $path ): string => str_replace( '\\', '/', $path );
+
+		$this->assertSame(
+			0,
+			strpos( $normalise( $inside ), $normalise( $directory ) . '/' ),
+			'A backup inside the directory must confine on a Windows-shaped path.'
+		);
+
+		$this->assertNotSame(
+			0,
+			strpos( $normalise( $sibling ), $normalise( $directory ) . '/' ),
+			'A sibling directory whose name merely starts the same must still be refused.'
+		);
+	}
+
+	/**
 	 * Refuses traversal, absolute paths, foreign names, and missing files.
 	 *
 	 * @return void
