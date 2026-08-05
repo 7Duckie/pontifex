@@ -52,27 +52,36 @@ Look for the most recent line containing `Admin backup failed.` or
 If you have shell access, running the same operation through WP-CLI is often
 the fastest way to find out what is wrong, because the CLI tells you.
 
-### 2. "Verified sound" does not promise the restore will work
+### 2. "Refused" is not "broken", and the difference matters
 
-`verify` is a real check and a valuable one. It confirms the archive's
-structure is intact and that every entry still matches the fingerprint taken
-when it was written. If verify says sound, the archive has not been corrupted
-or truncated.
+`verify` has three answers, not two.
 
-But verify does not attempt the restore, and there are checks it deliberately
-does not run:
+**Sound** means the archive's structure is intact, every entry still matches
+the fingerprint taken when it was written, and a restore would accept it.
+
+**Broken** means something inside is damaged or unreadable. Find another copy.
+
+**Refused** means the archive is *not* damaged — every fingerprint matched —
+but a restore will not accept it: it would place a symbolic link outside your
+site, or its contents contradict what its own header says it holds.
+
+That third answer calls for the opposite of what "broken" calls for. Broken
+sends you to delete the file and reach for another copy. **A refused archive
+should be kept and not restored.** Pontifex never produces one, so its
+existence is information: find out where the file came from. If you made it
+yourself with Pontifex and see this, please report it.
+
+Two checks verify still cannot make:
 
 - It does **not** check your passphrase. An encrypted archive verifies as
   sound without one, because verify never decrypts anything.
-- It does **not** check whether your server has room for the restore.
-- It does **not** check whether your host can create the symbolic links the
-  archive contains.
-- It does **not** check the archive's internal consistency claims that only
-  matter at restore time.
+- It does **not** check whether your host can create symbolic links, because
+  the only way to establish that is to create one, and verify never writes
+  anything. Use `wp pontifex doctor`, or rehearse the whole restore with
+  `wp pontifex import --dry-run`.
 
-So "sound" means *this archive is not damaged*. It does not mean *this archive
-will restore onto this server today*. Both are worth knowing; they are not the
-same thing.
+If your server has no room, verify tells you — as a note beside a sound
+verdict, never as the verdict itself. **A full disk is not a damaged backup.**
 
 ### 3. Your database is protected on a failed restore. Your files are not.
 
