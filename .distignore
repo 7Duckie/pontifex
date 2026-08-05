@@ -3,8 +3,9 @@
 # Used by `wp dist-archive` to build the ZIP that ships to WordPress.org.
 # Patterns are matched gitignore-style WITHOUT a leading slash (a leading
 # slash is not honoured by dist-archive's matcher). The shipped package is
-# the runtime only: pontifex.php, src/, vendor/, languages/, readme.txt,
-# LICENSE, CHANGELOG.md and composer.json. Everything below is development,
+# the runtime only: pontifex.php, src/, vendor/, languages/, assets/,
+# readme.txt, LICENSE, CHANGELOG.md and composer.json. Everything below is
+# development,
 # CI, testing, or internal documentation with no place in a user's site.
 
 # Version control, CI, and editor / OS metadata
@@ -36,6 +37,10 @@ composer.lock
 node_modules
 package.json
 package-lock.json
+
+# Test-only tooling configuration (Patchwork lets brain/monkey redefine PHP
+# internals in unit tests; it has no runtime role and must not ship)
+patchwork.json
 
 # Mutation testing (local, advisory; never shipped)
 infection.json5
