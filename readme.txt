@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.0.1 =
+* A security and correctness release, from an audit of 1.0.0 that found three defects every quality gate had passed. Fixed: an archive could disguise a symbolic link as an ordinary file and slip past the check that keeps links inside your site — changing two bytes of the archive's index was enough, and every integrity check still passed, so restoring an archive from someone else could create a link pointing at wp-config.php. Fixed: a restore altered content that mentioned its own database table in backticks, writing `pontifexstg_` permanently into posts and stored settings, and where that text sat inside a settings array the array stopped being readable and its plugin silently reverted to defaults. Fixed: verification skipped one of its checks unless given a memory budget, so it could call an archive sound that restoring would refuse. Changed: Pontifex now refuses to load on WordPress multisite, which it has never supported — it reads one table prefix and a network has more, so it would have backed up part of a network while appearing to back up all of it. No breaking changes.
+
 = 1.0.0 =
 * The stable release. From here the public API is frozen and the `.wpmig` archive format specification is locked, so a backup taken today stays readable by every future version of Pontifex and can always be opened without the plugin. Fixed: a restore on a host that cannot create symbolic links — common on shared hosting — used to overwrite files and then stop part-way, leaving a site that was neither the old one nor the backup; it is now refused before anything is changed, and a backup containing no symbolic links is never affected. Also fixed: three untrue statements in this readme. It told you to encrypt with `export --passphrase`, a flag that has never existed, so following it produced an UNENCRYPTED backup with no error — the real flags are `--encrypt` and `--passphrase-stdin`, so re-take any backup you believed was encrypted. It said Pontifex never contacts any remote service, which stopped being true when offsite SFTP destinations shipped in 0.8.0. And it described Pontifex as a WP-CLI plugin, when the admin interface has been most of the product since 0.5.0 — the installation steps now work without a terminal, and `wp pontifex doctor` now also reports whether this host supports symbolic links. No breaking changes.
 
@@ -145,6 +148,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.0.1 =
+Security and correctness. A crafted archive could plant a symbolic link pointing outside your site, and a restore could write `pontifexstg_` into posts and settings that name a table. Upgrade before restoring an archive you did not create. Multisite is now refused.
 
 = 1.0.0 =
 The stable release: the public API and archive format are now locked. If you ever ran `export --passphrase` believing it encrypted a backup, it did not — that flag never existed. Use `--encrypt` and re-take that backup. A restore is now also refused up front on a host that cannot finish it.
