@@ -50,8 +50,9 @@ There are no breaking changes. Every v0.9.x archive restores unchanged.
   which stopped being true when offsite SFTP destinations shipped in v0.8.0 —
   Pontifex still runs no service and contacts nothing on its own initiative,
   but a destination you configure yourself is a real exception and is now
-  described as one. And it pointed you at the Overview screen to check your
-  environment, which no admin screen does; that check is `wp pontifex doctor`.
+  described as one. And it described Pontifex as a WP-CLI plugin, when the
+  admin interface has been most of the product since v0.5.0; the installation
+  steps now work for someone who never opens a terminal.
 
 ### Added
 

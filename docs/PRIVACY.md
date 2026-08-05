@@ -16,8 +16,10 @@ ask for it: an **offsite destination** you configure yourself (v0.8.0
 onwards), which uploads a finished archive over SFTP to a server whose
 address, credentials and host key you supply. It goes to your server,
 not ours. Configure no destination and nothing is ever sent. Every
-network call in the plugin's PHP lives in that one component,
-`src/Destination/`; a standing architecture test in the suite
+network call Pontifex's own code makes lives in that one component,
+`src/Destination/`; the SFTP socket itself is opened by the bundled
+`phpseclib3` library, which nothing outside that component drives. A
+standing architecture test in the suite
 (`tests/Unit/Architecture/NoNetworkOutsideDestinationTest.php`) scans
 every PHP file under `src/` and fails the build if any of them, outside
 `src/Destination/`, calls a known network function — the `curl_*`,
@@ -39,6 +41,13 @@ source check over the plugin's own call sites, not a runtime sandbox.
   (`pontifex_export_stats`, `pontifex_import_stats`,
   `pontifex_rollback_stats`): attempt / success / failure / byte
   tallies. Numbers only — no content.
+- **Backups and safety archives Pontifex writes for you**, under
+  `wp-content/pontifex/` (`backups/` for admin-created and scheduled
+  backups, `rollback/` for the automatic pre-import safety archive).
+  These are inside the web root, not at a path you choose. The directory is
+  created not world-readable (mode 0700) with a deny-all `.htaccess`,
+  but that guard is Apache-only and best-effort — see
+  [the threat model, §4](./threat-model.md#4-backup-download-and-delete).
 
 ## Telemetry
 

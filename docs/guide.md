@@ -371,8 +371,16 @@ To fetch a backup back after losing the original:
 
 ```
 wp pontifex destination archives myserver
-wp pontifex destination pull myserver pontifex-backup-….wpmig --output=/tmp/
+wp pontifex destination pull myserver pontifex-backup-….wpmig --output=/tmp/recovered.wpmig
 ```
+
+`--output` is the **full path of the file to write**, not a directory, and
+Pontifex refuses to overwrite a path that already exists — so give it a name
+that is not yet taken.
+
+Note there is no command to upload an archive Pontifex has already written.
+Uploading happens during `export --destination`; to send an existing file,
+copy it to the server yourself.
 
 Configuring a destination is command line only; there is no admin screen for
 it yet.

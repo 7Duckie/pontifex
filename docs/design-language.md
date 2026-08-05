@@ -102,10 +102,11 @@ does not sit flush against the wp-admin chrome.
   button — Restore's file-choose control — it is instead a muted hairline
   outline on white that darkens to an ink hairline over a subtle fill tint on
   hover.
-- **Progress / notice** — a quiet muted line (tabular figures) that reports the
-  running count of a long operation, a smaller muted timing line beneath it
-  (elapsed or remaining time), and an ink line for the final result; none of the
-  three is boxed or colour-coded, per "restraint over alarm". A secondary text
+- **Progress / notice** — an ink line in a heavier weight (tabular figures) that
+  reports the running count of a long operation, a smaller muted timing line
+  beneath it (elapsed or remaining time), and a plain ink line for the final
+  result; none of the three is boxed or colour-coded, per "restraint over
+  alarm". A secondary text
   action (e.g. a backup's "Delete") is an underlined muted link, never a
   coloured button. A warning that needs to persist rather than report a
   one-off result (for example a switched-on schedule with no pending cron
