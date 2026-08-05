@@ -301,10 +301,24 @@ final class VerifyController {
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin verify failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+
+			// A backup this site cannot READ is not a backup that failed to
+			// verify, and saying so sends the operator to replace a file that is
+			// very probably intact — the one message that could talk somebody out
+			// of a good backup. Decided on readability rather than on the
+			// exception, because the file can also become unreadable part-way
+			// through, and because an open_basedir restriction defeats a
+			// pre-flight is_readable() check while still landing here.
+			$unreadable = ! is_readable( (string) $path );
+
+			$message = $unreadable
+				? __( 'This backup could not be read, so it was not checked. That is a file-access problem on this server, not a damaged backup — check the file permissions and ownership of the backup and of wp-content/pontifex. The Pontifex log has the details.', 'pontifex' )
+				: __( 'Broken — this backup did not verify. Check the Pontifex log for details.', 'pontifex' );
+
 			wp_send_json_success(
 				array(
 					'sound'   => false,
-					'message' => __( 'Broken — this backup did not verify. Check the Pontifex log for details.', 'pontifex' ),
+					'message' => $message,
 				)
 			);
 		}

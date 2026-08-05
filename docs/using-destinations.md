@@ -126,10 +126,10 @@ Two things to know:
 
 - **Resumable exports can't use a destination yet.** `--resumable`
   and `--resume` are not available together with `--destination`: a
-  resumed run wouldn't know to push the finished archive. Export
-  without `--resumable` to upload directly, or upload a resumable
-  export's finished archive afterwards with a plain
-  `destination` command once it's complete.
+  resumed run wouldn't know to push the finished archive. Run the
+  export without `--resumable` to upload directly — there is no
+  command that uploads an archive already sitting on disk, so a
+  resumable export's finished archive has no offsite path yet.
 - **An unencrypted upload warns.** The archive is leaving your server
   for storage whose safety Pontifex can't vouch for, so uploading
   without `--encrypt` prints a warning (it isn't blocked — it's your

@@ -386,7 +386,7 @@ final class ExportCommand {
 		}
 
 		if ( ( $resumable || $resume ) && '' !== $destination_name ) {
-			WP_CLI::error( __( 'A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or pull the finished archive later with `wp pontifex destination`.', 'pontifex' ) );
+			WP_CLI::error( __( 'A resumable export cannot upload to a destination yet: a resumed run would not know to push it. Export without --resumable to upload directly, or copy the finished archive to the destination server yourself — there is no command that uploads an archive Pontifex has already written.', 'pontifex' ) );
 		}
 
 		// Single-runner lock: refuse to start while any site-mutating operation

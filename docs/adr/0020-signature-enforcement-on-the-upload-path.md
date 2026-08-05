@@ -1,6 +1,6 @@
 # 0020 — signatures in the browser: enforce on the upload path, where an archive crosses the trust boundary
 
-- **Status:** Proposed, 2026-07-29.
+- **Status:** Accepted, 2026-07-29. Implemented and shipped in v0.9.5.
 - **Deciders:** 7Duckie (signature parity on the admin upload path).
 
 ## Context

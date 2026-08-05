@@ -1,6 +1,6 @@
 # 0012 — signing: a supplied trusted key makes the signature mandatory
 
-- **Status:** Proposed, 2026-07-12.
+- **Status:** Accepted, 2026-07-12. Implemented and shipped in v0.5.0.
 - **Deciders:** 7Duckie (v0.5.0 hardening).
 
 ## Context
