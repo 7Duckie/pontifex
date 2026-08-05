@@ -82,8 +82,8 @@ Pontifex uses a three-tier promotion model (see
   Commits types — `feat/`, `fix/`, `test/`, `ci/`, `docs/`, `refactor/`,
   `chore/` (e.g. `feat/import`). No version numbers in branch names. Open the
   pull request against `dev`; promotions then run `dev → staging → main`.
-- Security branches: kept private until disclosed; coordinate via the email in
-  SECURITY.md.
+- Security branches: kept private until disclosed; coordinate via GitHub's
+  private vulnerability reporting (see [SECURITY.md](SECURITY.md)).
 
 ## Security
 
@@ -100,8 +100,8 @@ threat model in their description.
 From v0.1.0 onward, Pontifex's UI follows Swiss design principles — the
 mid-20th-century typographic style associated with Helvetica, the
 Bauhaus school, and modern wayfinding systems. The plugin's admin
-screens, which begin arriving in v0.5.0, reflect these principles
-consistently:
+screens — Overview, Backup, Verify and Restore/Rollback, which shipped
+in v0.5.0 — reflect these principles consistently:
 
 - **Typography over decoration.** Information hierarchy through type
   weight and size, not boxes, borders, or alert colours.
@@ -129,7 +129,7 @@ build.
 ## Quality-gate reference
 
 - Code style — `phpcs.xml.dist` (WordPress-Extra + Pontifex prefix rules)
-- Static analysis — `phpstan.neon.dist` (level 6, ratcheting to 8 by v1.0)
+- Static analysis — `phpstan.neon.dist` (level 6)
 - Tests — `phpunit.xml.dist` (unit) and `phpunit-integration.xml.dist`
   (integration, via wp-env)
 - Pre-commit — `.pre-commit-config.yaml`
@@ -172,20 +172,31 @@ need no equivalent step.
 ## Local development environment
 
 Pontifex is developed against a real WordPress, not against mocked
-functions. The repository ships a
-[wp-env](https://www.npmjs.com/package/@wordpress/env) configuration
-(`.wp-env.json`) that runs WordPress, the web server, and
-MySQL/MariaDB in Docker for you. With Docker running:
+functions. The repository ships two
+[wp-env](https://www.npmjs.com/package/@wordpress/env) configurations
+that run WordPress, the web server, and MySQL/MariaDB in Docker for
+you: `.wp-env.json` for day-to-day development, and a separate
+`.wp-env.tests.json` that only the integration suite uses (see "Run
+the tests" below) — these are two independent environments, not one
+environment with two sites, so each is started on its own.
+`@wordpress/env` is pinned in `package.json`, so install it first:
+
+```bash
+npm ci
+```
+
+With Docker running, start the development site:
 
 ```bash
 npx @wordpress/env start
 ```
 
-This boots a development site on `http://localhost:8910` with Pontifex
-already mounted and active (`.wp-env.json` maps the project in as a
-plugin), plus a separate test site on `http://localhost:8911` that the
-integration suite uses. The bare `wp-env` command is not on the PATH —
-always invoke it as `npx @wordpress/env …`.
+This boots a development site on `http://localhost:8910` with
+Pontifex already mounted and active (`.wp-env.json` maps the project
+in as a plugin). It does **not** also boot the tests site — that is
+the separate `.wp-env.tests.json` config, on port 8911, started
+separately. The bare `wp-env` command is not on the PATH — always
+invoke it as `npx @wordpress/env …`.
 
 ### Run WP-CLI against the site
 
@@ -204,18 +215,29 @@ is active with `npx @wordpress/env run cli wp plugin list`.
 
 ```bash
 composer test          # unit suite, on your host PHP — fast, no Docker
-# integration suite — must run inside the wp-env tests container:
-npx @wordpress/env run tests-cli --env-cwd=wp-content/plugins/pontifex composer test:integration
+
+# integration suite — boots the separate tests environment (port 8911),
+# then runs inside its cli container:
+npx @wordpress/env start --config .wp-env.tests.json
+npx @wordpress/env run cli --env-cwd=wp-content/plugins/pontifex composer test:integration --config .wp-env.tests.json
 ```
 
 The unit suite mocks WordPress and runs directly on your machine. The
 integration suite boots a real WordPress, so it must run inside the
-wp-env *tests* container, where `WP_TESTS_DIR` and the test database
-exist — running `composer test:integration` on the host fails with a
-missing-constants error. To exercise a specific PHP version, drop a
-`.wp-env.override.json` containing `{ "phpVersion": "8.5" }` next to
-`.wp-env.json` and restart wp-env; CI does exactly this across the
-8.2–8.5 matrix.
+`.wp-env.tests.json` environment's `cli` container, where
+`WP_TESTS_DIR` and the test database exist — running
+`composer test:integration` on the host fails with a missing-constants
+error. Every `wp-env` command against this environment needs
+`--config .wp-env.tests.json`; there is no separate `tests-cli`
+container to run against instead — that name belonged to the old
+single-file dual-environment setup, which this repository no longer
+uses (`wp-env run tests-cli` now errors with "the tests environment is
+disabled in the configuration"). To exercise a specific PHP version,
+drop a `.wp-env.tests.override.json` containing
+`{ "phpVersion": "8.5" }` next to `.wp-env.tests.json` and restart the
+tests environment; CI does exactly this — on the PHP 8.2 floor for a
+pull request into `dev`, and across the whole 8.2–8.5 matrix for a
+pull request into `staging` or `main`.
 
 ### Your daily cycle
 

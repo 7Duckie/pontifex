@@ -290,6 +290,68 @@ final class OperationLockTest extends TestCase {
 	}
 
 	/**
+	 * A parked signed export must not hold the lock against everything, forever.
+	 *
+	 * A signed resumable export cannot be continued by cron: signing needs the
+	 * operator's key on every tick and the key is never stored with the job, so
+	 * the ticker parks the job and stops the cron chain. The job stays active
+	 * because it really is still resumable — but nothing is advancing it. While
+	 * an active export job counted as a live backup unconditionally, that parked
+	 * job refused every backup, restore and rollback on both surfaces for as
+	 * long as it existed, with nothing anywhere saying why or how to clear it.
+	 *
+	 * @return void
+	 */
+	public function test_a_parked_signed_export_does_not_hold_the_lock_forever(): void {
+		$this->jobs()->create( Job::KIND_EXPORT, array( 'signed' => true ), 1_700_000_000 );
+
+		// Two acquires, one release: both acquires are GRANTED now, and only the
+		// first is released explicitly below. A refused acquire releases the
+		// named lock on its way out; a granted one holds it.
+		$context = $this->context_granting_lock( 2, 1 );
+		$now     = $this->fixed_clock();
+
+		$restore_lock = new OperationLock( $context, $this->jobs(), $now );
+		$this->assertTrue(
+			$restore_lock->acquire( OperationLock::OP_RESTORE ),
+			'A signed export job parked for its operator must not refuse a restore.'
+		);
+
+		// Release before the second acquire: a granted lock writes the holder
+		// transient, so without this the rollback below would be refused by that
+		// holder rather than by the parked job, and the assertion would be
+		// measuring the wrong thing.
+		$restore_lock->release();
+
+		$rollback_lock = new OperationLock( $context, $this->jobs(), $now );
+		$this->assertTrue(
+			$rollback_lock->acquire( OperationLock::OP_ROLLBACK ),
+			'A signed export job parked for its operator must not refuse a rollback.'
+		);
+	}
+
+	/**
+	 * The twin: an UNSIGNED export job still refuses, exactly as before.
+	 *
+	 * Without this, the fix above could be over-broad — releasing the lock for
+	 * every active export rather than only the parked kind — and no test would
+	 * notice. Cron does continue an unsigned resumable export, so that one is
+	 * genuinely live and must still refuse.
+	 *
+	 * @return void
+	 */
+	public function test_an_unsigned_export_job_still_refuses_a_restore(): void {
+		$this->jobs()->create( Job::KIND_EXPORT, array( 'signed' => false ), 1_700_000_000 );
+
+		$lock = new OperationLock( $this->context_granting_lock( 1, 1 ), $this->jobs(), $this->fixed_clock() );
+
+		$this->assertFalse(
+			$lock->acquire( OperationLock::OP_RESTORE ),
+			'An unsigned export job is still advancing under cron and must refuse a restore.'
+		);
+	}
+
+	/**
 	 * A resume may take the lock from the export job it is about to adopt.
 	 *
 	 * A backup killed outright leaves its job active and its holder transient

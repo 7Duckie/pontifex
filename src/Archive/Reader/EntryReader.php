@@ -224,6 +224,8 @@ final class EntryReader {
 			throw new RuntimeException( 'EntryReader: entry header is malformed.', 0, $e );
 		}
 
+		self::assert_kind_agrees( $header, $manifest_entry );
+
 		// Read codec_id and verify it matches the manifest entry.
 		$codec_id = ByteOrder::unpack_uint16( $this->read_exactly( $source, ByteOrder::UINT16_SIZE, $manifest_entry, $hash_context, $on_bytes ) );
 		if ( $codec_id !== $manifest_entry->codec_id() ) {
@@ -429,15 +431,28 @@ final class EntryReader {
 		// When a decoded-byte budget is given, refuse an over-budget entry here — before
 		// any restore begins — so the browser's pre-write verify gate rejects a backup the
 		// real restore would refuse mid-way, rather than starting and failing part-written.
-		// Only the small header is read to learn the declared size; nothing is decoded.
 		// Mirrors read_entry(): the budget applies only to shapes a restore must buffer
 		// whole (encrypted entries and db_chunks) — a plain file entry streams, so no
 		// memory refusal applies to it (ADR 0010).
-		if ( null !== $max_decoded_bytes ) {
-			$header = $this->peek_header( $source, $manifest_entry );
-			if ( ! $this->streams_decoded_payload( $header, $manifest_entry->codec_id() ) ) {
-				$this->refuse_if_over_budget( $header, $max_decoded_bytes );
-			}
+		// The header is read unconditionally, not only when a budget applies:
+		// peek_header() is where the record's kind is checked against the
+		// manifest's, and skipping it left verify() reporting SOUND for an
+		// archive whose manifest contradicted its own entries — the shape that
+		// slips a symlink past the confinement preflight by calling it a file.
+		// A verdict an operator uses to decide whether to trust an archive must
+		// not depend on whether a caller happened to pass a byte budget. The
+		// cost is a few dozen header bytes per entry, on a path that already
+		// streams every record in full to hash it.
+		$header = $this->peek_header( $source, $manifest_entry );
+
+		// When a decoded-byte budget is given, refuse an over-budget entry here — before
+		// any restore begins — so the browser's pre-write verify gate rejects a backup the
+		// real restore would refuse mid-way, rather than starting and failing part-written.
+		// Mirrors read_entry(): the budget applies only to shapes a restore must buffer
+		// whole (encrypted entries and db_chunks) — a plain file entry streams, so no
+		// memory refusal applies to it (ADR 0010).
+		if ( null !== $max_decoded_bytes && ! $this->streams_decoded_payload( $header, $manifest_entry->codec_id() ) ) {
+			$this->refuse_if_over_budget( $header, $max_decoded_bytes );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -569,11 +584,54 @@ final class EntryReader {
 		}
 
 		try {
-			return EntryHeader::from_bytes( $prefix . $header_bytes );
+			$header = EntryHeader::from_bytes( $prefix . $header_bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
 			throw new RuntimeException( 'EntryReader: entry header is malformed.', 0, $e );
 		}
+
+		self::assert_kind_agrees( $header, $manifest_entry );
+
+		return $header;
+	}
+
+	/**
+	 * Refuse an entry whose record and manifest disagree about what it is.
+	 *
+	 * The manifest and the record each carry the entry's kind, and different
+	 * parts of a restore read different copies: the whole-archive symlink
+	 * confinement preflight (ADR 0021) selects which entries to judge from the
+	 * MANIFEST, and {@see \Pontifex\Restore\FileWriter::write_entry()} decides
+	 * what to actually create from the RECORD. While nothing compared the two,
+	 * an archive could label a symlink record as a file in the manifest alone —
+	 * leaving the record and its SHA-256 untouched, so every integrity check
+	 * still passed — and the link was then never shown to the preflight, routed
+	 * as a file, and created as a symlink anyway. The only remaining check was
+	 * the textual fallback that ADR 0021 records as unsound and replaced. Two
+	 * bytes of manifest reopened the guarantee that release was cut to make.
+	 *
+	 * Checking here fixes it once for every consumer, rather than teaching each
+	 * one to prefer the record: after this, the two copies cannot disagree, so
+	 * it no longer matters which a caller reads.
+	 *
+	 * @param EntryHeader   $header         The kind recorded in the entry record itself.
+	 * @param ManifestEntry $manifest_entry The kind recorded in the manifest.
+	 * @return void
+	 * @throws RuntimeException If the two disagree.
+	 */
+	private static function assert_kind_agrees( EntryHeader $header, ManifestEntry $manifest_entry ): void {
+		if ( $header->kind() === $manifest_entry->kind() ) {
+			return;
+		}
+
+		$message = sprintf(
+			'EntryReader: entry kind mismatch — the record says "%s", the manifest says "%s". An archive whose manifest disagrees with its own entries is refused.',
+			$header->kind(),
+			$manifest_entry->kind()
+		);
+
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Archive-supplied kind strings reported verbatim for diagnostic context; exception path, not HTML output.
+		throw new RuntimeException( $message );
 	}
 
 	/**
