@@ -249,10 +249,10 @@ final class RestorePreflight {
 		}
 
 		if ( ! $scope->includes_database() && $has_db ) {
-			throw new ArchiveNotTrustworthy( 'RestoreRunner: the archive records a files-only scope but carries database chunks. Refusing this inconsistent archive.' );
+			throw new ArchiveNotTrustworthy( 'This backup says it contains files only, but it carries database content as well. A backup that contradicts its own description is refused.' );
 		}
 		if ( ! $scope->includes_files() && $has_files ) {
-			throw new ArchiveNotTrustworthy( 'RestoreRunner: the archive records a database-only scope but carries file entries. Refusing this inconsistent archive.' );
+			throw new ArchiveNotTrustworthy( 'This backup says it contains the database only, but it carries files as well. A backup that contradicts its own description is refused.' );
 		}
 	}
 

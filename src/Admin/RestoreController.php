@@ -100,6 +100,33 @@ final class RestoreController {
 	private const PROGRESS_THROTTLE_SECONDS = 0.3;
 
 	/**
+	 * Gate outcome: the archive passed and the operation may proceed.
+	 *
+	 * @var string
+	 */
+	private const GATE_OK = 'ok';
+
+	/**
+	 * Gate outcome: the archive is damaged — a hash mismatch or malformed structure.
+	 *
+	 * @var string
+	 */
+	private const GATE_BROKEN = 'broken';
+
+	/**
+	 * Gate outcome: the archive is INTACT but a restore will not accept it.
+	 *
+	 * Kept apart from {@see self::GATE_BROKEN} because the two call for opposite
+	 * actions from whoever reads them. Telling somebody their backup is broken
+	 * sends them to delete it and reach for another copy; this archive is
+	 * undamaged, every hash matched, and the right response is to keep it, not
+	 * restore it, and find out where it came from.
+	 *
+	 * @var string
+	 */
+	private const GATE_REFUSED = 'refused';
+
+	/**
 	 * Progress phase: verifying the chosen archive before anything is written.
 	 *
 	 * @var string
@@ -349,14 +376,18 @@ final class RestoreController {
 			// Phase 1: verify the backup as a gate. A broken backup is refused before
 			// the safety archive or any write — the whole point of previewing first.
 			$this->bump_counters( array( 'attempted' => 1 ) );
-			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+			$gate = $this->verify_gate( $runner, $source, $size );
+			if ( self::GATE_OK !== $gate ) {
 				$this->bump_counters( array( 'failed' => 1 ) );
 				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
 						'restored' => false,
-						'message'  => __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' ),
+						'refused'  => self::GATE_REFUSED === $gate,
+						'message'  => self::GATE_REFUSED === $gate
+							? __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' )
+							: __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' ),
 					)
 				);
 			} else {
@@ -466,7 +497,7 @@ final class RestoreController {
 			// required prefix, matching a rollback.
 			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
 
-			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+			if ( self::GATE_OK !== $this->verify_gate( $runner, $source, $size ) ) {
 				$this->finish( $source );
 				return false;
 			}
@@ -528,7 +559,8 @@ final class RestoreController {
 
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
-			if ( ! $this->verify_gate( $runner, $source, $size ) ) {
+			$gate = $this->verify_gate( $runner, $source, $size );
+			if ( self::GATE_OK !== $gate ) {
 				$this->bump_counters(
 					array(
 						'attempted' => 1,
@@ -541,7 +573,10 @@ final class RestoreController {
 				wp_send_json_success(
 					array(
 						'rolled_back' => false,
-						'message'     => __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' ),
+						'refused'     => self::GATE_REFUSED === $gate,
+						'message'     => self::GATE_REFUSED === $gate
+							? __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' )
+							: __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' ),
 					)
 				);
 			} else {
@@ -728,22 +763,27 @@ final class RestoreController {
 	 * Verify the archive as a preview gate, reporting byte progress.
 	 *
 	 * Runs {@see RestoreRunnerInterface::verify()} over the source with the
-	 * verifying-phase byte callback. A verification failure is not a server error
-	 * — it means the backup is broken — so it is caught and reported as a false
-	 * return, with the real cause logged, and nothing is written.
+	 * verifying-phase byte callback, then the restore's read-only preflights.
+	 * Neither failure is a server error, so both are caught, logged, and reported
+	 * as an outcome rather than thrown, and nothing is written either way.
+	 *
+	 * Reports which of three outcomes it reached rather than a bare pass/fail,
+	 * because a damaged backup and an intact one a restore will not accept need
+	 * to be told apart. Collapsing them is how the screen came to announce
+	 * "Broken" over an archive whose every hash had just matched.
 	 *
 	 * @param RestoreRunnerInterface $runner The engine to verify with.
 	 * @param resource               $source The open archive stream.
 	 * @param int                    $size   The archive size, the progress denominator.
-	 * @return bool True when the archive verified sound; false when it is broken.
+	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED} or {@see self::GATE_BROKEN}.
 	 */
-	private function verify_gate( RestoreRunnerInterface $runner, $source, int $size ): bool {
+	private function verify_gate( RestoreRunnerInterface $runner, $source, int $size ): string {
 		$this->set_progress( self::PHASE_VERIFYING, 0, $size );
 		try {
 			$runner->verify( $source, null, $this->byte_callback( self::PHASE_VERIFYING, $size ) );
 		} catch ( Throwable $error ) {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
-			return false;
+			return self::GATE_BROKEN;
 		}
 
 		// Hashes matching is not the same as a restore accepting the archive, and
@@ -763,10 +803,10 @@ final class RestoreController {
 				'Admin restore: the archive is intact but a restore would refuse it; nothing was written.',
 				array( 'findings' => $report->archive_findings() )
 			);
-			return false;
+			return self::GATE_REFUSED;
 		}
 
-		return true;
+		return self::GATE_OK;
 	}
 
 	/**

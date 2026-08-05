@@ -262,7 +262,7 @@ final class RestorePreflightTest extends TestCase {
 		);
 
 		$this->expectException( \Pontifex\Exception\HostCannotComply::class );
-		$this->expectExceptionMessageMatches( '/could not create a test symlink/' );
+		$this->expectExceptionMessageMatches( '/could not create a test link/' );
 
 		$preflight->assert_host_can_write( $source, self::manifest_of( $source ) );
 	}
