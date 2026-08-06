@@ -20,6 +20,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\DatabaseScanner;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\FileScanner;
@@ -338,14 +339,20 @@ final class ExportRunner {
 	 * Build the temp file path the archive is written to before it is moved into place.
 	 *
 	 * A sibling of the output path (same directory), so the final {@see self::move_into_place()}
-	 * is an atomic same-filesystem rename. A unique suffix keeps two exports writing to the
-	 * same output path (a user's mistake) from colliding on one temp file.
+	 * is an atomic same-filesystem rename. The unique suffix — built by
+	 * {@see TempArtefact::suffix()}, the one place in the plugin that shape is
+	 * built, so a sweep recognising it can never drift from a producer writing
+	 * it — keeps two exports writing to the same output path (a user's
+	 * mistake) from colliding on one temp file, and is what
+	 * {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()} and
+	 * {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}
+	 * recognise if an export is killed between this write and its rename.
 	 *
 	 * @param string $output_path The final archive path the export was asked to write.
 	 * @return string The temp file path to write the archive to first.
 	 */
 	private function temp_destination_path( string $output_path ): string {
-		return $output_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+		return $output_path . TempArtefact::suffix();
 	}
 
 	/**
