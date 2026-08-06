@@ -192,7 +192,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param DatabaseWriter       $database_writer   Replays db_chunk entries into the database.
 	 * @param ArchiveLimits|null   $limits            Defensive limits to enforce; null applies the conservative defaults.
 	 * @param int|null             $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
-	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded. Defaults to discarding them; trailing and optional, so no existing caller changes.
+	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded, or a count of leftover temp artefacts an earlier, interrupted restore left behind and this one swept away. Defaults to discarding them; trailing and optional, so no existing caller changes.
 	 */
 	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null, ?LoggerInterface $logger = null ) {
 		$this->logger              = $logger ?? new NullLogger();
@@ -317,6 +317,24 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// figure leans low rather than risk refusing a restore that would have
 		// succeeded.
 		$this->preflight->assert_free_space_for( $manifest );
+
+		// Sweep leftover temp artefacts a crashed earlier restore abandoned on
+		// the filesystem — the file-side twin of the leftover-table sweep
+		// DatabaseWriter::begin_staging() performs immediately below (ADR 0009).
+		// Both run here, after every preflight above has already had its
+		// chance to refuse, so no archive this restore rejects has had any of
+		// its content applied — not, as an earlier version of this comment
+		// claimed, that the sweep changes nothing at all: it writes a one-off
+		// case-sensitivity probe file of its own, removed again before it
+		// reasons about an orphan. See FileWriter::sweep_orphaned_temp_files()
+		// for why this is best-effort and can never itself gate a restore.
+		$swept = $this->file_writer->sweep_orphaned_temp_files();
+		if ( $swept > 0 ) {
+			$this->logger->info(
+				'Removed temporary files an interrupted earlier restore left behind.',
+				array( 'count' => $swept )
+			);
+		}
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 

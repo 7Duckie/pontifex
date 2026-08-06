@@ -763,9 +763,16 @@ versions.
 - **A restore that fails part-way through the file walk leaves a merged
   tree.** The database cuts over atomically, but files already written
   are not rolled back.
-- **Orphaned `*.pontifex-*.tmp` files are never swept.** An interrupted
-  write can leave a temporary file behind with nothing to clean it up
-  afterwards.
+- **Orphaned `*.pontifex-*.tmp` files inside Pontifex's own working
+  directory are never swept.** The ones an interrupted restore leaves out
+  in the site — a half-written file beside the real one, or the symlink
+  capability probe's dangling link — are now removed at the start of the
+  next restore. The ones under `wp-content/pontifex` are not, because that
+  is where a live export's and a running job's own temporary files sit, and
+  a restore cannot safely tell those apart from abandoned ones. The largest
+  is the partial safety archive a killed import leaves in
+  `wp-content/pontifex/rollback`, which can be as big as however much of the
+  site it had written before it died.
 - **The test-adequacy programme is substantially untouched**, above all a
   completeness oracle: a test asserting set equality between a real
   filesystem tree and the archive's entry paths, driven through the real
