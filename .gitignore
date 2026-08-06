@@ -55,16 +55,14 @@ Thumbs.db
 /.wp-env.override.json
 /.wp-env.tests.override.json
 
-# Local working state (Claude session context)
-STATE.md
-AUDIT-FINDINGS.md
-
-# Local planning and handoff documents. Deliberately NOT committed: they are
-# working notes about how the project is built rather than part of the plugin,
-# and they name the assistant tooling used to write it, which must not appear
-# anywhere in this repository's history. Kept out of `git status` so that an
-# accidental `git add -A` cannot sweep them into a commit.
+# Local working notes and handoff documents. Deliberately NOT committed: they
+# are working notes about how the project is built rather than part of the
+# plugin, and they name the assistant tooling used to write it, which must
+# not appear anywhere in this repository's history. They now live in one
+# ignored directory, so that a document added later is excluded automatically
+# rather than needing to be remembered, which is exactly what failed before.
+# CLAUDE.md stays at the repository root, where it must be loaded from, so it
+# is listed separately. Kept out of `git status` so that an accidental
+# `git add -A` cannot sweep them into a commit.
+/notes/
 /CLAUDE.md
-/CLAUDE-CODE-KICKOFF-PROMPT.md
-/PONTIFEX-*.md
-/STATE.md
