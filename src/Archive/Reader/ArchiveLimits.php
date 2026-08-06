@@ -157,16 +157,16 @@ final class ArchiveLimits {
 	 */
 	public function __construct( int $max_entry_count, int $max_entry_bytes, int $max_total_ratio, int $max_total_bytes ) {
 		if ( 1 > $max_entry_count ) {
-			throw new InvalidArgumentException( sprintf( 'ArchiveLimits: max_entry_count %d must be at least 1.', (int) $max_entry_count ) );
+			throw new InvalidArgumentException( sprintf( 'max_entry_count %d must be at least 1.', (int) $max_entry_count ) );
 		}
 		if ( 1 > $max_entry_bytes ) {
-			throw new InvalidArgumentException( sprintf( 'ArchiveLimits: max_entry_bytes %d must be at least 1.', (int) $max_entry_bytes ) );
+			throw new InvalidArgumentException( sprintf( 'max_entry_bytes %d must be at least 1.', (int) $max_entry_bytes ) );
 		}
 		if ( 1 > $max_total_ratio ) {
-			throw new InvalidArgumentException( sprintf( 'ArchiveLimits: max_total_ratio %d must be at least 1.', (int) $max_total_ratio ) );
+			throw new InvalidArgumentException( sprintf( 'max_total_ratio %d must be at least 1.', (int) $max_total_ratio ) );
 		}
 		if ( 1 > $max_total_bytes ) {
-			throw new InvalidArgumentException( sprintf( 'ArchiveLimits: max_total_bytes %d must be at least 1.', (int) $max_total_bytes ) );
+			throw new InvalidArgumentException( sprintf( 'max_total_bytes %d must be at least 1.', (int) $max_total_bytes ) );
 		}
 
 		$this->max_entry_count = $max_entry_count;

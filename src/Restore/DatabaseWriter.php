@@ -345,7 +345,7 @@ final class DatabaseWriter {
 			if ( 1 !== preg_match( '/^[A-Za-z0-9_]+$/', $source_charset ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $source_charset is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'DatabaseWriter: the archive declares a malformed database character set "%s"; refusing to restore it.', $source_charset )
+					sprintf( 'The archive declares a malformed database character set "%s"; refusing to restore it.', $source_charset )
 				);
 			}
 			$this->adapter->set_session_charset( $source_charset );
@@ -393,14 +393,14 @@ final class DatabaseWriter {
 		if ( ! $header->is_db_chunk() ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: expected a db_chunk entry; got kind "%s". File/directory/symlink entries belong to FileWriter.', $header->kind() )
+				sprintf( 'Expected a db_chunk entry; got kind "%s". File/directory/symlink entries belong to FileWriter.', $header->kind() )
 			);
 		}
 
 		$source_table = (string) $header->table_name();
 		if ( '' === $source_table ) {
 			throw new RuntimeException(
-				'DatabaseWriter: db_chunk entry carries no table name, so it cannot be staged; refusing to replay it against the live database.'
+				'db_chunk entry carries no table name, so it cannot be staged; refusing to replay it against the live database.'
 			);
 		}
 
@@ -433,7 +433,7 @@ final class DatabaseWriter {
 		if ( $declared_count !== $parsed_count ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_count and $parsed_count are integers reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: statement_count mismatch — header declared %d, payload contains %d.', $declared_count, $parsed_count )
+				sprintf( 'statement_count mismatch — header declared %d, payload contains %d.', $declared_count, $parsed_count )
 			);
 		}
 
@@ -530,7 +530,7 @@ final class DatabaseWriter {
 			if ( SqlSpanScanner::has_executable_semicolon( $statement, $this->backslash_is_escape ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-					sprintf( 'DatabaseWriter: table "%s" (%s) carries more than one statement; refusing to replay it against the live database.', $declared_table, $location )
+					sprintf( 'Table "%s" (%s) carries more than one statement; refusing to replay it against the live database.', $declared_table, $location )
 				);
 			}
 
@@ -553,7 +553,7 @@ final class DatabaseWriter {
 			if ( false === $insert_matched ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The regex engine's own error text and the table name are reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-					sprintf( 'DatabaseWriter: could not check the statements for table "%s" because the regular-expression engine failed (%s); refusing to replay them against the live database.', $declared_table, preg_last_error_msg() )
+					sprintf( 'Could not check the statements for table "%s" because the regular-expression engine failed (%s); refusing to replay them against the live database.', $declared_table, preg_last_error_msg() )
 				);
 			}
 			if ( 1 === $insert_matched ) {
@@ -563,13 +563,13 @@ final class DatabaseWriter {
 			if ( self::declares_a_view( $statement ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-					sprintf( 'DatabaseWriter: table "%s" (%s) declares a CREATE VIEW, which Pontifex does not restore; refusing to replay it against the live database.', $declared_table, $location )
+					sprintf( 'Table "%s" (%s) declares a CREATE VIEW, which Pontifex does not restore; refusing to replay it against the live database.', $declared_table, $location )
 				);
 			}
 
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $declared_table and $location are reported verbatim for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: table "%s" (%s) contains a statement that does not match a sanctioned shape; refusing to replay it against the live database.', $declared_table, $location )
+				sprintf( 'Table "%s" (%s) contains a statement that does not match a sanctioned shape; refusing to replay it against the live database.', $declared_table, $location )
 			);
 		}
 	}
@@ -722,14 +722,14 @@ final class DatabaseWriter {
 
 		if ( null === $facts ) {
 			throw new RuntimeException(
-				'DatabaseWriter: could not read the storage facts for a just-created staged table; refusing to continue this restore.'
+				'Could not read the storage facts for a just-created staged table; refusing to continue this restore.'
 			);
 		}
 
 		if ( ! in_array( $facts['table_type'], self::ALLOWED_TABLE_TYPES, true ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $facts['table_type'] is the server's own information_schema.TABLES.TABLE_TYPE value, reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: a staged CREATE built a "%s", not an ordinary table; refusing to replay it against the live database.', $facts['table_type'] )
+				sprintf( 'A staged CREATE built a "%s", not an ordinary table; refusing to replay it against the live database.', $facts['table_type'] )
 			);
 		}
 
@@ -737,7 +737,7 @@ final class DatabaseWriter {
 		if ( ! in_array( $engine, self::ALLOWED_ENGINES, true ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $facts['engine'] is the server's own information_schema.TABLES.ENGINE value (a storage-engine name), never the statement's own bytes; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: a staged CREATE built a table using the "%s" storage engine, which is not an ordinary local table; Pontifex restores only ordinary local tables — never one that reaches other tables, a remote server, or an arbitrary file — so this table cannot be restored; refusing to replay it against the live database.', $facts['engine'] )
+				sprintf( 'A staged CREATE built a table using the "%s" storage engine, which is not an ordinary local table; Pontifex restores only ordinary local tables — never one that reaches other tables, a remote server, or an arbitrary file — so this table cannot be restored; refusing to replay it against the live database.', $facts['engine'] )
 			);
 		}
 
@@ -745,7 +745,7 @@ final class DatabaseWriter {
 		foreach ( self::FORBIDDEN_CREATE_OPTION_FRAGMENTS as $fragment ) {
 			if ( str_contains( $normalised_options, $fragment ) ) {
 				throw new RuntimeException(
-					'DatabaseWriter: a staged CREATE carries table options that point outside its own local storage; refusing to replay it against the live database.'
+					'A staged CREATE carries table options that point outside its own local storage; refusing to replay it against the live database.'
 				);
 			}
 		}
@@ -757,7 +757,7 @@ final class DatabaseWriter {
 		// a second way; see DatabaseAdapter::partition_storage_directory_present().
 		if ( str_contains( $normalised_options, 'partitioned' ) && $this->adapter->partition_storage_directory_present( $staged_table ) ) {
 			throw new RuntimeException(
-				'DatabaseWriter: a staged CREATE names a DATA DIRECTORY or INDEX DIRECTORY on one of its partitions; refusing to replay it against the live database.'
+				'A staged CREATE names a DATA DIRECTORY or INDEX DIRECTORY on one of its partitions; refusing to replay it against the live database.'
 			);
 		}
 
@@ -772,7 +772,7 @@ final class DatabaseWriter {
 		if ( $this->adapter->table_row_count( $staged_table ) > $max_seeded_rows ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $staged_table is the identifier this class composed itself, reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: a staged CREATE for table "%s" produced rows; refusing to replay it against the live database.', $staged_table )
+				sprintf( 'A staged CREATE for table "%s" produced rows; refusing to replay it against the live database.', $staged_table )
 			);
 		}
 	}
@@ -951,7 +951,7 @@ final class DatabaseWriter {
 		if ( ( $longest_prefix + strlen( $dest_table ) ) > self::MAX_TABLE_NAME_LENGTH ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $dest_table is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'DatabaseWriter: table "%s" cannot be restored atomically — its staged name would exceed MySQL\'s %d-character table-name limit.', $dest_table, self::MAX_TABLE_NAME_LENGTH )
+				sprintf( 'Table "%s" cannot be restored atomically — its staged name would exceed MySQL\'s %d-character table-name limit.', $dest_table, self::MAX_TABLE_NAME_LENGTH )
 			);
 		}
 	}

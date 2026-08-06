@@ -221,13 +221,13 @@ final class ArchiveReader {
 	 */
 	public function __construct( $source, ?int $memory_limit_bytes = null, ?callable $raise_memory_limit = null ) {
 		if ( ! is_resource( $source ) ) {
-			throw new InvalidArgumentException( 'ArchiveReader: $source must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$source must be a valid stream resource.' );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_meta_data -- Inspecting an open stream resource; WP_Filesystem has no equivalent.
 		$meta = stream_get_meta_data( $source );
 		if ( empty( $meta['seekable'] ) ) {
-			throw new InvalidArgumentException( 'ArchiveReader: $source stream must be seekable.' );
+			throw new InvalidArgumentException( '$source stream must be seekable.' );
 		}
 
 		$this->source             = $source;
@@ -386,7 +386,7 @@ final class ArchiveReader {
 	private function read_header(): Header {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0 ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to offset 0 to read the header.' );
+			throw new RuntimeException( 'Could not seek to offset 0 to read the header.' );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -394,7 +394,7 @@ final class ArchiveReader {
 		if ( false === $bytes || strlen( $bytes ) !== Header::SIZE ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: could not read %d header bytes; stream may be truncated.',
+					'Could not read %d header bytes; stream may be truncated.',
 					(int) Header::SIZE
 				)
 			);
@@ -404,7 +404,7 @@ final class ArchiveReader {
 			$header = Header::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'ArchiveReader: archive header is malformed or not a Pontifex archive.', 0, $e );
+			throw new RuntimeException( 'Archive header is malformed or not a Pontifex archive.', 0, $e );
 		}
 
 		// The format's compatibility contract (archive-format.md section 13): a
@@ -414,7 +414,7 @@ final class ArchiveReader {
 		if ( $header->major() > Header::FORMAT_MAJOR_V1 ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: this archive is format version %d.%d, but this reader supports major version %d at most. Update Pontifex to restore it.',
+					'This archive is format version %d.%d, but this reader supports major version %d at most. Update Pontifex to restore it.',
 					(int) $header->major(),
 					(int) $header->minor(),
 					(int) Header::FORMAT_MAJOR_V1
@@ -434,19 +434,19 @@ final class ArchiveReader {
 	private function read_footer(): Footer {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to read the footer.' );
+			throw new RuntimeException( 'Could not seek to end of stream to read the footer.' );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$end = ftell( $this->source );
 		if ( false === $end ) {
-			throw new RuntimeException( 'ArchiveReader: could not determine stream length.' );
+			throw new RuntimeException( 'Could not determine stream length.' );
 		}
 		$tail = $this->signature_tail_size();
 		if ( $end < Header::SIZE + Footer::SIZE + $tail ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: stream length %d is shorter than the minimum header (%d) + footer (%d) + signature (%d) size.',
+					'Stream length %d is shorter than the minimum header (%d) + footer (%d) + signature (%d) size.',
 					(int) $end,
 					(int) Header::SIZE,
 					(int) Footer::SIZE,
@@ -459,7 +459,7 @@ final class ArchiveReader {
 		// before the trailing signature block of a signed one.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, $end - $tail - Footer::SIZE ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to footer position.' );
+			throw new RuntimeException( 'Could not seek to footer position.' );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -467,7 +467,7 @@ final class ArchiveReader {
 		if ( false === $bytes || strlen( $bytes ) !== Footer::SIZE ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: could not read %d footer bytes; stream may be truncated.',
+					'Could not read %d footer bytes; stream may be truncated.',
 					(int) Footer::SIZE
 				)
 			);
@@ -477,7 +477,7 @@ final class ArchiveReader {
 			return Footer::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'ArchiveReader: archive footer is malformed.', 0, $e );
+			throw new RuntimeException( 'Archive footer is malformed.', 0, $e );
 		}
 	}
 
@@ -500,12 +500,12 @@ final class ArchiveReader {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to bounds-check the manifest.' );
+			throw new RuntimeException( 'Could not seek to end of stream to bounds-check the manifest.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$stream_length = ftell( $this->source );
 		if ( false === $stream_length ) {
-			throw new RuntimeException( 'ArchiveReader: could not determine stream length for manifest bounds check.' );
+			throw new RuntimeException( 'Could not determine stream length for manifest bounds check.' );
 		}
 
 		// The manifest must sit entirely between the Header and the Footer (which is
@@ -515,7 +515,7 @@ final class ArchiveReader {
 		if ( $offset < Header::SIZE || $offset + $length > $footer_start ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: manifest at offset %d length %d does not fit between header (%d) and footer (start at %d).',
+					'Manifest at offset %d length %d does not fit between header (%d) and footer (start at %d).',
 					(int) $offset,
 					(int) $length,
 					(int) Header::SIZE,
@@ -531,7 +531,7 @@ final class ArchiveReader {
 		if ( $length > ArchiveManifest::MAX_PAYLOAD_SIZE + 1024 ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: declared manifest length %d exceeds the maximum %d; refusing to allocate.',
+					'Declared manifest length %d exceeds the maximum %d; refusing to allocate.',
 					(int) $length,
 					(int) ArchiveManifest::MAX_PAYLOAD_SIZE
 				)
@@ -542,13 +542,13 @@ final class ArchiveReader {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, $offset ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to manifest offset.' );
+			throw new RuntimeException( 'Could not seek to manifest offset.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$bytes = fread( $this->source, $length );
 		if ( false === $bytes || strlen( $bytes ) !== $length ) {
 			throw new RuntimeException(
-				sprintf( 'ArchiveReader: could not read %d manifest bytes; stream may be truncated.', (int) $length )
+				sprintf( 'Could not read %d manifest bytes; stream may be truncated.', (int) $length )
 			);
 		}
 
@@ -556,7 +556,7 @@ final class ArchiveReader {
 			$manifest = ArchiveManifest::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'ArchiveReader: archive manifest is malformed or its internal hash check failed.', 0, $e );
+			throw new RuntimeException( 'Archive manifest is malformed or its internal hash check failed.', 0, $e );
 		}
 
 		// Cross-check: the manifest payload's hash (embedded inside the manifest block) must equal the Footer's recorded hash.
@@ -564,7 +564,7 @@ final class ArchiveReader {
 		// here we verify the internal hash equals what the Footer says it should be.
 		$manifest_internal_hash = substr( $bytes, ArchiveManifest::LENGTH_PREFIX_SIZE, Sha256::DIGEST_SIZE );
 		if ( ! hash_equals( $this->footer->manifest_hash(), $manifest_internal_hash ) ) {
-			throw new RuntimeException( 'ArchiveReader: manifest hash recorded in footer does not match the hash embedded in the manifest block.' );
+			throw new RuntimeException( 'Manifest hash recorded in footer does not match the hash embedded in the manifest block.' );
 		}
 
 		return $manifest;
@@ -676,7 +676,7 @@ final class ArchiveReader {
 
 		throw new HostCannotComply(
 			sprintf(
-				'ArchiveReader: this archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server; the admin screens usually have less memory available than WP-CLI does.',
+				'This archive\'s manifest needs about %d MB to open, but only %d MB of this site\'s %d MB memory limit remains. Raise memory_limit on this server; the admin screens usually have less memory available than WP-CLI does.',
 				(int) ceil( $required / 1048576 ),
 				(int) floor( max( 0, $applied - memory_get_usage( true ) ) / 1048576 ),
 				(int) floor( $applied / 1048576 )
@@ -733,19 +733,19 @@ final class ArchiveReader {
 	private function read_provenance(): Provenance {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, Header::SIZE ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to the provenance block.' );
+			throw new RuntimeException( 'Could not seek to the provenance block.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$length_bytes = fread( $this->source, Provenance::LENGTH_PREFIX_SIZE );
 		if ( false === $length_bytes || strlen( $length_bytes ) !== Provenance::LENGTH_PREFIX_SIZE ) {
-			throw new RuntimeException( 'ArchiveReader: could not read the provenance length prefix; stream may be truncated.' );
+			throw new RuntimeException( 'Could not read the provenance length prefix; stream may be truncated.' );
 		}
 
 		$length = ByteOrder::unpack_uint32( $length_bytes );
 		if ( $length > Provenance::MAX_PAYLOAD_SIZE ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: provenance payload length %d exceeds the maximum of %d bytes.',
+					'Provenance payload length %d exceeds the maximum of %d bytes.',
 					(int) $length,
 					(int) Provenance::MAX_PAYLOAD_SIZE
 				)
@@ -758,7 +758,7 @@ final class ArchiveReader {
 		if ( Header::SIZE + $total > $this->footer->manifest_offset() ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: provenance block of %d bytes overruns the manifest offset %d.',
+					'Provenance block of %d bytes overruns the manifest offset %d.',
 					(int) $total,
 					(int) $this->footer->manifest_offset()
 				)
@@ -767,13 +767,13 @@ final class ArchiveReader {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, Header::SIZE ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to the provenance block to read it.' );
+			throw new RuntimeException( 'Could not seek to the provenance block to read it.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$bytes = fread( $this->source, $total );
 		if ( false === $bytes || strlen( $bytes ) !== $total ) {
 			throw new RuntimeException(
-				sprintf( 'ArchiveReader: could not read %d provenance bytes; stream may be truncated.', (int) $total )
+				sprintf( 'Could not read %d provenance bytes; stream may be truncated.', (int) $total )
 			);
 		}
 
@@ -781,7 +781,7 @@ final class ArchiveReader {
 			return Provenance::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'ArchiveReader: archive provenance block is malformed.', 0, $e );
+			throw new RuntimeException( 'Archive provenance block is malformed.', 0, $e );
 		}
 	}
 
@@ -797,17 +797,17 @@ final class ArchiveReader {
 	private function read_signature(): ArchiveSignature {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to read the signature block.' );
+			throw new RuntimeException( 'Could not seek to end of stream to read the signature block.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$end = ftell( $this->source );
 		if ( false === $end ) {
-			throw new RuntimeException( 'ArchiveReader: could not determine stream length to read the signature block.' );
+			throw new RuntimeException( 'Could not determine stream length to read the signature block.' );
 		}
 		if ( $end < Header::SIZE + Footer::SIZE + ArchiveSignature::SIZE ) {
 			throw new RuntimeException(
 				sprintf(
-					'ArchiveReader: stream length %d is shorter than the minimum for a signed archive (header %d + footer %d + signature %d).',
+					'Stream length %d is shorter than the minimum for a signed archive (header %d + footer %d + signature %d).',
 					(int) $end,
 					(int) Header::SIZE,
 					(int) Footer::SIZE,
@@ -818,13 +818,13 @@ final class ArchiveReader {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, $end - ArchiveSignature::SIZE ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to the signature block position.' );
+			throw new RuntimeException( 'Could not seek to the signature block position.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$bytes = fread( $this->source, ArchiveSignature::SIZE );
 		if ( false === $bytes || strlen( $bytes ) !== ArchiveSignature::SIZE ) {
 			throw new RuntimeException(
-				sprintf( 'ArchiveReader: could not read %d signature bytes; stream may be truncated.', (int) ArchiveSignature::SIZE )
+				sprintf( 'Could not read %d signature bytes; stream may be truncated.', (int) ArchiveSignature::SIZE )
 			);
 		}
 
@@ -832,7 +832,7 @@ final class ArchiveReader {
 			return ArchiveSignature::from_bytes( $bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'ArchiveReader: archive signature block is malformed.', 0, $e );
+			throw new RuntimeException( 'Archive signature block is malformed.', 0, $e );
 		}
 	}
 
@@ -860,18 +860,18 @@ final class ArchiveReader {
 	private function signed_digest(): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to end of stream to compute the signed digest.' );
+			throw new RuntimeException( 'Could not seek to end of stream to compute the signed digest.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		$end = ftell( $this->source );
 		if ( false === $end ) {
-			throw new RuntimeException( 'ArchiveReader: could not determine stream length to compute the signed digest.' );
+			throw new RuntimeException( 'Could not determine stream length to compute the signed digest.' );
 		}
 		$signed_length = $end - $this->signature_tail_size();
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $this->source, 0 ) ) {
-			throw new RuntimeException( 'ArchiveReader: could not seek to offset 0 to compute the signed digest.' );
+			throw new RuntimeException( 'Could not seek to offset 0 to compute the signed digest.' );
 		}
 		$context   = hash_init( 'sha256' );
 		$remaining = $signed_length;
@@ -880,7 +880,7 @@ final class ArchiveReader {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 			$chunk = fread( $this->source, $want );
 			if ( false === $chunk || '' === $chunk ) {
-				throw new RuntimeException( 'ArchiveReader: could not read the archive to compute the signed digest; stream may be truncated.' );
+				throw new RuntimeException( 'Could not read the archive to compute the signed digest; stream may be truncated.' );
 			}
 			hash_update( $context, $chunk );
 			$remaining -= strlen( $chunk );

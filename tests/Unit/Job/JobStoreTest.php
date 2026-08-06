@@ -105,7 +105,7 @@ final class JobStoreTest extends TestCase {
 		$store->create( Job::KIND_EXPORT, array(), 1700000000 );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'an active job already exists' );
+		$this->expectExceptionMessage( 'An active job already exists' );
 
 		$store->create( Job::KIND_EXPORT, array(), 1700000001 );
 	}

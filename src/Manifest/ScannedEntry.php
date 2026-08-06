@@ -136,48 +136,48 @@ final class ScannedEntry {
 		if ( ! in_array( $kind, $allowed_kinds, true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is a validated constant from a closed set; exception path, not HTML output.
-				sprintf( 'ScannedEntry: kind "%s" is not one of file, directory, symlink.', $kind )
+				sprintf( 'Kind "%s" is not one of file, directory, symlink.', $kind )
 			);
 		}
 		if ( '' === $relative_path ) {
-			throw new InvalidArgumentException( 'ScannedEntry: relative_path must be non-empty.' );
+			throw new InvalidArgumentException( 'relative_path must be non-empty.' );
 		}
 		if ( '' === $absolute_path ) {
-			throw new InvalidArgumentException( 'ScannedEntry: absolute_path must be non-empty.' );
+			throw new InvalidArgumentException( 'absolute_path must be non-empty.' );
 		}
 		if ( $size < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedEntry: size %d must be non-negative.', (int) $size )
+				sprintf( 'Size %d must be non-negative.', (int) $size )
 			);
 		}
 		if ( $mode < 0 || $mode > EntryHeader::MAX_POSIX_MODE ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedEntry: mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
+				sprintf( 'Mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
 			);
 		}
 		if ( $mtime < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedEntry: mtime %d must be non-negative.', (int) $mtime )
+				sprintf( 'Mtime %d must be non-negative.', (int) $mtime )
 			);
 		}
 		if ( EntryHeader::KIND_SYMLINK === $kind ) {
 			if ( null === $target || '' === $target ) {
-				throw new InvalidArgumentException( 'ScannedEntry: symlink entries must have a non-empty target.' );
+				throw new InvalidArgumentException( 'Symlink entries must have a non-empty target.' );
 			}
 		} elseif ( null !== $target ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is a validated constant from a closed set; exception path, not HTML output.
-				sprintf( 'ScannedEntry: target may only be set for symlink entries; got kind "%s".', $kind )
+				sprintf( 'Target may only be set for symlink entries; got kind "%s".', $kind )
 			);
 		}
 		if ( EntryHeader::KIND_FILE === $kind ) {
 			if ( '' === $media_type ) {
-				throw new InvalidArgumentException( 'ScannedEntry: file entries may carry a null media_type, but not an empty one.' );
+				throw new InvalidArgumentException( 'File entries may carry a null media_type, but not an empty one.' );
 			}
 		} elseif ( null !== $media_type ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is a validated constant from a closed set; exception path, not HTML output.
-				sprintf( 'ScannedEntry: media_type may only be set for file entries; got kind "%s".', $kind )
+				sprintf( 'media_type may only be set for file entries; got kind "%s".', $kind )
 			);
 		}
 

@@ -93,13 +93,13 @@ final class HashingStream {
 	 */
 	public function copy( $source, $destination ): int {
 		if ( $this->finalised ) {
-			throw new RuntimeException( 'HashingStream: cannot copy after digest() has been called.' );
+			throw new RuntimeException( 'Cannot copy after digest() has been called.' );
 		}
 		if ( ! is_resource( $source ) ) {
-			throw new InvalidArgumentException( 'HashingStream: $source must be a stream resource.' );
+			throw new InvalidArgumentException( '$source must be a stream resource.' );
 		}
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'HashingStream: $destination must be a stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a stream resource.' );
 		}
 
 		$copied_this_call = 0;
@@ -108,7 +108,7 @@ final class HashingStream {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- HashingStream operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream copy.
 			$chunk = fread( $source, self::CHUNK_SIZE );
 			if ( false === $chunk ) {
-				throw new RuntimeException( 'HashingStream: fread() failed on source stream.' );
+				throw new RuntimeException( 'fread() failed on source stream.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -119,12 +119,12 @@ final class HashingStream {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- HashingStream operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream copy.
 			$written = fwrite( $destination, $chunk );
 			if ( false === $written ) {
-				throw new RuntimeException( 'HashingStream: fwrite() failed on destination stream.' );
+				throw new RuntimeException( 'fwrite() failed on destination stream.' );
 			}
 			if ( $written !== $chunk_length ) {
 				throw new RuntimeException(
 					sprintf(
-						'HashingStream: partial write detected (%d of %d bytes); aborting to preserve hash integrity.',
+						'Partial write detected (%d of %d bytes); aborting to preserve hash integrity.',
 						(int) $written,
 						(int) $chunk_length
 					)
@@ -153,7 +153,7 @@ final class HashingStream {
 	 */
 	public function update( string $bytes ): void {
 		if ( $this->finalised ) {
-			throw new RuntimeException( 'HashingStream: cannot update after digest() has been called.' );
+			throw new RuntimeException( 'Cannot update after digest() has been called.' );
 		}
 		if ( '' === $bytes ) {
 			return;
@@ -172,7 +172,7 @@ final class HashingStream {
 	 */
 	public function digest(): string {
 		if ( $this->finalised ) {
-			throw new RuntimeException( 'HashingStream: digest() has already been called on this instance.' );
+			throw new RuntimeException( 'digest() has already been called on this instance.' );
 		}
 		$this->finalised = true;
 		return $this->hasher->digest();

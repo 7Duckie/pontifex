@@ -270,7 +270,7 @@ final class ExportRunner {
 
 		throw new ManifestTooLargeException(
 			sprintf(
-				'ExportRunner: this backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. Narrow it with --exclude/--exclude-table, or drop the file listing entirely with --db-only.',
+				'This backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. Narrow it with --exclude/--exclude-table, or drop the file listing entirely with --db-only.',
 				(int) $entry_count,
 				(int) $projected,
 				(int) ArchiveManifest::MAX_PAYLOAD_SIZE
@@ -328,7 +328,7 @@ final class ExportRunner {
 		if ( false === $destination ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; surfaced on the CLI / in logs, not HTML output.
-				sprintf( 'ExportRunner: could not open the destination archive for writing: %s', $output_path )
+				sprintf( 'Could not open the destination archive for writing: %s', $output_path )
 			);
 		}
 		return $destination;
@@ -367,7 +367,7 @@ final class ExportRunner {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; not HTML output.
-				sprintf( 'ExportRunner: could not move the completed archive into place: %s', $output_path )
+				sprintf( 'Could not move the completed archive into place: %s', $output_path )
 			);
 		}
 	}

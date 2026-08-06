@@ -122,23 +122,23 @@ final class RawCodec implements Codec {
 	 */
 	private function stream_copy( $input, $output, ?int $max_output_bytes ): int {
 		if ( ! is_resource( $input ) ) {
-			throw new CodecException( 'RawCodec: input argument is not a valid stream resource.' );
+			throw new CodecException( 'Input argument is not a valid stream resource.' );
 		}
 		if ( ! is_resource( $output ) ) {
-			throw new CodecException( 'RawCodec: output argument is not a valid stream resource.' );
+			throw new CodecException( 'Output argument is not a valid stream resource.' );
 		}
 
 		if ( null === $max_output_bytes ) {
 			$written = stream_copy_to_stream( $input, $output );
 			if ( false === $written ) {
-				throw new CodecException( 'RawCodec: stream_copy_to_stream() failed during codec operation.' );
+				throw new CodecException( 'stream_copy_to_stream() failed during codec operation.' );
 			}
 			return $written;
 		}
 
 		$written = stream_copy_to_stream( $input, $output, $max_output_bytes );
 		if ( false === $written ) {
-			throw new CodecException( 'RawCodec: stream_copy_to_stream() failed during codec operation.' );
+			throw new CodecException( 'stream_copy_to_stream() failed during codec operation.' );
 		}
 
 		// Any bytes still readable mean the payload exceeded the ceiling.
@@ -146,7 +146,7 @@ final class RawCodec implements Codec {
 		$overflow = fread( $input, 1 );
 		if ( false !== $overflow && '' !== $overflow ) {
 			throw new CodecException(
-				sprintf( 'RawCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+				sprintf( 'Decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
 			);
 		}
 
@@ -169,10 +169,10 @@ final class RawCodec implements Codec {
 	 */
 	private function copy_reporting( $input, $output, callable $on_read ): int {
 		if ( ! is_resource( $input ) ) {
-			throw new CodecException( 'RawCodec: input argument is not a valid stream resource.' );
+			throw new CodecException( 'Input argument is not a valid stream resource.' );
 		}
 		if ( ! is_resource( $output ) ) {
-			throw new CodecException( 'RawCodec: output argument is not a valid stream resource.' );
+			throw new CodecException( 'Output argument is not a valid stream resource.' );
 		}
 
 		$written = 0;
@@ -181,7 +181,7 @@ final class RawCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$chunk = fread( $input, self::COPY_CHUNK_SIZE );
 			if ( false === $chunk ) {
-				throw new CodecException( 'RawCodec: fread() failed during encode.' );
+				throw new CodecException( 'fread() failed during encode.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -192,7 +192,7 @@ final class RawCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$count = fwrite( $output, $chunk );
 			if ( false === $count ) {
-				throw new CodecException( 'RawCodec: fwrite() failed during encode.' );
+				throw new CodecException( 'fwrite() failed during encode.' );
 			}
 			$written += $count;
 		}

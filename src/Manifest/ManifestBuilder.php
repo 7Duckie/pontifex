@@ -172,7 +172,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 			if ( $item instanceof ScannedDbChunk ) {
 				return self::plan_for_scanned_db_chunk( $item );
 			}
-			throw new RuntimeException( 'ManifestBuilder: manifest item is neither a ScannedEntry nor a ScannedDbChunk.' );
+			throw new RuntimeException( 'Manifest item is neither a ScannedEntry nor a ScannedDbChunk.' );
 		};
 
 		return new ManifestStream( array_merge( $file_items, $db_items ), $factory, $estimated_bytes );
@@ -193,7 +193,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	 */
 	private function refuse_when_no_database( array $db_items ): void {
 		if ( array() === $db_items ) {
-			throw new RuntimeException( 'ManifestBuilder: the database scan produced no chunks. Refusing to build a backup with no database in it.' );
+			throw new RuntimeException( 'The database scan produced no chunks. Refusing to build a backup with no database in it.' );
 		}
 	}
 
@@ -213,7 +213,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	 */
 	private function refuse_when_empty( array $file_items, array $db_items ): void {
 		if ( array() === $file_items && array() === $db_items ) {
-			throw new RuntimeException( 'ManifestBuilder: the scan captured no files and no database. Refusing to build an empty backup.' );
+			throw new RuntimeException( 'The scan captured no files and no database. Refusing to build an empty backup.' );
 		}
 	}
 
@@ -266,7 +266,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 			default:
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $entry->kind() is a validated KIND_* constant; reported verbatim for diagnostic context, exception path.
-					sprintf( 'ManifestBuilder: unsupported ScannedEntry kind "%s".', $entry->kind() )
+					sprintf( 'Unsupported ScannedEntry kind "%s".', $entry->kind() )
 				);
 		}
 	}
@@ -289,7 +289,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 			if ( false === $stream ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $entry->absolute_path() reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'ManifestBuilder: could not open file "%s" for reading.', $entry->absolute_path() )
+					sprintf( 'Could not open file "%s" for reading.', $entry->absolute_path() )
 				);
 			}
 			return $stream;
@@ -368,7 +368,7 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
 		$stream = fopen( 'php://memory', 'r+b' );
 		if ( false === $stream ) {
-			throw new RuntimeException( 'ManifestBuilder: could not open php://memory for empty payload.' );
+			throw new RuntimeException( 'Could not open php://memory for empty payload.' );
 		}
 		return $stream;
 	}

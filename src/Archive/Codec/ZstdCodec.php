@@ -84,7 +84,7 @@ final class ZstdCodec implements Codec {
 		if ( $chunk_size < 1 || $chunk_size > self::MAX_CHUNK_SIZE ) {
 			throw new CodecException(
 				sprintf(
-					'ZstdCodec: chunk size %d is out of range (1..%d).',
+					'Chunk size %d is out of range (1..%d).',
 					(int) $chunk_size,
 					(int) self::MAX_CHUNK_SIZE
 				)
@@ -126,7 +126,7 @@ final class ZstdCodec implements Codec {
 
 		$ctx = zstd_compress_init();
 		if ( false === $ctx ) {
-			throw new CodecException( 'ZstdCodec: zstd_compress_init() failed.' );
+			throw new CodecException( 'zstd_compress_init() failed.' );
 		}
 
 		$written = 0;
@@ -135,7 +135,7 @@ final class ZstdCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$chunk = fread( $input, $this->chunk_size );
 			if ( false === $chunk ) {
-				throw new CodecException( 'ZstdCodec: fread() failed during encode.' );
+				throw new CodecException( 'fread() failed during encode.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -147,7 +147,7 @@ final class ZstdCodec implements Codec {
 
 			$compressed = zstd_compress_add( $ctx, $chunk, false );
 			if ( false === $compressed ) {
-				throw new CodecException( 'ZstdCodec: zstd_compress_add() failed during encode.' );
+				throw new CodecException( 'zstd_compress_add() failed during encode.' );
 			}
 
 			$written += $this->write_to_stream( $output, $compressed );
@@ -155,7 +155,7 @@ final class ZstdCodec implements Codec {
 
 		$final = zstd_compress_add( $ctx, '', true );
 		if ( false === $final ) {
-			throw new CodecException( 'ZstdCodec: zstd_compress_add() failed to finalise the encode stream.' );
+			throw new CodecException( 'zstd_compress_add() failed to finalise the encode stream.' );
 		}
 
 		$written += $this->write_to_stream( $output, $final );
@@ -188,7 +188,7 @@ final class ZstdCodec implements Codec {
 
 		$ctx = zstd_uncompress_init();
 		if ( false === $ctx ) {
-			throw new CodecException( 'ZstdCodec: zstd_uncompress_init() failed.' );
+			throw new CodecException( 'zstd_uncompress_init() failed.' );
 		}
 
 		$written = 0;
@@ -197,7 +197,7 @@ final class ZstdCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$chunk = fread( $input, $this->chunk_size );
 			if ( false === $chunk ) {
-				throw new CodecException( 'ZstdCodec: fread() failed during decode.' );
+				throw new CodecException( 'fread() failed during decode.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -206,14 +206,14 @@ final class ZstdCodec implements Codec {
 			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- zstd_uncompress_add() emits a warning on malformed input before returning false; we already handle the false return by throwing CodecException, so the warning is redundant noise.
 			$decompressed = @zstd_uncompress_add( $ctx, $chunk );
 			if ( false === $decompressed ) {
-				throw new CodecException( 'ZstdCodec: zstd_uncompress_add() failed; input may be malformed or truncated.' );
+				throw new CodecException( 'zstd_uncompress_add() failed; input may be malformed or truncated.' );
 			}
 
 			$written += $this->write_to_stream( $output, $decompressed );
 
 			if ( null !== $max_output_bytes && $written > $max_output_bytes ) {
 				throw new CodecException(
-					sprintf( 'ZstdCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+					sprintf( 'Decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
 				);
 			}
 		}
@@ -229,7 +229,7 @@ final class ZstdCodec implements Codec {
 	 */
 	private function assert_available(): void {
 		if ( ! extension_loaded( 'zstd' ) ) {
-			throw new CodecException( 'ZstdCodec: the zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.' );
+			throw new CodecException( 'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.' );
 		}
 	}
 
@@ -243,10 +243,10 @@ final class ZstdCodec implements Codec {
 	 */
 	private function assert_streams( $input, $output ): void {
 		if ( ! is_resource( $input ) ) {
-			throw new CodecException( 'ZstdCodec: input argument is not a valid stream resource.' );
+			throw new CodecException( 'Input argument is not a valid stream resource.' );
 		}
 		if ( ! is_resource( $output ) ) {
-			throw new CodecException( 'ZstdCodec: output argument is not a valid stream resource.' );
+			throw new CodecException( 'Output argument is not a valid stream resource.' );
 		}
 	}
 
@@ -266,7 +266,7 @@ final class ZstdCodec implements Codec {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 		$count = fwrite( $stream, $bytes );
 		if ( false === $count ) {
-			throw new CodecException( 'ZstdCodec: fwrite() failed during codec operation.' );
+			throw new CodecException( 'fwrite() failed during codec operation.' );
 		}
 		return $count;
 	}

@@ -198,10 +198,18 @@ final class FileLogger extends AbstractLogger {
 	/**
 	 * Turn a level, message and context into one finished log line.
 	 *
-	 * Shape: "[UTC-ISO-8601] LEVEL: message | ExceptionClass: detail | {json}".
+	 * Shape: "[UTC-ISO-8601] LEVEL: message | ExceptionClass: detail (file:line) | {json}".
 	 * Placeholders in the message are interpolated from context; an
-	 * 'exception' Throwable is rendered as class and message; any
+	 * 'exception' Throwable is rendered as class, message and origin; any
 	 * remaining context is appended as compact JSON.
+	 *
+	 * The origin is recorded because nothing else records it. Pontifex's messages
+	 * used to begin with the name of the class that raised them — "FileWriter:
+	 * could not create directory" — which was the only trace of where a failure
+	 * came from, and it was being read by operators to whom a class name means
+	 * nothing. Those prefixes are gone from the text people read; the information
+	 * belongs here instead, and file-and-line is strictly better than a class
+	 * name because it names the exact statement rather than the object.
 	 *
 	 * @param string               $level   The level name.
 	 * @param string               $message The raw message.
@@ -213,7 +221,13 @@ final class FileLogger extends AbstractLogger {
 
 		if ( isset( $context['exception'] ) && $context['exception'] instanceof Throwable ) {
 			$exception = $context['exception'];
-			$line     .= sprintf( ' | %s: %s', $exception::class, $exception->getMessage() );
+			$line     .= sprintf(
+				' | %s: %s (%s:%d)',
+				$exception::class,
+				$exception->getMessage(),
+				$exception->getFile(),
+				$exception->getLine()
+			);
 			unset( $context['exception'] );
 		}
 

@@ -686,7 +686,7 @@ final class ExportCommand {
 				// persisted state is what carries the export forward.
 				$current = $store->get( $job->id() );
 				if ( null === $current ) {
-					throw new RuntimeException( 'ExportCommand: the resumable job record disappeared mid-run.' );
+					throw new RuntimeException( 'The resumable job record disappeared mid-run.' );
 				}
 				$done = $runner->tick(
 					$current,

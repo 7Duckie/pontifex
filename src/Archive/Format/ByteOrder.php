@@ -114,7 +114,7 @@ final class ByteOrder {
 		if ( $value < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::pack_uint16: value %d is negative; unsigned integers must be non-negative.',
+					'Value %d is negative; unsigned integers must be non-negative.',
 					(int) $value
 				)
 			);
@@ -122,7 +122,7 @@ final class ByteOrder {
 		if ( $value > self::MAX_UINT16 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::pack_uint16: value %d exceeds the uint16 maximum of %d.',
+					'Value %d exceeds the uint16 maximum of %d.',
 					(int) $value,
 					(int) self::MAX_UINT16
 				)
@@ -143,7 +143,7 @@ final class ByteOrder {
 		if ( strlen( $bytes ) !== self::UINT16_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::unpack_uint16: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::UINT16_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -151,7 +151,7 @@ final class ByteOrder {
 		}
 		$unpacked = unpack( 'n', $bytes );
 		if ( false === $unpacked ) {
-			throw new RuntimeException( 'ByteOrder::unpack_uint16: unpack() returned false unexpectedly.' );
+			throw new RuntimeException( 'unpack() returned false unexpectedly.' );
 		}
 		return (int) $unpacked[1];
 	}
@@ -167,7 +167,7 @@ final class ByteOrder {
 		if ( $value < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::pack_uint32: value %d is negative; unsigned integers must be non-negative.',
+					'Value %d is negative; unsigned integers must be non-negative.',
 					(int) $value
 				)
 			);
@@ -175,7 +175,7 @@ final class ByteOrder {
 		if ( $value > self::MAX_UINT32 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::pack_uint32: value %d exceeds the uint32 maximum of %d.',
+					'Value %d exceeds the uint32 maximum of %d.',
 					(int) $value,
 					(int) self::MAX_UINT32
 				)
@@ -196,7 +196,7 @@ final class ByteOrder {
 		if ( strlen( $bytes ) !== self::UINT32_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::unpack_uint32: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::UINT32_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -204,7 +204,7 @@ final class ByteOrder {
 		}
 		$unpacked = unpack( 'N', $bytes );
 		if ( false === $unpacked ) {
-			throw new RuntimeException( 'ByteOrder::unpack_uint32: unpack() returned false unexpectedly.' );
+			throw new RuntimeException( 'unpack() returned false unexpectedly.' );
 		}
 		return (int) $unpacked[1];
 	}
@@ -224,7 +224,7 @@ final class ByteOrder {
 		if ( $value < 0 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::pack_uint64: value %d is negative; unsigned integers must be non-negative.',
+					'Value %d is negative; unsigned integers must be non-negative.',
 					(int) $value
 				)
 			);
@@ -249,7 +249,7 @@ final class ByteOrder {
 		if ( strlen( $bytes ) !== self::UINT64_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ByteOrder::unpack_uint64: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::UINT64_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -257,12 +257,12 @@ final class ByteOrder {
 		}
 		$unpacked = unpack( 'J', $bytes );
 		if ( false === $unpacked ) {
-			throw new RuntimeException( 'ByteOrder::unpack_uint64: unpack() returned false unexpectedly.' );
+			throw new RuntimeException( 'unpack() returned false unexpectedly.' );
 		}
 		$value = (int) $unpacked[1];
 		if ( $value < 0 ) {
 			throw new InvalidArgumentException(
-				'ByteOrder::unpack_uint64: bytes represent a value with the high bit set; Pontifex does not support uint64 values above PHP_INT_MAX.'
+				'Bytes represent a value with the high bit set; Pontifex does not support uint64 values above PHP_INT_MAX.'
 			);
 		}
 		return $value;

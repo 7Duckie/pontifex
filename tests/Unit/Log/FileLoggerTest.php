@@ -169,6 +169,28 @@ final class FileLoggerTest extends TestCase {
 	}
 
 	/**
+	 * An exception is logged with the file and line it was thrown from.
+	 *
+	 * This is the only record of where a failure came from. Pontifex's messages
+	 * used to begin with the name of the class that raised them, which was the de
+	 * facto origin marker — and was being read by operators to whom a class name
+	 * means nothing. The prefixes are gone from the text people read, so the
+	 * origin has to be here, and it has to stay here: without it, a support log
+	 * says a restore failed and gives no way to find out where.
+	 *
+	 * @return void
+	 */
+	public function test_exception_context_records_where_it_was_thrown(): void {
+		$logger = new FileLogger( $this->temp_dir, false );
+
+		$thrown = new RuntimeException( 'no room on the destination' );
+		$logger->error( 'Restore failed.', array( 'exception' => $thrown ) );
+
+		$body = $this->read_log();
+		$this->assertStringContainsString( $thrown->getFile() . ':' . $thrown->getLine(), $body );
+	}
+
+	/**
 	 * PSR-3 {placeholder} tokens are interpolated from context.
 	 *
 	 * @return void

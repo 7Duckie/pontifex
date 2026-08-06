@@ -184,12 +184,12 @@ final class EntryReader {
 	 */
 	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES, ?callable $on_bytes = null, ?int $memory_budget = null ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
-			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$source must be a valid stream resource.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_meta_data -- Inspecting an open stream resource; WP_Filesystem has no equivalent.
 		$meta = stream_get_meta_data( $source );
 		if ( empty( $meta['seekable'] ) ) {
-			throw new InvalidArgumentException( 'EntryReader: $source stream must be seekable.' );
+			throw new InvalidArgumentException( '$source stream must be seekable.' );
 		}
 
 		$record_len = $manifest_entry->length();
@@ -198,14 +198,14 @@ final class EntryReader {
 		$min_record_size = EntryHeader::LENGTH_PREFIX_SIZE + 1 + 2 + EntryWriter::NONCE_SIZE + Sha256::DIGEST_SIZE;
 		if ( $record_len < $min_record_size ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $record_len )
+				sprintf( 'Entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $record_len )
 			);
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+				sprintf( 'Could not seek to entry offset %d.', (int) $manifest_entry->offset() )
 			);
 		}
 
@@ -219,7 +219,7 @@ final class EntryReader {
 		$header_end    = EntryHeader::LENGTH_PREFIX_SIZE + $header_length;
 		if ( $header_end + 2 + EntryWriter::NONCE_SIZE + Sha256::DIGEST_SIZE > $record_len ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $record_len )
+				sprintf( 'Declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $record_len )
 			);
 		}
 
@@ -229,7 +229,7 @@ final class EntryReader {
 			$header = EntryHeader::from_bytes( $header_bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new ArchiveNotTrustworthy( 'EntryReader: entry header is malformed.', 0, $e );
+			throw new ArchiveNotTrustworthy( 'Entry header is malformed.', 0, $e );
 		}
 
 		self::assert_kind_agrees( $header, $manifest_entry );
@@ -238,7 +238,7 @@ final class EntryReader {
 		$codec_id = ByteOrder::unpack_uint16( $this->read_exactly( $source, ByteOrder::UINT16_SIZE, $manifest_entry, $hash_context, $on_bytes ) );
 		if ( $codec_id !== $manifest_entry->codec_id() ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: codec_id mismatch — on-disk %d, manifest %d.', (int) $codec_id, (int) $manifest_entry->codec_id() )
+				sprintf( 'codec_id mismatch — on-disk %d, manifest %d.', (int) $codec_id, (int) $manifest_entry->codec_id() )
 			);
 		}
 
@@ -247,12 +247,12 @@ final class EntryReader {
 		$compression_codec_id = CodecId::compression( $codec_id );
 		if ( CodecId::is_encrypted( $codec_id ) && CodecId::ENCRYPTION_AES_GCM !== CodecId::encryption_family( $codec_id ) ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
+				sprintf( 'Unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
 			);
 		}
 		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
+				sprintf( 'Compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
 			);
 		}
 
@@ -283,7 +283,7 @@ final class EntryReader {
 			$chunk = fread( $source, $want );
 			if ( false === $chunk || '' === $chunk ) {
 				throw new ArchiveNotTrustworthy(
-					sprintf( 'EntryReader: could not read %d entry bytes at offset %d; stream may be truncated.', (int) $record_len, (int) $manifest_entry->offset() )
+					sprintf( 'Could not read %d entry bytes at offset %d; stream may be truncated.', (int) $record_len, (int) $manifest_entry->offset() )
 				);
 			}
 			hash_update( $hash_context, $chunk );
@@ -298,12 +298,12 @@ final class EntryReader {
 		$expected_hash = $this->read_exactly( $source, Sha256::DIGEST_SIZE, $manifest_entry, null, $on_bytes );
 		$computed_hash = hash_final( $hash_context, true );
 		if ( ! hash_equals( $expected_hash, $computed_hash ) ) {
-			throw new ArchiveNotTrustworthy( 'EntryReader: entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
+			throw new ArchiveNotTrustworthy( 'Entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
 		}
 
 		// Verify the on-disk hash matches the manifest's recorded entry_hash.
 		if ( ! hash_equals( $manifest_entry->entry_hash(), $expected_hash ) ) {
-			throw new ArchiveNotTrustworthy( 'EntryReader: on-disk entry hash does not match the manifest entry_hash.' );
+			throw new ArchiveNotTrustworthy( 'On-disk entry hash does not match the manifest entry_hash.' );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a php://temp spool, not a filesystem path.
@@ -348,7 +348,7 @@ final class EntryReader {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 			fclose( $output );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new ArchiveNotTrustworthy( 'EntryReader: codec failed to decode entry payload.', 0, $e );
+			throw new ArchiveNotTrustworthy( 'Codec failed to decode entry payload.', 0, $e );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 		fclose( $spool );
@@ -392,7 +392,7 @@ final class EntryReader {
 		}
 		throw new ArchiveNotTrustworthy(
 			sprintf(
-				'EntryReader: entry %d ("%s") declares %d bytes but its payload decoded to %d. The file changed while it was being backed up and this archive does not hold the content it claims; refusing to restore it silently wrong.',
+				'Entry %d ("%s") declares %d bytes but its payload decoded to %d. The file changed while it was being backed up and this archive does not hold the content it claims; refusing to restore it silently wrong.',
 				(int) $manifest_entry->index(),
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->path() is reported verbatim for diagnostic context; exception path, not HTML output.
 				(string) $header->path(),
@@ -426,13 +426,13 @@ final class EntryReader {
 	 */
 	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null, ?int $max_decoded_bytes = null ): void {
 		if ( ! is_resource( $source ) ) {
-			throw new InvalidArgumentException( 'EntryReader: $source must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$source must be a valid stream resource.' );
 		}
 
 		$length = $manifest_entry->length();
 		if ( $length < Sha256::DIGEST_SIZE ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $length )
+				sprintf( 'Entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $length )
 			);
 		}
 
@@ -466,7 +466,7 @@ final class EntryReader {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+				sprintf( 'Could not seek to entry offset %d.', (int) $manifest_entry->offset() )
 			);
 		}
 
@@ -479,7 +479,7 @@ final class EntryReader {
 			$chunk = fread( $source, $want );
 			if ( false === $chunk || '' === $chunk ) {
 				throw new ArchiveNotTrustworthy(
-					sprintf( 'EntryReader: could not read entry bytes at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+					sprintf( 'Could not read entry bytes at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
 				);
 			}
 			hash_update( $context, $chunk );
@@ -495,7 +495,7 @@ final class EntryReader {
 		$stored_hash = fread( $source, Sha256::DIGEST_SIZE );
 		if ( false === $stored_hash || strlen( $stored_hash ) !== Sha256::DIGEST_SIZE ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: could not read the entry hash at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+				sprintf( 'Could not read the entry hash at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
 			);
 		}
 		if ( null !== $on_bytes ) {
@@ -503,10 +503,10 @@ final class EntryReader {
 		}
 
 		if ( ! hash_equals( $stored_hash, $computed_hash ) ) {
-			throw new ArchiveNotTrustworthy( 'EntryReader: entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
+			throw new ArchiveNotTrustworthy( 'Entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
 		}
 		if ( ! hash_equals( $manifest_entry->entry_hash(), $computed_hash ) ) {
-			throw new ArchiveNotTrustworthy( 'EntryReader: on-disk entry hash does not match the manifest entry_hash.' );
+			throw new ArchiveNotTrustworthy( 'On-disk entry hash does not match the manifest entry_hash.' );
 		}
 	}
 
@@ -532,7 +532,7 @@ final class EntryReader {
 		if ( $declared > $max_decoded_bytes ) {
 			throw new HostCannotComply(
 				sprintf(
-					'EntryReader: entry declares %d decoded bytes, exceeding the %d-byte budget for this restore.',
+					'Entry declares %d decoded bytes, exceeding the %d-byte budget for this restore.',
 					(int) $declared,
 					(int) $max_decoded_bytes
 				)
@@ -558,7 +558,7 @@ final class EntryReader {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+				sprintf( 'Could not seek to entry offset %d.', (int) $manifest_entry->offset() )
 			);
 		}
 
@@ -566,14 +566,14 @@ final class EntryReader {
 		$prefix = fread( $source, EntryHeader::LENGTH_PREFIX_SIZE );
 		if ( false === $prefix || strlen( $prefix ) !== EntryHeader::LENGTH_PREFIX_SIZE ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: could not read the entry header length at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+				sprintf( 'Could not read the entry header length at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
 			);
 		}
 
 		$header_length = ByteOrder::unpack_uint32( $prefix );
 		if ( EntryHeader::LENGTH_PREFIX_SIZE + $header_length > $manifest_entry->length() ) {
 			throw new ArchiveNotTrustworthy(
-				sprintf( 'EntryReader: declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $manifest_entry->length() )
+				sprintf( 'Declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $manifest_entry->length() )
 			);
 		}
 
@@ -584,7 +584,7 @@ final class EntryReader {
 			$chunk = fread( $source, (int) min( self::READ_CHUNK_SIZE, $remaining ) );
 			if ( false === $chunk || '' === $chunk ) {
 				throw new ArchiveNotTrustworthy(
-					sprintf( 'EntryReader: could not read the entry header at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+					sprintf( 'Could not read the entry header at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
 				);
 			}
 			$header_bytes .= $chunk;
@@ -595,7 +595,7 @@ final class EntryReader {
 			$header = EntryHeader::from_bytes( $prefix . $header_bytes );
 		} catch ( InvalidArgumentException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new ArchiveNotTrustworthy( 'EntryReader: entry header is malformed.', 0, $e );
+			throw new ArchiveNotTrustworthy( 'Entry header is malformed.', 0, $e );
 		}
 
 		self::assert_kind_agrees( $header, $manifest_entry );
@@ -633,7 +633,7 @@ final class EntryReader {
 		}
 
 		$message = sprintf(
-			'EntryReader: entry kind mismatch — the record says "%s", the manifest says "%s". An archive whose manifest disagrees with its own entries is refused.',
+			'Entry kind mismatch — the record says "%s", the manifest says "%s". An archive whose manifest disagrees with its own entries is refused.',
 			$header->kind(),
 			$manifest_entry->kind()
 		);
@@ -671,14 +671,14 @@ final class EntryReader {
 	): string {
 		if ( null === $this->cipher || null === $this->key ) {
 			throw new RuntimeException(
-				sprintf( 'EntryReader: entry %d is encrypted; a passphrase is required to read it.', (int) $manifest_entry->index() )
+				sprintf( 'Entry %d is encrypted; a passphrase is required to read it.', (int) $manifest_entry->index() )
 			);
 		}
 
 		try {
 			$compressed = $this->cipher->decrypt( $stored_payload, $nonce, $aad, $this->key );
 		} catch ( CipherException $e ) {
-			$message = sprintf( 'EntryReader: entry %d failed to decrypt; the passphrase is wrong or the entry has been tampered with.', (int) $manifest_entry->index() );
+			$message = sprintf( 'Entry %d failed to decrypt; the passphrase is wrong or the entry has been tampered with.', (int) $manifest_entry->index() );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying cipher exception, chained as the previous exception for diagnostics; not HTML output.
 			throw new RuntimeException( $message, 0, $e );
 		}
@@ -721,7 +721,7 @@ final class EntryReader {
 			$chunk = fread( $source, $want );
 			if ( false === $chunk || '' === $chunk ) {
 				throw new RuntimeException(
-					sprintf( 'EntryReader: could not read %d entry bytes at offset %d; stream may be truncated.', (int) $length, (int) $manifest_entry->offset() )
+					sprintf( 'Could not read %d entry bytes at offset %d; stream may be truncated.', (int) $length, (int) $manifest_entry->offset() )
 				);
 			}
 			$bytes     .= $chunk;
@@ -750,7 +750,7 @@ final class EntryReader {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem cannot open it.
 		$spool = fopen( 'php://temp', 'r+b' );
 		if ( false === $spool ) {
-			throw new RuntimeException( 'EntryReader: could not open a php://temp spool for the entry payload.' );
+			throw new RuntimeException( 'Could not open a php://temp spool for the entry payload.' );
 		}
 		return $spool;
 	}
@@ -767,7 +767,7 @@ final class EntryReader {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a php://temp spool, not a filesystem path.
 		$written = fwrite( $spool, $chunk );
 		if ( false === $written || strlen( $chunk ) !== $written ) {
-			throw new RuntimeException( 'EntryReader: could not spool entry payload bytes; the temporary buffer may be out of space.' );
+			throw new RuntimeException( 'Could not spool entry payload bytes; the temporary buffer may be out of space.' );
 		}
 	}
 
@@ -827,7 +827,7 @@ final class EntryReader {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of php://temp buffer; not a filesystem path.
 			fclose( $output );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'EntryReader: codec failed to decode entry payload.', 0, $e );
+			throw new RuntimeException( 'Codec failed to decode entry payload.', 0, $e );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a php://temp buffer, not a filesystem path.
@@ -839,7 +839,7 @@ final class EntryReader {
 		fclose( $output );
 
 		if ( false === $decoded ) {
-			throw new RuntimeException( 'EntryReader: could not read decoded bytes from php://temp output buffer.' );
+			throw new RuntimeException( 'Could not read decoded bytes from php://temp output buffer.' );
 		}
 		return $decoded;
 	}

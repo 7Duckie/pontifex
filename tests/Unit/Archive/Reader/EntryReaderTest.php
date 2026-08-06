@@ -290,7 +290,7 @@ final class EntryReaderTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'entry kind mismatch' );
+		$this->expectExceptionMessage( 'Entry kind mismatch' );
 
 		self::make_reader()->read_entry( $dest, $lying_entry );
 	}
@@ -320,7 +320,7 @@ final class EntryReaderTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'entry kind mismatch' );
+		$this->expectExceptionMessage( 'Entry kind mismatch' );
 
 		self::make_reader()->verify_entry( $dest, $lying_entry );
 	}
@@ -371,7 +371,7 @@ final class EntryReaderTest extends TestCase {
 		$stream  = self::memory_stream( $corrupt );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'entry hash does not match the bytes on disk' );
+		$this->expectExceptionMessage( 'Entry hash does not match the bytes on disk' );
 
 		self::make_reader()->verify_entry( $stream, $fixture[1] );
 	}
@@ -406,7 +406,7 @@ final class EntryReaderTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'on-disk entry hash does not match the manifest entry_hash' );
+		$this->expectExceptionMessage( 'On-disk entry hash does not match the manifest entry_hash' );
 
 		self::make_reader()->verify_entry( $stream, $forged_entry );
 	}
@@ -536,7 +536,7 @@ final class EntryReaderTest extends TestCase {
 		$tampered_stream = self::memory_stream( $tampered );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'entry hash does not match the bytes on disk' );
+		$this->expectExceptionMessage( 'Entry hash does not match the bytes on disk' );
 
 		self::make_reader()->read_entry( $tampered_stream, $real_manifest_entry );
 	}
@@ -572,7 +572,7 @@ final class EntryReaderTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'on-disk entry hash does not match the manifest entry_hash' );
+		$this->expectExceptionMessage( 'On-disk entry hash does not match the manifest entry_hash' );
 
 		self::make_reader()->read_entry( $stream, $forged_entry );
 	}

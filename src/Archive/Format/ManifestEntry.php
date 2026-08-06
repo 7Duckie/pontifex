@@ -148,34 +148,34 @@ final class ManifestEntry {
 	) {
 		if ( $index < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ManifestEntry: index %d must be non-negative.', (int) $index )
+				sprintf( 'Index %d must be non-negative.', (int) $index )
 			);
 		}
 		if ( $offset < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ManifestEntry: offset %d must be non-negative.', (int) $offset )
+				sprintf( 'Offset %d must be non-negative.', (int) $offset )
 			);
 		}
 		if ( $length < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ManifestEntry: length %d must be non-negative.', (int) $length )
+				sprintf( 'Length %d must be non-negative.', (int) $length )
 			);
 		}
 		if ( ! in_array( $kind, EntryHeader::ALL_KINDS, true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is validated input, exception message only.
-				sprintf( 'ManifestEntry: kind "%s" is not one of the supported kinds.', $kind )
+				sprintf( 'Kind "%s" is not one of the supported kinds.', $kind )
 			);
 		}
 		if ( $codec_id < 0 || $codec_id > self::MAX_CODEC_ID ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ManifestEntry: codec_id %d is outside the uint16 range (0 to 65535).', (int) $codec_id )
+				sprintf( 'codec_id %d is outside the uint16 range (0 to 65535).', (int) $codec_id )
 			);
 		}
 		if ( Sha256::DIGEST_SIZE !== strlen( $entry_hash ) ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ManifestEntry: entry_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
+					'entry_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
 					(int) Sha256::DIGEST_SIZE,
 					(int) strlen( $entry_hash )
 				)
@@ -193,21 +193,21 @@ final class ManifestEntry {
 			if ( null === $path ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is validated input.
-					sprintf( 'ManifestEntry: kind "%s" requires a path identifier.', $kind )
+					sprintf( 'Kind "%s" requires a path identifier.', $kind )
 				);
 			}
 			if ( null !== $chunk_index ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is validated input.
-					sprintf( 'ManifestEntry: kind "%s" must not carry a chunk_index identifier.', $kind )
+					sprintf( 'Kind "%s" must not carry a chunk_index identifier.', $kind )
 				);
 			}
 		} elseif ( EntryHeader::KIND_DB_CHUNK === $kind ) {
 			if ( null === $chunk_index ) {
-				throw new InvalidArgumentException( 'ManifestEntry: kind "db_chunk" requires a chunk_index identifier.' );
+				throw new InvalidArgumentException( 'Kind "db_chunk" requires a chunk_index identifier.' );
 			}
 			if ( null !== $path ) {
-				throw new InvalidArgumentException( 'ManifestEntry: kind "db_chunk" must not carry a path identifier.' );
+				throw new InvalidArgumentException( 'Kind "db_chunk" must not carry a path identifier.' );
 			}
 		}
 
@@ -242,7 +242,7 @@ final class ManifestEntry {
 		string $entry_hash
 	): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'ManifestEntry: path must be a non-empty string for file entries.' );
+			throw new InvalidArgumentException( 'Path must be a non-empty string for file entries.' );
 		}
 		return new self(
 			$index,
@@ -278,7 +278,7 @@ final class ManifestEntry {
 	): self {
 		if ( $chunk_index < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ManifestEntry: chunk_index %d must be non-negative.', (int) $chunk_index )
+				sprintf( 'chunk_index %d must be non-negative.', (int) $chunk_index )
 			);
 		}
 		return new self(
@@ -314,7 +314,7 @@ final class ManifestEntry {
 		string $entry_hash
 	): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'ManifestEntry: path must be a non-empty string for directory entries.' );
+			throw new InvalidArgumentException( 'Path must be a non-empty string for directory entries.' );
 		}
 		return new self(
 			$index,
@@ -349,7 +349,7 @@ final class ManifestEntry {
 		string $entry_hash
 	): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'ManifestEntry: path must be a non-empty string for symlink entries.' );
+			throw new InvalidArgumentException( 'Path must be a non-empty string for symlink entries.' );
 		}
 		return new self(
 			$index,
@@ -518,34 +518,34 @@ final class ManifestEntry {
 			if ( ! array_key_exists( $field, $data ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is a hardcoded literal.
-					sprintf( 'ManifestEntry: data is missing required field "%s".', $field )
+					sprintf( 'Data is missing required field "%s".', $field )
 				);
 			}
 			if ( ! is_int( $data[ $field ] ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is a hardcoded literal.
-					sprintf( 'ManifestEntry: field "%s" must be an integer.', $field )
+					sprintf( 'Field "%s" must be an integer.', $field )
 				);
 			}
 		}
 
 		if ( ! array_key_exists( 'kind', $data ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: data is missing required field "kind".' );
+			throw new InvalidArgumentException( 'Data is missing required field "kind".' );
 		}
 		if ( ! is_string( $data['kind'] ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: field "kind" must be a string.' );
+			throw new InvalidArgumentException( 'Field "kind" must be a string.' );
 		}
 
 		if ( ! array_key_exists( 'hash', $data ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: data is missing required field "hash".' );
+			throw new InvalidArgumentException( 'Data is missing required field "hash".' );
 		}
 		if ( ! is_string( $data['hash'] ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: field "hash" must be a string.' );
+			throw new InvalidArgumentException( 'Field "hash" must be a string.' );
 		}
 		if ( 1 !== preg_match( '/^[0-9a-f]{' . self::HASH_HEX_LENGTH . '}$/', $data['hash'] ) ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ManifestEntry: hash must be exactly %d lowercase hex characters.',
+					'Hash must be exactly %d lowercase hex characters.',
 					(int) self::HASH_HEX_LENGTH
 				)
 			);
@@ -554,7 +554,7 @@ final class ManifestEntry {
 		$entry_hash = hex2bin( $data['hash'] );
 		// hex2bin returns false on failure, but the regex above guarantees success here.
 		if ( false === $entry_hash ) {
-			throw new InvalidArgumentException( 'ManifestEntry: hash failed to decode despite passing validation.' );
+			throw new InvalidArgumentException( 'Hash failed to decode despite passing validation.' );
 		}
 
 		switch ( $data['kind'] ) {
@@ -601,7 +601,7 @@ final class ManifestEntry {
 			default:
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- kind is parsed input, exception only.
-					sprintf( 'ManifestEntry: unknown kind "%s".', $data['kind'] )
+					sprintf( 'Unknown kind "%s".', $data['kind'] )
 				);
 		}
 	}
@@ -618,11 +618,11 @@ final class ManifestEntry {
 		if ( ! array_key_exists( 'path', $data ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is validated input.
-				sprintf( 'ManifestEntry: kind "%s" requires a "path" field.', $kind )
+				sprintf( 'Kind "%s" requires a "path" field.', $kind )
 			);
 		}
 		if ( ! is_string( $data['path'] ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: field "path" must be a string.' );
+			throw new InvalidArgumentException( 'Field "path" must be a string.' );
 		}
 		return $data['path'];
 	}
@@ -636,10 +636,10 @@ final class ManifestEntry {
 	 */
 	private static function require_chunk_index( array $data ): int {
 		if ( ! array_key_exists( 'chunk_index', $data ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: kind "db_chunk" requires a "chunk_index" field.' );
+			throw new InvalidArgumentException( 'Kind "db_chunk" requires a "chunk_index" field.' );
 		}
 		if ( ! is_int( $data['chunk_index'] ) ) {
-			throw new InvalidArgumentException( 'ManifestEntry: field "chunk_index" must be an integer.' );
+			throw new InvalidArgumentException( 'Field "chunk_index" must be an integer.' );
 		}
 		return $data['chunk_index'];
 	}

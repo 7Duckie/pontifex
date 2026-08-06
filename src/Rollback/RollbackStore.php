@@ -101,7 +101,7 @@ final class RollbackStore implements RollbackStoreInterface {
 		if ( ! ProtectedDirectory::ensure( $this->directory, self::DIRECTORY_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'RollbackStore: could not create the rollback directory: %s', $this->directory )
+				sprintf( 'Could not create the rollback directory: %s', $this->directory )
 			);
 		}
 	}

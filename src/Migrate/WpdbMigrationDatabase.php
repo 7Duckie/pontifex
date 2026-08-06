@@ -72,7 +72,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		if ( null !== $tables ) {
 			foreach ( $tables as $table ) {
 				if ( '' === $table ) {
-					throw new InvalidArgumentException( 'WpdbMigrationDatabase: table scope must not contain an empty name.' );
+					throw new InvalidArgumentException( 'Table scope must not contain an empty name.' );
 				}
 			}
 			$tables = array_values( $tables );
@@ -119,7 +119,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		if ( '' !== $this->wpdb->last_error ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbMigrationDatabase: primary-key lookup failed for "%s": %s', $table, $last_error ) );
+			throw new RuntimeException( sprintf( 'Primary-key lookup failed for "%s": %s', $table, $last_error ) );
 		}
 
 		if ( ! is_array( $rows ) || 1 !== count( $rows ) ) {
@@ -155,7 +155,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		if ( '' !== $this->wpdb->last_error ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbMigrationDatabase: row read failed for "%s" offset=%d limit=%d: %s', $table, $offset, $limit, $last_error ) );
+			throw new RuntimeException( sprintf( 'Row read failed for "%s" offset=%d limit=%d: %s', $table, $offset, $limit, $last_error ) );
 		}
 
 		return is_array( $rows ) ? array_values( $rows ) : array();
@@ -230,7 +230,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	 */
 	public function update_row( string $table, string $primary_key, int|string $primary_key_value, array $columns ): void {
 		if ( array() === $columns ) {
-			throw new InvalidArgumentException( 'WpdbMigrationDatabase::update_row: columns must not be empty.' );
+			throw new InvalidArgumentException( 'Columns must not be empty.' );
 		}
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A targeted single-row migration UPDATE keyed on the primary key; $wpdb->update() parameterises the values, and a write must not be cached.
@@ -239,7 +239,7 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 		if ( false === $result ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbMigrationDatabase: update failed for "%s": %s', $table, $last_error ) );
+			throw new RuntimeException( sprintf( 'Update failed for "%s": %s', $table, $last_error ) );
 		}
 	}
 }

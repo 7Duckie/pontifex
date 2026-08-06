@@ -128,7 +128,7 @@ final class StreamedRestoreTest extends TestCase {
 		$tampered = self::tampered_archive();
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'EntryReader: entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
+		$this->expectExceptionMessage( 'Entry hash does not match the bytes on disk; the entry has been tampered with or is corrupt.' );
 
 		$this->runner()->restore( $tampered );
 	}

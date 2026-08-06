@@ -500,7 +500,7 @@ final class VerifyController {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening a plugin-owned backup as a stream; @ traps an unopenable-file warning converted to the exception below.
 		$source = @fopen( $path, 'rb' );
 		if ( false === $source ) {
-			throw new RuntimeException( 'VerifyController: could not open the backup for reading.' );
+			throw new RuntimeException( 'Could not open the backup for reading.' );
 		}
 		return $source;
 	}
