@@ -89,12 +89,12 @@ final class ArchiveSignature {
 	public function __construct( string $key_id, string $signature ) {
 		if ( self::KEY_ID_SIZE !== strlen( $key_id ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ArchiveSignature: key id must be exactly %d bytes, got %d.', (int) self::KEY_ID_SIZE, (int) strlen( $key_id ) )
+				sprintf( 'Key id must be exactly %d bytes, got %d.', (int) self::KEY_ID_SIZE, (int) strlen( $key_id ) )
 			);
 		}
 		if ( self::SIGNATURE_SIZE !== strlen( $signature ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ArchiveSignature: signature must be exactly %d bytes, got %d.', (int) self::SIGNATURE_SIZE, (int) strlen( $signature ) )
+				sprintf( 'Signature must be exactly %d bytes, got %d.', (int) self::SIGNATURE_SIZE, (int) strlen( $signature ) )
 			);
 		}
 
@@ -145,7 +145,7 @@ final class ArchiveSignature {
 		if ( strlen( $bytes ) !== self::SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ArchiveSignature::from_bytes: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::SIZE,
 					(int) strlen( $bytes )
 				)
@@ -157,7 +157,7 @@ final class ArchiveSignature {
 		if ( self::SIGNATURE_SIZE !== $sig_length ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ArchiveSignature::from_bytes: sig length must be %d (Ed25519), got %d.',
+					'Sig length must be %d (Ed25519), got %d.',
 					(int) self::SIGNATURE_SIZE,
 					(int) $sig_length
 				)

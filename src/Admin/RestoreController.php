@@ -969,7 +969,7 @@ final class RestoreController {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening a plugin-owned archive as a stream; @ traps an unopenable-file warning converted to the exception below.
 		$source = @fopen( $path, 'rb' );
 		if ( false === $source ) {
-			throw new RuntimeException( 'RestoreController: could not open the archive for reading.' );
+			throw new RuntimeException( 'Could not open the archive for reading.' );
 		}
 		return $source;
 	}

@@ -63,12 +63,12 @@ final class SigningContext {
 	public function __construct( Ed25519Signer $signer, string $secret_key, string $key_id ) {
 		if ( SigningKeypair::SECRET_KEY_SIZE !== strlen( $secret_key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'SigningContext: secret key must be exactly %d bytes, got %d.', (int) SigningKeypair::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
+				sprintf( 'Secret key must be exactly %d bytes, got %d.', (int) SigningKeypair::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
 			);
 		}
 		if ( SigningKeypair::KEY_ID_SIZE !== strlen( $key_id ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'SigningContext: key id must be exactly %d bytes, got %d.', (int) SigningKeypair::KEY_ID_SIZE, (int) strlen( $key_id ) )
+				sprintf( 'Key id must be exactly %d bytes, got %d.', (int) SigningKeypair::KEY_ID_SIZE, (int) strlen( $key_id ) )
 			);
 		}
 
@@ -119,7 +119,7 @@ final class SigningContext {
 	 */
 	public function secret_key(): string {
 		if ( null === $this->secret_key ) {
-			throw new LogicException( 'SigningContext: the secret key has been wiped from memory and is no longer available.' );
+			throw new LogicException( 'The secret key has been wiped from memory and is no longer available.' );
 		}
 		return $this->secret_key;
 	}

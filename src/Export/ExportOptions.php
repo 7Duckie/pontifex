@@ -94,7 +94,7 @@ final class ExportOptions {
 		?Scope $scope = null
 	) {
 		if ( '' === $output_path ) {
-			throw new InvalidArgumentException( 'ExportOptions: output_path must not be empty.' );
+			throw new InvalidArgumentException( 'output_path must not be empty.' );
 		}
 
 		$this->output_path                = $output_path;

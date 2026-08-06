@@ -124,7 +124,7 @@ final class SigningKeysTest extends TestCase {
 		$this->put( 'k.key', 'existing' );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'refusing to overwrite' );
+		$this->expectExceptionMessage( 'Refusing to overwrite' );
 
 		SigningKeys::write_keypair( SigningKeypair::generate(), $this->path( 'k.key' ), $this->path( 'k.pub' ) );
 	}
@@ -138,7 +138,7 @@ final class SigningKeysTest extends TestCase {
 		$this->put( 'k.pub', 'existing' );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'refusing to overwrite' );
+		$this->expectExceptionMessage( 'Refusing to overwrite' );
 
 		SigningKeys::write_keypair( SigningKeypair::generate(), $this->path( 'k.key' ), $this->path( 'k.pub' ) );
 	}
@@ -164,7 +164,7 @@ final class SigningKeysTest extends TestCase {
 	 */
 	public function test_load_rejects_a_missing_file(): void {
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'could not read' );
+		$this->expectExceptionMessage( 'Could not read' );
 
 		SigningKeys::load_public_key( $this->path( 'nope.pub' ) );
 	}
@@ -192,7 +192,7 @@ final class SigningKeysTest extends TestCase {
 		$path = $this->put( 'short.pub', "only a comment line\n" );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'malformed' );
+		$this->expectExceptionMessage( 'Malformed' );
 
 		SigningKeys::load_public_key( $path );
 	}

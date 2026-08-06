@@ -56,7 +56,7 @@ final class OpensslAesGcmCipher implements Cipher {
 		$tag        = '';
 		$ciphertext = openssl_encrypt( $plaintext, self::CIPHER_METHOD, $key, OPENSSL_RAW_DATA, $nonce, $tag, $aad, Cipher::TAG_SIZE );
 		if ( false === $ciphertext ) {
-			throw new CipherException( 'OpensslAesGcmCipher: openssl_encrypt() failed.' );
+			throw new CipherException( 'openssl_encrypt() failed.' );
 		}
 
 		return $ciphertext . $tag;
@@ -79,7 +79,7 @@ final class OpensslAesGcmCipher implements Cipher {
 		if ( strlen( $ciphertext_and_tag ) < Cipher::TAG_SIZE ) {
 			throw new CipherException(
 				sprintf(
-					'OpensslAesGcmCipher: encrypted payload is %d bytes, shorter than the %d-byte authentication tag; the archive is truncated or corrupt.',
+					'Encrypted payload is %d bytes, shorter than the %d-byte authentication tag; the archive is truncated or corrupt.',
 					(int) strlen( $ciphertext_and_tag ),
 					(int) Cipher::TAG_SIZE
 				)
@@ -92,7 +92,7 @@ final class OpensslAesGcmCipher implements Cipher {
 		$plaintext = openssl_decrypt( $ciphertext, self::CIPHER_METHOD, $key, OPENSSL_RAW_DATA, $nonce, $tag, $aad );
 		if ( false === $plaintext ) {
 			throw new CipherException(
-				'OpensslAesGcmCipher: decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.'
+				'Decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.'
 			);
 		}
 
@@ -111,7 +111,7 @@ final class OpensslAesGcmCipher implements Cipher {
 	 */
 	private function assert_available(): void {
 		if ( ! function_exists( 'openssl_encrypt' ) || ! function_exists( 'openssl_decrypt' ) ) {
-			throw new CipherException( 'OpensslAesGcmCipher: ext-openssl is required but is not loaded.' );
+			throw new CipherException( 'Ext-openssl is required but is not loaded.' );
 		}
 	}
 
@@ -126,12 +126,12 @@ final class OpensslAesGcmCipher implements Cipher {
 	private function assert_sizes( string $nonce, string $key ): void {
 		if ( Cipher::NONCE_SIZE !== strlen( $nonce ) ) {
 			throw new CipherException(
-				sprintf( 'OpensslAesGcmCipher: nonce must be exactly %d bytes, got %d.', (int) Cipher::NONCE_SIZE, (int) strlen( $nonce ) )
+				sprintf( 'Nonce must be exactly %d bytes, got %d.', (int) Cipher::NONCE_SIZE, (int) strlen( $nonce ) )
 			);
 		}
 		if ( Cipher::KEY_SIZE !== strlen( $key ) ) {
 			throw new CipherException(
-				sprintf( 'OpensslAesGcmCipher: key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
+				sprintf( 'Key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
 			);
 		}
 	}

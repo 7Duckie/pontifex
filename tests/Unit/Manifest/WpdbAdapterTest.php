@@ -355,7 +355,7 @@ final class WpdbAdapterTest extends TestCase {
 		$wpdb->method( 'query' )->willReturn( false );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'prefix-key rewrite' );
+		$this->expectExceptionMessage( 'Prefix-key rewrite' );
 
 		( new WpdbAdapter( $wpdb ) )->rewrite_prefix_keys( 'wp_', 'xyz_' );
 	}

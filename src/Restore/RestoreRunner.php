@@ -400,7 +400,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(
-					'RestoreRunner: archive declares %d entries, exceeding the maximum of %d.',
+					'Archive declares %d entries, exceeding the maximum of %d.',
 					(int) $total,
 					(int) $this->limits->max_entry_count()
 				)
@@ -461,7 +461,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		if ( $total > $this->limits->max_entry_count() ) {
 			throw new RuntimeException(
 				sprintf(
-					'RestoreRunner: archive declares %d entries, exceeding the maximum of %d.',
+					'Archive declares %d entries, exceeding the maximum of %d.',
 					(int) $total,
 					(int) $this->limits->max_entry_count()
 				)
@@ -491,7 +491,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			if ( $decoded_so_far > $total_budget ) {
 				throw new RuntimeException(
 					sprintf(
-						'RestoreRunner: restored data exceeds the maximum of %d bytes permitted for this archive.',
+						'Restored data exceeds the maximum of %d bytes permitted for this archive.',
 						(int) $total_budget
 					)
 				);
@@ -529,7 +529,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 
 		throw new RuntimeException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $manifest_entry->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
-			sprintf( 'RestoreRunner: unsupported entry kind "%s" at manifest index %d.', $manifest_entry->kind(), (int) $manifest_entry->index() )
+			sprintf( 'Unsupported entry kind "%s" at manifest index %d.', $manifest_entry->kind(), (int) $manifest_entry->index() )
 		);
 	}
 	/**
@@ -546,12 +546,12 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	private function stream_size( $archive_source ): int {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Measuring an open archive stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $archive_source, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'RestoreRunner: could not seek to the end of the archive to measure its size.' );
+			throw new RuntimeException( 'Could not seek to the end of the archive to measure its size.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftell -- Measuring an open archive stream resource; WP_Filesystem has no equivalent.
 		$size = ftell( $archive_source );
 		if ( false === $size ) {
-			throw new RuntimeException( 'RestoreRunner: could not determine the archive size.' );
+			throw new RuntimeException( 'Could not determine the archive size.' );
 		}
 		return $size;
 	}

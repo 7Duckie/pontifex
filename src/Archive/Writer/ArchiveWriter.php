@@ -100,7 +100,7 @@ final class ArchiveWriter {
 	public function write_archive( Provenance $provenance, iterable $entry_plans, $destination, ?callable $on_entry_written = null, ?EncryptionContext $encryption = null, ?SigningContext $signing = null, ?callable $on_bytes_read = null, ?callable $on_file_changed = null, ?callable $on_media_type_unresolved = null ): int {
 		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'ArchiveWriter: $destination must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a valid stream resource.' );
 		}
 
 		// The entry list may be a lazily-streamed ManifestStream as well as a plain
@@ -117,7 +117,7 @@ final class ArchiveWriter {
 		foreach ( $entry_plans as $plan ) {
 			if ( ! $plan instanceof EntryPlan ) {
 				throw new InvalidArgumentException(
-					sprintf( 'ArchiveWriter: $entry_plans[%d] must be an EntryPlan instance.', (int) $index )
+					sprintf( '$entry_plans[%d] must be an EntryPlan instance.', (int) $index )
 				);
 			}
 

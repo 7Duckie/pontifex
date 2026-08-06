@@ -107,7 +107,7 @@ final class ManifestStream implements Countable, IteratorAggregate {
 
 		$identity = static function ( $plan ): EntryPlan {
 			if ( ! $plan instanceof EntryPlan ) {
-				throw new InvalidArgumentException( 'ManifestStream::from_plans(): every item must be an EntryPlan instance.' );
+				throw new InvalidArgumentException( 'Every item must be an EntryPlan instance.' );
 			}
 			return $plan;
 		};

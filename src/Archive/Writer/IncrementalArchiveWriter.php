@@ -154,7 +154,7 @@ final class IncrementalArchiveWriter {
 	public function begin( $destination, Provenance $provenance, ?EncryptionContext $encryption = null, ?SigningContext $signing = null ): void {
 		$this->assert_not_started();
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'IncrementalArchiveWriter: $destination must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a valid stream resource.' );
 		}
 		if ( null !== $signing ) {
 			self::assert_signable_destination( $destination );
@@ -169,7 +169,7 @@ final class IncrementalArchiveWriter {
 			$provenance_bytes = $provenance->to_bytes();
 		} catch ( JsonException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-			throw new RuntimeException( 'IncrementalArchiveWriter: failed to serialise the provenance block: ' . $e->getMessage() );
+			throw new RuntimeException( 'Failed to serialise the provenance block: ' . $e->getMessage() );
 		}
 
 		// The signed flag must be set in the header so it is part of the bytes the
@@ -216,7 +216,7 @@ final class IncrementalArchiveWriter {
 	public function adopt( $destination, int $bytes_written, array $manifest_entries, ?SigningContext $signing = null ): void {
 		$this->assert_not_started();
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'IncrementalArchiveWriter: $destination must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a valid stream resource.' );
 		}
 		if ( null !== $signing ) {
 			self::assert_signable_destination( $destination );
@@ -225,7 +225,7 @@ final class IncrementalArchiveWriter {
 		$expected_index = 0;
 		foreach ( $manifest_entries as $entry ) {
 			if ( ! $entry instanceof ManifestEntry || $entry->index() !== $expected_index ) {
-				throw new InvalidArgumentException( 'IncrementalArchiveWriter: adopted manifest entries must be ManifestEntry instances in contiguous index order from 0.' );
+				throw new InvalidArgumentException( 'Adopted manifest entries must be ManifestEntry instances in contiguous index order from 0.' );
 			}
 			++$expected_index;
 		}
@@ -234,7 +234,7 @@ final class IncrementalArchiveWriter {
 		if ( false === $stat || (int) $stat['size'] !== $bytes_written ) {
 			throw new RuntimeException(
 				sprintf(
-					'IncrementalArchiveWriter: the partial archive is %d bytes but %d were claimed; refusing to append to an unverified file.',
+					'The partial archive is %d bytes but %d were claimed; refusing to append to an unverified file.',
 					false !== $stat ? (int) $stat['size'] : -1,
 					(int) $bytes_written
 				)
@@ -242,7 +242,7 @@ final class IncrementalArchiveWriter {
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Positioning the archive stream to append; WP_Filesystem has no streaming API.
 		if ( -1 === fseek( $destination, $bytes_written ) ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: could not seek to the end of the partial archive.' );
+			throw new RuntimeException( 'Could not seek to the end of the partial archive.' );
 		}
 
 		$this->destination      = $destination;
@@ -350,7 +350,7 @@ final class IncrementalArchiveWriter {
 			$manifest_bytes = ( new ArchiveManifest( $this->manifest_entries ) )->to_bytes();
 		} catch ( JsonException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-			throw new RuntimeException( 'IncrementalArchiveWriter: failed to serialise the manifest block: ' . $e->getMessage() );
+			throw new RuntimeException( 'Failed to serialise the manifest block: ' . $e->getMessage() );
 		}
 
 		$manifest_offset      = $this->bytes_written;
@@ -404,7 +404,7 @@ final class IncrementalArchiveWriter {
 	 */
 	private function assert_writable(): void {
 		if ( ! $this->started || $this->finished || ! is_resource( $this->destination ) ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: the writer must be started (begin or adopt) and not finished.' );
+			throw new RuntimeException( 'The writer must be started (begin or adopt) and not finished.' );
 		}
 	}
 
@@ -416,7 +416,7 @@ final class IncrementalArchiveWriter {
 	 */
 	private function assert_not_started(): void {
 		if ( $this->started ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: already started; use one instance per archive.' );
+			throw new RuntimeException( 'Already started; use one instance per archive.' );
 		}
 	}
 
@@ -454,7 +454,7 @@ final class IncrementalArchiveWriter {
 			default:
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant from EntryHeader; this branch should be unreachable. Exception path, not HTML output.
-					sprintf( 'IncrementalArchiveWriter: entry %d has unknown header kind "%s"; expected one of: %s.', (int) $index, $header->kind(), implode( ', ', EntryHeader::ALL_KINDS ) )
+					sprintf( 'Entry %d has unknown header kind "%s"; expected one of: %s.', (int) $index, $header->kind(), implode( ', ', EntryHeader::ALL_KINDS ) )
 				);
 		}
 	}
@@ -478,7 +478,7 @@ final class IncrementalArchiveWriter {
 			// random_bytes() throws Random\RandomException (a subclass of Exception) when the
 			// system CSPRNG fails; catching Exception keeps this portable across PHP versions.
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying randomness-source exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new RuntimeException( 'IncrementalArchiveWriter: could not generate a random nonce for an encrypted entry.', 0, $e );
+			throw new RuntimeException( 'Could not generate a random nonce for an encrypted entry.', 0, $e );
 		}
 		return ByteOrder::pack_uint32( $index ) . $random;
 	}
@@ -510,7 +510,7 @@ final class IncrementalArchiveWriter {
 	private static function digest_stream_prefix( $destination, int $length ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Seeking within the archive stream to re-read it for the signing digest; WP_Filesystem has no streaming API.
 		if ( -1 === fseek( $destination, 0 ) ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: could not seek to offset 0 to compute the signing digest.' );
+			throw new RuntimeException( 'Could not seek to offset 0 to compute the signing digest.' );
 		}
 
 		$context   = hash_init( 'sha256' );
@@ -520,7 +520,7 @@ final class IncrementalArchiveWriter {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading the archive stream back to compute the signing digest; WP_Filesystem has no streaming API.
 			$chunk = fread( $destination, $want );
 			if ( false === $chunk || '' === $chunk ) {
-				throw new RuntimeException( 'IncrementalArchiveWriter: could not re-read the archive to compute the signing digest; stream may be truncated.' );
+				throw new RuntimeException( 'Could not re-read the archive to compute the signing digest; stream may be truncated.' );
 			}
 			hash_update( $context, $chunk );
 			$remaining -= strlen( $chunk );
@@ -528,7 +528,7 @@ final class IncrementalArchiveWriter {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Returning to the end of the stream so the signature block appends after the footer.
 		if ( -1 === fseek( $destination, 0, SEEK_END ) ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: could not seek back to the end of the stream after computing the signing digest.' );
+			throw new RuntimeException( 'Could not seek back to the end of the stream after computing the signing digest.' );
 		}
 
 		return hash_final( $context, true );
@@ -545,10 +545,10 @@ final class IncrementalArchiveWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_meta_data -- Inspecting the destination stream's capabilities before signing; WP_Filesystem has no equivalent.
 		$meta = stream_get_meta_data( $destination );
 		if ( empty( $meta['seekable'] ) ) {
-			throw new InvalidArgumentException( 'IncrementalArchiveWriter: signing requires a seekable destination stream.' );
+			throw new InvalidArgumentException( 'Signing requires a seekable destination stream.' );
 		}
 		if ( false === strpbrk( (string) $meta['mode'], 'r+' ) ) {
-			throw new InvalidArgumentException( 'IncrementalArchiveWriter: signing requires a readable destination stream; open it with a mode that permits reading, e.g. "w+b".' );
+			throw new InvalidArgumentException( 'Signing requires a readable destination stream; open it with a mode that permits reading, e.g. "w+b".' );
 		}
 	}
 
@@ -569,11 +569,11 @@ final class IncrementalArchiveWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- IncrementalArchiveWriter operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API.
 		$written = fwrite( $destination, $bytes );
 		if ( false === $written ) {
-			throw new RuntimeException( 'IncrementalArchiveWriter: fwrite() failed on destination stream.' );
+			throw new RuntimeException( 'fwrite() failed on destination stream.' );
 		}
 		if ( $written !== $length ) {
 			throw new RuntimeException(
-				sprintf( 'IncrementalArchiveWriter: partial write detected (%d of %d bytes); aborting to preserve archive integrity.', (int) $written, (int) $length )
+				sprintf( 'Partial write detected (%d of %d bytes); aborting to preserve archive integrity.', (int) $written, (int) $length )
 			);
 		}
 

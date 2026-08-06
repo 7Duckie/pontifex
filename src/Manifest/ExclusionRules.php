@@ -106,7 +106,7 @@ final class ExclusionRules {
 		foreach ( $patterns as $i => $pattern ) {
 			if ( ! is_string( $pattern ) ) {
 				throw new InvalidArgumentException(
-					sprintf( 'ExclusionRules: patterns[%d] must be a string.', (int) $i )
+					sprintf( 'Patterns[%d] must be a string.', (int) $i )
 				);
 			}
 		}
@@ -203,7 +203,7 @@ final class ExclusionRules {
 	 */
 	public function matches( string $relative_path, string $kind ): bool {
 		if ( '' === $relative_path ) {
-			throw new InvalidArgumentException( 'ExclusionRules::matches: relative_path must be non-empty.' );
+			throw new InvalidArgumentException( 'relative_path must be non-empty.' );
 		}
 		$allowed_kinds = array(
 			EntryHeader::KIND_FILE,
@@ -214,7 +214,7 @@ final class ExclusionRules {
 		if ( ! in_array( $kind, $allowed_kinds, true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind reported verbatim in exception message for diagnostic context; not HTML output.
-				sprintf( 'ExclusionRules::matches: kind "%s" is not one of file, directory, symlink, db_chunk.', $kind )
+				sprintf( 'Kind "%s" is not one of file, directory, symlink, db_chunk.', $kind )
 			);
 		}
 
@@ -287,7 +287,7 @@ final class ExclusionRules {
 		if ( false === $result ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $pattern reported verbatim in exception message for diagnostic context; not HTML output.
-				sprintf( 'ExclusionRules: pattern "%s" is not a valid regular expression.', $pattern )
+				sprintf( 'Pattern "%s" is not a valid regular expression.', $pattern )
 			);
 		}
 		return 1 === $result;

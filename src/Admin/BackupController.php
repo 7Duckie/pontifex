@@ -458,7 +458,7 @@ final class BackupController {
 				}
 				$current = $job_store->get( $job->id() );
 				if ( null === $current ) {
-					throw new RuntimeException( 'BackupController: the backup job record disappeared mid-run.' );
+					throw new RuntimeException( 'The backup job record disappeared mid-run.' );
 				}
 				$total_bytes = max( $total_bytes, $this->counter_int( $current->payload(), 'total_bytes' ) );
 
@@ -1107,7 +1107,7 @@ final class BackupController {
 			return rtrim( (string) $this->environment->constant_value( 'WP_CONTENT_DIR' ), '/' );
 		}
 		if ( ! $this->environment->is_constant_defined( 'ABSPATH' ) ) {
-			throw new RuntimeException( 'BackupController: neither WP_CONTENT_DIR nor ABSPATH is defined; is WordPress loaded?' );
+			throw new RuntimeException( 'Neither WP_CONTENT_DIR nor ABSPATH is defined; is WordPress loaded?' );
 		}
 		return rtrim( (string) $this->environment->constant_value( 'ABSPATH' ), '/' ) . '/wp-content';
 	}

@@ -129,12 +129,12 @@ final class Scope {
 			if ( ! is_string( $pattern ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $i is an array index cast to string for diagnostic context; exception message, not HTML output.
-					sprintf( 'Scope: excluded_paths[%s] must be a string.', (string) $i )
+					sprintf( 'excluded_paths[%s] must be a string.', (string) $i )
 				);
 			}
 		}
 		if ( ! $includes_files && ! $includes_database ) {
-			throw new InvalidArgumentException( 'Scope: a backup must include the files, the database, or both — an archive of neither is refused.' );
+			throw new InvalidArgumentException( 'A backup must include the files, the database, or both — an archive of neither is refused.' );
 		}
 
 		$this->content_only       = $content_only;
@@ -365,22 +365,22 @@ final class Scope {
 			if ( ! array_key_exists( $bool_field, $data ) || ! is_bool( $data[ $bool_field ] ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $bool_field is a hardcoded literal from the list above; exception message, not HTML output.
-					sprintf( 'Scope: field "%s" must be a boolean.', $bool_field )
+					sprintf( 'Field "%s" must be a boolean.', $bool_field )
 				);
 			}
 		}
 		if ( ! array_key_exists( 'content_root', $data ) || ! is_string( $data['content_root'] ) ) {
-			throw new InvalidArgumentException( 'Scope: field "content_root" must be a string.' );
+			throw new InvalidArgumentException( 'Field "content_root" must be a string.' );
 		}
 		if ( ! array_key_exists( 'excluded_paths', $data ) || ! is_array( $data['excluded_paths'] ) ) {
-			throw new InvalidArgumentException( 'Scope: field "excluded_paths" must be an array of strings.' );
+			throw new InvalidArgumentException( 'Field "excluded_paths" must be an array of strings.' );
 		}
 
 		// includes_files is optional and defaults to true: an archive written
 		// before the field existed, or any non-db-only archive, has files.
 		$includes_files = array_key_exists( 'includes_files', $data ) ? $data['includes_files'] : true;
 		if ( ! is_bool( $includes_files ) ) {
-			throw new InvalidArgumentException( 'Scope: field "includes_files" must be a boolean.' );
+			throw new InvalidArgumentException( 'Field "includes_files" must be a boolean.' );
 		}
 
 		return new self(
