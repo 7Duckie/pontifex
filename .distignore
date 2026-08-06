@@ -23,6 +23,7 @@
 .wp-env.override.json
 .wp-env.tests.json
 .wp-env.tests.override.json
+.wp-env.plugin-check.json
 .distignore
 
 # Build and QA configuration (not needed at runtime)
@@ -30,6 +31,7 @@ phpcs.xml.dist
 phpstan.neon.dist
 phpunit.xml.dist
 phpunit-integration.xml.dist
+build
 stubs
 composer.lock
 

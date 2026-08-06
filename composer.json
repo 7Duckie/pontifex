@@ -61,6 +61,10 @@
       "@test",
       "@composer audit --abandoned=report"
     ],
+    "check:plugin": [
+      "Composer\\Config::disableProcessTimeout",
+      "scripts/plugin-check.sh"
+    ],
     "dev:setup": [
       "@php -r \"echo 'Installing pre-commit hooks...' . PHP_EOL;\"",
       "python3 -m pip install pre-commit",
