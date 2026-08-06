@@ -240,12 +240,35 @@ final class RecoveryCreationLedgerTest extends TestCase {
 	}
 
 	/**
-	 * A directory that is not empty by cleanup time is reported, never thrown, and left in place.
+	 * A directory that is not empty by cleanup time is reported, never thrown, and left in place — and the failure CASCADES to every recorded ancestor above it.
 	 *
 	 * The live site puts a file inside a directory the restore created, so
 	 * rmdir() refuses it on its own — proving rule 3 (a directory disappears
 	 * only once genuinely empty) and the "reported, not thrown" contract in
 	 * the same test.
+	 *
+	 * The restored entry is "wp-content/uploads/newdir", and this restore
+	 * root starts with neither "wp-content" nor "wp-content/uploads" on disk,
+	 * so B1 (see {@see \Pontifex\Restore\FileWriter::create_directory_recording_intermediates()})
+	 * correctly records BOTH of those implicit intermediate directories in
+	 * the ledger alongside "newdir" itself — three directories, not one. This
+	 * case carries no preserved path at all (contrast
+	 * {@see self::test_a_path_the_safety_archive_also_declares_is_never_removed()}
+	 * and {@see self::test_a_differently_spelled_preserved_path_naming_the_same_file_is_honoured()},
+	 * where a directory survives ON PURPOSE because something inside it was
+	 * deliberately preserved, and is correctly reported as neither removed
+	 * nor failed): "newdir" is undeletable for a genuine, unplanned reason —
+	 * the live site put a file in it — and once its own rmdir() fails, its
+	 * PARENT "wp-content/uploads" is no longer empty either (newdir itself is
+	 * still sitting inside it), so removing that one fails too, and by the
+	 * same reasoning so does "wp-content" above it. Cleanup runs
+	 * deepest-path-first (the same strlen-descending order
+	 * {@see \Pontifex\Restore\FileWriter::finalise_directory_modes()} uses),
+	 * so the three failures are reported in that same deepest-first order.
+	 * All three genuinely remain on disk, and reporting all three is the
+	 * honest outcome — collapsing the cascade to only the innermost failure
+	 * would hide that two directories this run created, and could not put
+	 * back the way it found them, are also still there.
 	 *
 	 * @return void
 	 */
@@ -262,7 +285,13 @@ final class RecoveryCreationLedgerTest extends TestCase {
 
 		$this->assertDirectoryExists( $this->restore_root . '/wp-content/uploads/newdir', 'A non-empty directory must survive.' );
 		$this->assertFileExists( $this->restore_root . '/wp-content/uploads/newdir/still-here.txt' );
-		$this->assertSame( array( 'wp-content/uploads/newdir' ), $report->failed_paths() );
+		$this->assertDirectoryExists( $this->restore_root . '/wp-content/uploads', 'The parent of an undeletable directory is no longer empty either, and must survive too.' );
+		$this->assertDirectoryExists( $this->restore_root . '/wp-content', 'The cascade reaches every recorded ancestor, not only the innermost one.' );
+		$this->assertSame(
+			array( 'wp-content/uploads/newdir', 'wp-content/uploads', 'wp-content' ),
+			$report->failed_paths(),
+			'a genuinely undeletable directory must fail every recorded ancestor above it too, deepest first, because none of them end up empty either'
+		);
 		$this->assertSame( array(), $report->removed_paths() );
 		$this->assertFalse( $report->is_precise_revert() );
 	}

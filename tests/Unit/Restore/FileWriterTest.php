@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Restore;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use ReflectionClassConstant;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
@@ -3607,5 +3608,413 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertSame( 0, $removed );
 		$this->assertFileExists( $dir . '/photo.jpg' );
+	}
+
+	// -------------------------------------------------------------------
+	// Creation ledger invariants (ADR 0024 follow-up: fixing the verdict
+	// that was not true for an entry's own implicit intermediate
+	// directories, and pinning four behaviours that survived mutation
+	// with no test noticing).
+	// -------------------------------------------------------------------
+
+	/**
+	 * Overwriting something already on the site — a file (buffered and
+	 * streamed), a directory, and a symlink — must never add it to the
+	 * creation ledger, so recovery can never delete something the failed
+	 * import did not introduce.
+	 *
+	 * Every write_*() method captures $existed_before BEFORE it changes the
+	 * filesystem and gates its own record_created_path() call on
+	 * `! $existed_before`. Removing that guard from any ONE of the four
+	 * sites — write_file(), write_file_from_stream(), write_directory(), or
+	 * write_symlink() — would make its kind of entry, once merely
+	 * OVERWRITTEN rather than created, look identical in the ledger to a
+	 * genuine creation: recovery would then delete a file, directory, or
+	 * symlink that was on the site before the import ever ran. This seeds
+	 * all four kinds, restores an entry over each, and proves none of the
+	 * four ends up in the ledger by running the real cleanup and finding
+	 * every one of them still there afterwards, unchanged in kind.
+	 *
+	 * @return void
+	 */
+	public function test_overwriting_pre_existing_entries_of_every_kind_never_adds_them_to_the_ledger(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		// A pre-existing file, overwritten through the buffered write path.
+		$buffered_file = $this->fixture_root . '/wp-content/buffered.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( dirname( $buffered_file ), 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: seeding the pre-existing file the buffered path overwrites.
+		file_put_contents( $buffered_file, 'ORIGINAL BUFFERED' );
+
+		// A pre-existing file, overwritten through the streamed write path.
+		$streamed_file = $this->fixture_root . '/wp-content/streamed.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: seeding the pre-existing file the streamed path overwrites.
+		file_put_contents( $streamed_file, 'ORIGINAL STREAMED' );
+
+		// A pre-existing directory, "overwritten" (its mode updated in place).
+		$existing_dir = $this->fixture_root . '/wp-content/existing-dir';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: seeding the pre-existing directory the restore overwrites.
+		mkdir( $existing_dir, 0o755, true );
+
+		// A pre-existing symlink, overwritten with a new target.
+		$existing_link = $this->fixture_root . '/wp-content/existing-link';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup: seeding the pre-existing symlink the restore overwrites.
+		symlink( '/old/target', $existing_link );
+
+		$writer->write_entry( self::file_result( 'wp-content/buffered.txt', 'NEW BUFFERED' ) );
+
+		$stream_contents = 'NEW STREAMED';
+		$stream_header   = EntryHeader::for_file( 'wp-content/streamed.txt', strlen( $stream_contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+		fwrite( $stream, $stream_contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+		rewind( $stream );
+		$writer->write_entry( EntryReadResult::for_stream( $stream_header, $stream, strlen( $stream_contents ) ) );
+
+		$writer->write_entry( self::directory_result( 'wp-content/existing-dir', 0o700 ) );
+		$writer->write_entry( self::symlink_result( 'wp-content/existing-link', 'new-target' ) );
+
+		// Sanity check: every write actually landed as the new content, mode,
+		// or target — proving this test exercises real overwrites, not no-ops
+		// that would pass trivially regardless of the guard under test.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW BUFFERED', file_get_contents( $buffered_file ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW STREAMED', file_get_contents( $streamed_file ) );
+		clearstatcache( true, $existing_dir );
+		$this->assertSame( 0o700, fileperms( $existing_dir ) & 0o7777 );
+		$this->assertSame( 'new-target', readlink( $existing_link ) );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertSame( array(), $report->removed_paths(), 'nothing this run merely overwrote should ever be considered "removed" during cleanup' );
+		$this->assertSame( array(), $report->failed_paths() );
+		$this->assertTrue( $report->is_precise_revert() );
+		$this->assertFileExists( $buffered_file, 'a pre-existing file overwritten via the buffered path must survive cleanup' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW BUFFERED', file_get_contents( $buffered_file ) );
+		$this->assertFileExists( $streamed_file, 'a pre-existing file overwritten via the streamed path must survive cleanup' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW STREAMED', file_get_contents( $streamed_file ) );
+		$this->assertDirectoryExists( $existing_dir, 'a pre-existing directory must survive cleanup' );
+		$this->assertTrue( is_link( $existing_link ), 'a pre-existing symlink must survive cleanup' );
+		$this->assertSame( 'new-target', readlink( $existing_link ) );
+	}
+
+	/**
+	 * The ledger's record_created_path() call must run only AFTER
+	 * finalise_temp() has actually succeeded — never merely after the temp
+	 * file itself has landed.
+	 *
+	 * ADR 0024 ("The ordering that makes it safe") names this the one thing
+	 * standing between the ledger and a bug worse than the one it fixes:
+	 * record a path before the write that creates it has truly landed, and an
+	 * abort between the two leaves a ledger entry for a path that was never
+	 * really created — recovery would then delete something it never
+	 * touched. The tempting-looking mutation this pins against is moving
+	 * write_file_from_stream()'s record_created_path() call to right after
+	 * the temp file is copied — "it's basically done at that point" — rather
+	 * than after finalise_temp() (chmod, touch, RENAME) has actually
+	 * returned.
+	 *
+	 * Reaching that window for real, rather than merely asserting it in
+	 * prose, needs the temp file to have genuinely landed while the FINAL
+	 * rename() still fails. FileWriter's own temp filename is built from
+	 * uniqid() (via {@see \Pontifex\Filesystem\TempArtefact::suffix()}), so
+	 * it cannot be predicted from outside the class and pre-seeded — and a
+	 * directory's write permission gates creating a new file in it and
+	 * renaming a file within it identically, so chmodding the directory
+	 * unwritable before write_entry() is called blocks the temp file from
+	 * ever being written at all (proving nothing about ordering), while
+	 * chmodding it only after write_entry() returns is too late to affect
+	 * anything that happened inside that same call.
+	 *
+	 * A PHP stream filter is the way through both problems. Appended to the
+	 * payload stream write_file_from_stream() reads from, its filter()
+	 * method runs exactly when stream_copy_to_stream() asks that stream for
+	 * its first chunk — which happens AFTER write_file_from_stream() has
+	 * already called fopen($temp_path, 'wb'), and opening a file for writing
+	 * creates its directory entry immediately, before a single byte is
+	 * copied. Chmodding the directory at that moment therefore lands in
+	 * exactly the window where the temp file already exists but
+	 * finalise_temp()'s rename() has not yet run: the data write that
+	 * follows goes to an already-open file descriptor (no directory
+	 * permission needed for that), finalise_temp()'s chmod()/touch() calls
+	 * on the temp file need only ownership of it (not directory permission
+	 * either), and rename() is the one operation left that genuinely needs
+	 * the directory to be writable — so it, and only it, fails. Proven
+	 * directly against this exact mechanism before being relied on here (a
+	 * plain script reproducing the same fopen/chmod-mid-copy/rename sequence
+	 * outside PHPUnit) rather than assumed.
+	 *
+	 * Gated on an empirical capability probe, never on identity: `getmyuid()`
+	 * reports who owns the SCRIPT FILE on disk, not what this process can
+	 * actually do, and is wrong in exactly this codebase under a
+	 * bind-mounted container (root process, host-owned files) — see
+	 * {@see self::test_sweep_does_not_count_an_orphan_it_could_not_actually_remove()}
+	 * for the same lesson already learned once in this file. The probe
+	 * attempts the REAL mechanism this test depends on — renaming a file
+	 * within a directory just chmod'd unwritable — and skips only if that
+	 * attempt actually succeeds, i.e. this process is not constrained by the
+	 * mode.
+	 *
+	 * @return void
+	 */
+	public function test_a_created_path_is_never_recorded_before_finalise_temp_actually_succeeds(): void {
+		$probe_dir = $this->fixture_root . '/probe';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup for the capability probe below.
+		mkdir( $probe_dir, 0o755, true );
+		$probe_source = $probe_dir . '/source';
+		$probe_target = $probe_dir . '/target';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup for the capability probe below.
+		file_put_contents( $probe_source, 'x' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the probe directory unwritable, the condition the real test below depends on.
+		chmod( $probe_dir, 0o555 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked from renaming within a directory just chmod'd to 0o555, rather than inferring it from uid.
+		$probe_rename_worked = @rename( $probe_source, $probe_target );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the probe directory so it, and any leftovers inside it, can be cleaned up.
+		chmod( $probe_dir, 0o755 );
+		if ( $probe_rename_worked ) {
+			$this->markTestSkipped( 'This process can still rename within a directory just chmod\'d to 0o555 (commonly root inside a container over a host-owned bind mount), so the condition this test needs cannot be produced here.' );
+		}
+
+		$filter_name = 'pontifex-filewritertest-chmod-on-first-read';
+		if ( ! in_array( $filter_name, stream_get_filters(), true ) ) {
+			// An anonymous class, registered by its dynamically-obtained name,
+			// rather than a dedicated fixture class: this file is the sole owner
+			// of this test, and the filter has no state beyond one boolean that
+			// resets naturally with each stream_filter_append() call (a fresh
+			// instance per append), so a shared, named class would buy nothing a
+			// second file elsewhere in the tree would need to know about.
+			$filter = new class() extends \php_user_filter {
+				/**
+				 * Whether this filter instance has already fired its chmod side effect.
+				 *
+				 * @var bool
+				 */
+				private bool $already_fired = false;
+
+				/**
+				 * Pass every byte through unchanged; chmod the configured directory before the FIRST chunk.
+				 *
+				 * $this->params carries the ['directory' => ..., 'mode' => ...] pair
+				 * passed to stream_filter_append()'s fourth argument — PHP's own
+				 * php_user_filter base class populates it automatically, so no
+				 * static state is needed to get configuration into this instance.
+				 *
+				 * @param resource $in       Input bucket brigade.
+				 * @param resource $out      Output bucket brigade.
+				 * @param int      $consumed Bytes consumed, updated by reference.
+				 * @param bool     $closing  Whether the stream is closing.
+				 * @return int One of the PSFS_* constants.
+				 */
+				public function filter( $in, $out, &$consumed, bool $closing ): int {
+					if ( ! $this->already_fired ) {
+						$this->already_fired = true;
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Test-only timing hook: this chmod IS the condition under test, fired mid-copy so the destination temp file has already landed before its directory becomes unwritable.
+						@chmod( $this->params['directory'], $this->params['mode'] );
+					}
+					// phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- Standard PHP stream-filter idiom: stream_bucket_make_writeable() returns null once the bucket brigade is exhausted, so the assignment IS the loop's own termination test.
+					while ( $bucket = stream_bucket_make_writeable( $in ) ) {
+						$consumed += $bucket->datalen;
+						stream_bucket_append( $out, $bucket );
+					}
+					return PSFS_PASS_ON;
+				}
+			};
+			stream_filter_register( $filter_name, get_class( $filter ) );
+		}
+
+		$area = $this->fixture_root . '/wp-content/newarea';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: the directory the stream filter will chmod mid-copy.
+		mkdir( $area, 0o755, true );
+
+		$contents = 'this file must never be recorded';
+		$header   = EntryHeader::for_file( 'wp-content/newarea/newfile.txt', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+		rewind( $stream );
+		stream_filter_append(
+			$stream,
+			$filter_name,
+			STREAM_FILTER_READ,
+			array(
+				'directory' => $area,
+				'mode'      => 0o555,
+			)
+		);
+
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+		try {
+			$writer->write_entry( EntryReadResult::for_stream( $header, $stream, strlen( $contents ) ) );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+			chmod( $area, 0o755 );
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown, 'the final rename must actually fail for this test to prove anything about ordering' );
+		$this->assertStringContainsString( 'Could not move file into place', $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $area . '/newfile.txt', 'the rename never landed, so the target must not exist' );
+
+		$created_paths = ( new ReflectionProperty( FileWriter::class, 'created_paths' ) )->getValue( $writer );
+		$this->assertSame( array(), $created_paths, 'a write whose finalise_temp() step failed must leave no ledger entry at all, however far the write had otherwise progressed' );
+	}
+
+	/**
+	 * A created, empty directory is removed with rmdir(), not unlink() —
+	 * and is reported as REMOVED, never as failed.
+	 *
+	 * The unlink() function cannot remove a directory on any platform this
+	 * plugin supports; if remove_one_created_path() ever called it for a
+	 * LEDGER_KIND_DIRECTORY entry instead of rmdir(), the removal attempt
+	 * would fail outright, the directory would survive on disk, and the
+	 * cleanup report would misclassify a directory as "could not be removed"
+	 * rather than removing it. A top-level directory name is used
+	 * deliberately, so the only ledger entry in play is the one this test is
+	 * about — a nested path would also record an intermediate ancestor (see
+	 * {@see self::test_removing_created_paths_deletes_intermediate_directories_a_file_entry_implicitly_created()}),
+	 * which would make this assertion about exactly which paths were removed
+	 * ambiguous.
+	 *
+	 * @return void
+	 */
+	public function test_a_created_empty_directory_is_removed_with_rmdir_not_unlink(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::directory_result( 'newdir', 0o755 ) );
+
+		$path = $this->fixture_root . '/newdir';
+		$this->assertDirectoryExists( $path, 'Sanity check: the directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertDirectoryDoesNotExist( $path );
+		$this->assertSame( array( 'newdir' ), $report->removed_paths() );
+		$this->assertSame( array(), $report->failed_paths() );
+		$this->assertTrue( $report->is_precise_revert() );
+	}
+
+	/**
+	 * Cleanup removes the intermediate directories a single file entry
+	 * implicitly created — and leaves alone a directory that already existed
+	 * before the restore.
+	 *
+	 * Both {@see FileWriter::ensure_parent_directory()} and
+	 * {@see FileWriter::write_directory()} used to hand their target straight
+	 * to a single RECURSIVE mkdir(). Every intermediate level PHP silently
+	 * created that way was never passed to record_created_path(): a single
+	 * file entry "wp-content/plugins/intruder/evil.php", restored where
+	 * neither "wp-content/plugins" nor "wp-content/plugins/intruder" yet
+	 * existed, left BOTH of those directories on disk with no ledger entry
+	 * for either — recovery would neither remove them nor report them as
+	 * failures, and {@see CreationLedgerCleanupReport::is_precise_revert()}
+	 * would still (wrongly) answer true. This is the scenario from the brief,
+	 * reproduced exactly: "wp-content" is seeded so it exists BEFORE the
+	 * restore, "plugins" and "intruder" do not, and the file lands three
+	 * levels below the destination root.
+	 *
+	 * @return void
+	 */
+	public function test_removing_created_paths_deletes_intermediate_directories_a_file_entry_implicitly_created(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: a directory that exists BEFORE the restore runs, and so must survive cleanup.
+		mkdir( $this->fixture_root . '/wp-content', 0o755, true );
+
+		$writer->write_entry( self::file_result( 'wp-content/plugins/intruder/evil.php', '<?php /* intruder */' ) );
+
+		$plugins  = $this->fixture_root . '/wp-content/plugins';
+		$intruder = $plugins . '/intruder';
+		$evil     = $intruder . '/evil.php';
+		$this->assertFileExists( $evil, 'Sanity check: the file actually landed.' );
+		$this->assertDirectoryExists( $plugins, 'Sanity check: the implicit intermediate directory was actually created.' );
+		$this->assertDirectoryExists( $intruder, 'Sanity check: the implicit intermediate directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertFileDoesNotExist( $evil );
+		$this->assertDirectoryDoesNotExist( $intruder, 'the intermediate directory the file entry implicitly created must be removed' );
+		$this->assertDirectoryDoesNotExist( $plugins, 'the OTHER intermediate directory the file entry implicitly created must also be removed' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'a directory that existed BEFORE the restore must survive cleanup' );
+		$this->assertTrue( $report->is_precise_revert(), 'every path this run created — the file and both intermediate directories — was accounted for and removed' );
+	}
+
+	/**
+	 * An intermediate directory the new level-by-level helper creates carries
+	 * the exact same mode a plain recursive mkdir() with the same mode
+	 * argument would have produced.
+	 *
+	 * {@see FileWriter::create_directory_recording_intermediates()}'s own
+	 * docblock states that it changes what gets RECORDED, never what gets
+	 * CREATED. This pins the second half of that claim directly against a
+	 * CONTROL directory built with a plain recursive mkdir() in the same
+	 * process (so both are subject to the identical umask), rather than
+	 * merely trusting the reasoning in prose.
+	 *
+	 * @return void
+	 */
+	public function test_intermediate_directories_carry_the_same_mode_a_recursive_mkdir_would_have_produced(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::file_result( 'wp-content/plugins/intruder/evil.php', 'x' ) );
+
+		$intermediate = $this->fixture_root . '/wp-content/plugins';
+		clearstatcache( true, $intermediate );
+		$actual_mode = fileperms( $intermediate ) & 0o7777;
+
+		$parent_dir_mode = (int) ( new ReflectionClassConstant( FileWriter::class, 'PARENT_DIR_MODE' ) )->getValue();
+		$control_root    = sys_get_temp_dir() . '/pontifex-filewriter-mode-control-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Building a CONTROL directory with a plain recursive mkdir(), for a same-process, same-umask mode comparison against the value under test.
+		mkdir( $control_root . '/a/b', $parent_dir_mode, true );
+		clearstatcache( true, $control_root . '/a' );
+		$control_mode = fileperms( $control_root . '/a' ) & 0o7777;
+		self::rmtree( $control_root );
+
+		$this->assertSame( $control_mode, $actual_mode, 'an intermediate directory created by the new helper must carry the same mode a recursive mkdir() with the same mode argument would have produced' );
+	}
+
+	/**
+	 * A directory this run created is skipped by cleanup — counted in
+	 * NEITHER removed_paths() NOR failed_paths() — when a path deliberately
+	 * preserved still lives inside it, and is_precise_revert() stays true.
+	 *
+	 * B1 made the ledger record "wp-content" itself (an implicit intermediate
+	 * directory) alongside "wp-content/keep.txt" here, since neither existed
+	 * before this write. Preserving "wp-content/keep.txt" — telling cleanup
+	 * "this one belongs to the site's prior state, leave it" — necessarily
+	 * leaves "wp-content" non-empty, so rmdir() on it refuses on its own
+	 * merits. Without {@see \Pontifex\Restore\FileWriter::preserved_ancestor_directories()},
+	 * that refusal would be counted as a cleanup FAILURE, which is incoherent:
+	 * a directory that survives purely because the caller asked to KEEP
+	 * something inside it is not a failure of anything, and must not stop
+	 * this from being reported as a precise revert. This is the "one more
+	 * test" pinning that rule directly, at the same level the other four
+	 * ledger tests in this file work at (real write_entry() calls, real
+	 * remove_created_paths(), no RestoreRunner involved) — contrast
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest::test_a_path_the_safety_archive_also_declares_is_never_removed()},
+	 * which proves the identical rule through the full restore engine.
+	 *
+	 * @return void
+	 */
+	public function test_a_directory_containing_a_preserved_path_is_skipped_not_reported_as_failed(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::file_result( 'wp-content/keep.txt', 'kept content' ) );
+
+		$this->assertFileExists( $this->fixture_root . '/wp-content/keep.txt', 'Sanity check: the file was actually written.' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'Sanity check: the implicit intermediate directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array( 'wp-content/keep.txt' ) );
+
+		$this->assertFileExists( $this->fixture_root . '/wp-content/keep.txt', 'The preserved file must survive.' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'The directory that merely contains a preserved path must survive too.' );
+		$this->assertSame( array(), $report->removed_paths(), 'a directory kept only because something inside it was preserved is not a removal' );
+		$this->assertSame( array(), $report->failed_paths(), 'a directory kept only because something inside it was preserved is not a FAILED removal either' );
+		$this->assertTrue( $report->is_precise_revert(), 'a directory surviving purely because of a deliberate preservation must not stop this from being a precise revert' );
 	}
 }
