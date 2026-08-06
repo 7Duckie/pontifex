@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Restore;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use ReflectionClass;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
@@ -2974,5 +2975,527 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertFalse( $result );
 		$this->assertDirectoryDoesNotExist( $missing_directory, 'the probe must not have created the missing parent directory, or left anything inside it' );
+	}
+
+	// -------------------------------------------------------------------
+	// sweep_orphaned_temp_files()
+	// -------------------------------------------------------------------
+
+	/**
+	 * Build a filename shaped exactly like a temp artefact this writer's own
+	 * producers create — the very shape sweep_orphaned_temp_files() is built
+	 * to recognise.
+	 *
+	 * Deliberately calls uniqid() itself rather than embedding a hand-typed
+	 * hex string: a hand-typed sample risks an accidental non-hex character
+	 * slipping in (an 'h' or a 'g'), which would silently test the wrong
+	 * thing. Going through the real generator, the same one production code
+	 * uses, keeps every fixture built by this helper genuinely representative.
+	 *
+	 * @param string $stem The part of the name before the temp suffix, e.g. "photo.jpg" or ".symlink-probe".
+	 * @return string $stem with a fresh, uniquely-suffixed temp shape appended.
+	 */
+	private static function orphaned_temp_name( string $stem ): string {
+		return $stem . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+	}
+
+	/**
+	 * A file orphan a killed restore left behind is removed.
+	 *
+	 * Stands in for {@see FileWriter::write_file()}'s own sibling temp,
+	 * abandoned by a restore that died between the write and the rename that
+	 * would otherwise have completed it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_file_orphan_left_by_a_killed_restore(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( 'photo.jpg' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * A dangling-symlink probe orphan is removed.
+	 *
+	 * {@see FileWriter::probe_symlink_creation()}'s own artefact is a symlink
+	 * whose target is chosen to never exist, so is_file() reports false for
+	 * it — this is the shape the isLink()-before-isFile() ordering in
+	 * sweep_orphaned_temp_files() exists to catch.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_dangling_symlink_probe_orphan(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( '.symlink-probe' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; a dangling probe symlink is the subject under test.
+		symlink( 'this-target-does-not-exist.tmp', $orphan );
+		$this->assertTrue( is_link( $orphan ), 'precondition: the orphan must exist as a symlink' );
+		$this->assertFalse( file_exists( $orphan ), 'precondition: the link must be dangling (its target does not exist)' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFalse( is_link( $orphan ), 'the dangling link itself must be gone' );
+	}
+
+	/**
+	 * A resumable export's .part file is left alone.
+	 *
+	 * A `.part` file is live state a still-running export is writing to, not
+	 * a restore artefact; deleting one would destroy real, unrecoverable work.
+	 *
+	 * Placed under wp-content/uploads, NOT wp-content/pontifex — mutation
+	 * testing found that a fixture placed under wp-content/pontifex passes
+	 * this test even when the ORPHANED_TEMP_FILE_PATTERN is mutated to also
+	 * match ".part", because {@see self::test_sweep_skips_pontifexs_own_working_directory()}'s
+	 * prune removes that whole directory from the walk before the pattern is
+	 * ever consulted. Placing it under uploads, which the sweep does walk,
+	 * means this test actually exercises the pattern's own refusal to match
+	 * ".part", rather than passing for the unrelated reason that the
+	 * directory was never entered at all.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_resumable_exports_part_file_alone(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$part   = $dir . '/site-export.wpmig.part';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $part, 'in-progress export state' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $part );
+	}
+
+	/**
+	 * A user's own similarly-named file is left alone.
+	 *
+	 * "notes.pontifex-backup.tmp" and "data.pontifex.tmp" have no uniqid()
+	 * shape at all (no hex run followed by a dot and a decimal run), so
+	 * neither is close to matching. "archive.pontifex-2024.01.tmp" and
+	 * "db.pontifex-1.2.tmp" are closer — "2024" and "1" are legal hex runs,
+	 * and both are followed by a dot and a decimal run — but neither reaches
+	 * the eight-character floor {@see FileWriter::ORPHANED_TEMP_FILE_PATTERN}
+	 * requires, which is exactly the false positive that floor exists to
+	 * rule out; a real uniqid()-shaped hex run is always fourteen characters,
+	 * so the floor never excludes a genuine artefact.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_users_own_similarly_named_files_alone(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$one    = $dir . '/notes.pontifex-backup.tmp';
+		$two    = $dir . '/data.pontifex.tmp';
+		$three  = $dir . '/archive.pontifex-2024.01.tmp';
+		$four   = $dir . '/db.pontifex-1.2.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $one, 'a' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $two, 'b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $three, 'c' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $four, 'd' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $one );
+		$this->assertFileExists( $two );
+		$this->assertFileExists( $three );
+		$this->assertFileExists( $four );
+	}
+
+	/**
+	 * The sweep never descends through a symlink.
+	 *
+	 * The catastrophic-if-wrong case: a matching orphan sits under a real
+	 * directory that is a SIBLING of the sweep root, reachable only through a
+	 * symlink placed inside the sweep root. A sweep that followed the link
+	 * would find and remove it; the correct sweep must not even look.
+	 *
+	 * Confined to the "wp-content" prefix deliberately, so the file under
+	 * "outside/" is not also directly reachable by ordinary, non-symlinked
+	 * traversal — the symlink is the ONLY path to it, which is what makes
+	 * this test actually exercise the guard rather than passing for an
+	 * unrelated reason (prefix confinement alone).
+	 *
+	 * @return void
+	 */
+	public function test_sweep_never_descends_through_a_symlink(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$outside = $this->make_fixture_directory( 'outside' );
+		$orphan  = $outside . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$content_dir = $this->make_fixture_directory( 'wp-content' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; the sweep must never follow this link.
+		symlink( '../outside', $content_dir . '/link' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed, 'nothing reachable only through a symlink may ever be counted' );
+		$this->assertFileExists( $orphan, 'a file reachable only through a symlink must never be swept' );
+	}
+
+	/**
+	 * Pontifex's own working directory is skipped.
+	 *
+	 * A matching name under wp-content/pontifex/jobs survives — the same
+	 * guard {@see FileWriter::assert_not_pontifex_working_path()} enforces
+	 * for entries being WRITTEN applies here to entries being SWEPT.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_skips_pontifexs_own_working_directory(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$jobs   = $this->make_fixture_directory( 'wp-content/pontifex/jobs' );
+		$orphan = $jobs . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * Pontifex's own working directory is skipped under a REQUIRED PREFIX too.
+	 *
+	 * The test above proves this with $required_prefix null, where the sweep
+	 * root and the destination root are the same directory, so the callback
+	 * filter's relative-path slice — `substr( ..., strlen( $destination_root ) + 1 )`
+	 * — and a hypothetical slice measured from the (narrower) sweep root
+	 * instead would cut the string in exactly the same place; mutation
+	 * testing found that swapping `strlen( $destination_root ) + 1` for
+	 * `strlen( $sweep_root ) + 1` left that test, and the whole suite, green.
+	 * Every restore this plugin actually ships runs with $required_prefix set
+	 * to "wp-content" (the default, content-only mode), where the two lengths
+	 * differ: sliced relative to the sweep root, this orphan's path would
+	 * read as "pontifex/jobs/…", which
+	 * {@see FileWriter::is_pontifex_working_path()} does not recognise (it
+	 * expects "wp-content/pontifex/…"), so that mutation would walk straight
+	 * into Pontifex's own jobs directory and delete a live
+	 * JobStore/JobProgressLog temp file mid-write, on every content-only
+	 * restore. Proving the guard holds under exactly the mode this plugin
+	 * actually runs closes that gap.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_skips_pontifexs_own_working_directory_under_a_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+		$jobs   = $this->make_fixture_directory( 'wp-content/pontifex/jobs' );
+		$orphan = $jobs . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * A required_prefix of "wp-content" confines the RECURSIVE walk to that subtree — but the installation root is still reached separately.
+	 *
+	 * This test used to plant its "outside the prefix" orphan directly at the
+	 * destination root and assert it survived, on the theory that
+	 * {@see FileWriter::assert_within_required_prefix()} refuses every WRITE
+	 * outside that boundary, so nothing outside it could ever hold one of
+	 * this writer's own temp files. An adversarial audit demonstrated that
+	 * theory false: the capability probe behind
+	 * {@see FileWriter::assert_symlinks_creatable()} can itself leave its
+	 * dangling-symlink orphan directly at the installation root (see REACH in
+	 * {@see FileWriter::sweep_orphaned_temp_files()}'s own docblock for the
+	 * two real cases), so that orphan is now correctly swept too — this test
+	 * proves the fix rather than the false assumption it used to encode. An
+	 * orphan nested a level deeper still, outside "wp-content" entirely, sits
+	 * somewhere neither the recursive walk nor the non-recursive
+	 * installation-root scan ever reaches, and survives.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_confines_the_recursive_walk_but_still_reaches_the_installation_root(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$root_orphan = $this->fixture_root . '/' . self::orphaned_temp_name( 'orphan' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $root_orphan, 'at the installation root, e.g. a symlink-capability probe orphan' );
+
+		$genuinely_outside_dir    = $this->make_fixture_directory( 'other' );
+		$genuinely_outside_orphan = $genuinely_outside_dir . '/' . self::orphaned_temp_name( 'orphan' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $genuinely_outside_orphan, 'nested outside both wp-content and the installation-root scan' );
+
+		$content_dir   = $this->make_fixture_directory( 'wp-content' );
+		$inside_orphan = $content_dir . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $inside_orphan, 'inside the prefix' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 2, $removed );
+		$this->assertFileDoesNotExist( $root_orphan, 'a probe orphan at the installation root must be swept too' );
+		$this->assertFileExists( $genuinely_outside_orphan, 'an orphan nested outside both the prefix and the installation root must survive' );
+		$this->assertFileDoesNotExist( $inside_orphan );
+	}
+
+	/**
+	 * A directory named like a temp artefact survives and is not counted.
+	 *
+	 * This proves only the observable OUTCOME: a directory whose name happens
+	 * to match the orphan pattern, and everything inside it, is left
+	 * untouched and does not contribute to the returned count. It does NOT
+	 * prove that isFile() is what produces that outcome — unlink() refuses a
+	 * directory on every platform regardless of that guard, so this test
+	 * cannot isolate isFile() from unlink()'s own refusal, and does not claim
+	 * to.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_directory_named_like_a_temp_file_alone(): void {
+		$writer          = new FileWriter( $this->fixture_root );
+		$uploads         = $this->make_fixture_directory( 'wp-content/uploads' );
+		$temp_shaped_dir = $uploads . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $temp_shaped_dir, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $temp_shaped_dir . '/inner.txt', 'still here' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertDirectoryExists( $temp_shaped_dir );
+		$this->assertFileExists( $temp_shaped_dir . '/inner.txt' );
+	}
+
+	/**
+	 * The returned count is the number of files actually removed.
+	 *
+	 * Three orphans are placed; the count must be exactly 3 — describing what
+	 * was actually done, never merely how many names matched.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_returns_the_count_of_files_actually_removed(): void {
+		$writer  = new FileWriter( $this->fixture_root );
+		$dir     = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphans = array(
+			$dir . '/' . self::orphaned_temp_name( 'a.jpg' ),
+			$dir . '/' . self::orphaned_temp_name( 'b.jpg' ),
+			$dir . '/' . self::orphaned_temp_name( 'c.jpg' ),
+		);
+		foreach ( $orphans as $orphan ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+			file_put_contents( $orphan, 'x' );
+		}
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 3, $removed );
+		foreach ( $orphans as $orphan ) {
+			$this->assertFileDoesNotExist( $orphan );
+		}
+	}
+
+	/**
+	 * The returned count reflects only unlink() calls that actually succeeded.
+	 *
+	 * A matching orphan sits inside a directory this process cannot write to
+	 * (0o555: read and execute, no write) — unlink() needs write permission
+	 * on the PARENT directory, not the file itself, so the removal attempt
+	 * fails. Mutating the removal loop to `@unlink( $path ); ++$removed;`
+	 * unconditionally (dropping the surrounding `if`) left every other sweep
+	 * test in this suite green, because every fixture those tests plant sits
+	 * somewhere genuinely removable; only a fixture the sweep cannot actually
+	 * delete can catch that mutation, which is why this test exists on its
+	 * own.
+	 *
+	 * Skips whenever this process turns out not to actually be constrained
+	 * by the 0o555 mode just set — proven EMPIRICALLY, by attempting to
+	 * create a probe file inside the directory right after the chmod,
+	 * rather than inferred from identity. `getmyuid()` was tried first and
+	 * was wrong: it reports who owns the SCRIPT FILE on disk, not what this
+	 * process can actually do, and inside a container where the repository
+	 * is bind-mounted from the host, the files are host-owned while PHP
+	 * itself runs as root — so `0 === getmyuid()` reads false even though
+	 * root is about to unlink straight through the 0o555 mode regardless.
+	 * A capability probe must measure the thing it is about to rely on,
+	 * never infer it from identity. The mode is restored in a `finally` so
+	 * tearDown() can still remove the fixture, following
+	 * {@see self::test_a_failed_write_leaves_the_original_intact_and_no_temp()}'s
+	 * existing pattern in this file.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_does_not_count_an_orphan_it_could_not_actually_remove(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( 'stuck' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'cannot actually be removed' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the DIRECTORY unwritable so the removal attempt fails, the condition under test.
+		chmod( $dir, 0o555 );
+
+		try {
+			$write_probe_path = $dir . '/.pontifex-write-probe-' . bin2hex( random_bytes( 8 ) );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked by the 0o555 mode just set, rather than inferring it from uid.
+			$can_still_write = false !== @file_put_contents( $write_probe_path, '' );
+			if ( $can_still_write ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Cleanup of the capability probe's own artefact before skipping.
+				@unlink( $write_probe_path );
+				$this->markTestSkipped( 'This process can still write into a 0o555 directory (commonly root inside a container over a host-owned bind mount), so the condition this test needs cannot be produced here.' );
+			}
+
+			$removed = $writer->sweep_orphaned_temp_files();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+			chmod( $dir, 0o755 );
+		}
+
+		$this->assertSame( 0, $removed, 'a name that matched but failed to unlink must not be counted as removed' );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * The sweep never throws, even when it cannot open a directory inside it — and it still removes what it CAN reach.
+	 *
+	 * {@see RecursiveIteratorIterator::CATCH_GET_CHILD} is what stops the
+	 * UnexpectedValueException raised when the walker tries to open a
+	 * directory it cannot read from escaping the walk entirely. Removing
+	 * that flag left every other sweep test in this suite green, because
+	 * none of them ever plants a directory the walker cannot even open.
+	 * Several locked, unreadable directories are planted (created BEFORE the
+	 * one reachable orphan, so a filesystem that returns directory entries
+	 * in roughly creation order encounters every one of them first) so that,
+	 * whichever order the real filesystem happens to return entries in, it
+	 * is overwhelmingly likely that at least one locked directory is reached
+	 * before the reachable orphan is: without CATCH_GET_CHILD, the first
+	 * such encounter throws and the whole walk stops right there, so the
+	 * reachable orphan is never removed. With CATCH_GET_CHILD, each locked
+	 * directory is skipped and the walk carries on regardless, so the
+	 * reachable orphan is removed every time. The assertion is therefore
+	 * twofold: the call does not throw, and the reachable orphan is removed.
+	 *
+	 * Skips whenever this process turns out not to actually be constrained
+	 * by the 0o000 mode just set — proven EMPIRICALLY, by attempting to
+	 * list one of the locked directories right after the chmod, rather than
+	 * inferred from identity. `getmyuid()` was tried first and was wrong in
+	 * BOTH directions here: it answers who owns the SCRIPT FILE on disk,
+	 * not what this process can actually do, and root reads a 0o000
+	 * directory perfectly well regardless of what any uid check reports —
+	 * so a test guarded only by identity would report as neither correctly
+	 * skipped nor genuinely exercised, depending on what a bind mount
+	 * happens to make `getmyuid()` say, while silently proving nothing
+	 * either way. A capability probe must measure the thing it is about to
+	 * rely on, never infer it from identity. The mode is restored in a
+	 * `finally` so tearDown() can still remove the fixture, following
+	 * {@see self::test_a_failed_write_leaves_the_original_intact_and_no_temp()}'s
+	 * existing pattern in this file.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_never_throws_on_an_unreadable_directory_and_still_removes_a_reachable_orphan(): void {
+		$writer      = new FileWriter( $this->fixture_root );
+		$locked_dirs = array();
+		for ( $i = 0; $i < 8; $i++ ) {
+			$locked_dirs[] = $this->make_fixture_directory( 'wp-content/locked-' . $i );
+		}
+		$reachable_dir = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan        = $reachable_dir . '/' . self::orphaned_temp_name( 'reachable' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must still be removed' );
+
+		foreach ( $locked_dirs as $locked_dir ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the directory unreadable so the walker cannot open it, the condition under test.
+			chmod( $locked_dir, 0o000 );
+		}
+
+		try {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked from listing a directory just chmod'd to 0o000, rather than inferring it from uid.
+			$can_still_read = false !== @scandir( $locked_dirs[0] );
+			if ( $can_still_read ) {
+				$this->markTestSkipped( 'This process can still list a 0o000 directory (commonly root inside a container), so the condition this test needs cannot be produced here.' );
+			}
+
+			$removed = $writer->sweep_orphaned_temp_files();
+		} finally {
+			foreach ( $locked_dirs as $locked_dir ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+				chmod( $locked_dir, 0o755 );
+			}
+		}
+
+		$this->assertSame( 1, $removed, 'the sweep must still remove a reachable orphan despite unreadable directories elsewhere in the walk' );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * Every name temp_artefact_suffix() (and, through it, temp_sibling_path())
+	 * produces matches the orphan matcher, over many generated names.
+	 *
+	 * Drives the private helper directly by reflection rather than
+	 * duplicating its regex here, so this asserts the two are consistent WITH
+	 * EACH OTHER — the actual anti-drift property — instead of merely
+	 * asserting the test author's own copy of the pattern matches itself.
+	 * uniqid()'s random component means a single sample could pass even if
+	 * the pattern subtly disagreed with the generator's real shape (wrong
+	 * digit counts, a stray anchor); looping asserts it holds for the
+	 * generator's actual output distribution, not one lucky draw.
+	 *
+	 * @return void
+	 */
+	public function test_temp_artefact_suffix_always_matches_the_orphan_pattern(): void {
+		$pattern        = (string) ( new ReflectionClass( FileWriter::class ) )->getConstant( 'ORPHANED_TEMP_FILE_PATTERN' );
+		$suffix_method  = new ReflectionMethod( FileWriter::class, 'temp_artefact_suffix' );
+		$sibling_method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$suffix = (string) $suffix_method->invoke( null );
+			$this->assertSame(
+				1,
+				preg_match( $pattern, $suffix ),
+				sprintf( 'temp_artefact_suffix() output "%s" must match the orphan pattern.', $suffix )
+			);
+
+			$sibling      = (string) $sibling_method->invoke( null, '/some/target/path/note.txt' );
+			$sibling_name = basename( $sibling );
+			$this->assertSame(
+				1,
+				preg_match( $pattern, $sibling_name ),
+				sprintf( 'temp_sibling_path() output "%s" must match the orphan pattern.', $sibling_name )
+			);
+		}
+	}
+
+	/**
+	 * Sweeping a destination that contains no orphans returns 0 and removes nothing.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_of_a_clean_destination_returns_zero_and_removes_nothing(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $dir . '/photo.jpg', 'ordinary content' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $dir . '/photo.jpg' );
 	}
 }

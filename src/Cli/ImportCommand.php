@@ -665,7 +665,12 @@ final class ImportCommand {
 	 * Then wires a FileWriter rooted at the WordPress installation (ABSPATH) and
 	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb. On a
 	 * content-only restore the FileWriter is additionally restricted to the
-	 * wp-content tree.
+	 * wp-content tree. This command's own $this->logger is passed through as the
+	 * runner's optional sixth argument, so the few things RestoreRunner itself
+	 * still only mentions in passing — a directory mode that could not be
+	 * restored, temp artefacts an interrupted earlier restore left behind and
+	 * this run swept up — reach the real per-transfer log file instead of the
+	 * NullLogger a caller that passes nothing would silently get.
 	 *
 	 * @param resource    $source                The open archive stream, read for its header and footer.
 	 * @param bool        $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
@@ -709,7 +714,8 @@ final class ImportCommand {
 			$file_writer,
 			$database_writer,
 			null,
-			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) ),
+			$this->logger
 		);
 	}
 

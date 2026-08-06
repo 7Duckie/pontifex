@@ -306,6 +306,62 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * Restore() actually sweeps orphaned temp files an earlier, interrupted restore left behind.
+	 *
+	 * A leftover temp artefact is placed under the fixture root exactly as a
+	 * killed restore would have left one, before the runner is ever touched.
+	 * Running a real restore through the same archive-stream harness every
+	 * other test in this file uses, then asserting the artefact is gone
+	 * afterwards, proves RestoreRunner::restore() actually calls
+	 * FileWriter::sweep_orphaned_temp_files() as part of a real restore — not
+	 * merely that the method exists and behaves correctly in isolation,
+	 * which FileWriterTest already covers on its own.
+	 *
+	 * @return void
+	 */
+	public function test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileDoesNotExist( $orphan, 'restore() must sweep an orphaned temp file left by an earlier, interrupted restore.' );
+	}
+
+	/**
+	 * Verify() must NEVER sweep orphaned temp files — it is read-only.
+	 *
+	 * Adding a call to FileWriter::sweep_orphaned_temp_files() inside
+	 * verify() was found, under mutation, to leave the whole suite green: a
+	 * read-only verification silently deleting live files on disk is exactly
+	 * the regression FileWriter::sweep_orphaned_temp_files()'s own docblock
+	 * says never happens, because verify() "writes nothing and so has
+	 * nothing to sweep". This places an orphan exactly as
+	 * {@see self::test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore()}
+	 * does, but calls verify() instead of restore() through the same real
+	 * archive-stream harness every other test in this file uses, and asserts
+	 * the orphan is still there afterwards.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_sweep_orphaned_temp_files(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->verify( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileExists( $orphan, 'verify() must never sweep — it is read-only and must leave every file on disk untouched.' );
+	}
+
+	/**
 	 * A directory entry must be restored to the destination filesystem.
 	 *
 	 * @return void

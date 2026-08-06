@@ -14,7 +14,12 @@ use Pontifex\Exception\HostCannotComply;
 
 use Closure;
 use InvalidArgumentException;
+use RecursiveCallbackFilterIterator;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use RuntimeException;
+use SplFileInfo;
+use Throwable;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
@@ -143,6 +148,80 @@ final class FileWriter {
 	 * @var int
 	 */
 	private const BYTES_PER_MEGABYTE = 1048576;
+
+	/**
+	 * The uniqid() prefix embedded in every temp artefact this writer creates.
+	 *
+	 * Shared, via {@see self::temp_artefact_suffix()}, by both temp-file
+	 * producers this class has: {@see self::temp_sibling_path()} (a file's
+	 * sibling temp, renamed into place once the write completes) and
+	 * {@see self::probe_symlink_creation()} (the create-then-remove symlink
+	 * capability probe). Neither producer formats its own uniqid() call any
+	 * more — see {@see self::temp_artefact_suffix()}'s docblock for why
+	 * routing both through one method is what keeps the shape a producer
+	 * WRITES and the shape {@see self::sweep_orphaned_temp_files()}
+	 * RECOGNISES from ever drifting apart.
+	 *
+	 * @var string
+	 */
+	private const TEMP_ARTEFACT_PREFIX = 'pontifex-';
+
+	/**
+	 * The fixed extension appended to every temp artefact this writer creates.
+	 *
+	 * @var string
+	 */
+	private const TEMP_ARTEFACT_EXTENSION = '.tmp';
+
+	/**
+	 * Matches the basename of any temp artefact {@see self::temp_artefact_suffix()} can produce.
+	 *
+	 * Used only by {@see self::sweep_orphaned_temp_files()}, to recognise a
+	 * temp file or dangling probe symlink an earlier, interrupted restore left
+	 * behind. Anchored at the END of the basename with `$`, and matched
+	 * against the basename alone (never the full path), so a legitimate file
+	 * that merely happens to sit inside a path segment shaped like this is
+	 * never mistaken for one — this pattern is consulted only by the sweep,
+	 * never by write_entry()'s own path guards, so no archive-supplied path is
+	 * ever checked against it.
+	 *
+	 * Deliberately narrow, not a loose `*.tmp` glob:
+	 *
+	 *  - It must NOT match a resumable export's `*.part` file — that is live
+	 *    state a still-running export is writing to, and deleting one would
+	 *    destroy real, unrecoverable work. `.part` never appears in this
+	 *    pattern at all.
+	 *  - It must NOT match an ordinary user file that merely happens to carry
+	 *    "pontifex" or ".tmp" in its name, such as "notes.pontifex-backup.tmp",
+	 *    "data.pontifex.tmp", "archive.pontifex-2024.01.tmp", or
+	 *    "db.pontifex-1.2.tmp" — none has the uniqid() shape this pattern
+	 *    requires (a run of at least eight hex digits, a literal dot, a run of
+	 *    decimal digits), so none matches.
+	 *
+	 * The hex/decimal split mirrors uniqid()'s own output shape with the
+	 * `$more_entropy` argument true, which both producers pass: a hexadecimal
+	 * timestamp-and-counter (an 8-digit seconds component immediately
+	 * followed by a 5-digit microseconds component — 13 hex digits with no
+	 * separator between them), then a literal ".", then a pseudorandom value
+	 * from PHP's combined LCG scaled and formatted as `%.8F` — not, as an
+	 * earlier version of this docblock claimed, a fraction of a microsecond.
+	 * That formatted value's own single leading integer digit (0-9) is
+	 * itself a valid hex character, so it is silently absorbed into what
+	 * this pattern reads as the hex run rather than starting the decimal
+	 * run — which is why the hex run in every one of uniqid()'s real outputs
+	 * is 14 characters, not 13, and why the eight-digit FLOOR below is a
+	 * floor and not an exact count: pinning it at exactly 14 would be one
+	 * accident of the current implementation away from silently no longer
+	 * recognising this writer's own artefacts, whereas eight is comfortably
+	 * below every real output while still ruling out a short, human-typed
+	 * number such as the "2024" or "1" in the two false positives above.
+	 * This pattern does not pin the digit COUNT after the dot at all, only
+	 * the shape (hex run, dot, decimal run), so it keeps matching even if a
+	 * future PHP release ever changes uniqid()'s precision.
+	 *
+	 * @var string
+	 */
+	private const ORPHANED_TEMP_FILE_PATTERN = '/\.pontifex-[0-9a-f]{8,}\.[0-9]+\.tmp$/';
 
 	/**
 	 * Absolute path of the directory under which all entries are restored.
@@ -783,14 +862,15 @@ final class FileWriter {
 			return false;
 		}
 
-		// Named to match the project's temp-artefact shape (*.pontifex-*.tmp, as
-		// built by self::temp_sibling_path() and its siblings elsewhere) rather
-		// than a shape of its own. The finally below removes it on every normal
-		// outcome, but a SIGKILL between the symlink() and the finally cannot be
-		// caught by anything — and an orphan nobody sweeps would then sit under
-		// wp-content forever and be recorded as a dangling symlink by the next
-		// backup. Matching the known shape is what lets a sweep find it at all.
-		$probe_name   = '.symlink-probe.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// Built through self::temp_artefact_suffix() — the same helper
+		// self::temp_sibling_path() uses — rather than formatting its own
+		// uniqid() call, so this probe's shape and a real write's temp shape can
+		// never drift apart; see that method's docblock. The finally below
+		// removes it on every normal outcome, but a SIGKILL between the
+		// symlink() and the finally cannot be caught by anything — and an
+		// orphan left this way is exactly what self::sweep_orphaned_temp_files()
+		// recognises and removes at the start of the next restore.
+		$probe_name   = '.symlink-probe' . self::temp_artefact_suffix();
 		$probe_path   = $directory . '/' . $probe_name;
 		$probe_target = $probe_name . '.target';
 
@@ -1802,16 +1882,58 @@ final class FileWriter {
 	}
 
 	/**
+	 * Build the shared suffix appended to every temp artefact this writer creates.
+	 *
+	 * The one place, WITHIN THIS CLASS, that knows the shape of a Pontifex
+	 * temp file — not, as an earlier version of this docblock overstated,
+	 * the one place in the whole plugin. Both {@see self::temp_sibling_path()}
+	 * and {@see self::probe_symlink_creation()} build their names by calling
+	 * this method rather than each formatting
+	 * `'.' . uniqid( 'pontifex-', true ) . '.tmp'` independently, so the shape
+	 * THIS CLASS writes and the shape {@see self::sweep_orphaned_temp_files()}
+	 * later recognises as an orphan cannot silently drift apart from each
+	 * other — a future edit to either of this class's two producers that
+	 * changed the suffix without touching this method simply has nowhere left
+	 * to make that change in isolation. It does not, and cannot, prevent a
+	 * DIFFERENT class from formatting the identical shape independently:
+	 * {@see \Pontifex\Job\JobStore::save()},
+	 * {@see \Pontifex\Job\JobProgressLog::truncate_to()}, and
+	 * {@see \Pontifex\Export\ExportRunner::temp_destination_path()} each do
+	 * exactly that, none of them routed through this method — see
+	 * {@see self::sweep_orphaned_temp_files()}'s docblock for why that
+	 * overlap is safe rather than a hazard. {@see \Pontifex\Tests\Unit\Restore\FileWriterTest}
+	 * asserts, over several dozen generated outputs, that every string this
+	 * method produces matches {@see self::ORPHANED_TEMP_FILE_PATTERN}.
+	 *
+	 * uniqid() with $more_entropy true is what supplies the actual
+	 * uniqueness (a seconds-and-microseconds hex timestamp, plus a
+	 * pseudorandom value from PHP's combined LCG — see
+	 * {@see self::ORPHANED_TEMP_FILE_PATTERN}'s docblock for the exact
+	 * shape), so two concurrent writers — or two hops of the same probe run
+	 * moments apart — never collide on one temp name.
+	 *
+	 * @return string A leading-dot suffix, e.g. ".pontifex-6a743b0b47cff2.47524803.tmp".
+	 */
+	private static function temp_artefact_suffix(): string {
+		return '.' . uniqid( self::TEMP_ARTEFACT_PREFIX, true ) . self::TEMP_ARTEFACT_EXTENSION;
+	}
+
+	/**
 	 * Build the sibling temp path a file is written to before its atomic rename.
 	 *
 	 * A sibling of the target (same directory), so the final rename is a
-	 * same-filesystem move; a unique suffix keeps concurrent writers apart.
+	 * same-filesystem move; the unique suffix — built by
+	 * {@see self::temp_artefact_suffix()}, the same helper
+	 * {@see self::probe_symlink_creation()} uses, so the two producers can
+	 * never drift apart — keeps concurrent writers apart and lets
+	 * {@see self::sweep_orphaned_temp_files()} recognise one left behind by an
+	 * interrupted restore.
 	 *
 	 * @param string $target_path The final file path.
 	 * @return string The temp path to write to first.
 	 */
 	private static function temp_sibling_path( string $target_path ): string {
-		return $target_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+		return $target_path . self::temp_artefact_suffix();
 	}
 
 	/**
@@ -2012,6 +2134,348 @@ final class FileWriter {
 		$this->deferred_directory_modes = array();
 
 		return $failed;
+	}
+
+	/**
+	 * Remove every leftover temp artefact an earlier, interrupted restore abandoned.
+	 *
+	 * The file-side twin of the sweep {@see \Pontifex\Restore\DatabaseWriter::begin_staging()}
+	 * already performs for a crashed earlier run's leftover `pontifexstg_*` /
+	 * `pontifexold_*` tables (ADR 0009): same policy, same moment in the
+	 * restore, same failure posture. {@see self::write_file()} and
+	 * {@see self::write_file_from_stream()} both land their bytes in a sibling
+	 * temp file — {@see self::temp_sibling_path()} — before renaming it over
+	 * the target, and {@see self::probe_symlink_creation()} briefly creates a
+	 * temp-shaped symlink of its own. A restore killed between either write
+	 * and its rename (SIGKILL, a host timeout, a fatal error) leaves that temp
+	 * artefact sitting next to the real file, inside the live site. Nothing
+	 * else ever removes it: it is not the manifest's problem (the archive that
+	 * caused it is long finished), and it is not
+	 * {@see self::discard_temp()}'s problem either — that only ever runs for a
+	 * failure THIS call caught, never for one a previous, separate PHP process
+	 * never got the chance to catch at all. Left alone, these accumulate under
+	 * wp-content, can approach the size of the file they shadow, and —
+	 * because {@see \Pontifex\Manifest\FileScanner} only prunes
+	 * wp-content/pontifex, never a "*.tmp" shape — are scanned into the NEXT
+	 * backup as ordinary content and faithfully restored onto whatever site
+	 * that backup is later used to recover.
+	 *
+	 * CALLED ONCE, by {@see \Pontifex\Restore\RestoreRunner::restore()},
+	 * immediately before the database-side sweep — after every preflight has
+	 * already had its chance to refuse, so no archive this restore rejects has
+	 * had any of its content applied. That is not quite the same as saying
+	 * this call itself changes nothing: {@see self::destination_is_case_sensitive()}
+	 * runs inside it and writes a one-off probe file at $this->destination_root,
+	 * removed again in its own `finally` before this method ever reasons about
+	 * an orphan. Never called from verify(), which writes nothing and so has
+	 * nothing to sweep.
+	 *
+	 * REACH. The recursive walk below is rooted at $this->destination_root,
+	 * narrowed to `$this->destination_root . '/' . $this->required_prefix`
+	 * when a required prefix is set (a content-only restore is confined to
+	 * "wp-content"; a rollback has none, so the whole destination root is
+	 * walked). An earlier version of this docblock called that "exactly
+	 * complete, no more and no less" — an adversarial audit demonstrated both
+	 * halves of that claim false against a real filesystem.
+	 *
+	 * Too little: {@see self::assert_within_required_prefix()} does confine
+	 * every entry {@see self::write_entry()} performs to that same boundary,
+	 * but the CAPABILITY PREFLIGHT that runs ahead of it does not. See
+	 * {@see self::symlink_creation_probe_directories()}'s own docblock for why
+	 * {@see self::assert_symlinks_creatable()}'s probe directories fall back
+	 * to $this->destination_root itself once a declared link's own parent has
+	 * no existing ancestor closer than the root — which a symlink declared at
+	 * exactly the required-prefix path ("wp-content" itself), or a restore
+	 * onto a fresh destination where nothing has been created yet, both
+	 * produce. A probe interrupted there ({@see self::probe_symlink_creation()})
+	 * leaves its dangling-symlink orphan AT the installation root, outside a
+	 * required-prefix-narrowed recursive walk, where a content-only restore
+	 * would otherwise never look again. So, when a required prefix is set,
+	 * this method ALSO lists $this->destination_root's own immediate
+	 * children — never descending, because the recursive walk already covers
+	 * the whole prefixed subtree — applying the same pattern match and the
+	 * same isLink()-before-isFile() removal described under REMOVAL below,
+	 * and counting those removals the same way. See the second loop in this
+	 * method's body.
+	 *
+	 * Too much: $sweep_root itself can be a symlink — see TRAVERSAL below for
+	 * why that is caught separately, before the recursive walk is even built.
+	 *
+	 * The honest claim REACH can make, then, is: everywhere this writer can
+	 * actually have created an artefact, which is the prefixed subtree PLUS
+	 * the installation root the capability probe can fall back to — never
+	 * more, and, since the two fixes above, never less either. If the sweep
+	 * root does not exist yet (a first-ever restore onto a fresh destination),
+	 * there is nothing to sweep and this returns 0 without creating anything.
+	 *
+	 * NO AGE THRESHOLD. {@see \Pontifex\Lock\OperationLock} guarantees only one
+	 * site-mutating operation — backup, restore, or rollback — runs against
+	 * this site at a time, so by the time this method runs (inside a restore
+	 * that has just acquired that lock) no LIVE temp file of this writer's own
+	 * can possibly exist to be swept out from under a concurrent write; every
+	 * match found here is necessarily a leftover from a run that is no longer
+	 * running. An age threshold would actively break the commonest real
+	 * case — kill a restore, retry immediately — where the orphans left
+	 * behind are still only seconds old. The database-side twin this mirrors
+	 * has no threshold either.
+	 *
+	 * WHAT COUNTS AS AN ORPHAN. Only a basename matching
+	 * {@see self::ORPHANED_TEMP_FILE_PATTERN} — the exact shape
+	 * {@see self::temp_artefact_suffix()} produces, anchored at the end of the
+	 * basename — never a loose "*.tmp" glob; see that constant's own docblock
+	 * for the two shapes it deliberately does not match (a resumable export's
+	 * "*.part" file, and an ordinary user file that merely contains
+	 * "pontifex" or ".tmp" somewhere in its name).
+	 *
+	 * TRAVERSAL, the one way this could be catastrophic if it were wrong.
+	 * Built from {@see RecursiveDirectoryIterator} with
+	 * `SKIP_DOTS | UNIX_PATHS` — the same flags
+	 * {@see \Pontifex\Manifest\FileScanner::scan()} uses — and, critically,
+	 * NEVER `FOLLOW_SYMLINKS`. A live site may legitimately contain a symlink
+	 * (a Composer vendor/ layout, an aliased uploads directory), and one
+	 * shaped like `wp-content/uploads/x -> /` would otherwise turn a sweep
+	 * that followed it into a walk of the ENTIRE filesystem looking for
+	 * something to delete. {@see RecursiveIteratorIterator} calls
+	 * `hasChildren()` with its own default `$allowLinks = false`, so a
+	 * symlinked directory encountered DURING the walk is never descended into
+	 * — this method must not defeat that default by passing anything else.
+	 *
+	 * That default protects every INTERIOR symlink the walk encounters, but
+	 * it says nothing about $sweep_root ITSELF, and an adversarial audit
+	 * demonstrated the gap: `is_dir( $sweep_root )` follows a symlink to ask
+	 * whether its TARGET is a directory, and {@see RecursiveDirectoryIterator}'s
+	 * own constructor then opens whatever a symlinked root resolves to just
+	 * as readily as it opens a real one — `$allowLinks` governs only whether
+	 * the walk descends INTO a child it finds while walking, never what it
+	 * was handed as its starting point. A required prefix of "wp-content"
+	 * whose "wp-content" happens to be a symlink to a foreign tree was
+	 * therefore walked, and swept, in full — while
+	 * {@see self::assert_no_symlinked_ancestor()} refuses every entry
+	 * {@see self::write_entry()} is asked to write through that identical
+	 * symlinked directory, so the writer's own reach there is zero and the
+	 * sweep's was a whole foreign tree. So $sweep_root is checked separately,
+	 * before a single {@see RecursiveDirectoryIterator} is even constructed,
+	 * with BOTH of two guards — this project does not take the lighter
+	 * single-guard option: `is_link( $sweep_root )` refuses outright,
+	 * mirroring {@see self::assert_no_symlinked_ancestor()}'s posture exactly
+	 * (a tree the writer refuses to write THROUGH is a tree the sweep must
+	 * refuse to walk); and, independently, `realpath( $sweep_root )` must
+	 * resolve to $this->destination_root itself or somewhere beneath it,
+	 * with a false or unreadable realpath() result refused rather than
+	 * trusted. Either guard refusing returns 0 without touching anything.
+	 *
+	 * The directory iterator is
+	 * wrapped in a {@see RecursiveCallbackFilterIterator} — INSIDE the
+	 * {@see RecursiveIteratorIterator}, so a pruned directory is never opened
+	 * at all, mirroring {@see \Pontifex\Manifest\FileScanner::scan()} — whose
+	 * callback prunes Pontifex's own working directory via the existing
+	 * {@see self::is_pontifex_working_path()}, fed the candidate's path made
+	 * relative to $this->destination_root, DELIBERATELY NOT to the (possibly
+	 * narrower) sweep root: that method expects the shape
+	 * "wp-content/pontifex/…", and slicing against a sweep root already
+	 * inside wp-content would cut the string in the wrong place and never
+	 * recognise it. The callback's `: bool` return type is declared for the
+	 * same reason FileScanner's is: an edit that fell off the end without
+	 * returning would prune EVERYTHING silently, sweeping nothing and
+	 * reporting success regardless.
+	 *
+	 * TWO deliberate differences from {@see \Pontifex\Manifest\FileScanner::scan()},
+	 * each the opposite choice for the opposite reason:
+	 *
+	 *  1. This walk passes `RecursiveIteratorIterator::CATCH_GET_CHILD`, which
+	 *     FileScanner's deliberately omits. For an export, a silently skipped
+	 *     unreadable directory would be a silent hole in someone's backup —
+	 *     unacceptable. Here the opposite is true: a directory this process
+	 *     cannot even read cannot have been written into by THIS writer
+	 *     either, so it can hold no orphan of ours to sweep; and this is
+	 *     best-effort housekeeping run at the very start of a restore, so its
+	 *     own failure must never be capable of stopping that restore from
+	 *     proceeding.
+	 *  2. The whole walk is wrapped in `try { … } catch ( Throwable $error )`.
+	 *     This method must NEVER throw — not a permissions error, not an
+	 *     iterator failure, nothing. It returns however many artefacts were
+	 *     actually removed before whatever happened, happened.
+	 *
+	 * clearstatcache() runs once at the start: isLink()/isFile() results can
+	 * be cached from earlier in the same request (an earlier restore's own
+	 * probes, in a long-running CLI process), and a stale reading here would
+	 * misclassify what is actually on disk right now.
+	 *
+	 * REMOVAL. For each visited entry whose basename matches the pattern,
+	 * isLink() is checked BEFORE isFile() — an ordering that is load-bearing,
+	 * not stylistic. {@see self::probe_symlink_creation()}'s own orphan is a
+	 * DANGLING symlink (its target, a sibling name chosen to never exist, is
+	 * exactly what makes that probe work at all — see its own docblock), and
+	 * PHP's isFile() reports FALSE for a dangling symlink, because it follows
+	 * the link to ask what the TARGET is, and there is no target. A sweep
+	 * that checked isFile() first would therefore silently pass over every
+	 * probe orphan while still reporting success. unlink() on a symlink
+	 * removes the link itself, never anything at the far end of a (here,
+	 * nonexistent) target — the same guarantee
+	 * {@see self::remove_conflicting_symlink()} relies on elsewhere in this
+	 * class. A directory that happens to be NAMED like a temp artefact — never
+	 * produced by this class, but not this method's business to assume
+	 * impossible — is left alone entirely and does not contribute to the
+	 * count. The same ordering, and the same directory exemption, govern the
+	 * installation-root scan described under REACH above; it is not a
+	 * separate policy, only a second place the same one is applied.
+	 *
+	 * The returned count is the number of unlink() calls that actually
+	 * returned true — never the number of matching names FOUND. A reported
+	 * figure in this project describes what was actually done, never what was
+	 * merely predicted; a name that matched but failed to unlink (a
+	 * permissions problem, a race) is not counted as removed, because it was
+	 * not.
+	 *
+	 * @return int How many leftover temp artefacts were actually removed.
+	 */
+	public function sweep_orphaned_temp_files(): int {
+		clearstatcache();
+
+		$sweep_root = null === $this->required_prefix
+			? $this->destination_root
+			: $this->destination_root . '/' . $this->required_prefix;
+
+		// Both guards run before a single RecursiveDirectoryIterator is built,
+		// and both refuse the whole sweep (returning 0) rather than merely
+		// skipping the offending part — see TRAVERSAL in this method's
+		// docblock for why $sweep_root itself needs checks the interior
+		// walk's own hasChildren( $allowLinks = false ) default cannot provide.
+		if ( is_link( $sweep_root ) ) {
+			return 0;
+		}
+
+		if ( ! is_dir( $sweep_root ) ) {
+			return 0;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_realpath -- Confirming the sweep root resolves inside this writer's own, already-resolved destination_root before any recursive walk begins; see TRAVERSAL above.
+		$resolved_sweep_root = realpath( $sweep_root );
+		if ( false === $resolved_sweep_root
+			|| ( $resolved_sweep_root !== $this->destination_root
+				&& ! str_starts_with( $resolved_sweep_root, $this->destination_root . '/' ) )
+		) {
+			return 0;
+		}
+
+		$removed = 0;
+
+		try {
+			$destination_root           = $this->destination_root;
+			$case_sensitive_destination = $this->destination_is_case_sensitive();
+			$root_prefix_len            = strlen( $destination_root ) + 1;
+
+			$flags = RecursiveDirectoryIterator::SKIP_DOTS | RecursiveDirectoryIterator::UNIX_PATHS;
+			$inner = new RecursiveDirectoryIterator( $sweep_root, $flags );
+
+			// Pruning happens HERE, inside the recursive walk, exactly as it does in
+			// FileScanner::scan() — a callback that returns false for a directory
+			// means PHP never opens that directory at all, so Pontifex's own working
+			// directory is genuinely never entered by this sweep.
+			$filtered = new RecursiveCallbackFilterIterator(
+				$inner,
+				static function ( SplFileInfo $current ) use ( $root_prefix_len, $case_sensitive_destination ): bool {
+					$relative_path = str_replace( '\\', '/', substr( $current->getPathname(), $root_prefix_len ) );
+
+					return ! self::is_pontifex_working_path( $relative_path, $case_sensitive_destination );
+				}
+			);
+
+			// SELF_FIRST, so a directory whose own name happens to match the
+			// orphan pattern is visited (and correctly left alone; see the
+			// removal loop below) rather than only its contents being seen.
+			// CATCH_GET_CHILD is the deliberate difference from FileScanner's own
+			// walk — see this method's docblock for why the two must disagree.
+			$walker = new RecursiveIteratorIterator(
+				$filtered,
+				RecursiveIteratorIterator::SELF_FIRST,
+				RecursiveIteratorIterator::CATCH_GET_CHILD
+			);
+
+			foreach ( $walker as $info ) {
+				// RecursiveDirectoryIterator yields SplFileInfo (in practice, itself);
+				// the instanceof narrows the iterator's mixed current() for static
+				// analysis rather than trusting that in silence.
+				if ( ! $info instanceof SplFileInfo ) {
+					continue;
+				}
+				if ( 1 !== preg_match( self::ORPHANED_TEMP_FILE_PATTERN, $info->getFilename() ) ) {
+					continue;
+				}
+
+				$path = $info->getPathname();
+
+				// isLink() FIRST: a probe orphan is a dangling symlink, and isFile()
+				// reports false for one — see this method's docblock.
+				if ( $info->isLink() ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+					continue;
+				}
+
+				if ( $info->isFile() ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+				}
+
+				// Anything else (a directory named like a temp artefact) is left
+				// alone and does not contribute to the count.
+			}
+
+			// REACH's second half: when a required prefix narrows the recursive
+			// walk above to a subtree, this writer can still have left a probe
+			// orphan directly at the installation root — see REACH in this
+			// method's docblock for the two real cases. Never recursive: the
+			// walk above already covers the whole prefixed subtree, so only
+			// $destination_root's own immediate children are listed here.
+			if ( null !== $this->required_prefix ) {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time housekeeping listing of this writer's own, already-resolved destination_root; a read failure here simply means there is nothing further this step can find to sweep.
+				$installation_root_children = @scandir( $destination_root );
+				if ( false !== $installation_root_children ) {
+					foreach ( $installation_root_children as $child_name ) {
+						if ( '.' === $child_name || '..' === $child_name ) {
+							continue;
+						}
+						if ( 1 !== preg_match( self::ORPHANED_TEMP_FILE_PATTERN, $child_name ) ) {
+							continue;
+						}
+
+						$child_path = $destination_root . '/' . $child_name;
+
+						// Same isLink()-before-isFile() ordering as the loop above, and
+						// for the same reason: a dangling probe orphan reports false
+						// from isFile() — see REMOVAL in this method's docblock.
+						if ( is_link( $child_path ) ) {
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+							if ( @unlink( $child_path ) ) {
+								++$removed;
+							}
+							continue;
+						}
+
+						if ( is_file( $child_path ) ) {
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+							if ( @unlink( $child_path ) ) {
+								++$removed;
+							}
+						}
+
+						// A directory named like a temp artefact, at the installation
+						// root, is left alone — the same posture as the loop above.
+					}
+				}
+			}
+		} catch ( Throwable $error ) {
+			// Best-effort housekeeping must never abort the restore it runs ahead
+			// of; whatever was removed before the failure is still reported.
+			unset( $error );
+		}
+
+		return $removed;
 	}
 
 	/**

@@ -445,7 +445,13 @@ final class RollbackCommand {
 	 *
 	 * Identical to ImportCommand's wiring: an EntryReader with the v0.1.0
 	 * default codecs, a FileWriter rooted at the WordPress installation, and a
-	 * DatabaseWriter over the real $wpdb.
+	 * DatabaseWriter over the real $wpdb. This command's own $this->logger is
+	 * passed through as the runner's optional sixth argument, so the few
+	 * things RestoreRunner itself still only mentions in passing — a
+	 * directory mode that could not be restored, temp artefacts an
+	 * interrupted earlier restore left behind and this run swept up — reach
+	 * the real per-transfer log file instead of the NullLogger a caller that
+	 * passes nothing would silently get.
 	 *
 	 * @return RestoreRunner
 	 */
@@ -458,7 +464,8 @@ final class RollbackCommand {
 			$file_writer,
 			$database_writer,
 			null,
-			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) ),
+			$this->logger
 		);
 	}
 
