@@ -797,16 +797,21 @@ versions.
 - **A restore that fails part-way through the file walk leaves a merged
   tree.** The database cuts over atomically, but files already written
   are not rolled back.
-- **Orphaned `*.pontifex-*.tmp` files inside Pontifex's own working
-  directory are never swept.** The ones an interrupted restore leaves out
+- **Two kinds of orphaned `*.pontifex-*.tmp` file are still never swept.**
+  The two that mattered now are: the ones an interrupted restore leaves out
   in the site — a half-written file beside the real one, or the symlink
-  capability probe's dangling link — are now removed at the start of the
-  next restore. The ones under `wp-content/pontifex` are not, because that
-  is where a live export's and a running job's own temporary files sit, and
-  a restore cannot safely tell those apart from abandoned ones. The largest
-  is the partial safety archive a killed import leaves in
-  `wp-content/pontifex/rollback`, which can be as big as however much of the
-  site it had written before it died.
+  capability probe's dangling link — are removed at the start of the next
+  restore, and the partial safety archive a killed import leaves in
+  `wp-content/pontifex/rollback`, which can be as large as however much of
+  the site it had written before it died, is removed at the start of the
+  next import. What remains is smaller and deliberate. A killed background
+  job can leave a temporary file in `wp-content/pontifex/jobs`; those are
+  small, and that directory also holds the temporary files a *running* job
+  is writing, which nothing can safely tell apart from abandoned ones. And
+  a killed `wp pontifex export` leaves one beside the `--output` path it
+  was given: Pontifex does not sweep there, because that is a directory the
+  operator nominated rather than one Pontifex owns, and quietly deleting
+  inside it is a wider licence than a backup tool should take.
 - **The test-adequacy programme is substantially untouched**, above all a
   completeness oracle: a test asserting set equality between a real
   filesystem tree and the archive's entry paths, driven through the real

@@ -11,13 +11,13 @@ namespace Pontifex\Tests\Unit\Restore;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
-use ReflectionClass;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
 
@@ -3054,8 +3054,9 @@ final class FileWriterTest extends TestCase {
 	 *
 	 * Placed under wp-content/uploads, NOT wp-content/pontifex — mutation
 	 * testing found that a fixture placed under wp-content/pontifex passes
-	 * this test even when the ORPHANED_TEMP_FILE_PATTERN is mutated to also
-	 * match ".part", because {@see self::test_sweep_skips_pontifexs_own_working_directory()}'s
+	 * this test even when {@see \Pontifex\Filesystem\TempArtefact}'s orphan
+	 * pattern is mutated to also match ".part", because
+	 * {@see self::test_sweep_skips_pontifexs_own_working_directory()}'s
 	 * prune removes that whole directory from the walk before the pattern is
 	 * ever consulted. Placing it under uploads, which the sweep does walk,
 	 * means this test actually exercises the pattern's own refusal to match
@@ -3085,8 +3086,8 @@ final class FileWriterTest extends TestCase {
 	 * neither is close to matching. "archive.pontifex-2024.01.tmp" and
 	 * "db.pontifex-1.2.tmp" are closer — "2024" and "1" are legal hex runs,
 	 * and both are followed by a dot and a decimal run — but neither reaches
-	 * the eight-character floor {@see FileWriter::ORPHANED_TEMP_FILE_PATTERN}
-	 * requires, which is exactly the false positive that floor exists to
+	 * the eight-character floor {@see \Pontifex\Filesystem\TempArtefact}'s
+	 * orphan pattern requires, which is exactly the false positive that floor exists to
 	 * rule out; a real uniqid()-shaped hex run is always fourteen characters,
 	 * so the floor never excludes a genuine artefact.
 	 *
@@ -3445,39 +3446,47 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
-	 * Every name temp_artefact_suffix() (and, through it, temp_sibling_path())
-	 * produces matches the orphan matcher, over many generated names.
+	 * Every name TempArtefact::suffix() (and, through it, FileWriter's own
+	 * private temp_sibling_path()) produces is recognised by
+	 * TempArtefact::is_orphan_name(), over many generated names.
 	 *
-	 * Drives the private helper directly by reflection rather than
-	 * duplicating its regex here, so this asserts the two are consistent WITH
-	 * EACH OTHER — the actual anti-drift property — instead of merely
-	 * asserting the test author's own copy of the pattern matches itself.
+	 * Re-pointed at the new home rather than deleted: FileWriter no longer
+	 * builds or recognises this shape itself — both halves moved to
+	 * {@see \Pontifex\Filesystem\TempArtefact} (see that class's own
+	 * docblock for why two independent copies of a security-relevant
+	 * pattern, one per deleter, would be a drift hazard). temp_sibling_path()
+	 * stays private and stays in this class — it is one of
+	 * TempArtefact::suffix()'s real callers — so this test keeps proving the
+	 * same anti-drift property against the new home: it is still driven by
+	 * reflection rather than duplicating a regex here, so this asserts the
+	 * two are consistent WITH EACH OTHER instead of merely asserting the
+	 * test author's own copy of a pattern matches itself.
+	 * {@see \Pontifex\Tests\Unit\Filesystem\TempArtefactTest} separately
+	 * covers TempArtefact::suffix() and TempArtefact::is_orphan_name()
+	 * against each other directly, with no FileWriter involved at all.
+	 *
 	 * uniqid()'s random component means a single sample could pass even if
-	 * the pattern subtly disagreed with the generator's real shape (wrong
-	 * digit counts, a stray anchor); looping asserts it holds for the
-	 * generator's actual output distribution, not one lucky draw.
+	 * the two were subtly inconsistent (wrong digit counts, a stray anchor);
+	 * looping asserts it holds for the generator's actual output
+	 * distribution, not one lucky draw.
 	 *
 	 * @return void
 	 */
 	public function test_temp_artefact_suffix_always_matches_the_orphan_pattern(): void {
-		$pattern        = (string) ( new ReflectionClass( FileWriter::class ) )->getConstant( 'ORPHANED_TEMP_FILE_PATTERN' );
-		$suffix_method  = new ReflectionMethod( FileWriter::class, 'temp_artefact_suffix' );
 		$sibling_method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
 
 		for ( $i = 0; $i < 50; $i++ ) {
-			$suffix = (string) $suffix_method->invoke( null );
-			$this->assertSame(
-				1,
-				preg_match( $pattern, $suffix ),
-				sprintf( 'temp_artefact_suffix() output "%s" must match the orphan pattern.', $suffix )
+			$suffix = TempArtefact::suffix();
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( $suffix ),
+				sprintf( 'TempArtefact::suffix() output "%s" must be recognised by TempArtefact::is_orphan_name().', $suffix )
 			);
 
 			$sibling      = (string) $sibling_method->invoke( null, '/some/target/path/note.txt' );
 			$sibling_name = basename( $sibling );
-			$this->assertSame(
-				1,
-				preg_match( $pattern, $sibling_name ),
-				sprintf( 'temp_sibling_path() output "%s" must match the orphan pattern.', $sibling_name )
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( $sibling_name ),
+				sprintf( 'FileWriter::temp_sibling_path() output "%s" must be recognised as an orphan.', $sibling_name )
 			);
 		}
 	}

@@ -51,6 +51,18 @@ root="$(cd "$script_dir/.." && pwd)"
 
 wp_env_config=".wp-env.plugin-check.json"
 
+# Pinned like any other dependency, and bumped deliberately, not left to
+# float. `wp plugin install plugin-check --activate` installs whatever
+# Plugin Check wordpress.org is serving on the day the command runs, and
+# the action this script now replaces has no version input at all — so an
+# unpinned check can fail a release gate on code that has not changed,
+# purely because Plugin Check itself changed underneath it. IMPORTANT
+# CAVEAT: wordpress.org always applies the CURRENT Plugin Check at actual
+# submission time, so this pin going green here is not a promise the
+# directory will accept the plugin as-is — review and bump this version
+# deliberately before any submission.
+plugin_check_version="2.0.0"
+
 phase() {
     printf '\n==> %s\n' "$1"
 }
@@ -114,6 +126,26 @@ phase "Copying the working tree into build/src"
 # point of this script is to check what you are about to push, INCLUDING
 # whatever is currently staged or unstaged. A commit-time snapshot would
 # miss exactly the change you are trying to verify before you commit it.
+#
+# But the built package must match what a clean checkout would produce,
+# because a developer's working directory routinely holds git-ignored
+# private notes and scratch files that must never reach a distributable —
+# on a real run this shipped four planning documents into the built
+# package. So every git-ignored path is excluded from the copy too, not
+# just the fixed list below. The exclude list is generated into build/
+# itself (already git-ignored, already outside build/src) rather than
+# build/src, so it can never be copied into the very tree it is excluding
+# things from.
+ignore_list="$root/build/.rsync-exclude"
+
+if ! git -C "$root" ls-files --others --ignored --exclude-standard --directory >"$ignore_list"; then
+    echo "Warning: could not determine git-ignored files (not a git checkout, or git is unavailable). The built package may contain files a clean checkout would not." >&2
+    : >"$ignore_list"
+fi
+
+# The fixed excludes stay too, belt and braces — they also cover the case
+# where this script is run outside a git checkout altogether, where the
+# generated list above is empty.
 rsync -a \
     --exclude='.git' \
     --exclude='vendor' \
@@ -122,6 +154,7 @@ rsync -a \
     --exclude='.phpunit.cache' \
     --exclude='.idea' \
     --exclude='.vscode' \
+    --exclude-from="$ignore_list" \
     "$root/" "$root/build/src/"
 
 # --- production-only dependencies -----------------------------------------
@@ -183,11 +216,24 @@ npx @wordpress/env start --config "$wp_env_config"
 
 phase "Checking for the WP-CLI dist-archive package"
 
-if npx @wordpress/env run cli --config "$wp_env_config" wp help dist-archive >/dev/null 2>&1; then
+# Every `npx @wordpress/env run` call below puts a bare `--` between wp-env's
+# own options and the inner `wp` command. `wp-env run` parses its command
+# line with yargs BEFORE handing anything to the container, and yargs
+# registers its own options for this command — at minimum --config, --debug,
+# --env-cwd, --version and --help. Without the separator, an inner `wp`
+# flag with the same name is silently swallowed by wp-env instead of
+# reaching WP-CLI: `wp plugin install plugin-check --version=X` once
+# installed whatever version wordpress.org was serving that day, not X,
+# while still printing this script's own "installing X" message — a guard
+# that reports success while doing nothing. Only --version collides with a
+# flag this script actually passes today, but wp-env's option set is not
+# ours to control and the failure mode is silent, so every invocation gets
+# the separator, not just the one that broke.
+if npx @wordpress/env run cli --config "$wp_env_config" -- wp help dist-archive >/dev/null 2>&1; then
     echo "wp-cli/dist-archive-command is already installed."
 else
     echo "Installing wp-cli/dist-archive-command..."
-    if ! npx @wordpress/env run cli --config "$wp_env_config" wp package install wp-cli/dist-archive-command:^2.0; then
+    if ! npx @wordpress/env run cli --config "$wp_env_config" -- wp package install wp-cli/dist-archive-command:^2.0; then
         cat >&2 <<'EOF'
 
 Error: could not install wp-cli/dist-archive-command inside the wp-env
@@ -218,7 +264,7 @@ phase "Building the distributable package inside the container"
 # next step, before anything checks that directory as the plugin itself.
 dist_target="/var/www/html/wp-content/plugins/pontifex/pontifex.tar.gz"
 
-if dist_output=$(npx @wordpress/env run cli --env-cwd=wp-content/pontifex-src --config "$wp_env_config" \
+if dist_output=$(npx @wordpress/env run cli --env-cwd=wp-content/pontifex-src --config "$wp_env_config" -- \
     wp dist-archive . "$dist_target" --format=targz 2>&1); then
     dist_status=0
 else
@@ -234,7 +280,7 @@ fi
 # this specific cause, and no other, was hit.
 if [ "$dist_status" -ne 0 ] && printf '%s\n' "$dist_output" | grep -qF -- '--allow-root'; then
     echo "wp dist-archive refused to run as root inside the container; retrying with --allow-root."
-    if dist_output=$(npx @wordpress/env run cli --env-cwd=wp-content/pontifex-src --config "$wp_env_config" \
+    if dist_output=$(npx @wordpress/env run cli --env-cwd=wp-content/pontifex-src --config "$wp_env_config" -- \
         wp dist-archive . "$dist_target" --format=targz --allow-root 2>&1); then
         dist_status=0
     else
@@ -268,13 +314,39 @@ ls -la "$root/build/pkg"
 
 phase "Installing and activating Plugin Check, and activating Pontifex"
 
-if npx @wordpress/env run cli --config "$wp_env_config" wp plugin is-installed plugin-check >/dev/null 2>&1; then
-    npx @wordpress/env run cli --config "$wp_env_config" wp plugin activate plugin-check
-else
-    npx @wordpress/env run cli --config "$wp_env_config" wp plugin install plugin-check --activate
+# A persistent local environment can already hold plugin-check, but at a
+# DIFFERENT version to the one pinned above — merely activating whatever is
+# already installed would silently keep using that other version, defeating
+# the pin. So the installed version, if any, is checked against the pin
+# before deciding whether to install at all.
+#
+# `npx @wordpress/env run` prints its own "Starting '...'" / "Ran '...' in
+# Ns" progress text via a spinner on stderr, already discarded by
+# `2>/dev/null` below; the command's own stdout is passed through directly.
+# Filtering the captured value down to a line that looks like a version
+# number anyway, rather than trusting it verbatim, is the same defensive
+# approach the PHP-version check in ci.yml uses for `php -v` output.
+installed_plugin_check_version=""
+if npx @wordpress/env run cli --config "$wp_env_config" -- wp plugin is-installed plugin-check >/dev/null 2>&1; then
+    installed_plugin_check_version="$(npx @wordpress/env run cli --config "$wp_env_config" -- wp plugin get plugin-check --field=version 2>/dev/null \
+        | tr -d '\r' | grep -E '^[0-9]+(\.[0-9]+)+$' | head -n1)"
 fi
 
-npx @wordpress/env run cli --config "$wp_env_config" wp plugin activate pontifex
+if [ -n "$installed_plugin_check_version" ] && [ "$installed_plugin_check_version" = "$plugin_check_version" ]; then
+    echo "Plugin Check $plugin_check_version is already installed; activating."
+    npx @wordpress/env run cli --config "$wp_env_config" -- wp plugin activate plugin-check
+else
+    echo "Installing Plugin Check $plugin_check_version (pinned)."
+    # --force so an already-installed but DIFFERENT version is overwritten
+    # rather than left in place. The -- is load-bearing here specifically:
+    # without it, wp-env's own --version option (not WP-CLI's) consumes
+    # this flag and the pin silently has no effect — see the comment at the
+    # first `run` invocation above.
+    npx @wordpress/env run cli --config "$wp_env_config" -- \
+        wp plugin install plugin-check --version="$plugin_check_version" --activate --force
+fi
+
+npx @wordpress/env run cli --config "$wp_env_config" -- wp plugin activate pontifex
 
 phase "Running Plugin Check against the built package"
 
@@ -294,7 +366,7 @@ raw_output_file="$root/build/plugin-check.json"
 # alongside it because the default output fields (line, column, type, code,
 # message, docs) do not include "file", and the summariser below groups by
 # file.
-npx @wordpress/env run cli --config "$wp_env_config" \
+npx @wordpress/env run cli --config "$wp_env_config" -- \
     wp plugin check pontifex \
     --format=strict-json \
     --fields=file,line,column,type,code,message \
