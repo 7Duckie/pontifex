@@ -17,7 +17,10 @@ use Pontifex\Environment\Environment;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ManifestBuilderInterface;
+use Pontifex\Manifest\ManifestStream;
 use Pontifex\Schedule\JobTicker;
+use Pontifex\Schedule\Schedule;
+use Pontifex\Schedule\ScheduleStore;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
@@ -294,5 +297,264 @@ final class JobTickerTest extends TestCase {
 		$this->assertNotNull( $after );
 		$this->assertSame( Job::STATUS_FAILED, $after->status(), 'An unsigned job must still run the ordinary tick-and-catch path.' );
 		$this->assertSame( 1, (int) ( $after->payload()['ticker_attempts'] ?? 0 ), 'record_attempt() must have run for an unsigned job.' );
+	}
+
+	/**
+	 * Build an Environment mock answering the provenance reads a completed
+	 * tick performs, matching {@see \Pontifex\Tests\Unit\Export\ResumableExportRunnerTest}'s helper.
+	 *
+	 * @return Environment&\Mockery\MockInterface
+	 */
+	private function environment_mock() {
+		$mock = Mockery::mock( Environment::class );
+		$mock->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_VERSION' )->andReturn( false );
+		$mock->shouldReceive( 'php_version' )->andReturn( '8.3.0' );
+		return $mock;
+	}
+
+	/**
+	 * Build a WordPressContext mock wired for a full tick-to-completion run,
+	 * whose ScheduleStore::load() answers with the given retention.
+	 *
+	 * Built on {@see self::locking_context()} so the lock take/release
+	 * expectations stay in one place; adds the provenance reads finalise()'s
+	 * tick needs, a keyed option_value() so ScheduleStore's option is
+	 * distinguished from the export counters' option, and an unconstrained
+	 * save_option() since these tests assert on the backup store, not on
+	 * what gets written back to wp_options.
+	 *
+	 * @param int $retention The retention count ScheduleStore::load() must answer.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function completion_context( int $retention ) {
+		$context = $this->locking_context();
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $key, $fallback ) use ( $retention ) {
+				if ( ScheduleStore::OPTION === $key ) {
+					return array(
+						'enabled'   => true,
+						'frequency' => Schedule::FREQUENCY_DAILY,
+						'hour'      => 3,
+						'retention' => $retention,
+					);
+				}
+				return $fallback;
+			}
+		);
+		$context->shouldReceive( 'save_option' );
+		return $context;
+	}
+
+	/**
+	 * Plant a real, minimal backup file under a valid, timestamped name.
+	 *
+	 * Creates the backups directory on first use. The stamp shapes the
+	 * filename BackupStore::backups() sorts on, so callers control fixture
+	 * age purely through the stamp's lexical order.
+	 *
+	 * @param string $stamp A 'Ymd\THis\Z'-shaped UTC stamp, e.g. '20260101T000000Z'.
+	 * @return void
+	 */
+	private function plant_backup( string $stamp ): void {
+		$dir = $this->content_dir . '/pontifex/backups';
+		if ( ! is_dir( $dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the test fixture directory.
+			mkdir( $dir, 0700, true );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Planting a fixture backup file in the test's own temp directory.
+		file_put_contents( $dir . '/pontifex-backup-' . $stamp . '.wpmig', 'fixture' );
+	}
+
+	/**
+	 * Create a pending export job payload shaped exactly as
+	 * ResumableExportRunner::start() would leave it, ready to complete on one
+	 * tick against an empty manifest.
+	 *
+	 * @param JobStore $job_store The store to create the job in.
+	 * @param bool     $schedule  Whether the payload carries schedule => true.
+	 * @return Job The pending job.
+	 */
+	private function create_completable_job( JobStore $job_store, bool $schedule ): Job {
+		$payload = array(
+			'output'                => $this->content_dir . '/done.wpmig',
+			'temp'                  => $this->content_dir . '/done.part',
+			'scan_root'             => $this->content_dir,
+			'path_prefix'           => 'wp-content',
+			'exclusions'            => array(),
+			'signed'                => false,
+			'reason'                => null,
+			'scope'                 => null,
+			'phase'                 => 'files',
+			'bytes_written'         => 0,
+			'files_changed'         => 0,
+			'media_type_unresolved' => 0,
+		);
+		if ( $schedule ) {
+			$payload['schedule'] = true;
+		}
+		return $job_store->create( Job::KIND_EXPORT, $payload, 1700000000 );
+	}
+
+	/**
+	 * A manifest-builder factory serving an empty stream, so the runner's
+	 * tick finishes the archive on its first pass.
+	 *
+	 * @return callable
+	 */
+	private function empty_manifest_builder_factory(): callable {
+		return static function (): ManifestBuilderInterface {
+			$builder = Mockery::mock( ManifestBuilderInterface::class );
+			$builder->shouldReceive( 'build' )->andReturn( ManifestStream::from_plans( array() ) );
+			return $builder;
+		};
+	}
+
+	/**
+	 * Stub the WP-Cron and transient functions a completed tick touches, none
+	 * of which these retention tests assert on.
+	 *
+	 * @return void
+	 */
+	private function stub_completion_wp_functions(): void {
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\when( 'wp_schedule_single_event' )->justReturn( null );
+		Functions\when( 'wp_clear_scheduled_hook' )->justReturn( null );
+		Functions\when( 'get_transient' )->justReturn( false );
+	}
+
+	/**
+	 * A completed SCHEDULE-originated job prunes the backup store down to the
+	 * schedule's retention count, deleting from the oldest and keeping the
+	 * newest ones by name — not merely by count.
+	 *
+	 * If pruning ever ran on the wrong set, or in the wrong direction, a
+	 * nightly schedule would either delete an operator's newest, most useful
+	 * backups and keep the stale ones, or delete nothing at all and quietly
+	 * fill the disk. Five real fixture files are planted with valid,
+	 * strictly-increasing timestamped names — first proven to be accepted by
+	 * BackupStore::backups() — then a schedule-flagged job is ticked to
+	 * completion and the exact surviving set is asserted by name.
+	 *
+	 * @return void
+	 */
+	public function test_finalise_prunes_schedule_backups_oldest_first(): void {
+		$stamps = array( '20260101T000000Z', '20260102T000000Z', '20260103T000000Z', '20260104T000000Z', '20260105T000000Z' );
+		foreach ( $stamps as $stamp ) {
+			$this->plant_backup( $stamp );
+		}
+
+		$backup_store = new BackupStore( $this->content_dir );
+		$this->assertCount( 5, $backup_store->backups(), 'Every planted fixture name must be a real, resolvable backup before it can be relied on.' );
+
+		$job_store = new JobStore( $this->content_dir );
+		$this->create_completable_job( $job_store, true );
+		$this->stub_completion_wp_functions();
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 2 ),
+			$job_store,
+			$backup_store,
+			new NullLogger(),
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$surviving = array_map( 'basename', $backup_store->backups() );
+		sort( $surviving );
+		$this->assertSame(
+			array( 'pontifex-backup-20260104T000000Z.wpmig', 'pontifex-backup-20260105T000000Z.wpmig' ),
+			$surviving,
+			'Retention 2 must keep exactly the two newest backups by name, not merely two backups of some kind.'
+		);
+	}
+
+	/**
+	 * A completed MANUAL job (the `schedule` flag absent from its payload)
+	 * never prunes: an operator's own backups must never be deleted by
+	 * someone else's retention setting.
+	 *
+	 * Retention is deliberately set to a stringent 1 so the test would catch
+	 * ANY pruning at all, not merely an over-aggressive one.
+	 *
+	 * @return void
+	 */
+	public function test_finalise_never_prunes_a_manual_job(): void {
+		$stamps = array( '20260101T000000Z', '20260102T000000Z', '20260103T000000Z' );
+		foreach ( $stamps as $stamp ) {
+			$this->plant_backup( $stamp );
+		}
+
+		$backup_store = new BackupStore( $this->content_dir );
+		$this->assertCount( 3, $backup_store->backups() );
+
+		$job_store = new JobStore( $this->content_dir );
+		$this->create_completable_job( $job_store, false );
+		$this->stub_completion_wp_functions();
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 1 ),
+			$job_store,
+			$backup_store,
+			new NullLogger(),
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$this->assertCount( 3, $backup_store->backups(), 'A manual job must leave every backup untouched, even against a retention of 1 on record.' );
+	}
+
+	/**
+	 * The retention floor holds when the stored schedule's retention is
+	 * zero: {@see \Pontifex\Schedule\Schedule}'s constructor clamps up to
+	 * MIN_RETENTION, so pruning can never empty the store.
+	 *
+	 * ADR 0005 exists precisely to stop a pruning rule from being
+	 * configurable into deleting everything; this pins that guarantee
+	 * through the whole finalise() -> prune_to_retention() ->
+	 * ScheduleStore::load() path, not only at the Schedule value object in
+	 * isolation.
+	 *
+	 * @return void
+	 */
+	public function test_finalise_never_empties_the_store_when_stored_retention_is_zero(): void {
+		$stamps = array( '20260101T000000Z', '20260102T000000Z', '20260103T000000Z' );
+		foreach ( $stamps as $stamp ) {
+			$this->plant_backup( $stamp );
+		}
+
+		$backup_store = new BackupStore( $this->content_dir );
+		$this->assertCount( 3, $backup_store->backups() );
+
+		$job_store = new JobStore( $this->content_dir );
+		$this->create_completable_job( $job_store, true );
+		$this->stub_completion_wp_functions();
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 0 ),
+			$job_store,
+			$backup_store,
+			new NullLogger(),
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$surviving = $backup_store->backups();
+		$this->assertNotEmpty( $surviving, 'The floor must hold: a stored retention of zero must never empty the store.' );
+		$this->assertCount( Schedule::MIN_RETENTION, $surviving, 'Retention clamps to exactly MIN_RETENTION, so only the newest backup survives.' );
+		$this->assertSame(
+			'pontifex-backup-20260103T000000Z.wpmig',
+			basename( $surviving[0] ),
+			'The single survivor must be the newest, not an arbitrary one.'
+		);
 	}
 }
