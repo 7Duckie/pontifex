@@ -126,7 +126,7 @@ final class SigningKeys {
 	private static function refuse_if_exists( string $path ): void {
 		if ( file_exists( $path ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: refusing to overwrite an existing file: %s', $path ) );
+			throw new RuntimeException( sprintf( 'Refusing to overwrite an existing file: %s', $path ) );
 		}
 	}
 
@@ -147,7 +147,7 @@ final class SigningKeys {
 		$handle = @fopen( $path, 'xb' );
 		if ( false === $handle ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: could not create the key file: %s', $path ) );
+			throw new RuntimeException( sprintf( 'Could not create the key file: %s', $path ) );
 		}
 
 		// Tighten the mode BEFORE writing any bytes, so a secret key never exists
@@ -162,7 +162,7 @@ final class SigningKeys {
 
 		if ( false === $written || strlen( $contents ) !== $written ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: could not write the key file: %s', $path ) );
+			throw new RuntimeException( sprintf( 'Could not write the key file: %s', $path ) );
 		}
 
 		self::assert_mode( $path, $mode );
@@ -187,7 +187,7 @@ final class SigningKeys {
 		$actual = fileperms( $path );
 		if ( false === $actual || ( $actual & 0o777 ) !== $mode ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: could not secure the key file %s to mode %o.', $path, $mode ) );
+			throw new RuntimeException( sprintf( 'Could not secure the key file %s to mode %o.', $path, $mode ) );
 		}
 	}
 
@@ -205,24 +205,24 @@ final class SigningKeys {
 		$contents = @file_get_contents( $path );
 		if ( false === $contents ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: could not read the %s key file: %s', $kind, $path ) );
+			throw new RuntimeException( sprintf( 'Could not read the %s key file: %s', $kind, $path ) );
 		}
 
 		$lines = preg_split( '/\r\n|\r|\n/', trim( $contents ) );
 		if ( false === $lines || count( $lines ) < 2 ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: malformed %s key file (expected a comment line then a base64 line): %s', $kind, $path ) );
+			throw new RuntimeException( sprintf( 'Malformed %s key file (expected a comment line then a base64 line): %s', $kind, $path ) );
 		}
 
 		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Decoding the key file's base64 line back to raw key bytes; not code obfuscation.
 		$raw = base64_decode( trim( $lines[1] ), true );
 		if ( false === $raw ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: the %s key file does not contain valid base64: %s', $kind, $path ) );
+			throw new RuntimeException( sprintf( 'The %s key file does not contain valid base64: %s', $kind, $path ) );
 		}
 		if ( strlen( $raw ) !== $expected_size ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the file path for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'SigningKeys: the %s key must be %d bytes, got %d (is this the right key file?): %s', $kind, (int) $expected_size, (int) strlen( $raw ), $path ) );
+			throw new RuntimeException( sprintf( 'The %s key must be %d bytes, got %d (is this the right key file?): %s', $kind, (int) $expected_size, (int) strlen( $raw ), $path ) );
 		}
 
 		return $raw;

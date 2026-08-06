@@ -92,7 +92,7 @@ final class EntryPlan {
 		if ( EntryWriter::NONCE_SIZE !== strlen( $nonce ) ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryPlan: nonce must be exactly %d bytes, got %d.',
+					'Nonce must be exactly %d bytes, got %d.',
 					(int) EntryWriter::NONCE_SIZE,
 					(int) strlen( $nonce )
 				)
@@ -106,7 +106,7 @@ final class EntryPlan {
 		} elseif ( is_callable( $source ) ) {
 			$this->source_factory = $source;
 		} else {
-			throw new InvalidArgumentException( 'EntryPlan: $source must be a stream resource or a callable that returns one.' );
+			throw new InvalidArgumentException( '$source must be a stream resource or a callable that returns one.' );
 		}
 
 		$this->header   = $header;

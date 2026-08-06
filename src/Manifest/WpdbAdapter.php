@@ -108,7 +108,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( null === $count ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: row_count query failed for "%s": %s', $table_name, $last_error ) );
+			throw new RuntimeException( sprintf( 'row_count query failed for "%s": %s', $table_name, $last_error ) );
 		}
 
 		return (int) $count;
@@ -134,7 +134,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( null === $row || ! isset( $row[1] ) || '' === $row[1] ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: SHOW CREATE TABLE failed for "%s": %s', $table_name, $last_error ) );
+			throw new RuntimeException( sprintf( 'SHOW CREATE TABLE failed for "%s": %s', $table_name, $last_error ) );
 		}
 
 		$create_sql         = (string) $row[1];
@@ -172,7 +172,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( null === $rows ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: row dump failed for "%s" offset=%d limit=%d: %s', $table_name, (int) $offset, (int) $limit, $last_error ) );
+			throw new RuntimeException( sprintf( 'Row dump failed for "%s" offset=%d limit=%d: %s', $table_name, (int) $offset, (int) $limit, $last_error ) );
 		}
 
 		if ( empty( $rows ) ) {
@@ -217,7 +217,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 */
 	public function execute_sql( string $sql ): void {
 		if ( '' === $sql ) {
-			throw new RuntimeException( 'WpdbAdapter::execute_sql: sql must not be empty.' );
+			throw new RuntimeException( 'Sql must not be empty.' );
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the by-design replay of a Pontifex archive's database dump (the documented import trust boundary, Gap E); preparation/caching/escaping do not apply to schema-modifying restore statements.
 		$result = $this->wpdb->query( $sql );
@@ -225,7 +225,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 			$last_error = '' !== $this->wpdb->last_error ? (string) $this->wpdb->last_error : 'query returned false';
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $last_error is the database driver's error message, reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'WpdbAdapter::execute_sql: query failed: %s', $last_error )
+				sprintf( 'Query failed: %s', $last_error )
 			);
 		}
 	}
@@ -314,7 +314,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 */
 	public function list_tables_by_prefix( string $prefix ): array {
 		if ( '' === $prefix ) {
-			throw new RuntimeException( 'WpdbAdapter::list_tables_by_prefix: prefix must not be empty.' );
+			throw new RuntimeException( 'Prefix must not be empty.' );
 		}
 		$sql = $this->wpdb->prepare( 'SHOW TABLES LIKE %s', $this->wpdb->esc_like( $prefix ) . '%' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- $sql is the direct return value of $wpdb->prepare() on the line above; the leftover-table sweep reads live schema state, so caching does not apply.
@@ -450,7 +450,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 	public function set_session_charset( string $charset ): void {
 		if ( 1 !== preg_match( self::CHARSET_PATTERN, $charset ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $charset is reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: refusing malformed character set "%s".', $charset ) );
+			throw new RuntimeException( sprintf( 'Refusing malformed character set "%s".', $charset ) );
 		}
 		$this->execute_sql( "SET NAMES '" . $charset . "'" );
 	}
@@ -599,7 +599,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( null === $row || ! isset( $row[1] ) || '' === $row[1] ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: could not read the definition of "%s" to check for a partition storage-directory clause: %s', $table_name, $last_error ) );
+			throw new RuntimeException( sprintf( 'Could not read the definition of "%s" to check for a partition storage-directory clause: %s', $table_name, $last_error ) );
 		}
 
 		$definition          = (string) $row[1];
@@ -611,7 +611,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 			// A regex ENGINE failure must never be read as "no directory clause found" —
 			// see the identical reasoning in DatabaseWriter::refuse_unsanctioned_statements().
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name is reported verbatim and preg_last_error_msg() is the engine's own diagnostic text; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: could not check "%s" for a partition storage-directory clause because the regular-expression engine failed (%s).', $table_name, preg_last_error_msg() ) );
+			throw new RuntimeException( sprintf( 'Could not check "%s" for a partition storage-directory clause because the regular-expression engine failed (%s).', $table_name, preg_last_error_msg() ) );
 		}
 		return 1 === $matched;
 	}
@@ -639,7 +639,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		if ( null === $count ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: could not read the row count for "%s": %s', $table_name, $last_error ) );
+			throw new RuntimeException( sprintf( 'Could not read the row count for "%s": %s', $table_name, $last_error ) );
 		}
 		return (int) $count;
 	}
@@ -740,7 +740,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 			$last_error = '' !== $this->wpdb->last_error ? (string) $this->wpdb->last_error : 'query returned false';
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $context is a hardcoded label and $last_error is the driver's message, reported verbatim for diagnostics; exception path, not HTML output.
-				sprintf( 'WpdbAdapter: prefix-key rewrite of %s failed: %s', $context, $last_error )
+				sprintf( 'Prefix-key rewrite of %s failed: %s', $context, $last_error )
 			);
 		}
 	}
@@ -784,7 +784,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		$prefix = (string) $this->wpdb->prefix;
 		if ( '' !== $prefix && ! str_starts_with( $table_name, $prefix ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the table and prefix for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'WpdbAdapter: refusing to operate on table "%s" outside the WordPress prefix "%s".', $table_name, $prefix ) );
+			throw new RuntimeException( sprintf( 'Refusing to operate on table "%s" outside the WordPress prefix "%s".', $table_name, $prefix ) );
 		}
 	}
 

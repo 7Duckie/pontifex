@@ -513,7 +513,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
 		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
-		$this->run_failing_dry_run( new RuntimeException( 'ArchiveReader: manifest does not fit between header and footer' ) );
+		$this->run_failing_dry_run( new RuntimeException( 'The manifest does not fit between header and footer.' ) );
 
 		$output = implode( "\n", $printed );
 		$this->assertStringContainsString( 'Dry run: this rollback failed. Your site was not changed.', $output );

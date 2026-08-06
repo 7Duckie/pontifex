@@ -66,7 +66,7 @@ final class JobStore {
 	 */
 	public function __construct( string $content_dir ) {
 		if ( '' === $content_dir ) {
-			throw new InvalidArgumentException( 'JobStore: content_dir must be non-empty.' );
+			throw new InvalidArgumentException( 'content_dir must be non-empty.' );
 		}
 		$this->directory = rtrim( $content_dir, '/' ) . '/' . self::SUBDIRECTORY;
 	}
@@ -90,7 +90,7 @@ final class JobStore {
 		if ( ! ProtectedDirectory::ensure( $this->directory, self::DIRECTORY_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'JobStore: could not create the jobs directory: %s', $this->directory )
+				sprintf( 'Could not create the jobs directory: %s', $this->directory )
 			);
 		}
 	}
@@ -111,7 +111,7 @@ final class JobStore {
 		if ( null !== $active ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The id is 16 hex characters from random_bytes; exception path, not HTML output.
-				sprintf( 'JobStore: an active job already exists (%s); one operation runs at a time.', $active->id() )
+				sprintf( 'An active job already exists (%s); one operation runs at a time.', $active->id() )
 			);
 		}
 
@@ -119,7 +119,7 @@ final class JobStore {
 			$id = bin2hex( random_bytes( 8 ) );
 		} catch ( \Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying randomness-source exception, chained for diagnostics; not HTML output.
-			throw new RuntimeException( 'JobStore: could not generate a job id.', 0, $e );
+			throw new RuntimeException( 'Could not generate a job id.', 0, $e );
 		}
 
 		$job = new Job( $id, $kind, Job::STATUS_PENDING, $payload, $now, $now );
@@ -142,7 +142,7 @@ final class JobStore {
 			$json = json_encode( $job->to_array(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
 		} catch ( JsonException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying encode exception, chained for diagnostics; not HTML output.
-			throw new RuntimeException( 'JobStore: could not encode the job for saving.', 0, $e );
+			throw new RuntimeException( 'Could not encode the job for saving.', 0, $e );
 		}
 
 		$path = $this->job_path( $job->id() );
@@ -151,7 +151,7 @@ final class JobStore {
 		if ( false === @file_put_contents( $temp, $json ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobStore: could not write the job record: %s', $path )
+				sprintf( 'Could not write the job record: %s', $path )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Atomic same-directory move of the completed record; WP_Filesystem is unavailable in CLI/cron contexts.
@@ -160,7 +160,7 @@ final class JobStore {
 			@unlink( $temp );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobStore: could not move the job record into place: %s', $path )
+				sprintf( 'Could not move the job record into place: %s', $path )
 			);
 		}
 	}
@@ -185,19 +185,19 @@ final class JobStore {
 		if ( false === $json ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobStore: could not read the job record: %s', $path )
+				sprintf( 'Could not read the job record: %s', $path )
 			);
 		}
 		try {
 			$data = json_decode( $json, true, 32, JSON_THROW_ON_ERROR );
 		} catch ( JsonException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; $e chained for diagnostics; not HTML output.
-			throw new RuntimeException( sprintf( 'JobStore: the job record is corrupt: %s', $path ), 0, $e );
+			throw new RuntimeException( sprintf( 'The job record is corrupt: %s', $path ), 0, $e );
 		}
 		if ( ! is_array( $data ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobStore: the job record is not an object: %s', $path )
+				sprintf( 'The job record is not an object: %s', $path )
 			);
 		}
 		return Job::from_array( $data );
@@ -256,7 +256,7 @@ final class JobStore {
 	 */
 	public function progress_log( string $id ): JobProgressLog {
 		if ( 1 !== preg_match( Job::ID_PATTERN, $id ) ) {
-			throw new InvalidArgumentException( 'JobStore: malformed job id.' );
+			throw new InvalidArgumentException( 'Malformed job id.' );
 		}
 		return new JobProgressLog( $this->progress_path( $id ) );
 	}

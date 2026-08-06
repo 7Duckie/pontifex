@@ -81,12 +81,12 @@ final class SigningKeypair {
 	public function __construct( string $public_key, string $secret_key ) {
 		if ( self::PUBLIC_KEY_SIZE !== strlen( $public_key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'SigningKeypair: public key must be exactly %d bytes, got %d.', (int) self::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
+				sprintf( 'Public key must be exactly %d bytes, got %d.', (int) self::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
 			);
 		}
 		if ( self::SECRET_KEY_SIZE !== strlen( $secret_key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'SigningKeypair: secret key must be exactly %d bytes, got %d.', (int) self::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
+				sprintf( 'Secret key must be exactly %d bytes, got %d.', (int) self::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
 			);
 		}
 
@@ -117,7 +117,7 @@ final class SigningKeypair {
 	public static function generate(): self {
 		if ( ! function_exists( 'sodium_crypto_sign_keypair' ) ) {
 			throw new SignatureException(
-				'SigningKeypair: ext-sodium is required to generate an Ed25519 keypair but is not available.'
+				'Ext-sodium is required to generate an Ed25519 keypair but is not available.'
 			);
 		}
 
@@ -127,7 +127,7 @@ final class SigningKeypair {
 			$secret_key = sodium_crypto_sign_secretkey( $keypair );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new SignatureException( 'SigningKeypair: Ed25519 keypair generation failed.', 0, $e );
+			throw new SignatureException( 'Ed25519 keypair generation failed.', 0, $e );
 		}
 
 		return new self( $public_key, $secret_key );
@@ -147,12 +147,12 @@ final class SigningKeypair {
 	public static function from_secret_key( string $secret_key ): self {
 		if ( ! function_exists( 'sodium_crypto_sign_publickey_from_secretkey' ) ) {
 			throw new SignatureException(
-				'SigningKeypair: ext-sodium is required to derive a public key from a secret key but is not available.'
+				'Ext-sodium is required to derive a public key from a secret key but is not available.'
 			);
 		}
 		if ( self::SECRET_KEY_SIZE !== strlen( $secret_key ) ) {
 			throw new SignatureException(
-				sprintf( 'SigningKeypair: secret key must be exactly %d bytes to derive a public key, got %d.', (int) self::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
+				sprintf( 'Secret key must be exactly %d bytes to derive a public key, got %d.', (int) self::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
 			);
 		}
 
@@ -160,7 +160,7 @@ final class SigningKeypair {
 			$public_key = sodium_crypto_sign_publickey_from_secretkey( $secret_key );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new SignatureException( 'SigningKeypair: could not derive the public key from the secret key.', 0, $e );
+			throw new SignatureException( 'Could not derive the public key from the secret key.', 0, $e );
 		}
 
 		return new self( $public_key, $secret_key );
@@ -183,7 +183,7 @@ final class SigningKeypair {
 	 */
 	public function secret_key(): string {
 		if ( null === $this->secret_key ) {
-			throw new LogicException( 'SigningKeypair: the secret key has been wiped from memory and is no longer available.' );
+			throw new LogicException( 'The secret key has been wiped from memory and is no longer available.' );
 		}
 		return $this->secret_key;
 	}
@@ -210,7 +210,7 @@ final class SigningKeypair {
 	public static function key_id_of( string $public_key ): string {
 		if ( self::PUBLIC_KEY_SIZE !== strlen( $public_key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'SigningKeypair: public key must be exactly %d bytes to compute a key id, got %d.', (int) self::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
+				sprintf( 'Public key must be exactly %d bytes to compute a key id, got %d.', (int) self::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
 			);
 		}
 

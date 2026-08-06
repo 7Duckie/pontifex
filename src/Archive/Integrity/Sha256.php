@@ -85,7 +85,7 @@ final class Sha256 {
 	 */
 	public function update( string $bytes ): void {
 		if ( $this->finalised ) {
-			throw new RuntimeException( 'Sha256: cannot update after digest() has been called.' );
+			throw new RuntimeException( 'Cannot update after digest() has been called.' );
 		}
 		if ( '' === $bytes ) {
 			return;
@@ -104,7 +104,7 @@ final class Sha256 {
 	 */
 	public function digest(): string {
 		if ( $this->finalised ) {
-			throw new RuntimeException( 'Sha256: digest() has already been called on this instance.' );
+			throw new RuntimeException( 'digest() has already been called on this instance.' );
 		}
 		$this->finalised = true;
 		return hash_final( $this->ctx, true );

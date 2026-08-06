@@ -186,7 +186,7 @@ final class IncrementalArchiveWriterTest extends TestCase {
 		$writer->begin( self::memory_stream(), self::sample_provenance() );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'already started' );
+		$this->expectExceptionMessage( 'Already started' );
 
 		$writer->begin( self::memory_stream(), self::sample_provenance() );
 	}

@@ -138,7 +138,7 @@ final class SafetyArchiverTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'a safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
+		$this->expectExceptionMessage( 'A safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
 
 		$archiver->create( '/var/www/html' );
 	}
@@ -313,7 +313,7 @@ final class SafetyArchiverTest extends TestCase {
 			$archiver->create( '/var/www/html' );
 			$this->fail( 'create() should have refused: free space is below the estimate.' );
 		} catch ( RuntimeException $error ) {
-			$this->assertStringContainsString( 'not enough free disk space', $error->getMessage() );
+			$this->assertStringContainsString( 'Not enough free disk space', $error->getMessage() );
 		}
 
 		$this->assertSame( array(), $store->archives(), 'No archive may be written when the preflight refuses.' );

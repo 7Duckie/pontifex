@@ -48,10 +48,10 @@ final class ExporterInfo {
 	 */
 	public function __construct( string $name, string $version ) {
 		if ( '' === $name ) {
-			throw new InvalidArgumentException( 'ExporterInfo: name must not be empty.' );
+			throw new InvalidArgumentException( 'Name must not be empty.' );
 		}
 		if ( '' === $version ) {
-			throw new InvalidArgumentException( 'ExporterInfo: version must not be empty.' );
+			throw new InvalidArgumentException( 'Version must not be empty.' );
 		}
 
 		$this->name    = $name;

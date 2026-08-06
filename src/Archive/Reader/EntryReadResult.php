@@ -119,7 +119,7 @@ final class EntryReadResult {
 	 */
 	public function payload(): string {
 		if ( null === $this->payload ) {
-			throw new RuntimeException( 'EntryReadResult: this entry\'s payload is a stream; read it through payload_stream() instead of materialising it.' );
+			throw new RuntimeException( 'This entry\'s payload is a stream; read it through payload_stream() instead of materialising it.' );
 		}
 		return $this->payload;
 	}
@@ -132,7 +132,7 @@ final class EntryReadResult {
 	 */
 	public function payload_stream() {
 		if ( null === $this->payload_stream ) {
-			throw new RuntimeException( 'EntryReadResult: this entry\'s payload is a string; read it through payload().' );
+			throw new RuntimeException( 'This entry\'s payload is a string; read it through payload().' );
 		}
 		return $this->payload_stream;
 	}

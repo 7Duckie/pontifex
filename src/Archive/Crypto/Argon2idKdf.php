@@ -91,12 +91,12 @@ final class Argon2idKdf {
 	public function derive( string $passphrase, string $salt ): string {
 		if ( ! function_exists( 'sodium_crypto_pwhash' ) ) {
 			throw new CipherException(
-				'Argon2idKdf: ext-sodium is required for Argon2id key derivation but is not available; encrypted archives cannot be produced or read without it.'
+				'Ext-sodium is required for Argon2id key derivation but is not available; encrypted archives cannot be produced or read without it.'
 			);
 		}
 		if ( self::SALT_SIZE !== strlen( $salt ) ) {
 			throw new CipherException(
-				sprintf( 'Argon2idKdf: salt must be exactly %d bytes, got %d.', (int) self::SALT_SIZE, (int) strlen( $salt ) )
+				sprintf( 'Salt must be exactly %d bytes, got %d.', (int) self::SALT_SIZE, (int) strlen( $salt ) )
 			);
 		}
 
@@ -112,7 +112,7 @@ final class Argon2idKdf {
 		} catch ( SodiumException $e ) {
 			// The passphrase is deliberately kept out of the message; it must never be logged.
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new CipherException( 'Argon2idKdf: Argon2id key derivation failed.', 0, $e );
+			throw new CipherException( 'Argon2id key derivation failed.', 0, $e );
 		}
 	}
 }

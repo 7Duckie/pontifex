@@ -41,12 +41,12 @@ final class Ed25519Signer {
 	public function sign( string $message, string $secret_key ): string {
 		if ( ! function_exists( 'sodium_crypto_sign_detached' ) ) {
 			throw new SignatureException(
-				'Ed25519Signer: ext-sodium is required to sign but is not available; signed archives cannot be produced without it.'
+				'Ext-sodium is required to sign but is not available; signed archives cannot be produced without it.'
 			);
 		}
 		if ( SigningKeypair::SECRET_KEY_SIZE !== strlen( $secret_key ) ) {
 			throw new SignatureException(
-				sprintf( 'Ed25519Signer: secret key must be exactly %d bytes, got %d.', (int) SigningKeypair::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
+				sprintf( 'Secret key must be exactly %d bytes, got %d.', (int) SigningKeypair::SECRET_KEY_SIZE, (int) strlen( $secret_key ) )
 			);
 		}
 
@@ -54,7 +54,7 @@ final class Ed25519Signer {
 			return sodium_crypto_sign_detached( $message, $secret_key );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new SignatureException( 'Ed25519Signer: Ed25519 signing failed.', 0, $e );
+			throw new SignatureException( 'Ed25519 signing failed.', 0, $e );
 		}
 	}
 }

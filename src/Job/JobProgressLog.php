@@ -68,14 +68,14 @@ final class JobProgressLog {
 			$line = json_encode( $record, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES ) . "\n";
 		} catch ( JsonException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying encode exception, chained for diagnostics; not HTML output.
-			throw new RuntimeException( 'JobProgressLog: could not encode the progress record.', 0, $e );
+			throw new RuntimeException( 'Could not encode the progress record.', 0, $e );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Appending to the plugin's own progress sidecar; WP_Filesystem is unavailable in CLI/cron contexts where this runs.
 		$written = @file_put_contents( $this->path, $line, FILE_APPEND );
 		if ( strlen( $line ) !== $written ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobProgressLog: could not append to the progress log: %s', $this->path )
+				sprintf( 'Could not append to the progress log: %s', $this->path )
 			);
 		}
 	}
@@ -95,7 +95,7 @@ final class JobProgressLog {
 		if ( false === $contents ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobProgressLog: could not read the progress log: %s', $this->path )
+				sprintf( 'Could not read the progress log: %s', $this->path )
 			);
 		}
 
@@ -118,7 +118,7 @@ final class JobProgressLog {
 					break;
 				}
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived and $e is chained for diagnostics; exception path, not HTML output.
-				throw new RuntimeException( sprintf( 'JobProgressLog: the progress log is corrupt mid-file: %s', $this->path ), 0, $e );
+				throw new RuntimeException( sprintf( 'The progress log is corrupt mid-file: %s', $this->path ), 0, $e );
 			}
 			if ( is_array( $record ) ) {
 				$records[] = $record;
@@ -147,7 +147,7 @@ final class JobProgressLog {
 				$lines .= json_encode( $record, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES ) . "\n";
 			} catch ( JsonException $e ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying encode exception, chained for diagnostics; not HTML output.
-				throw new RuntimeException( 'JobProgressLog: could not re-encode the progress log.', 0, $e );
+				throw new RuntimeException( 'Could not re-encode the progress log.', 0, $e );
 			}
 		}
 		$temp = $this->path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
@@ -155,7 +155,7 @@ final class JobProgressLog {
 		if ( false === @file_put_contents( $temp, $lines ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobProgressLog: could not rewrite the progress log: %s', $this->path )
+				sprintf( 'Could not rewrite the progress log: %s', $this->path )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Atomic same-directory move of the rewritten sidecar; WP_Filesystem is unavailable in CLI/cron contexts.
@@ -164,7 +164,7 @@ final class JobProgressLog {
 			@unlink( $temp );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'JobProgressLog: could not move the rewritten progress log into place: %s', $this->path )
+				sprintf( 'Could not move the rewritten progress log into place: %s', $this->path )
 			);
 		}
 	}

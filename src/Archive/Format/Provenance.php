@@ -206,19 +206,19 @@ final class Provenance {
 		?Scope $scope = null
 	) {
 		if ( '' === $wp_version ) {
-			throw new InvalidArgumentException( 'Provenance: wp_version must not be empty.' );
+			throw new InvalidArgumentException( 'wp_version must not be empty.' );
 		}
 		if ( '' === $php_version ) {
-			throw new InvalidArgumentException( 'Provenance: php_version must not be empty.' );
+			throw new InvalidArgumentException( 'php_version must not be empty.' );
 		}
 		if ( '' === $url ) {
-			throw new InvalidArgumentException( 'Provenance: url must not be empty.' );
+			throw new InvalidArgumentException( 'Url must not be empty.' );
 		}
 		if ( '' === $db_charset ) {
-			throw new InvalidArgumentException( 'Provenance: db_charset must not be empty.' );
+			throw new InvalidArgumentException( 'db_charset must not be empty.' );
 		}
 		if ( '' === $db_collation ) {
-			throw new InvalidArgumentException( 'Provenance: db_collation must not be empty.' );
+			throw new InvalidArgumentException( 'db_collation must not be empty.' );
 		}
 
 		$this->wp_version                 = $wp_version;
@@ -358,7 +358,7 @@ final class Provenance {
 		if ( strlen( $bytes ) < self::HEADER_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Provenance::from_bytes: input must be at least %d bytes, got %d.',
+					'Input must be at least %d bytes, got %d.',
 					(int) self::HEADER_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -370,7 +370,7 @@ final class Provenance {
 		if ( $length > self::MAX_PAYLOAD_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Provenance::from_bytes: declared payload size %d exceeds maximum %d bytes.',
+					'Declared payload size %d exceeds maximum %d bytes.',
 					(int) $length,
 					(int) self::MAX_PAYLOAD_SIZE
 				)
@@ -381,7 +381,7 @@ final class Provenance {
 		if ( strlen( $bytes ) !== $expected_total ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Provenance::from_bytes: expected exactly %d bytes (4 length + 32 hash + %d payload), got %d.',
+					'Expected exactly %d bytes (4 length + 32 hash + %d payload), got %d.',
 					(int) $expected_total,
 					(int) $length,
 					(int) strlen( $bytes )
@@ -395,7 +395,7 @@ final class Provenance {
 		$computed_hash = Sha256::of( $payload );
 		if ( ! hash_equals( $stored_hash, $computed_hash ) ) {
 			throw new InvalidArgumentException(
-				'Provenance::from_bytes: payload hash does not match stored hash; the block is corrupt or has been tampered with.'
+				'Payload hash does not match stored hash; the block is corrupt or has been tampered with.'
 			);
 		}
 
@@ -466,12 +466,12 @@ final class Provenance {
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-				'Provenance: JSON payload is malformed: ' . $e->getMessage()
+				'JSON payload is malformed: ' . $e->getMessage()
 			);
 		}
 
 		if ( ! is_array( $data ) ) {
-			throw new InvalidArgumentException( 'Provenance: JSON payload must decode to an object.' );
+			throw new InvalidArgumentException( 'JSON payload must decode to an object.' );
 		}
 
 		$required_string_fields = array( 'wp_version', 'php_version', 'url', 'db_charset', 'db_collation', 'timestamp' );
@@ -479,34 +479,34 @@ final class Provenance {
 			if ( ! array_key_exists( $field, $data ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is a hardcoded value from $required_string_fields above; exception message, not HTML output.
-					sprintf( 'Provenance: JSON payload is missing required field "%s".', $field )
+					sprintf( 'JSON payload is missing required field "%s".', $field )
 				);
 			}
 			if ( ! is_string( $data[ $field ] ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is a hardcoded value from $required_string_fields above; exception message, not HTML output.
-					sprintf( 'Provenance: field "%s" must be a string.', $field )
+					sprintf( 'Field "%s" must be a string.', $field )
 				);
 			}
 		}
 
 		if ( ! array_key_exists( 'exporter', $data ) ) {
-			throw new InvalidArgumentException( 'Provenance: JSON payload is missing required field "exporter".' );
+			throw new InvalidArgumentException( 'JSON payload is missing required field "exporter".' );
 		}
 		if ( ! is_array( $data['exporter'] ) ) {
-			throw new InvalidArgumentException( 'Provenance: exporter field must be an object.' );
+			throw new InvalidArgumentException( 'Exporter field must be an object.' );
 		}
 		foreach ( array( 'name', 'version' ) as $exporter_field ) {
 			if ( ! array_key_exists( $exporter_field, $data['exporter'] ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $exporter_field is a hardcoded literal ('name' or 'version'); exception message, not HTML output.
-					sprintf( 'Provenance: exporter object is missing required field "%s".', $exporter_field )
+					sprintf( 'Exporter object is missing required field "%s".', $exporter_field )
 				);
 			}
 			if ( ! is_string( $data['exporter'][ $exporter_field ] ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $exporter_field is a hardcoded literal ('name' or 'version'); exception message, not HTML output.
-					sprintf( 'Provenance: exporter.%s must be a string.', $exporter_field )
+					sprintf( 'Exporter.%s must be a string.', $exporter_field )
 				);
 			}
 		}
@@ -522,7 +522,7 @@ final class Provenance {
 		) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- User-supplied value embedded in exception message for diagnostic context; this is an exception path, not HTML output to a browser.
-				sprintf( 'Provenance: timestamp "%s" is not a valid ISO 8601 string with timezone offset.', $data['timestamp'] )
+				sprintf( 'Timestamp "%s" is not a valid ISO 8601 string with timezone offset.', $data['timestamp'] )
 			);
 		}
 
@@ -531,7 +531,7 @@ final class Provenance {
 		$encryption_disabled_reason = null;
 		if ( array_key_exists( 'encryption_disabled_reason', $data ) && null !== $data['encryption_disabled_reason'] ) {
 			if ( ! is_string( $data['encryption_disabled_reason'] ) ) {
-				throw new InvalidArgumentException( 'Provenance: field "encryption_disabled_reason" must be a string or null.' );
+				throw new InvalidArgumentException( 'Field "encryption_disabled_reason" must be a string or null.' );
 			}
 			$encryption_disabled_reason = $data['encryption_disabled_reason'];
 		}
@@ -541,7 +541,7 @@ final class Provenance {
 		$table_prefix = null;
 		if ( array_key_exists( 'table_prefix', $data ) && null !== $data['table_prefix'] ) {
 			if ( ! is_string( $data['table_prefix'] ) ) {
-				throw new InvalidArgumentException( 'Provenance: field "table_prefix" must be a string or null.' );
+				throw new InvalidArgumentException( 'Field "table_prefix" must be a string or null.' );
 			}
 			$table_prefix = $data['table_prefix'];
 		}
@@ -549,7 +549,7 @@ final class Provenance {
 		$scope = null;
 		if ( array_key_exists( 'scope', $data ) && null !== $data['scope'] ) {
 			if ( ! is_array( $data['scope'] ) ) {
-				throw new InvalidArgumentException( 'Provenance: field "scope" must be an object or null.' );
+				throw new InvalidArgumentException( 'Field "scope" must be an object or null.' );
 			}
 			$scope = Scope::from_array( $data['scope'] );
 		}

@@ -692,12 +692,12 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
 		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
-		$this->run_failing_export( new RuntimeException( 'FileScanner: the directory could not be read' ) );
+		$this->run_failing_export( new RuntimeException( 'The directory could not be read.' ) );
 
 		$output = implode( "\n", $printed );
 		$this->assertStringContainsString( 'Export failed.', $output );
 		$this->assertStringNotContainsString( 'Export refused.', $output );
-		$this->assertStringContainsString( 'The failure was: FileScanner: the directory could not be read', $output );
+		$this->assertStringContainsString( 'The failure was: The directory could not be read.', $output );
 		$this->assertStringContainsString( 'Full details are in the Pontifex log', $output );
 	}
 

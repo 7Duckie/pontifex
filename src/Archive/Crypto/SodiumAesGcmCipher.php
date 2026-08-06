@@ -50,7 +50,7 @@ final class SodiumAesGcmCipher implements Cipher {
 			return sodium_crypto_aead_aes256gcm_encrypt( $plaintext, $aad, $nonce, $key );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new CipherException( 'SodiumAesGcmCipher: AES-256-GCM encryption failed.', 0, $e );
+			throw new CipherException( 'AES-256-GCM encryption failed.', 0, $e );
 		}
 	}
 
@@ -71,7 +71,7 @@ final class SodiumAesGcmCipher implements Cipher {
 		if ( strlen( $ciphertext_and_tag ) < Cipher::TAG_SIZE ) {
 			throw new CipherException(
 				sprintf(
-					'SodiumAesGcmCipher: encrypted payload is %d bytes, shorter than the %d-byte authentication tag; the archive is truncated or corrupt.',
+					'Encrypted payload is %d bytes, shorter than the %d-byte authentication tag; the archive is truncated or corrupt.',
 					(int) strlen( $ciphertext_and_tag ),
 					(int) Cipher::TAG_SIZE
 				)
@@ -82,11 +82,11 @@ final class SodiumAesGcmCipher implements Cipher {
 			$plaintext = sodium_crypto_aead_aes256gcm_decrypt( $ciphertext_and_tag, $aad, $nonce, $key );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new CipherException( 'SodiumAesGcmCipher: decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.', 0, $e );
+			throw new CipherException( 'Decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.', 0, $e );
 		}
 		if ( false === $plaintext ) {
 			throw new CipherException(
-				'SodiumAesGcmCipher: decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.'
+				'Decryption failed; the archive was tampered with or truncated, or the passphrase is wrong.'
 			);
 		}
 
@@ -103,7 +103,7 @@ final class SodiumAesGcmCipher implements Cipher {
 		if ( ! function_exists( 'sodium_crypto_aead_aes256gcm_is_available' )
 			|| ! sodium_crypto_aead_aes256gcm_is_available() ) {
 			throw new CipherException(
-				'SodiumAesGcmCipher: AES-256-GCM via ext-sodium is not available on this host (no hardware AES support); the openssl cipher is the fallback.'
+				'AES-256-GCM via ext-sodium is not available on this host (no hardware AES support); the openssl cipher is the fallback.'
 			);
 		}
 	}
@@ -119,12 +119,12 @@ final class SodiumAesGcmCipher implements Cipher {
 	private function assert_sizes( string $nonce, string $key ): void {
 		if ( Cipher::NONCE_SIZE !== strlen( $nonce ) ) {
 			throw new CipherException(
-				sprintf( 'SodiumAesGcmCipher: nonce must be exactly %d bytes, got %d.', (int) Cipher::NONCE_SIZE, (int) strlen( $nonce ) )
+				sprintf( 'Nonce must be exactly %d bytes, got %d.', (int) Cipher::NONCE_SIZE, (int) strlen( $nonce ) )
 			);
 		}
 		if ( Cipher::KEY_SIZE !== strlen( $key ) ) {
 			throw new CipherException(
-				sprintf( 'SodiumAesGcmCipher: key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
+				sprintf( 'Key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
 			);
 		}
 	}
