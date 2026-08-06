@@ -1,6 +1,6 @@
 # 0022 — three kinds of refusal, so a caller can tell them apart
 
-- **Status:** Accepted, 2026-08-05. Implemented and shipping in v1.0.2.
+- **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.0.2.
 - **Deciders:** 7Duckie (raised by a full-build audit of v1.0.1).
 
 ## Context
