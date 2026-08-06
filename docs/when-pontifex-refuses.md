@@ -51,11 +51,21 @@ Look for the most recent line containing `Admin backup failed.` or
 
 If you have shell access, running the same operation through WP-CLI is often
 the fastest way to find out what is wrong, because the CLI tells you.
-`wp pontifex import` and `wp pontifex verify` name the reason they stopped —
-and, for an import, whether the problem is the archive, this server, or the
-command you typed — then exit with a failing status. Server paths are replaced
-with placeholders such as `{WP_CONTENT_DIR}`, so that output is safe to paste
-into a support thread.
+`wp pontifex export`, `wp pontifex import`, `wp pontifex rollback` and
+`wp pontifex verify` name the reason they stopped — and, for the first three,
+whether the problem is the archive, this server, or the command you typed —
+then exit with a failing status. Server paths are replaced with placeholders
+such as `{WP_CONTENT_DIR}`, so that output is safe to paste into a support
+thread.
+
+Two of them go further, because the state they leave things in is not obvious.
+A failed export says whether there is now a backup at the output path: usually
+there is not, though an archive that finished before a later step failed is
+still usable. If the run was resumable it also says that `--resume` will *not*
+pick it up — that is for an interrupted export, not a failed one — and names
+the part-written file it stranded, if it stranded one. A failed rollback says
+how many entries it had already restored, because a replay that stops partway
+leaves the site half undone and nothing puts that right on its own.
 
 ### 2. "Refused" is not "broken", and the difference matters
 

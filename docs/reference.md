@@ -73,6 +73,23 @@ Creates a backup.
 `--resumable` and `--resume` cannot be combined, and neither works with
 encryption — the derived key exists for one run and is never stored.
 
+A refused or failed export prints a verdict rather than propagating the
+exception: which of the three kinds of refusal it was (ADR 0022 — the archive
+cannot be trusted, this host cannot comply, or the request needs correcting),
+the engine's own message with absolute paths redacted, and then exit 1. It also
+says whether there is now a backup, because the answer is not always no: a
+one-shot export leaves nothing at the output path (the archive is written to a
+temp sibling and moved into place only when complete, so any file still there
+is an earlier one), and an archive that was completed before a later step
+failed is still a usable backup.
+
+A **failed** resumable export cannot be continued with `--resume`. A tick that
+raises marks its job `failed`, that status is terminal, and `--resume` accepts
+only an active job — so `--resume` is for a run that was *interrupted* (killed,
+timed out, disconnected), never for one that failed. The verdict says so, and
+names the orphaned `.part` file if the run left one, which it establishes by
+looking rather than by assuming.
+
 ### `wp pontifex import <archive>`
 
 Restores an archive over the current site.
@@ -137,6 +154,18 @@ a statement about an archive **and** a destination. See
 ### `wp pontifex rollback`
 
 Replays the most recent safety archive. Flags: `--yes`, `--dry-run`.
+
+A refused or failed rollback prints the same three-way verdict, redacted, and
+exits 1. Where import's advice for an untrustworthy archive is to fetch a fresh
+copy of the backup, rollback's cannot be: a safety archive is written
+automatically, in one copy, at the moment of the import it undoes, so there is
+none to fetch — restore a backup you took yourself instead.
+
+A real rollback that stops partway also says so, and how many entries it had
+restored. Nothing reconciles a half-replayed site automatically, so this is the
+one failure whose verdict describes the site rather than the archive. It is
+said only when entries actually landed; a preflight refusal that wrote nothing
+does not raise it.
 
 ### `wp pontifex keygen`
 
