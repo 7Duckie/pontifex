@@ -224,6 +224,85 @@ final class FileWriter {
 	private const ORPHANED_TEMP_FILE_PATTERN = '/\.pontifex-[0-9a-f]{8,}\.[0-9]+\.tmp$/';
 
 	/**
+	 * Kind tag for a newly created FILE path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_FILE = 'file';
+
+	/**
+	 * Kind tag for a newly created DIRECTORY path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_DIRECTORY = 'directory';
+
+	/**
+	 * Kind tag for a newly created SYMLINK path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_SYMLINK = 'symlink';
+
+	/**
+	 * How many newly-created paths the creation ledger will record before giving up.
+	 *
+	 * The ledger (see {@see self::$created_paths}) exists so a FAILED restore's
+	 * recovery can delete exactly what this run created and nothing else — see
+	 * {@see self::remove_created_paths()}. It has to live in memory for the length
+	 * of EVERY restore, not only a failing one, so its ceiling is sized for the
+	 * ordinary case, not the archive that would most benefit from a complete
+	 * record.
+	 *
+	 * A restore inside a 128 MB web request already spends up to a quarter of
+	 * that on a single entry's decode buffer (RestoreRunner's own memory
+	 * budgeting), so the ledger's own share has to be a small slice of whatever
+	 * is left over. Each recorded path costs a two-element PHP array plus its
+	 * own bytes — call it 150-250 bytes for a typical WordPress-shaped relative
+	 * path such as "wp-content/plugins/some-plugin/includes/class-something.php"
+	 * — so 20,000 entries costs on the order of 3-5 MB, a small fraction of what
+	 * remains once the per-entry decode budget is accounted for.
+	 *
+	 * That sits well below what a real restore can create: a fresh-server
+	 * whole-site restore (WordPress core, a handful of plugins, any real media
+	 * library) clears it easily. Hitting the cap is therefore the ORDINARY
+	 * outcome for a large restore, not a rare one — which is fine, because past
+	 * it {@see self::remove_created_paths()} honestly reports a merge instead of
+	 * a revert. An honest "this cannot be proven complete" is worth more than a
+	 * precise-sounding claim this ledger has no way to back up.
+	 *
+	 * @var int
+	 */
+	private const CREATION_LEDGER_CAP = 20000;
+
+	/**
+	 * Every path this restore run's writer newly created, in creation order.
+	 *
+	 * Populated only by {@see self::write_file()}, {@see self::write_file_from_stream()},
+	 * {@see self::write_directory()}, and {@see self::write_symlink()} — and, within each
+	 * of those, only once the write has actually landed (the rename for a file, the
+	 * mkdir+chmod for a directory, the symlink() call itself). Recording BEFORE that
+	 * point would let an aborted mid-write leave a ledger entry for a path that was
+	 * never really created, and {@see self::remove_created_paths()} would then delete
+	 * something it did not put there — the exact failure this ledger exists to
+	 * prevent, aimed at itself.
+	 *
+	 * Each element is a two-tuple of the entry's normalised relative path and one of
+	 * the LEDGER_KIND_* constants. Bounded by {@see self::CREATION_LEDGER_CAP}; see
+	 * {@see self::record_created_path()}.
+	 *
+	 * @var array<int, array{0: string, 1: string}>
+	 */
+	private array $created_paths = array();
+
+	/**
+	 * Whether the creation ledger stopped recording once {@see self::CREATION_LEDGER_CAP} was reached.
+	 *
+	 * @var bool
+	 */
+	private bool $creation_ledger_incomplete = false;
+
+	/**
 	 * Absolute path of the directory under which all entries are restored.
 	 *
 	 * Always stored without a trailing slash.
@@ -417,18 +496,18 @@ final class FileWriter {
 
 		if ( $header->is_file() ) {
 			if ( $result->is_streamed() ) {
-				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime(), $relative_path );
 			} else {
-				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime(), $relative_path );
 			}
 			return;
 		}
 		if ( $header->is_directory() ) {
-			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ) );
+			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ), $relative_path );
 			return;
 		}
 		if ( $header->is_symlink() ) {
-			$this->write_symlink( $target_path, (string) $header->target() );
+			$this->write_symlink( $target_path, (string) $header->target(), $relative_path );
 			return;
 		}
 
@@ -1854,19 +1933,71 @@ final class FileWriter {
 	}
 
 	/**
+	 * Whether something already sits at $target_path, of any kind, before a write touches it.
+	 *
+	 * PHP's file_exists() alone misses a DANGLING symlink (it follows the link to
+	 * ask about the target, and reports false when that target is absent), so it
+	 * is paired with is_link() — exactly the same pairing {@see self::write_symlink()}
+	 * already used to decide whether to unlink a conflicting entry first. Called at
+	 * the very start of each write_*() method, before that method changes anything,
+	 * so the answer reflects the filesystem as the restore found it, not as this
+	 * write is about to leave it.
+	 *
+	 * @param string $target_path Absolute path about to be written.
+	 * @return bool True if a file, directory, or symlink (dangling or not) already exists there.
+	 */
+	private static function path_exists_before_write( string $target_path ): bool {
+		return file_exists( $target_path ) || is_link( $target_path );
+	}
+
+	/**
+	 * Record that this run created $relative_path, unless the creation ledger has already given up.
+	 *
+	 * Called ONLY after a write has actually landed — see each write_*() method's
+	 * own call site for what "landed" means for that kind. Once
+	 * {@see self::CREATION_LEDGER_CAP} is reached this stops recording (and marks
+	 * the ledger incomplete) rather than growing without bound; a restore that
+	 * creates more paths than the cap allows is exactly the case
+	 * {@see self::remove_created_paths()} is built to answer honestly, not silently.
+	 *
+	 * @param string $relative_path The entry's normalised relative path.
+	 * @param string $kind          One of the LEDGER_KIND_* constants.
+	 * @return void
+	 */
+	private function record_created_path( string $relative_path, string $kind ): void {
+		if ( $this->creation_ledger_incomplete ) {
+			return;
+		}
+		if ( count( $this->created_paths ) >= self::CREATION_LEDGER_CAP ) {
+			$this->creation_ledger_incomplete = true;
+			return;
+		}
+		$this->created_paths[] = array( $relative_path, $kind );
+	}
+
+	/**
 	 * Write file contents and set mode and mtime.
 	 *
 	 * The bytes land in a sibling temp file which is renamed over the target
 	 * once complete — see {@see self::finalise_temp()} for the two properties
 	 * that buys (per-file crash atomicity, and replacing read-only targets).
 	 *
-	 * @param string $target_path Absolute path of the file to write.
-	 * @param string $payload     Decoded file contents.
-	 * @param int    $mode        POSIX mode bits to set after writing.
-	 * @param int    $mtime       Unix modification timestamp to set after writing.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, and the creation ledger is updated only once
+	 * {@see self::finalise_temp()} has returned — meaning the rename already
+	 * succeeded — never before. See {@see self::record_created_path()}'s
+	 * docblock for why recording early would be the same class of bug this
+	 * ledger exists to prevent.
+	 *
+	 * @param string $target_path   Absolute path of the file to write.
+	 * @param string $payload       Decoded file contents.
+	 * @param int    $mode          POSIX mode bits to set after writing.
+	 * @param int    $mtime         Unix modification timestamp to set after writing.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
 	 */
-	private function write_file( string $target_path, string $payload, int $mode, int $mtime ): void {
+	private function write_file( string $target_path, string $payload, int $mode, int $mtime, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 		$temp_path = self::temp_sibling_path( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
@@ -1879,6 +2010,9 @@ final class FileWriter {
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_FILE );
+		}
 	}
 
 	/**
@@ -2007,13 +2141,20 @@ final class FileWriter {
 	 * reader handed the stream over. The source stream is closed here — the
 	 * result's consumer owns it, and this is where it is consumed.
 	 *
-	 * @param string   $target_path Absolute path of the file to write.
-	 * @param resource $payload     Decoded file contents, positioned at the start.
-	 * @param int      $mode        POSIX mode bits to set after writing.
-	 * @param int      $mtime       Unix modification timestamp to set after writing.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, and the creation ledger is updated only once
+	 * {@see self::finalise_temp()} has returned — meaning the rename already
+	 * succeeded — never before, mirroring {@see self::write_file()}.
+	 *
+	 * @param string   $target_path   Absolute path of the file to write.
+	 * @param resource $payload       Decoded file contents, positioned at the start.
+	 * @param int      $mode          POSIX mode bits to set after writing.
+	 * @param int      $mtime         Unix modification timestamp to set after writing.
+	 * @param string   $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
 	 */
-	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime ): void {
+	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 		$temp_path = self::temp_sibling_path( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
@@ -2040,6 +2181,9 @@ final class FileWriter {
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_FILE );
+		}
 	}
 
 	/**
@@ -2058,11 +2202,18 @@ final class FileWriter {
 	 * Idempotent: if the directory already exists, its mode is
 	 * updated to match.
 	 *
-	 * @param string $target_path Absolute path of the directory to create.
-	 * @param int    $mode        POSIX mode bits to set.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, so a directory that already existed (the
+	 * ordinary idempotent case) is never mistaken for one this run created —
+	 * see {@see self::record_created_path()}.
+	 *
+	 * @param string $target_path   Absolute path of the directory to create.
+	 * @param int    $mode          POSIX mode bits to set.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If the directory cannot be created or its mode cannot be set.
 	 */
-	private function write_directory( string $target_path, int $mode ): void {
+	private function write_directory( string $target_path, int $mode, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 
 		// Keep the directory owner-writable for the duration of the walk, and
@@ -2098,6 +2249,10 @@ final class FileWriter {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not chmod directory "%s".', $target_path )
 			);
+		}
+
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_DIRECTORY );
 		}
 
 		if ( $working_mode !== $mode ) {
@@ -2479,6 +2634,189 @@ final class FileWriter {
 	}
 
 	/**
+	 * Normalise every preserved path the same way the ledger's own paths were normalised.
+	 *
+	 * {@see self::write_entry()} normalises an entry's path via
+	 * {@see self::normalise_entry_path()} BEFORE it is ever recorded into
+	 * {@see self::$created_paths} — so "./wp-content/foo.php",
+	 * "wp-content//foo.php", and "wp-content/foo.php" all land in the ledger as
+	 * the identical string "wp-content/foo.php". A caller's preserved-paths set,
+	 * built from a manifest entry's raw, un-normalised path field, has no reason
+	 * to share that same discipline. Comparing the two verbatim would let a
+	 * safety archive that happens to spell its own path differently — never
+	 * observed from {@see \Pontifex\Rollback\SafetyArchiver}'s own scan-derived
+	 * paths today, but nothing here depends on that holding forever — miss the
+	 * ledger's normalised entry and have that path deleted anyway, which is
+	 * exactly the outcome rule 2 in {@see self::remove_created_paths()} exists to
+	 * rule out. Running both sides through the same normalisation closes that
+	 * for good, in the one place that can never drift out of step with it.
+	 *
+	 * A path {@see self::normalise_entry_path()} refuses outright (empty, a null
+	 * byte, absolute, a ".." segment, or a path that collapses to empty) is
+	 * skipped rather than propagated: it is not a shape the ledger could ever
+	 * hold either, so it can never match a ledger entry, and this method — like
+	 * {@see self::remove_created_paths()} itself — must never throw.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive declares, un-normalised.
+	 * @return array<string, true> The normalised paths, as a set suitable for isset() lookups.
+	 */
+	private function normalised_preserve_set( array $preserved_paths ): array {
+		$preserve = array();
+		foreach ( $preserved_paths as $raw_path ) {
+			try {
+				$preserve[ $this->normalise_entry_path( $raw_path ) ] = true;
+			} catch ( InvalidArgumentException $unusable_path ) {
+				unset( $unusable_path );
+				continue;
+			}
+		}
+		return $preserve;
+	}
+
+	/**
+	 * Remove every path this run newly created, except any $preserved_paths still declares.
+	 *
+	 * Called only by a FAILED import's recovery, after the pre-import safety
+	 * archive has already been replayed. A restore is purely additive — it
+	 * overwrites and creates, and never deletes a path absent from the archive
+	 * (see {@see self::write_entry()}'s own docblock) — so replaying the safety
+	 * archive alone leaves every file the failed import CREATED still on disk,
+	 * merged in alongside the recovered original content. This is the other
+	 * half of undoing that: delete exactly what THIS writer's own creation
+	 * ledger recorded, and nothing it did not.
+	 *
+	 * Three rules govern what gets removed, none of them negotiable:
+	 *
+	 *  1. ONLY a path this writer's own ledger recorded as newly created —
+	 *     never a set difference against the live filesystem. A set difference
+	 *     would delete legitimate work a live WordPress site did DURING the
+	 *     restore (an upload, a cache file, a session file, a log line
+	 *     written mid-request) merely for not being in the archive being
+	 *     replayed back.
+	 *  2. NEVER a path also present in $preserved_paths. The caller passes the
+	 *     safety archive's own declared paths: anything the safety archive
+	 *     carries belongs to the site's prior state, restoring it there was
+	 *     already correct, and this method's job is only to remove what
+	 *     neither the original site nor the safety archive ever had. Each
+	 *     incoming preserved path is run through
+	 *     {@see self::normalise_entry_path()} — the same normalisation the
+	 *     ledger's own paths already went through in {@see self::write_entry()}
+	 *     — before comparison, so "wp-content/foo.php" and
+	 *     "./wp-content/foo.php" are recognised as the same path rather than
+	 *     missing each other as two different strings. A preserved path that
+	 *     normalisation refuses outright is skipped rather than thrown: it
+	 *     cannot match a ledger entry anyway, and this method must never throw.
+	 *  3. A directory is removed only once it is genuinely EMPTY. rmdir()
+	 *     enforces that on its own, so directories are processed
+	 *     deepest-path-first — the same strlen-descending heuristic
+	 *     {@see self::finalise_directory_modes()} already uses for the same
+	 *     "children before parents" reason — and a directory a live site put
+	 *     something new into during the restore simply survives, silently,
+	 *     because rmdir() refuses a non-empty directory outright.
+	 *
+	 * Every removal is best-effort: a path that will not delete (a permissions
+	 * problem, something else now holding it open) is reported in the
+	 * returned {@see CreationLedgerCleanupReport}, never thrown. The import has
+	 * already failed by the time this runs; turning a partial cleanup into a
+	 * second exception would bury the original cause from the operator who
+	 * most needs to see it. For the same reason this method never throws at
+	 * all — an unexpected failure resolving one ledger path is counted as a
+	 * failure for that path and the rest of the cleanup continues.
+	 *
+	 * Each ledger path is turned back into an absolute path via
+	 * {@see self::resolve_safe_path()} — the same path-safety check
+	 * {@see self::write_entry()} itself uses — rather than a second,
+	 * independently-written join, so deletion is confined by exactly the
+	 * guard writing already trusted.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this writer's own ledger created them.
+	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation — so the caller can tell a precise revert from a capped merge.
+	 */
+	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
+		$preserve = $this->normalised_preserve_set( $preserved_paths );
+
+		$non_directory_paths = array();
+		$directory_paths     = array();
+		foreach ( $this->created_paths as $created ) {
+			[ $path, $kind ] = $created;
+			if ( isset( $preserve[ $path ] ) ) {
+				continue;
+			}
+			if ( self::LEDGER_KIND_DIRECTORY === $kind ) {
+				$directory_paths[] = $path;
+			} else {
+				$non_directory_paths[] = $path;
+			}
+		}
+
+		$removed = array();
+		$failed  = array();
+
+		foreach ( $non_directory_paths as $path ) {
+			if ( $this->remove_one_created_path( $path, false ) ) {
+				$removed[] = $path;
+			} else {
+				$failed[] = $path;
+			}
+		}
+
+		// Deepest path first, mirroring finalise_directory_modes(), so a child
+		// directory is removed (or found non-empty) before its parent is ever
+		// attempted — see rule 3 above.
+		usort( $directory_paths, static fn ( string $a, string $b ): int => strlen( $b ) <=> strlen( $a ) );
+
+		foreach ( $directory_paths as $path ) {
+			if ( $this->remove_one_created_path( $path, true ) ) {
+				$removed[] = $path;
+			} else {
+				$failed[] = $path;
+			}
+		}
+
+		return new CreationLedgerCleanupReport( $removed, $failed, ! $this->creation_ledger_incomplete );
+	}
+
+	/**
+	 * Remove one ledger path, best-effort, never throwing.
+	 *
+	 * A missing path (already gone, somehow) counts as removed: the outcome
+	 * this method exists to guarantee — nothing this writer created remains —
+	 * already holds. The whole body, INCLUDING resolving the relative path back
+	 * to an absolute one via {@see self::resolve_safe_path()}, sits inside the
+	 * try/catch — not only the filesystem calls — so that this method really
+	 * does never throw, exactly as {@see self::remove_created_paths()} promises
+	 * its own caller; an unexpected failure (a filesystem race, a permissions
+	 * check that itself errors) is reported as a failure for this one path
+	 * rather than escaping and aborting the rest of that cleanup.
+	 *
+	 * @param string $relative_path The ledger's own normalised relative path.
+	 * @param bool   $is_directory  True to rmdir() (fails on a non-empty directory, by design); false to unlink().
+	 * @return bool True if the path is gone (removed now, or already absent).
+	 */
+	private function remove_one_created_path( string $relative_path, bool $is_directory ): bool {
+		try {
+			$absolute_path = $this->resolve_safe_path( $relative_path );
+
+			if ( $is_directory ) {
+				if ( ! is_dir( $absolute_path ) ) {
+					return true;
+				}
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort recovery cleanup of a directory this run created; rmdir() itself refuses a non-empty directory, which is exactly rule 3 in remove_created_paths()'s docblock.
+				return @rmdir( $absolute_path );
+			}
+
+			if ( ! is_link( $absolute_path ) && ! file_exists( $absolute_path ) ) {
+				return true;
+			}
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort recovery cleanup of a file or symlink this run created.
+			return @unlink( $absolute_path );
+		} catch ( Throwable $error ) {
+			unset( $error );
+			return false;
+		}
+	}
+
+	/**
 	 * Create a symlink at $target_path pointing at $link_target.
 	 *
 	 * Overwrites an existing symlink, file, or directory at the link path. Unless
@@ -2500,11 +2838,20 @@ final class FileWriter {
 	 * preflight none the wiser. This guard is what keeps that shape a clean,
 	 * documented refusal rather than a raw PHP Error.
 	 *
-	 * @param string $target_path Absolute path where the link should be created.
-	 * @param string $link_target The string the link should point at.
+	 * Whether the link path already held something is captured BEFORE the
+	 * pre-existing-entry removal a few lines below, so a path this restore
+	 * merely REPLACED (a file or symlink the site already had there) is never
+	 * mistaken for one it created — see {@see self::record_created_path()}.
+	 * The creation ledger is updated only once symlink() itself has succeeded.
+	 *
+	 * @param string $target_path   Absolute path where the link should be created.
+	 * @param string $link_target   The string the link should point at.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If the target escapes the root (and is not allowed), symlink() is unavailable on this host, or the link cannot be created.
 	 */
-	private function write_symlink( string $target_path, string $link_target ): void {
+	private function write_symlink( string $target_path, string $link_target, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
+
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
@@ -2530,6 +2877,10 @@ final class FileWriter {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not create symlink "%s" -> "%s".', $target_path, $link_target )
 			);
+		}
+
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_SYMLINK );
 		}
 	}
 

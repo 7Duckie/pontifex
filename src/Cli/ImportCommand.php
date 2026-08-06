@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
@@ -143,6 +144,34 @@ final class ImportCommand {
 	 * off — written occasionally, read almost never.
 	 */
 	private const STATS_OPTION = 'pontifex_import_stats';
+
+	/**
+	 * Recovery outcome: every path the failed import created was accounted for and undone.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_PRECISE = 'precise';
+
+	/**
+	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
+	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: recovery was attempted and did not complete at all.
+	 *
+	 * Only ever produced from inside {@see self::recover_from_safety_archive()},
+	 * which is called only once the safety archive has actually been taken, so —
+	 * unlike RestoreController's equivalent — this class has no separate "recovery
+	 * was never attempted" state to keep apart from this one; the calling `if` at
+	 * this class's one call site already gates that.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_FAILED = 'failed';
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -421,6 +450,14 @@ final class ImportCommand {
 		// recover the site if the restore then fails part-written. Null until it is taken.
 		$safety_path = null;
 
+		// The restore engine actually used for the forward restore, once wired inside the
+		// try below. The failure handler needs THIS instance, not a freshly-built one, to
+		// consult the creation ledger its own FileWriter kept — a second instance would
+		// have an empty ledger and nothing to undo. Null only if an exception strikes before
+		// it is wired (e.g. collecting an encrypted archive's passphrase), in which case the
+		// restore itself never started and there is nothing this run could have created.
+		$restore_runner = null;
+
 		// The failure the run ended on, or null when it succeeded. Recorded rather than
 		// re-thrown, and acted on only after the finally below: WP_CLI::halt() calls
 		// exit(), and PHP does not run a finally block when exit() is called — so
@@ -549,8 +586,11 @@ final class ImportCommand {
 			// database, so replay it to return the site to its pre-import state before the
 			// command exits with the failure. When it was not taken the site was not changed.
 			if ( null !== $safety_path ) {
-				if ( $this->recover_from_safety_archive( $safety_path, $allow_unsafe ) ) {
+				$recovery = $this->recover_from_safety_archive( $safety_path, $allow_unsafe, $restore_runner );
+				if ( self::RECOVERY_PRECISE === $recovery ) {
 					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
+				} elseif ( self::RECOVERY_MERGE === $recovery ) {
+					WP_CLI::warning( __( 'The import failed. Your site\'s database was rolled back to its state before the import, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed import created may still be present alongside the recovered content.', 'pontifex' ) );
 				} else {
 					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
 				}
@@ -792,20 +832,27 @@ final class ImportCommand {
 	 * Called only from the import failure handler, once the safety archive has been taken
 	 * and the restore has then failed — so the database may be part-written. It opens the
 	 * safety archive (a plain archive of the site's prior state), verifies it, and replays
-	 * it unrestricted, returning the site to its pre-import state. Wrapped so it can never
-	 * throw out of the failure handler: a recovery that itself fails is reported by
-	 * returning false, not escalated over the original import error.
+	 * it unrestricted, returning the site's DATABASE to its pre-import state. A restore is
+	 * purely additive, though (see {@see \Pontifex\Restore\FileWriter::write_entry()}'s own
+	 * docblock), so that replay alone leaves every FILE the failed import created still on
+	 * disk. When $forward_restore_runner is the real engine that ran the failed forward
+	 * import, this also undoes exactly what that run's own FileWriter created — see
+	 * {@see RestoreRunner::remove_created_paths()} — so a file the failed import introduced
+	 * does not survive alongside the recovered content. Wrapped so it can never throw out of
+	 * the failure handler: a recovery that itself fails is reported as such, not escalated
+	 * over the original import error.
 	 *
-	 * @param string $safety_path           The absolute path of the safety archive to replay.
-	 * @param bool   $allow_unsafe_symlinks Whether to allow escaping symlink targets (mirrors the import).
-	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 * @param string                      $safety_path             The absolute path of the safety archive to replay.
+	 * @param bool                        $allow_unsafe_symlinks   Whether to allow escaping symlink targets (mirrors the import).
+	 * @param RestoreRunnerInterface|null $forward_restore_runner  The engine that ran the failed forward import, or null if the import never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
+	 * @return string One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks ): bool {
+	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks, ?RestoreRunnerInterface $forward_restore_runner ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the plugin-owned safety archive for recovery; an unopenable file is reported below, not raised as a WP-CLI halt.
 		$recovery_source = @fopen( $safety_path, 'rb' );
 		if ( false === $recovery_source ) {
 			$this->logger->error( 'Import auto-recovery failed: could not open the safety archive.', array( 'safety_archive' => $safety_path ) );
-			return false;
+			return self::RECOVERY_FAILED;
 		}
 
 		try {
@@ -821,16 +868,58 @@ final class ImportCommand {
 			rewind( $recovery_source );
 			$runner->restore( $recovery_source );
 
-			return true;
+			if ( ! $forward_restore_runner instanceof RestoreRunner ) {
+				return self::RECOVERY_MERGE;
+			}
+
+			// The safety archive's own declared paths are what "belongs to the site's
+			// prior state" means.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream to read its manifest for the preserved-paths set; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$preserved_paths = self::declared_content_paths( ( new ArchiveReader( $recovery_source ) )->manifest() );
+
+			$cleanup = $forward_restore_runner->remove_created_paths( $preserved_paths );
+			if ( array() !== $cleanup->failed_paths() ) {
+				$this->logger->warning(
+					'Import auto-recovery: could not remove every path the failed import created.',
+					array( 'failed_paths' => $cleanup->failed_paths() )
+				);
+			}
+
+			return $cleanup->is_precise_revert() ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Import auto-recovery failed.', array( 'exception' => $recovery_error ) );
-			return false;
+			return self::RECOVERY_FAILED;
 		} finally {
 			if ( is_resource( $recovery_source ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the recovery stream opened above; not a WP_Filesystem operation.
 				fclose( $recovery_source );
 			}
 		}
+	}
+
+	/**
+	 * Every file/directory/symlink path an already-decoded manifest declares.
+	 *
+	 * Used to build the preserved-paths set {@see RestoreRunner::remove_created_paths()}
+	 * must never delete from, even when the failed import's own ledger recorded them:
+	 * anything the safety archive carries belongs to the site's prior state.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return array<int, string>
+	 */
+	private static function declared_content_paths( ArchiveManifest $manifest ): array {
+		$paths = array();
+		foreach ( $manifest->entries() as $entry ) {
+			if ( ! $entry->is_file() && ! $entry->is_directory() && ! $entry->is_symlink() ) {
+				continue;
+			}
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$paths[] = $path;
+			}
+		}
+		return $paths;
 	}
 
 	/**

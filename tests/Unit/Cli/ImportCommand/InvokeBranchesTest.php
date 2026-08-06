@@ -314,6 +314,16 @@ final class InvokeBranchesTest extends TestCase {
 	 * automatic rollback occurred. The command still exits non-zero — now by halting
 	 * rather than by re-throwing.
 	 *
+	 * The forward engine here is a {@see RestoreRunnerInterface} mock, not a real
+	 * {@see \Pontifex\Restore\RestoreRunner} — so it has no creation ledger for the
+	 * failure handler to consult, and the recovery honestly reports a MERGE rather than
+	 * a precise revert (see {@see \Pontifex\Restore\FileWriter::remove_created_paths()}
+	 * and ImportCommand's own RECOVERY_* constants). Both outcomes share the phrase
+	 * "rolled back to its state before the import", which is what this test asserts on;
+	 * proving the PRECISE wording needs the real engine, and that is exercised at the
+	 * RestoreRunner/FileWriter level in
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}.
+	 *
 	 * The order matters and is asserted: the verdict says why the import stopped, then
 	 * the warning says what was done about it. Reversed, the operator reads that their
 	 * site was rolled back before reading why.
@@ -360,7 +370,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli->shouldReceive( 'warning' )->atLeast()->once()->andReturnUsing(
 			static function ( string $message ) use ( &$rolled_back, &$printed ): void {
 				$printed[] = $message;
-				if ( str_contains( $message, 'automatically rolled back' ) ) {
+				if ( str_contains( $message, 'rolled back to its state before the import' ) ) {
 					$rolled_back = true;
 				}
 			}
@@ -382,7 +392,7 @@ final class InvokeBranchesTest extends TestCase {
 			@unlink( $safety_path );
 		}
 
-		$this->assertTrue( $rolled_back, 'The operator is warned that the site was automatically rolled back.' );
+		$this->assertTrue( $rolled_back, 'The operator is warned that the site\'s database was rolled back.' );
 
 		$output = implode( "\n", $printed );
 		$this->assertStringContainsString( 'Import refused.', $output, 'A real import states plainly that it refused, without the dry-run framing.' );
@@ -390,7 +400,7 @@ final class InvokeBranchesTest extends TestCase {
 		$this->assertStringNotContainsString( 'Your site was not changed.', $output, 'A real import must never claim nothing happened — the site was written to.' );
 
 		$verdict_at = self::index_of_line_containing( $printed, 'simulated restore failure' );
-		$warning_at = self::index_of_line_containing( $printed, 'automatically rolled back' );
+		$warning_at = self::index_of_line_containing( $printed, 'rolled back to its state before the import' );
 		$this->assertNotNull( $verdict_at, 'The failure verdict names the engine\'s own message.' );
 		$this->assertNotNull( $warning_at, 'The recovery warning is printed.' );
 		$this->assertLessThan(
