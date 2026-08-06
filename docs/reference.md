@@ -95,6 +95,13 @@ and removes one test symbolic link, which is the only thing a dry run touches
 and the only check `verify` cannot perform. See
 [ADR 0023](adr/0023-verify-and-restorability.md).
 
+A refused or failed import prints a verdict rather than propagating the
+exception: which of the three kinds of refusal it was (ADR 0022 — the archive
+cannot be trusted, this host cannot comply, or the request needs correcting),
+the engine's own message with absolute paths redacted, and then exit 1. A
+failure carrying none of those types is reported as a failure rather than a
+refusal, because claiming a refusal would assert an intent that was not there.
+
 ### `wp pontifex verify <archive>`
 
 | Flag | Effect |

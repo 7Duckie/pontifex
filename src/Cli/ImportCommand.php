@@ -19,6 +19,10 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
+use Pontifex\Exception\PontifexException;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Log\CompositeLogger;
@@ -59,6 +63,11 @@ use Pontifex\WordPress\WordPressRoot;
  * Before restoring, it writes a safety archive of the current site (unless
  * --no-rollback-archive), so a mistaken import can be undone with
  * `wp pontifex rollback`.
+ *
+ * It exits 0 when the restore (or the dry run) completes, and non-zero when it
+ * is refused or fails — reporting which of the three kinds of refusal happened
+ * (ADR 0022): the archive cannot be trusted, this host cannot comply, or the
+ * request itself needs correcting.
  *
  * ## OPTIONS
  *
@@ -330,10 +339,14 @@ final class ImportCommand {
 	 * open the archive, then restore it — or, under --dry-run, verify it
 	 * without writing.
 	 *
+	 * A failure is not re-thrown. It is logged, reported as a readable verdict
+	 * naming which kind of refusal it was, and the command halts non-zero — so
+	 * an operator sees why it stopped rather than a stack trace, and a script
+	 * still sees a failing exit code.
+	 *
 	 * @param array<int, string>         $positional_args  Positional arguments. The first is the required archive path.
 	 * @param array<string, string|bool> $associative_args Associative `--flag` arguments (`--dry-run`, `--yes`).
 	 * @return void
-	 * @throws Throwable Re-thrown after logging if the restore fails.
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
@@ -407,6 +420,14 @@ final class ImportCommand {
 		// The safety archive's path, once taken — the undo the failure handler replays to
 		// recover the site if the restore then fails part-written. Null until it is taken.
 		$safety_path = null;
+
+		// The failure the run ended on, or null when it succeeded. Recorded rather than
+		// re-thrown, and acted on only after the finally below: WP_CLI::halt() calls
+		// exit(), and PHP does not run a finally block when exit() is called — so
+		// halting inside the catch would skip the lock release and leave the site's
+		// operation lock to the shutdown backstop. That backstop is the last line of
+		// defence, not the primary one.
+		$failure = null;
 
 		// 5a. Single-runner lock: acquire only now, immediately before the try below —
 		// after every exit-prone step above (opening the archive, the signature gate,
@@ -520,6 +541,10 @@ final class ImportCommand {
 				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
 			}
 
+			// Why it stopped, before what was done about it: the verdict names the
+			// failure, then the recovery warnings below report the site's state.
+			$this->print_failure_verdict( $archive_path, $error, $dry_run );
+
 			// If the safety archive was taken, the restore may have written part of the
 			// database, so replay it to return the site to its pre-import state before the
 			// command exits with the failure. When it was not taken the site was not changed.
@@ -531,13 +556,19 @@ final class ImportCommand {
 				}
 			}
 
-			throw $error;
+			$failure = $error;
 		} finally {
 			if ( null !== $lock ) {
 				$lock->release();
 			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
 			fclose( $source );
+		}
+
+		// Halt here, outside the try, so the finally above has already released the
+		// lock and closed the archive. See the note on $failure at its declaration.
+		if ( null !== $failure ) {
+			WP_CLI::halt( 1 );
 		}
 	}
 
@@ -1271,5 +1302,106 @@ final class ImportCommand {
 				$migration_note
 			)
 		);
+	}
+
+	/**
+	 * Print why the import stopped, in terms an operator can act on.
+	 *
+	 * Three situations demand three different responses, and the exception's
+	 * type is what tells them apart (ADR 0022): an archive that cannot be
+	 * trusted means do not restore this file; a host that cannot comply means
+	 * the archive may be fine and the server is the fixable problem; a wrong
+	 * request means correct the invocation. A failure carrying none of those
+	 * types is reported plainly rather than guessed at — most of the safety
+	 * core still throws untyped exceptions, and inventing a kind for one would
+	 * be worse than admitting we do not know.
+	 *
+	 * Both the message and the path go through the redactor, because an engine
+	 * message routinely names an absolute path and this output is exactly what
+	 * an operator pastes into a support thread.
+	 *
+	 * @param string    $archive_path The archive the import was reading.
+	 * @param Throwable $error        The failure that ended the run.
+	 * @param bool      $dry_run      True when this was a rehearsal, so nothing was written.
+	 * @return void
+	 */
+	private function print_failure_verdict( string $archive_path, Throwable $error, bool $dry_run ): void {
+		$redactor = PathRedactor::from_environment();
+		$message  = $redactor->redact( $error->getMessage() );
+		$path     = $redactor->redact( $archive_path );
+
+		WP_CLI::log( self::failure_headline( $dry_run, $error instanceof PontifexException ) );
+
+		if ( $error instanceof ArchiveNotTrustworthy ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: the reason the archive was refused, 2: the archive path */
+					__( 'This archive cannot be trusted: %1$s (%2$s)', 'pontifex' ),
+					$message,
+					$path
+				)
+			);
+			WP_CLI::log( __( 'Do not restore this archive — fetch a fresh copy of the backup.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof HostCannotComply ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: the reason this host could not comply, 2: the archive path */
+					__( 'This host cannot complete the restore: %1$s (%2$s)', 'pontifex' ),
+					$message,
+					$path
+				)
+			);
+			WP_CLI::log( __( 'The archive may be perfectly good — the problem is this server, and it is usually fixable.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof InvalidRequest ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: what was wrong with the command that was run */
+					__( 'The request needs correcting: %s', 'pontifex' ),
+					$message
+				)
+			);
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: the failure message, 2: the archive path */
+				__( 'The failure was: %1$s (%2$s)', 'pontifex' ),
+				$message,
+				$path
+			)
+		);
+		WP_CLI::log( __( 'Full details are in the Pontifex log: wp-content/pontifex/logs/pontifex.log', 'pontifex' ) );
+	}
+
+	/**
+	 * The opening line of a failure verdict: what happened, and to what.
+	 *
+	 * Two facts decide it. A refusal is a decision Pontifex made and can
+	 * explain; anything else is a fault, and calling a fault a refusal would
+	 * claim an intent that was not there. And a dry run changed nothing, which
+	 * is the first thing an operator wants to know — on a real import the
+	 * recovery warnings that follow report the site's state instead.
+	 *
+	 * @param bool $dry_run    True when this was a rehearsal, so nothing was written.
+	 * @param bool $is_refusal True when Pontifex refused deliberately (ADR 0022's marker).
+	 * @return string
+	 */
+	private static function failure_headline( bool $dry_run, bool $is_refusal ): string {
+		if ( $dry_run ) {
+			return $is_refusal
+				? __( 'Dry run: this restore would be refused. Your site was not changed.', 'pontifex' )
+				: __( 'Dry run: this restore failed. Your site was not changed.', 'pontifex' );
+		}
+
+		return $is_refusal
+			? __( 'Import refused.', 'pontifex' )
+			: __( 'Import failed.', 'pontifex' );
 	}
 }

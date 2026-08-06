@@ -51,6 +51,11 @@ Look for the most recent line containing `Admin backup failed.` or
 
 If you have shell access, running the same operation through WP-CLI is often
 the fastest way to find out what is wrong, because the CLI tells you.
+`wp pontifex import` and `wp pontifex verify` name the reason they stopped —
+and, for an import, whether the problem is the archive, this server, or the
+command you typed — then exit with a failing status. Server paths are replaced
+with placeholders such as `{WP_CONTENT_DIR}`, so that output is safe to paste
+into a support thread.
 
 ### 2. "Refused" is not "broken", and the difference matters
 
