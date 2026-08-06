@@ -16,21 +16,45 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
-- **A failed `wp pontifex import` showed a PHP stack trace and told you your
-  website had a critical error.** Every failure — a truncated archive, a
-  server with no room, a mistyped flag — was re-thrown out of the command and
-  landed in WordPress's own fatal handler, which printed the internal call
-  stack, leaked the server's absolute directory paths, and finished with
-  "There has been a critical error on this website." That sentence says
-  Pontifex is broken, when what had usually happened is that Pontifex spotted
-  something wrong with the archive and stopped on purpose. The import now
-  reports what happened in one readable verdict and says which of the three
-  kinds of refusal it was — the archive cannot be trusted, this host cannot
-  complete the restore, or the request needs correcting — with server paths
-  replaced by placeholders, exactly as `wp pontifex verify` already did. The
-  exit code is unchanged (non-zero), so scripts and scheduled jobs behave as
-  before; the log entry, the failure counters, the transfer history and the
-  automatic rollback from the safety archive all continue as before too.
+- **A failed `wp pontifex import`, `export` or `rollback` showed a PHP stack
+  trace and told you your website had a critical error.** Every failure — a
+  truncated archive, a server with no room, a mistyped flag — was re-thrown out
+  of the command and landed in WordPress's own fatal handler, which printed the
+  internal call stack, leaked the server's absolute directory paths, and
+  finished with "There has been a critical error on this website." That
+  sentence says Pontifex is broken, when what had usually happened is that
+  Pontifex spotted something wrong and stopped on purpose. All three now report
+  what happened in one readable verdict and say which of the three kinds of
+  refusal it was — the archive cannot be trusted, this host cannot comply, or
+  the request needs correcting — with server paths replaced by placeholders,
+  exactly as `wp pontifex verify` already did. The log entry, the failure
+  counters, the transfer history and import's automatic rollback from the
+  safety archive all continue as before.
+
+- **A failed backup did not tell you whether you had one.** `wp pontifex
+  export` now says what it left behind, because the answer is not always the
+  same: an ordinary export leaves nothing at the output path, so any file
+  sitting there is an older backup it never replaced — exactly the file you
+  could otherwise mistake for the one you just tried to take. An archive that
+  was finished before something later went wrong is a real, usable backup
+  already on the server. And a **resumable** export that fails says plainly
+  that `--resume` will not pick it up — `--resume` continues a run that was
+  interrupted, not one that failed — then names the part-written `.part` file
+  it left behind, if it left one, so a large orphan does not sit on the disk
+  unmentioned.
+
+- **A rollback that stopped partway said nothing about the state it left the
+  site in.** `wp pontifex rollback` now says how many entries it had restored
+  before it stopped, because a replay that halts midway leaves some of the site
+  as the safety archive's copy and the rest as the import left it, and nothing
+  reconciles the two on its own. It is said only when entries really were
+  written; a refusal that touched nothing does not raise a false alarm.
+
+  The exit code for all three is unchanged — `1`, exactly as before — so
+  scripts and scheduled jobs behave as they always did. A PHP fatal exits `255`
+  on its own, but under WP-CLI these never reached that: WordPress's shutdown
+  handler caught the fatal, printed the critical-error sentence, and exited `1`.
+  All that changes is what is printed on the way out.
 
 ## [1.0.3] — 2026-08-05 — Exclusion patterns are kept as you typed them
 
