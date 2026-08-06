@@ -14,8 +14,101 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
-Nothing yet. Work toward the next operational increment begins after this
-tag. See [`docs/roadmap.md`](docs/roadmap.md).
+### Fixed
+
+- **A failed `wp pontifex import`, `export` or `rollback` showed a PHP stack
+  trace and told you your website had a critical error.** Every failure — a
+  truncated archive, a server with no room, a mistyped flag — was re-thrown out
+  of the command and landed in WordPress's own fatal handler, which printed the
+  internal call stack, leaked the server's absolute directory paths, and
+  finished with "There has been a critical error on this website." That
+  sentence says Pontifex is broken, when what had usually happened is that
+  Pontifex spotted something wrong and stopped on purpose. All three now report
+  what happened in one readable verdict and say which of the three kinds of
+  refusal it was — the archive cannot be trusted, this host cannot comply, or
+  the request needs correcting — with server paths replaced by placeholders,
+  exactly as `wp pontifex verify` already did. The log entry, the failure
+  counters, the transfer history and import's automatic rollback from the
+  safety archive all continue as before.
+
+- **A failed backup did not tell you whether you had one.** `wp pontifex
+  export` now says what it left behind, because the answer is not always the
+  same: an ordinary export leaves nothing at the output path, so any file
+  sitting there is an older backup it never replaced — exactly the file you
+  could otherwise mistake for the one you just tried to take. An archive that
+  was finished before something later went wrong is a real, usable backup
+  already on the server. And a **resumable** export that fails says plainly
+  that `--resume` will not pick it up — `--resume` continues a run that was
+  interrupted, not one that failed — then names the part-written `.part` file
+  it left behind, if it left one, so a large orphan does not sit on the disk
+  unmentioned.
+
+- **A rollback that stopped partway said nothing about the state it left the
+  site in.** `wp pontifex rollback` now says how many entries it had restored
+  before it stopped, because a replay that halts midway leaves some of the site
+  as the safety archive's copy and the rest as the import left it, and nothing
+  reconciles the two on its own. It is said only when entries really were
+  written; a refusal that touched nothing does not raise a false alarm.
+
+  The exit code for all three is unchanged — `1`, exactly as before — so
+  scripts and scheduled jobs behave as they always did. A PHP fatal exits `255`
+  on its own, but under WP-CLI these never reached that: WordPress's shutdown
+  handler caught the fatal, printed the critical-error sentence, and exited `1`.
+  All that changes is what is printed on the way out.
+
+## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
+
+A minor release rather than a patch: no public API moved — not an interface, a
+constructor, a signature or a return type — but `verify` gains an outcome, so a
+script that checks its exit code can now see a failure it could not see before.
+No breaking changes.
+
+### Fixed
+
+- **Verifying a backup no longer tells you it is fine when a restore will
+  refuse it.** Verifying recalculated a fingerprint for every file and reported
+  the backup **sound**. Restoring settled four further questions that verifying
+  never asked — so a backup engineered to place a symbolic link outside your
+  site, which by its nature has perfectly valid fingerprints, was reported sound
+  and then refused by the very restore the check was meant to vouch for. The
+  person misled by this was the one checking their backups. Verifying now runs
+  every check that changes nothing, and answers with one of three verdicts
+  rather than two. See [ADR 0023](docs/adr/0023-verify-and-restorability.md).
+- **"Refused" is now its own answer, separate from "broken".** A refused backup
+  is **not damaged** — every fingerprint matched — but a restore will not accept
+  it. The two call for opposite actions: broken sends you to delete the file and
+  find another copy, whereas a refused backup should be kept, not restored, and
+  traced, because Pontifex never produces one.
+- **A server that cannot restore is reported beside the verdict, never as the
+  verdict.** A full disk is not a damaged backup, and saying otherwise is the
+  one message capable of talking somebody out of a good backup.
+- **A failed command explains itself instead of printing a crash.** `import`,
+  `export` and `rollback` each ended a failure by re-raising it into WordPress's
+  fatal handler, so what you actually saw was a page of PHP internals followed
+  by "There has been a critical error on this website." All three now say what
+  went wrong, in which of three categories, and what to do about it.
+- **Messages no longer name Pontifex's own internal parts.** 523 of them began
+  with the name of the code that raised them — "FileWriter: could not create
+  directory" — which means nothing to anybody who does not work on Pontifex.
+  That information now goes to the log instead, which records the exact file and
+  line, so support diagnosis got better while the text you read got clearer.
+
+### Changed
+
+- **`wp pontifex import --dry-run` is now a real rehearsal.** It ran the
+  integrity check and nothing else, which meant it ran *fewer* checks than the
+  import it claimed to be rehearsing. It now runs every one of them, including
+  the one that briefly creates and removes a test symbolic link to find out
+  whether this server can — the single check a plain verify cannot make, because
+  verifying never writes anything at all.
+- **The admin Restore screen refuses a bad backup before making the safety
+  copy**, not after. On a large site that copy is minutes of work and a second
+  full copy of the site on disk, all of it previously spent to arrive at a
+  refusal that was knowable up front.
+
+### Internal
+
+- `actions/upload-artifact` 4.6.2 → 7.0.1.
 
 ## [1.0.3] — 2026-08-05 — Exclusion patterns are kept as you typed them
 
@@ -1311,6 +1404,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[1.1.0]: https://github.com/7Duckie/pontifex/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/7Duckie/pontifex/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/7Duckie/pontifex/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/7Duckie/pontifex/compare/v1.0.0...v1.0.1

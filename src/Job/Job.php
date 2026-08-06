@@ -166,18 +166,18 @@ final class Job {
 	 */
 	public function __construct( string $id, string $kind, string $status, array $payload, int $created_at, int $updated_at ) {
 		if ( 1 !== preg_match( self::ID_PATTERN, $id ) ) {
-			throw new InvalidArgumentException( 'Job: id must be 16 lowercase hex characters.' );
+			throw new InvalidArgumentException( 'Id must be 16 lowercase hex characters.' );
 		}
 		if ( ! in_array( $kind, self::ALL_KINDS, true ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind is reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new InvalidArgumentException( sprintf( 'Job: unknown kind "%s".', $kind ) );
+			throw new InvalidArgumentException( sprintf( 'Unknown kind "%s".', $kind ) );
 		}
 		if ( ! in_array( $status, self::ALL_STATUSES, true ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $status is reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new InvalidArgumentException( sprintf( 'Job: unknown status "%s".', $status ) );
+			throw new InvalidArgumentException( sprintf( 'Unknown status "%s".', $status ) );
 		}
 		if ( $created_at < 0 || $updated_at < 0 ) {
-			throw new InvalidArgumentException( 'Job: timestamps must be non-negative.' );
+			throw new InvalidArgumentException( 'Timestamps must be non-negative.' );
 		}
 
 		$this->id         = $id;
@@ -273,7 +273,7 @@ final class Job {
 		if ( ! in_array( $status, self::ALLOWED_TRANSITIONS[ $this->status ] ?? array(), true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Both values are validated STATUS_* constants; exception path, not HTML output.
-				sprintf( 'Job: cannot transition from "%s" to "%s".', $this->status, $status )
+				sprintf( 'Cannot transition from "%s" to "%s".', $this->status, $status )
 			);
 		}
 		$this->status     = $status;
@@ -321,18 +321,18 @@ final class Job {
 		foreach ( array( 'id', 'kind', 'status', 'created_at', 'updated_at' ) as $key ) {
 			if ( ! isset( $data[ $key ] ) ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $key is a literal from the list above; exception path, not HTML output.
-				throw new InvalidArgumentException( sprintf( 'Job: persisted job is missing "%s".', $key ) );
+				throw new InvalidArgumentException( sprintf( 'Persisted job is missing "%s".', $key ) );
 			}
 		}
 		$payload = $data['payload'] ?? array();
 		if ( ! is_array( $payload ) ) {
-			throw new InvalidArgumentException( 'Job: persisted payload must be an array.' );
+			throw new InvalidArgumentException( 'Persisted payload must be an array.' );
 		}
 		if ( ! is_string( $data['id'] ) || ! is_string( $data['kind'] ) || ! is_string( $data['status'] ) ) {
-			throw new InvalidArgumentException( 'Job: persisted id, kind, and status must be strings.' );
+			throw new InvalidArgumentException( 'Persisted id, kind, and status must be strings.' );
 		}
 		if ( ! is_int( $data['created_at'] ) || ! is_int( $data['updated_at'] ) ) {
-			throw new InvalidArgumentException( 'Job: persisted timestamps must be integers.' );
+			throw new InvalidArgumentException( 'Persisted timestamps must be integers.' );
 		}
 
 		return new self( $data['id'], $data['kind'], $data['status'], $payload, $data['created_at'], $data['updated_at'] );

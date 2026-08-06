@@ -201,7 +201,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		} catch ( ManifestTooLargeException $e ) {
 			throw new RuntimeException(
 				sprintf(
-					'SafetyArchiver: a safety archive could not be taken for this site because its file listing (%d entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.',
+					'A safety archive could not be taken for this site because its file listing (%d entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.',
 					count( $entry_plans )
 				),
 				0,
@@ -222,7 +222,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 			@unlink( $path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; surfaced on the CLI, not HTML output.
-				sprintf( 'SafetyArchiver: could not restrict the safety archive %s to owner-only; refusing to proceed with an insecure database backup.', $path )
+				sprintf( 'Could not restrict the safety archive %s to owner-only; refusing to proceed with an insecure database backup.', $path )
 			);
 		}
 
@@ -258,7 +258,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		if ( $free < $estimate ) {
 			throw new RuntimeException(
 				sprintf(
-					'SafetyArchiver: not enough free disk space for a safety archive (need about %d bytes, %d available at %s). Free space, or pass --no-rollback-archive to skip the safety archive.',
+					'Not enough free disk space for a safety archive (need about %d bytes, %d available at %s). Free space, or pass --no-rollback-archive to skip the safety archive.',
 					(int) $estimate,
 					(int) $free,
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.

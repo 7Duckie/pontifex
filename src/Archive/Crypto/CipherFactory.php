@@ -50,7 +50,7 @@ final class CipherFactory {
 		}
 
 		throw new CipherException(
-			'CipherFactory: no AES-256-GCM implementation is available; reading or writing an encrypted archive requires ext-sodium with hardware AES support, or ext-openssl.'
+			'No AES-256-GCM implementation is available; reading or writing an encrypted archive requires ext-sodium with hardware AES support, or ext-openssl.'
 		);
 	}
 

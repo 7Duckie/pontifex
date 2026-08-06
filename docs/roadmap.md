@@ -527,6 +527,66 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
+## v1.1.0 — Verify stops promising what a restore will not honour
+
+Closes the last open finding from the hardening arc. The public API is
+unchanged — no interface, constructor, signature or return type moved — but
+`verify` gains an outcome and `import --dry-run` runs more checks than before,
+so this is a minor rather than a patch.
+
+- **Verify refuses an archive a restore would refuse.** It checked every
+  SHA-256 hash and reported the archive sound; a restore additionally settled
+  four questions verify never asked. An archive engineered to place a symbolic
+  link outside the site has, by construction, perfectly valid hashes, so verify
+  called it sound and the restore then refused the identical bytes. The person
+  misled was the one checking their backups. Verify now runs every preflight
+  that changes nothing.
+- **Refused is a verdict of its own, not a kind of broken.** The two call for
+  opposite actions: broken sends you to delete the file and find another copy,
+  while a refused archive is undamaged and should be kept, not restored, and
+  traced. Pontifex never produces one.
+- **A host that cannot restore is reported, never as the verdict.** A full disk
+  is not a damaged backup, and saying otherwise is the one message capable of
+  talking somebody out of a good backup. A check that reaches no decision at
+  all is reported as neither.
+- **`import --dry-run` is a real rehearsal.** It called `verify` and nothing
+  else, so the flag whose purpose is "tell me whether this would work" ran
+  strictly fewer checks than the operation it claimed to rehearse. It now runs
+  all of them, including the host capability probe that briefly creates and
+  removes a test symbolic link — the one check `verify` cannot make.
+- **The admin Restore preview refuses before taking the safety archive**, not
+  after, saving minutes of work and a second full copy of the site on disk for
+  a refusal that was knowable up front.
+
+See [ADR 0023](./adr/0023-verify-and-restorability.md).
+
+Two further pieces of the same theme — Pontifex saying clearly what it has
+decided — ship alongside it.
+
+- **A failed command gives a verdict, not a stack trace.** `import`, `export`
+  and `rollback` each ended a failure by re-raising it into WordPress's fatal
+  handler, so the operator saw a page of PHP internals and "There has been a
+  critical error on this website". All three now render what went wrong, in
+  which of the three [ADR 0022](./adr/0022-exception-taxonomy.md) categories,
+  and what to do about it — while keeping everything the old handlers did:
+  the log entry, the counters, the transfer history, and the automatic
+  safety-archive recovery.
+- **Messages no longer name Pontifex's own internal classes.** 523 of them
+  began with the class that raised them — "FileWriter: could not create
+  directory" — which is meaningless to anyone outside the project, and which
+  became the headline text of a verify verdict rather than a line buried in a
+  stack trace. The origin moved to the log, which now records the file and line
+  the exception came from: strictly better than a class name, because it names
+  the exact statement.
+
+### What is deliberately deferred
+
+- Verify still does not decode payloads, so it still does not test a
+  passphrase. Matching what mature tools do here would mean verify collecting a
+  passphrase it currently never needs.
+- The host symbolic-link capability probe stays out of verify permanently, not
+  provisionally: it writes, and verify's contract is that it does not.
+
 ## v1.0.3 — Exclusion patterns are kept as you typed them
 
 Closes the last of the findings from the audit that produced v1.0.1 and

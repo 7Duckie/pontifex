@@ -304,29 +304,29 @@ final class EntryHeader {
 	 */
 	public static function for_file( string $path, int $size, int $mode, int $mtime, ?string $media_type, int $size_compressed ): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_file: path must not be empty.' );
+			throw new InvalidArgumentException( 'Path must not be empty.' );
 		}
 		if ( $size < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_file: size %d must be non-negative.', (int) $size )
+				sprintf( 'Size %d must be non-negative.', (int) $size )
 			);
 		}
 		if ( $mode < 0 || $mode > self::MAX_POSIX_MODE ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_file: mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
+				sprintf( 'Mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
 			);
 		}
 		if ( $mtime < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_file: mtime %d must be non-negative.', (int) $mtime )
+				sprintf( 'Mtime %d must be non-negative.', (int) $mtime )
 			);
 		}
 		if ( '' === $media_type ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_file: media_type must not be empty.' );
+			throw new InvalidArgumentException( 'media_type must not be empty.' );
 		}
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_file: size_compressed %d must be non-negative.', (int) $size_compressed )
+				sprintf( 'size_compressed %d must be non-negative.', (int) $size_compressed )
 			);
 		}
 
@@ -360,25 +360,25 @@ final class EntryHeader {
 	public static function for_db_chunk( int $chunk_index, string $table_name, int $statement_count, int $byte_count, int $size_compressed ): self {
 		if ( $chunk_index < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_db_chunk: chunk_index %d must be non-negative.', (int) $chunk_index )
+				sprintf( 'chunk_index %d must be non-negative.', (int) $chunk_index )
 			);
 		}
 		if ( '' === $table_name ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_db_chunk: table_name must not be empty.' );
+			throw new InvalidArgumentException( 'table_name must not be empty.' );
 		}
 		if ( $statement_count < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_db_chunk: statement_count %d must be non-negative.', (int) $statement_count )
+				sprintf( 'statement_count %d must be non-negative.', (int) $statement_count )
 			);
 		}
 		if ( $byte_count < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_db_chunk: byte_count %d must be non-negative.', (int) $byte_count )
+				sprintf( 'byte_count %d must be non-negative.', (int) $byte_count )
 			);
 		}
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_db_chunk: size_compressed %d must be non-negative.', (int) $size_compressed )
+				sprintf( 'size_compressed %d must be non-negative.', (int) $size_compressed )
 			);
 		}
 
@@ -413,16 +413,16 @@ final class EntryHeader {
 	 */
 	public static function for_directory( string $path, int $mode, int $size_compressed ): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_directory: path must not be empty.' );
+			throw new InvalidArgumentException( 'Path must not be empty.' );
 		}
 		if ( $mode < 0 || $mode > self::MAX_POSIX_MODE ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_directory: mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
+				sprintf( 'Mode %d is outside the valid POSIX range (0 to 4095).', (int) $mode )
 			);
 		}
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_directory: size_compressed %d must be non-negative.', (int) $size_compressed )
+				sprintf( 'size_compressed %d must be non-negative.', (int) $size_compressed )
 			);
 		}
 
@@ -453,14 +453,14 @@ final class EntryHeader {
 	 */
 	public static function for_symlink( string $path, string $target, int $size_compressed ): self {
 		if ( '' === $path ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_symlink: path must not be empty.' );
+			throw new InvalidArgumentException( 'Path must not be empty.' );
 		}
 		if ( '' === $target ) {
-			throw new InvalidArgumentException( 'EntryHeader::for_symlink: target must not be empty.' );
+			throw new InvalidArgumentException( 'Target must not be empty.' );
 		}
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::for_symlink: size_compressed %d must be non-negative.', (int) $size_compressed )
+				sprintf( 'size_compressed %d must be non-negative.', (int) $size_compressed )
 			);
 		}
 
@@ -625,7 +625,7 @@ final class EntryHeader {
 	public function with_size_compressed( int $size_compressed ): self {
 		if ( $size_compressed < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::with_size_compressed: size_compressed %d must be non-negative.', (int) $size_compressed )
+				sprintf( 'size_compressed %d must be non-negative.', (int) $size_compressed )
 			);
 		}
 
@@ -651,12 +651,12 @@ final class EntryHeader {
 		if ( ! $this->is_file() ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->kind is a validated KIND_* constant; exception path, not HTML output.
-				sprintf( 'EntryHeader::with_size: size applies to file entries only; this is a "%s" entry.', $this->kind )
+				sprintf( 'Size applies to file entries only; this is a "%s" entry.', $this->kind )
 			);
 		}
 		if ( $size < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryHeader::with_size: size %d must be non-negative.', (int) $size )
+				sprintf( 'Size %d must be non-negative.', (int) $size )
 			);
 		}
 
@@ -683,11 +683,11 @@ final class EntryHeader {
 		if ( ! $this->is_file() ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->kind is a validated KIND_* constant; exception path, not HTML output.
-				sprintf( 'EntryHeader::with_media_type: media_type applies to file entries only; this is a "%s" entry.', $this->kind )
+				sprintf( 'media_type applies to file entries only; this is a "%s" entry.', $this->kind )
 			);
 		}
 		if ( '' === $media_type ) {
-			throw new InvalidArgumentException( 'EntryHeader::with_media_type: media_type must not be empty.' );
+			throw new InvalidArgumentException( 'media_type must not be empty.' );
 		}
 
 		$copy             = clone $this;
@@ -776,7 +776,7 @@ final class EntryHeader {
 	 */
 	private function refuse_unserialisable_file(): void {
 		if ( self::KIND_FILE === $this->kind && null === $this->media_type ) {
-			throw new InvalidArgumentException( 'EntryHeader: a file entry must have its media_type determined before serialisation.' );
+			throw new InvalidArgumentException( 'A file entry must have its media_type determined before serialisation.' );
 		}
 	}
 
@@ -795,7 +795,7 @@ final class EntryHeader {
 		if ( strlen( $bytes ) < self::LENGTH_PREFIX_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryHeader::from_bytes: input must be at least %d bytes, got %d.',
+					'Input must be at least %d bytes, got %d.',
 					(int) self::LENGTH_PREFIX_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -807,7 +807,7 @@ final class EntryHeader {
 		if ( $length > self::MAX_PAYLOAD_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryHeader::from_bytes: declared payload size %d exceeds maximum %d bytes.',
+					'Declared payload size %d exceeds maximum %d bytes.',
 					(int) $length,
 					(int) self::MAX_PAYLOAD_SIZE
 				)
@@ -818,7 +818,7 @@ final class EntryHeader {
 		if ( strlen( $bytes ) !== $expected_total ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryHeader::from_bytes: expected exactly %d bytes (4 length + %d payload), got %d.',
+					'Expected exactly %d bytes (4 length + %d payload), got %d.',
 					(int) $expected_total,
 					(int) $length,
 					(int) strlen( $bytes )
@@ -899,15 +899,15 @@ final class EntryHeader {
 	 */
 	public static function from_canonical_data( array $data ): self {
 		if ( ! array_key_exists( 'kind', $data ) ) {
-			throw new InvalidArgumentException( 'EntryHeader: data is missing required field "kind".' );
+			throw new InvalidArgumentException( 'Data is missing required field "kind".' );
 		}
 		if ( ! is_string( $data['kind'] ) ) {
-			throw new InvalidArgumentException( 'EntryHeader: field "kind" must be a string.' );
+			throw new InvalidArgumentException( 'Field "kind" must be a string.' );
 		}
 		if ( ! in_array( $data['kind'], self::ALL_KINDS, true ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- User-supplied value embedded in exception message for diagnostic context; exception path, not HTML output.
-				sprintf( 'EntryHeader: unknown kind "%s"; expected one of file, db_chunk, directory, symlink.', $data['kind'] )
+				sprintf( 'Unknown kind "%s"; expected one of file, db_chunk, directory, symlink.', $data['kind'] )
 			);
 		}
 
@@ -922,7 +922,7 @@ final class EntryHeader {
 				return self::parse_symlink_payload( $data );
 			default:
 				// Should be unreachable given the in_array guard above.
-				throw new InvalidArgumentException( 'EntryHeader: kind dispatch fell through.' );
+				throw new InvalidArgumentException( 'Kind dispatch fell through.' );
 		}
 	}
 
@@ -960,12 +960,12 @@ final class EntryHeader {
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-				'EntryHeader: JSON payload is malformed: ' . $e->getMessage()
+				'JSON payload is malformed: ' . $e->getMessage()
 			);
 		}
 
 		if ( ! is_array( $data ) ) {
-			throw new InvalidArgumentException( 'EntryHeader: JSON payload must decode to an object.' );
+			throw new InvalidArgumentException( 'JSON payload must decode to an object.' );
 		}
 
 		return self::from_canonical_data( $data );
@@ -1069,13 +1069,13 @@ final class EntryHeader {
 		if ( ! array_key_exists( $field, $data ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is supplied by trusted callers in this class; exception message, not HTML output.
-				sprintf( 'EntryHeader: JSON payload is missing required field "%s".', $field )
+				sprintf( 'JSON payload is missing required field "%s".', $field )
 			);
 		}
 		if ( ! is_string( $data[ $field ] ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is supplied by trusted callers in this class; exception message, not HTML output.
-				sprintf( 'EntryHeader: field "%s" must be a string.', $field )
+				sprintf( 'Field "%s" must be a string.', $field )
 			);
 		}
 	}
@@ -1095,13 +1095,13 @@ final class EntryHeader {
 		if ( ! array_key_exists( $field, $data ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is supplied by trusted callers in this class; exception message, not HTML output.
-				sprintf( 'EntryHeader: JSON payload is missing required field "%s".', $field )
+				sprintf( 'JSON payload is missing required field "%s".', $field )
 			);
 		}
 		if ( ! is_int( $data[ $field ] ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $field is supplied by trusted callers in this class; exception message, not HTML output.
-				sprintf( 'EntryHeader: field "%s" must be an integer.', $field )
+				sprintf( 'Field "%s" must be an integer.', $field )
 			);
 		}
 	}

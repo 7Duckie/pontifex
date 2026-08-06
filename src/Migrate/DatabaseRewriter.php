@@ -127,7 +127,7 @@ final class DatabaseRewriter {
 		if ( $batch_size <= 0 ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $batch_size is an integer reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'DatabaseRewriter: batch_size %d must be positive.', $batch_size )
+				sprintf( 'batch_size %d must be positive.', $batch_size )
 			);
 		}
 		$this->db         = $db;
@@ -179,7 +179,7 @@ final class DatabaseRewriter {
 	 */
 	private function walk( string $search, string $replace, bool $apply ): RewriteReport {
 		if ( '' === $search ) {
-			throw new InvalidArgumentException( 'DatabaseRewriter: search must not be empty.' );
+			throw new InvalidArgumentException( 'Search must not be empty.' );
 		}
 
 		$tables_scanned = 0;
@@ -316,7 +316,7 @@ final class DatabaseRewriter {
 		if ( ! is_int( $primary_key_value ) && ! is_string( $primary_key_value ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table and $primary_key are database-origin identifiers reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'DatabaseRewriter: row in "%s" has no scalar value for primary key "%s"; refusing to update without a key.', $table, $primary_key )
+				sprintf( 'Row in "%s" has no scalar value for primary key "%s"; refusing to update without a key.', $table, $primary_key )
 			);
 		}
 

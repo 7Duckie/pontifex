@@ -66,7 +66,7 @@ final class RealWordPressContext implements WordPressContext {
 	public function wpdb_instance(): wpdb {
 		global $wpdb;
 		if ( ! $wpdb instanceof wpdb ) {
-			throw new RuntimeException( 'RealWordPressContext: $wpdb global is not available; is WordPress loaded?' );
+			throw new RuntimeException( '$wpdb global is not available; is WordPress loaded?' );
 		}
 		return $wpdb;
 	}

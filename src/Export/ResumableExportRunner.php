@@ -143,7 +143,7 @@ final class ResumableExportRunner {
 	 */
 	public function start( ExportOptions $options, string $scan_root, string $path_prefix, array $exclusions, int $now ): Job {
 		if ( null !== $options->encryption() ) {
-			throw new RuntimeException( 'ResumableExportRunner: an encrypted export cannot be resumable — the derived key exists for one request and is never persisted. Run it without --resumable, or without --passphrase.' );
+			throw new RuntimeException( 'An encrypted export cannot be resumable — the derived key exists for one request and is never persisted. Run it without --resumable, or without --passphrase.' );
 		}
 
 		$payload = array(
@@ -183,11 +183,11 @@ final class ResumableExportRunner {
 		};
 
 		if ( Job::KIND_EXPORT !== $job->kind() || ! $job->is_active() ) {
-			throw new RuntimeException( 'ResumableExportRunner: tick() needs an active export job.' );
+			throw new RuntimeException( 'tick() needs an active export job.' );
 		}
 		$payload = $job->payload();
 		if ( (bool) ( $payload['signed'] ?? false ) !== ( null !== $signing ) ) {
-			throw new RuntimeException( 'ResumableExportRunner: the signing inputs must match how the job was started (a signed job needs its key on every tick; an unsigned job takes none).' );
+			throw new RuntimeException( 'The signing inputs must match how the job was started (a signed job needs its key on every tick; an unsigned job takes none).' );
 		}
 
 		// A job killed mid-tick is still marked running on disk; re-entering the
@@ -406,7 +406,7 @@ final class ResumableExportRunner {
 
 		throw new ManifestTooLargeException(
 			sprintf(
-				'ResumableExportRunner: this backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. This backup cannot be continued as configured — narrow it with narrower exclusion patterns (the Backup screen\'s editable exclusions, or --exclude/--exclude-table on the CLI), or drop the file listing entirely with --db-only, then start again.',
+				'This backup\'s %1$d entries would produce a manifest of roughly %2$d bytes, larger than the %3$d bytes this installation can read back. This backup cannot be continued as configured — narrow it with narrower exclusion patterns (the Backup screen\'s editable exclusions, or --exclude/--exclude-table on the CLI), or drop the file listing entirely with --db-only, then start again.',
 				(int) $total,
 				(int) $projected,
 				(int) ArchiveManifest::MAX_PAYLOAD_SIZE
@@ -467,7 +467,7 @@ final class ResumableExportRunner {
 			if ( $size > $end ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftruncate -- Cutting an unlogged tail off the partial archive per the resume contract; WP_Filesystem has no streaming API.
 				if ( ! ftruncate( $destination, $end ) ) {
-					throw new RuntimeException( 'ResumableExportRunner: could not truncate the partial archive to its verified length.' );
+					throw new RuntimeException( 'Could not truncate the partial archive to its verified length.' );
 				}
 			}
 			// Only rewrite the log when entries were actually dropped above.
@@ -492,7 +492,7 @@ final class ResumableExportRunner {
 		// timestamps, so the whole temp restarts from zero.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftruncate -- Resetting an unverifiable partial archive per the resume contract; WP_Filesystem has no streaming API.
 		if ( ! ftruncate( $destination, 0 ) ) {
-			throw new RuntimeException( 'ResumableExportRunner: could not reset the unverifiable partial archive.' );
+			throw new RuntimeException( 'Could not reset the unverifiable partial archive.' );
 		}
 		$log->truncate_to( 0 );
 		return array(
@@ -547,7 +547,7 @@ final class ResumableExportRunner {
 		if ( $scanned_id !== $logged_id ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Paths are reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'ResumableExportRunner: the source changed shape since this export started — position %d was "%s" and is now "%s", so every later entry would shift. Delete the partial export and start again.', (int) $index, $logged_id, $scanned_id )
+				sprintf( 'The source changed shape since this export started — position %d was "%s" and is now "%s", so every later entry would shift. Delete the partial export and start again.', (int) $index, $logged_id, $scanned_id )
 			);
 		}
 	}
@@ -584,7 +584,7 @@ final class ResumableExportRunner {
 		if ( ! $fresh && ! is_file( $temp ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'ResumableExportRunner: the partial archive is missing (%s); this export cannot be resumed — start it again.', $temp )
+				sprintf( 'The partial archive is missing (%s); this export cannot be resumed — start it again.', $temp )
 			);
 		}
 		$mode = $fresh && ! is_file( $temp ) ? 'w+b' : 'r+b';
@@ -593,7 +593,7 @@ final class ResumableExportRunner {
 		if ( false === $destination ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'ResumableExportRunner: could not open the partial archive: %s', $temp )
+				sprintf( 'Could not open the partial archive: %s', $temp )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Appends happen at verified offsets; start at the end for safety.
@@ -642,7 +642,7 @@ final class ResumableExportRunner {
 		if ( ! @rename( $temp, $output ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The path is plugin-derived; exception path, not HTML output.
-				sprintf( 'ResumableExportRunner: could not move the completed archive into place: %s', $output )
+				sprintf( 'Could not move the completed archive into place: %s', $output )
 			);
 		}
 	}

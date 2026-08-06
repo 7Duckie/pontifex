@@ -1772,7 +1772,7 @@ final class DatabaseWriterTest extends TestCase {
 			// rethrow must run before the RuntimeException catch below.
 			throw $bug;
 		} catch ( RuntimeException $refusal ) {
-			self::assertStringContainsString( 'could not read the storage facts', $refusal->getMessage() );
+			self::assertStringContainsString( 'Could not read the storage facts', $refusal->getMessage() );
 		}
 	}
 

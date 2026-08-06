@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Pontifex\Restore;
 
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\HostCannotComply;
 
 use Closure;
@@ -266,12 +267,12 @@ final class FileWriter {
 			};
 
 		if ( '' === $destination_root ) {
-			throw new InvalidArgumentException( 'FileWriter: destination_root must be non-empty.' );
+			throw new InvalidArgumentException( 'destination_root must be non-empty.' );
 		}
 		if ( ! self::is_absolute_path( $destination_root ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $destination_root is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: destination_root "%s" must be an absolute path.', $destination_root )
+				sprintf( 'destination_root "%s" must be an absolute path.', $destination_root )
 			);
 		}
 
@@ -280,7 +281,7 @@ final class FileWriter {
 			if ( ! @mkdir( $destination_root, self::PARENT_DIR_MODE, true ) && ! is_dir( $destination_root ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $destination_root is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileWriter: could not create destination_root "%s".', $destination_root )
+					sprintf( 'Could not create destination_root "%s".', $destination_root )
 				);
 			}
 		}
@@ -290,7 +291,7 @@ final class FileWriter {
 		if ( false === $real ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $destination_root is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not resolve real path of destination_root "%s".', $destination_root )
+				sprintf( 'Could not resolve real path of destination_root "%s".', $destination_root )
 			);
 		}
 		$this->destination_root = rtrim( $real, '/\\' );
@@ -324,7 +325,7 @@ final class FileWriter {
 		$header = $result->header();
 
 		if ( $header->is_db_chunk() ) {
-			throw new InvalidArgumentException( 'FileWriter: db_chunk entries must be written through DatabaseWriter, not FileWriter.' );
+			throw new InvalidArgumentException( 'db_chunk entries must be written through DatabaseWriter, not FileWriter.' );
 		}
 
 		$relative_path = (string) $header->path();
@@ -354,7 +355,7 @@ final class FileWriter {
 
 		throw new RuntimeException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $header->kind() is a validated KIND_* constant; reported verbatim for diagnostic context; exception path, not HTML output.
-			sprintf( 'FileWriter: unsupported entry kind "%s".', $header->kind() )
+			sprintf( 'Unsupported entry kind "%s".', $header->kind() )
 		);
 	}
 
@@ -458,7 +459,7 @@ final class FileWriter {
 		if ( $free < $needed ) {
 			throw new HostCannotComply(
 				sprintf(
-					'FileWriter: the restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
+					'The restore was stopped before changing anything, because there is not enough free disk space at "%s". It needs about %d MB free, and only %d MB is available. Free up some space and try again.',
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->destination_root is plugin-derived, not web output; reported verbatim for diagnostic context.
 					$this->destination_root,
 					(int) ceil( $needed / self::BYTES_PER_MEGABYTE ),
@@ -552,7 +553,7 @@ final class FileWriter {
 
 			throw new HostCannotComply(
 				sprintf(
-					'FileWriter: this archive contains %d symbolic link(s), but this host could not create a test symlink in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
+					'This backup contains %d symbolic link(s), but this host could not create a test link in "%s", so restoring it would overwrite files and then fail partway through, leaving neither the old site nor the archive\'s. Nothing has been changed beyond a test symlink this preflight itself created and removed again in that same directory. This is commonly caused by "symlink" being listed in disable_functions, a filesystem that cannot hold symbolic links, or an open_basedir/permissions restriction on that directory. Restore this archive on a host that can create symbolic links there.',
 					count( $declared_links ),
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $directory is plugin-derived (built from the destination root and the archive's own already-normalised declared paths), not web output; reported verbatim for diagnostic context.
 					$directory
@@ -875,7 +876,7 @@ final class FileWriter {
 	 *
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
 	 * @return void
-	 * @throws RuntimeException If any declared link's target resolves somewhere this restore will not allow.
+	 * @throws ArchiveNotTrustworthy If any declared link's target resolves somewhere this restore will not allow.
 	 */
 	public function assert_symlink_targets_confined( array $declared_links ): void {
 		if ( $this->allow_unsafe_symlinks ) {
@@ -955,17 +956,17 @@ final class FileWriter {
 	 * @param array<array-key, string>      $exact       Every declared link, keyed by its exact normalised path.
 	 * @param array<array-key, string|null> $folded      The same, keyed by lower-cased path; null marks a key whose spellings disagree.
 	 * @return void
-	 * @throws RuntimeException If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
+	 * @throws ArchiveNotTrustworthy If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
 	 */
 	private function assert_symlink_target_confined( string $link_path, string $raw_target, array $exact, array $folded ): void {
 		if ( self::is_absolute_path( $raw_target ) ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" is an absolute path, so it is not confined to this site at all. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" is an absolute path, so it is not confined to this site at all. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$root_components = self::path_components( $this->destination_root );
@@ -996,13 +997,13 @@ final class FileWriter {
 			++$hops;
 			if ( $hops > self::MAX_SYMLINK_HOPS ) {
 				$message = sprintf(
-					'FileWriter: refusing symlink "%s": resolving its target "%s" passed through more than %d symlinks, so the archive contains a symlink loop or a chain no filesystem would follow.',
+					'Refusing the symbolic link "%s": resolving its target "%s" passed through more than %d links, so this backup contains a loop or a chain no filesystem would follow.',
 					$link_path,
 					$raw_target,
 					self::MAX_SYMLINK_HOPS
 				);
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
-				throw new RuntimeException( $message );
+				throw new ArchiveNotTrustworthy( $message );
 			}
 
 			// An absolute target restarts resolution at the filesystem root, which
@@ -1045,7 +1046,7 @@ final class FileWriter {
 	 * @param string                        $link_path       The link being judged, for the diagnostic message only.
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
-	 * @throws RuntimeException If two declared spellings of one path disagree, or an on-disk link cannot be read.
+	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1061,13 +1062,13 @@ final class FileWriter {
 			if ( array_key_exists( $folded_key, $folded ) ) {
 				if ( null === $folded[ $folded_key ] ) {
 					$message = sprintf(
-						'FileWriter: refusing symlink "%s": resolving its target "%s" reaches "%s", which the archive declares more than once with different targets, differing only in letter case. Which one a destination filesystem would keep cannot be decided, so this archive is refused.',
+						'Refusing the symbolic link "%s": resolving its target "%s" reaches "%s", which this backup declares more than once with different targets, differing only in letter case. Which one a filesystem would keep cannot be decided, so the backup is refused.',
 						$link_path,
 						$raw_target,
 						$relative
 					);
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link paths and targets for diagnostic context; exception path, not HTML output.
-					throw new RuntimeException( $message );
+					throw new ArchiveNotTrustworthy( $message );
 				}
 				return $folded[ $folded_key ];
 			}
@@ -1085,13 +1086,13 @@ final class FileWriter {
 			// is a component whose destination is unknown, and an unknown here is
 			// indistinguishable from an escape.
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": resolving its target "%s" reaches the existing symlink "%s", whose own target could not be read, so where this link would point cannot be established.',
+				'Refusing the symbolic link "%s": resolving its target "%s" reaches the existing link "%s", whose own target could not be read, so where this link would point cannot be established.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		return $on_disk_target;
@@ -1133,7 +1134,7 @@ final class FileWriter {
 	 * @param array<int, string> $resolved        Where the target finally landed, as absolute components.
 	 * @param array<int, string> $root_components The destination root, as components.
 	 * @return void
-	 * @throws RuntimeException If the resolved target is not a strict descendant of the root, or is one of the named locations.
+	 * @throws ArchiveNotTrustworthy If the resolved target is not a strict descendant of the root, or is one of the named locations.
 	 */
 	private function assert_resolved_target_confined( string $link_path, string $raw_target, array $resolved, array $root_components ): void {
 		$root_depth = count( $root_components );
@@ -1141,14 +1142,14 @@ final class FileWriter {
 
 		if ( count( $resolved ) <= $root_depth || array_slice( $resolved, 0, $root_depth ) !== $root_components ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", which is not inside the restore root "%s". Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", which is not inside the site at "%s". Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute,
 				$this->destination_root
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus plugin-derived paths, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		foreach ( $this->wp_config_paths() as $wp_config_path ) {
@@ -1156,25 +1157,25 @@ final class FileWriter {
 				continue;
 			}
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", this site\'s own wp-config.php, which holds the database password and the authentication salts. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", this site\'s own wp-config.php, which holds the database password and the authentication salts. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		$relative = implode( '/', array_slice( $resolved, $root_depth ) );
 		if ( self::is_pontifex_working_path( $relative, $this->destination_is_case_sensitive() ) ) {
 			$message = sprintf(
-				'FileWriter: refusing symlink "%s": its target "%s" resolves to "%s", inside Pontifex\'s own working directory, where this site\'s stored backups live. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
+				'Refusing the symbolic link "%s": its target "%s" resolves to "%s", inside Pontifex\'s own working directory, where this site\'s stored backups live. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
 				$raw_target,
 				$absolute
 			);
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( $message );
+			throw new ArchiveNotTrustworthy( $message );
 		}
 	}
 
@@ -1322,15 +1323,15 @@ final class FileWriter {
 	 */
 	private function normalise_entry_path( string $relative_path ): string {
 		if ( '' === $relative_path ) {
-			throw new InvalidArgumentException( 'FileWriter: entry path must be non-empty.' );
+			throw new InvalidArgumentException( 'Entry path must be non-empty.' );
 		}
 		if ( false !== strpos( $relative_path, "\0" ) ) {
-			throw new InvalidArgumentException( 'FileWriter: entry path contains a null byte.' );
+			throw new InvalidArgumentException( 'Entry path contains a null byte.' );
 		}
 		if ( self::is_absolute_path( $relative_path ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: entry path "%s" must be relative, not absolute.', $relative_path )
+				sprintf( 'Entry path "%s" must be relative, not absolute.', $relative_path )
 			);
 		}
 
@@ -1339,7 +1340,7 @@ final class FileWriter {
 			if ( '..' === $segment ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileWriter: normalise_entry_path refuses entry path "%s": it contains a parent-directory segment.', $relative_path )
+					sprintf( 'Refusing the entry path "%s": it contains a parent-directory segment.', $relative_path )
 				);
 			}
 		}
@@ -1356,7 +1357,7 @@ final class FileWriter {
 		if ( '' === $normalised ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: entry path "%s" normalises to an empty path (e.g. ".", "./", or a run of such segments) and is refused.', $relative_path )
+				sprintf( 'Entry path "%s" normalises to an empty path (e.g. ".", "./", or a run of such segments) and is refused.', $relative_path )
 			);
 		}
 
@@ -1390,7 +1391,7 @@ final class FileWriter {
 		}
 		throw new InvalidArgumentException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path and the prefix are reported verbatim for diagnostic context; exception path, not HTML output.
-			sprintf( 'FileWriter: entry path "%s" is outside the permitted "%s" tree and is refused by this content-only restore.', $relative_path, $this->required_prefix )
+			sprintf( 'Entry path "%s" is outside the permitted "%s" tree and is refused by this content-only restore.', $relative_path, $this->required_prefix )
 		);
 	}
 
@@ -1425,7 +1426,7 @@ final class FileWriter {
 		}
 		throw new InvalidArgumentException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-			sprintf( 'FileWriter: entry path "%s" targets Pontifex\'s own working directory and is refused; no legitimate archive ever contains one.', $relative_path )
+			sprintf( 'Entry path "%s" targets Pontifex\'s own working directory and is refused; no legitimate archive ever contains one.', $relative_path )
 		);
 	}
 
@@ -1654,15 +1655,15 @@ final class FileWriter {
 	 */
 	private function resolve_safe_path( string $relative_path ): string {
 		if ( '' === $relative_path ) {
-			throw new InvalidArgumentException( 'FileWriter: entry path must be non-empty.' );
+			throw new InvalidArgumentException( 'Entry path must be non-empty.' );
 		}
 		if ( false !== strpos( $relative_path, "\0" ) ) {
-			throw new InvalidArgumentException( 'FileWriter: entry path contains a null byte.' );
+			throw new InvalidArgumentException( 'Entry path contains a null byte.' );
 		}
 		if ( self::is_absolute_path( $relative_path ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: entry path "%s" must be relative, not absolute.', $relative_path )
+				sprintf( 'Entry path "%s" must be relative, not absolute.', $relative_path )
 			);
 		}
 
@@ -1671,7 +1672,7 @@ final class FileWriter {
 			if ( '..' === $segment ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileWriter: entry path "%s" contains a parent-directory segment.', $relative_path )
+					sprintf( 'Entry path "%s" contains a parent-directory segment.', $relative_path )
 				);
 			}
 		}
@@ -1706,7 +1707,7 @@ final class FileWriter {
 			if ( is_link( $current ) ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $relative_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileWriter: entry path "%s" descends through a symlink and is refused.', $relative_path )
+					sprintf( 'Entry path "%s" descends through a symlink and is refused.', $relative_path )
 				);
 			}
 		}
@@ -1749,7 +1750,7 @@ final class FileWriter {
 		if ( ! @mkdir( $parent, self::PARENT_DIR_MODE, true ) && ! is_dir( $parent ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $parent is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not create parent directory "%s".', $parent )
+				sprintf( 'Could not create parent directory "%s".', $parent )
 			);
 		}
 	}
@@ -1794,7 +1795,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+				sprintf( 'Could not write file "%s".', $target_path )
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
@@ -1854,7 +1855,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not chmod file "%s".', $target_path )
+				sprintf( 'Could not chmod file "%s".', $target_path )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem cannot preserve mtime.
@@ -1862,7 +1863,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not set mtime on file "%s".', $target_path )
+				sprintf( 'Could not set mtime on file "%s".', $target_path )
 			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Atomically moving the completed file into place (a same-directory move); WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
@@ -1870,7 +1871,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not move file into place at "%s".', $target_path )
+				sprintf( 'Could not move file into place at "%s".', $target_path )
 			);
 		}
 	}
@@ -1901,7 +1902,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+				sprintf( 'Could not write file "%s".', $target_path )
 			);
 		}
 		$copied = stream_copy_to_stream( $payload, $destination );
@@ -1913,7 +1914,7 @@ final class FileWriter {
 			$this->discard_temp( $temp_path );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not write file "%s".', $target_path )
+				sprintf( 'Could not write file "%s".', $target_path )
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
@@ -1964,7 +1965,7 @@ final class FileWriter {
 			if ( ! @mkdir( $target_path, $working_mode, true ) && ! is_dir( $target_path ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileWriter: could not create directory "%s".', $target_path )
+					sprintf( 'Could not create directory "%s".', $target_path )
 				);
 			}
 		}
@@ -1973,7 +1974,7 @@ final class FileWriter {
 		if ( ! @chmod( $target_path, $working_mode ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not chmod directory "%s".', $target_path )
+				sprintf( 'Could not chmod directory "%s".', $target_path )
 			);
 		}
 
@@ -2043,14 +2044,14 @@ final class FileWriter {
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: refusing symlink "%s" whose target "%s" escapes the restore root. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
+				sprintf( 'Refusing the symbolic link "%s" whose target "%s" escapes the site. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )
 			);
 		}
 
 		if ( ! function_exists( 'symlink' ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not create symlink "%s" -> "%s": symlink() is not available on this host, commonly because it is listed in disable_functions.', $target_path, $link_target )
+				sprintf( 'Could not create symlink "%s" -> "%s": symlink() is not available on this host, commonly because it is listed in disable_functions.', $target_path, $link_target )
 			);
 		}
 
@@ -2063,7 +2064,7 @@ final class FileWriter {
 		if ( ! @symlink( $link_target, $target_path ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileWriter: could not create symlink "%s" -> "%s".', $target_path, $link_target )
+				sprintf( 'Could not create symlink "%s" -> "%s".', $target_path, $link_target )
 			);
 		}
 	}

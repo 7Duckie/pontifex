@@ -97,10 +97,10 @@ final class Schedule {
 	public function __construct( bool $enabled, string $frequency, int $hour, int $retention, array $exclusions = array() ) {
 		if ( ! in_array( $frequency, self::ALL_FREQUENCIES, true ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $frequency is reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new InvalidArgumentException( sprintf( 'Schedule: unknown frequency "%s".', $frequency ) );
+			throw new InvalidArgumentException( sprintf( 'Unknown frequency "%s".', $frequency ) );
 		}
 		if ( $hour < 0 || $hour > 23 ) {
-			throw new InvalidArgumentException( sprintf( 'Schedule: hour %d must be between 0 and 23.', (int) $hour ) );
+			throw new InvalidArgumentException( sprintf( 'Hour %d must be between 0 and 23.', (int) $hour ) );
 		}
 
 		$this->enabled    = $enabled;

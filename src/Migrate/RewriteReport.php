@@ -107,13 +107,13 @@ final class RewriteReport {
 			if ( $value < 0 ) {
 				throw new InvalidArgumentException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal validation message; $name is a known counter key and $value an integer, reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'RewriteReport: %s %d must be non-negative.', $name, $value )
+					sprintf( '%s %d must be non-negative.', $name, $value )
 				);
 			}
 		}
 		foreach ( $skipped_tables as $table ) {
 			if ( '' === $table ) {
-				throw new InvalidArgumentException( 'RewriteReport: skipped_tables must not contain an empty name.' );
+				throw new InvalidArgumentException( 'skipped_tables must not contain an empty name.' );
 			}
 		}
 

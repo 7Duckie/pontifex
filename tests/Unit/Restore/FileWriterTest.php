@@ -576,7 +576,7 @@ final class FileWriterTest extends TestCase {
 		file_put_contents( $this->fixture_root . '/conflict', 'i am a file, not a directory' );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'could not create directory' );
+		$this->expectExceptionMessage( 'Could not create directory' );
 
 		$writer->write_entry( self::directory_result( 'conflict', 0o755 ) );
 	}
@@ -628,7 +628,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'escapes the restore root' );
+		$this->expectExceptionMessage( 'escapes the site' );
 
 		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
 	}
@@ -642,7 +642,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'escapes the restore root' );
+		$this->expectExceptionMessage( 'escapes the site' );
 
 		$writer->write_entry( self::symlink_result( 'uploads/link', '../../../../etc/passwd' ) );
 	}
@@ -882,7 +882,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined(
 			array(
@@ -908,7 +908,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'passed through more than 40 symlinks' );
+		$this->expectExceptionMessage( 'passed through more than 40 links' );
 
 		$writer->assert_symlink_targets_confined(
 			array(
@@ -931,7 +931,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../..' ) );
 	}
@@ -945,7 +945,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'is not inside the restore root' );
+		$this->expectExceptionMessage( 'is not inside the site at' );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../../../etc/passwd' ) );
 	}
@@ -1279,7 +1279,7 @@ final class FileWriterTest extends TestCase {
 		);
 
 		$this->expectException( InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::symlink_result( 'wp-content/uploads/../hop', '..' ) );
 	}
@@ -1604,7 +1604,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
 
 		$this->expectException( InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::file_result( 'wp-content/pontifex/../pontifex/x', 'forged' ) );
 	}
@@ -1618,7 +1618,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root, false, null );
 
 		$this->expectException( InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::file_result( 'wp-content/pontifex/../pontifex/x', 'forged' ) );
 	}
@@ -1831,7 +1831,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root, false, null );
 
 		$this->expectException( InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::file_result( 'wp-content/uploads/../pontifex/evil.wpmig', 'forged' ) );
 	}
@@ -1849,7 +1849,7 @@ final class FileWriterTest extends TestCase {
 		$writer = new FileWriter( $this->fixture_root, false, null );
 
 		$this->expectException( InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'normalise_entry_path refuses entry path' );
+		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::file_result( 'wp-content/uploads/../../wp-config.php', 'malicious' ) );
 	}
@@ -2611,7 +2611,7 @@ final class FileWriterTest extends TestCase {
 		);
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'this host could not create a test symlink' );
+		$this->expectExceptionMessage( 'this host could not create a test link' );
 
 		$writer->assert_symlinks_creatable( array( 'wp-content/uploads/link' => 'target.txt' ) );
 	}

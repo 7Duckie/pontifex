@@ -136,7 +136,7 @@ final class DatabaseScanner {
 	) {
 		if ( $chunk_size_bytes <= 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'DatabaseScanner: chunk_size_bytes %d must be positive.', (int) $chunk_size_bytes )
+				sprintf( 'chunk_size_bytes %d must be positive.', (int) $chunk_size_bytes )
 			);
 		}
 		$this->db               = $db;
@@ -270,7 +270,7 @@ final class DatabaseScanner {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file; WP_Filesystem cannot open it.
 		$stream = fopen( 'php://memory', 'r+b' );
 		if ( false === $stream ) {
-			throw new RuntimeException( 'DatabaseScanner: could not open php://memory for chunk SQL.' );
+			throw new RuntimeException( 'Could not open php://memory for chunk SQL.' );
 		}
 		if ( '' !== $sql ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing to in-process php://memory stream, not a filesystem path.

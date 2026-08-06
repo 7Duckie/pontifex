@@ -14,6 +14,7 @@ use DateTimeZone;
 use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Crypto\SigningKeypair;
 use Pontifex\Archive\Format\ArchiveSignature;
@@ -29,6 +30,9 @@ use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
@@ -48,8 +52,9 @@ use RuntimeException;
  * __invoke test. The branches that genuinely earn a surgical unit test are:
  *
  *  1. The --yes short-circuit: confirm() is never called when --yes is set.
- *  2. The try-finally exception path: a restore failure closes the handle and
- *     propagates unswallowed.
+ *  2. The try-finally exception path: a restore failure closes the handle,
+ *     releases the lock, reports a verdict naming which kind of refusal it was
+ *     (ADR 0022), and halts non-zero rather than propagating.
  *  3. The --dry-run branch: it calls verify() (not restore()), writes no
  *     counters, and takes no safety archive.
  *  4. The safety archive (v0.2.0): a real import takes one before restoring;
@@ -194,17 +199,24 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * An exception thrown by RestoreRunner::restore must propagate out of __invoke.
+	 * A restore failure halts non-zero instead of escaping as an uncaught exception.
+	 *
+	 * It used to be re-thrown out of __invoke, where WordPress's fatal handler caught
+	 * it and printed a raw stack trace followed by "There has been a critical error on
+	 * this website" — the sentence that says Pontifex is broken when the truth is
+	 * usually that the archive is. The exit code was already non-zero and stays so;
+	 * what changes is that a human can now read why it stopped.
 	 *
 	 * @return void
 	 */
-	public function test_invoke_propagates_restore_exception(): void {
+	public function test_invoke_halts_instead_of_propagating_a_restore_failure(): void {
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
 		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$command = new ImportCommand(
 			$this->build_environment_mock(),
@@ -215,10 +227,12 @@ final class InvokeBranchesTest extends TestCase {
 			$this->build_safety_archiver_succeeding()
 		);
 
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'simulated restore failure' );
-
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertFileExists(
+			$this->temp_archive_path,
+			'ImportCommand should swallow the failure and run to completion (halt is mocked, so execution continues).'
+		);
 	}
 
 	/**
@@ -253,7 +267,10 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * A failing import records an error log line and re-throws unchanged.
+	 * A failing import still records its error log line, now alongside the verdict.
+	 *
+	 * The log entry is what a browser-side operator has to fall back on, so the
+	 * readable CLI verdict is in addition to it, never instead of it.
 	 *
 	 * @return void
 	 */
@@ -264,6 +281,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
@@ -280,10 +298,12 @@ final class InvokeBranchesTest extends TestCase {
 			$this->build_safety_archiver_succeeding()
 		);
 
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'simulated restore failure' );
-
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertFileExists(
+			$this->temp_archive_path,
+			'The failure is logged and reported, not re-thrown (halt is mocked, so execution continues).'
+		);
 	}
 
 	/**
@@ -291,8 +311,12 @@ final class InvokeBranchesTest extends TestCase {
 	 *
 	 * The forward replay throws; the failure handler then opens the safety archive and
 	 * replays it (verify then restore) to recover the site, warning the operator that an
-	 * automatic rollback occurred. The original import error still propagates so the
-	 * command exits non-zero.
+	 * automatic rollback occurred. The command still exits non-zero — now by halting
+	 * rather than by re-throwing.
+	 *
+	 * The order matters and is asserted: the verdict says why the import stopped, then
+	 * the warning says what was done about it. Reversed, the operator reads that their
+	 * site was rolled back before reading why.
 	 *
 	 * @return void
 	 */
@@ -305,7 +329,11 @@ final class InvokeBranchesTest extends TestCase {
 		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
 		$safety_archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
 
-		// Forward: replay throws. Recovery: verify passes, replay succeeds.
+		// Forward: replay throws. Recovery: verify passes, replay succeeds. The forward
+		// failure is a typed refusal because that is the realistic cause of a mid-replay
+		// abort (an entry that does not match its recorded hash), and because it is the
+		// one path that exercises a REAL import's refusal verdict — every other verdict
+		// test is a dry run.
 		$replays        = 0;
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
 		$restore_runner->shouldReceive( 'verify' )->once();
@@ -313,16 +341,25 @@ final class InvokeBranchesTest extends TestCase {
 			static function () use ( &$replays ): void {
 				++$replays;
 				if ( 1 === $replays ) {
-					throw new RuntimeException( 'simulated restore failure' );
+					throw new ArchiveNotTrustworthy( 'simulated restore failure' );
 				}
 			}
 		);
 
+		// Both streams are captured in one ordered list so the verdict-then-warning
+		// sequence can be asserted, not just the presence of each.
+		$printed     = array();
 		$rolled_back = false;
 		$wp_cli      = Mockery::mock( 'alias:WP_CLI' );
-		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing(
+			static function ( string $message ) use ( &$printed ): void {
+				$printed[] = $message;
+			}
+		);
 		$wp_cli->shouldReceive( 'warning' )->atLeast()->once()->andReturnUsing(
-			static function ( string $message ) use ( &$rolled_back ): void {
+			static function ( string $message ) use ( &$rolled_back, &$printed ): void {
+				$printed[] = $message;
 				if ( str_contains( $message, 'automatically rolled back' ) ) {
 					$rolled_back = true;
 				}
@@ -340,15 +377,27 @@ final class InvokeBranchesTest extends TestCase {
 
 		try {
 			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
-			$this->fail( 'The import should re-throw the restore failure after recovering.' );
-		} catch ( RuntimeException $error ) {
-			$this->assertSame( 'simulated restore failure', $error->getMessage() );
 		} finally {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the placeholder safety archive.
 			@unlink( $safety_path );
 		}
 
 		$this->assertTrue( $rolled_back, 'The operator is warned that the site was automatically rolled back.' );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Import refused.', $output, 'A real import states plainly that it refused, without the dry-run framing.' );
+		$this->assertStringContainsString( 'This archive cannot be trusted: simulated restore failure', $output );
+		$this->assertStringNotContainsString( 'Your site was not changed.', $output, 'A real import must never claim nothing happened — the site was written to.' );
+
+		$verdict_at = self::index_of_line_containing( $printed, 'simulated restore failure' );
+		$warning_at = self::index_of_line_containing( $printed, 'automatically rolled back' );
+		$this->assertNotNull( $verdict_at, 'The failure verdict names the engine\'s own message.' );
+		$this->assertNotNull( $warning_at, 'The recovery warning is printed.' );
+		$this->assertLessThan(
+			$warning_at,
+			$verdict_at,
+			'Why it stopped must be printed before what was done about it.'
+		);
 	}
 
 	/**
@@ -478,9 +527,9 @@ final class InvokeBranchesTest extends TestCase {
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
 		$restore_runner->shouldNotReceive( 'restore' );
 
-		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
-		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
-		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
@@ -495,10 +544,13 @@ final class InvokeBranchesTest extends TestCase {
 			$safety_archiver
 		);
 
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'not enough free disk space' );
-
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertStringContainsString(
+			'not enough free disk space',
+			implode( "\n", $printed ),
+			'A safety-archive failure must still tell the operator what stopped the import.'
+		);
 	}
 
 	/**
@@ -1073,6 +1125,253 @@ final class InvokeBranchesTest extends TestCase {
 		$command->release_lock_on_shutdown();
 
 		$this->assertFalse( $lock->is_held(), 'A lock that was never held must still report unheld after the no-op shutdown call.' );
+	}
+
+	/**
+	 * An archive that cannot be trusted is named as such, and the operator is told not to restore it.
+	 *
+	 * This is the kind that matters most: the file is the problem, so the useful
+	 * advice is "do not restore this", not "check your server".
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_untrustworthy_archive_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new ArchiveNotTrustworthy( 'the entry hash does not match' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore would be refused. Your site was not changed.', $output );
+		$this->assertStringContainsString( 'This archive cannot be trusted: the entry hash does not match', $output );
+		$this->assertStringContainsString( 'Do not restore this archive', $output );
+	}
+
+	/**
+	 * A host that cannot comply is distinguished from a bad archive.
+	 *
+	 * The archive may be perfectly good, so telling the operator to fetch a fresh
+	 * copy would send them to fix the one thing that is not broken.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_a_host_that_cannot_comply_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new HostCannotComply( 'there is not enough free disk space' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore would be refused. Your site was not changed.', $output );
+		$this->assertStringContainsString( 'This host cannot complete the restore: there is not enough free disk space', $output );
+		$this->assertStringContainsString( 'the problem is this server', $output );
+		$this->assertStringNotContainsString( 'Do not restore this archive', $output );
+	}
+
+	/**
+	 * A wrong request is reported without blaming the archive or the host.
+	 *
+	 * Nothing is wrong with anything; the invocation needs correcting, so the
+	 * archive path is not part of the verdict.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_invalid_request_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new InvalidRequest( '--url requires a new site URL' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'The request needs correcting: --url requires a new site URL', $output );
+		$this->assertStringNotContainsString( 'cannot be trusted', $output );
+		$this->assertStringNotContainsString( 'Full details are in the Pontifex log', $output );
+	}
+
+	/**
+	 * A refusal Pontifex has not yet classified is still reported as a refusal.
+	 *
+	 * Most of the safety core still throws exceptions that predate the taxonomy, and
+	 * five of them (a wrong passphrase among them) carry the marker interface without
+	 * being one of the three kinds. Those are decisions Pontifex made deliberately, so
+	 * calling them a failure would misreport a refusal as a fault.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_unclassified_refusal_as_a_refusal(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new CipherException( 'failed to decrypt; the passphrase is wrong' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore would be refused.', $output );
+		$this->assertStringContainsString( 'The failure was: failed to decrypt; the passphrase is wrong', $output );
+	}
+
+	/**
+	 * A failure carrying no Pontifex type is reported as a failure, not a refusal.
+	 *
+	 * This is the case the defect was found on — a truncated archive raises a bare
+	 * RuntimeException from the reader — and it is why the three kinds alone are not
+	 * enough. Claiming a refusal here would assert an intent that was never there.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_unrecognised_failure_as_a_failure_not_a_refusal(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new RuntimeException( 'ArchiveReader: manifest does not fit between header and footer' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore failed. Your site was not changed.', $output );
+		$this->assertStringNotContainsString( 'would be refused', $output );
+		$this->assertStringContainsString( 'The failure was: ArchiveReader: manifest does not fit', $output );
+		$this->assertStringContainsString( 'Full details are in the Pontifex log', $output );
+	}
+
+	/**
+	 * The verdict carries no absolute server paths.
+	 *
+	 * This output is exactly what an operator pastes into a support thread or a bug
+	 * report, and the engine's own messages routinely name absolute paths — so the
+	 * message is redacted as well as the archive path.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_redacts_absolute_paths_from_the_verdict(): void {
+		$temp_dir = rtrim( sys_get_temp_dir(), '/' );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new ArchiveNotTrustworthy( sprintf( 'refusing symlink target %s/escape', $temp_dir ) ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringNotContainsString( $temp_dir, $output, 'Neither the message nor the archive path may leak an absolute path.' );
+		$this->assertStringContainsString( '{TMP}/escape', $output, 'The redacted message still names the file, just not where it lives.' );
+	}
+
+	/**
+	 * The operation lock is released before the command halts.
+	 *
+	 * WP_CLI::halt() calls exit(), and PHP does not run a finally block when exit() is
+	 * called — so halting inside the catch would skip the release in the finally and
+	 * leave the site's lock to the shutdown backstop. That backstop exists for a
+	 * mid-work fatal, not as the normal path off a handled failure.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_releases_the_lock_before_halting(): void {
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$lock_context->shouldReceive( 'release_named_lock' )->once();
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-import-lock-test-' . uniqid( '', true ) ) );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
+
+		$held_at_halt = null;
+		$wp_cli       = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 )->andReturnUsing(
+			static function () use ( $lock, &$held_at_halt ): void {
+				$held_at_halt = $lock->is_held();
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding(),
+			null,
+			null,
+			$lock
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertFalse( $held_at_halt, 'The lock must already be released by the time the command halts.' );
+	}
+
+	/**
+	 * Run a --dry-run whose verify walk raises the given failure.
+	 *
+	 * A dry run is the shortest path to the failure handler: it takes no lock and no
+	 * safety archive, so the verdict is the only thing under test. The safety archiver
+	 * is asserted untouched to keep that true.
+	 *
+	 * @param \Throwable $failure The failure the verify walk raises.
+	 * @return void
+	 */
+	private function run_failing_dry_run( \Throwable $failure ): void {
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once()->andThrow( $failure );
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'     => true,
+				'dry-run' => true,
+			)
+		);
+	}
+
+	/**
+	 * Alias-mock WP_CLI, collecting every log and warning line in the order printed.
+	 *
+	 * @param array<int, string> $printed Filled with each message as it is printed.
+	 * @return \Mockery\MockInterface
+	 */
+	private function mock_wp_cli_capturing_output( array &$printed ) {
+		$collect = static function ( string $message ) use ( &$printed ): void {
+			$printed[] = $message;
+		};
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		return $wp_cli;
+	}
+
+	/**
+	 * Find the position of the first captured line containing the given text.
+	 *
+	 * @param array<int, string> $printed The captured output, in order.
+	 * @param string             $needle  The text to look for.
+	 * @return int|null The line's position, or null when no line contains it.
+	 */
+	private static function index_of_line_containing( array $printed, string $needle ): ?int {
+		foreach ( array_values( $printed ) as $index => $line ) {
+			if ( str_contains( $line, $needle ) ) {
+				return $index;
+			}
+		}
+		return null;
 	}
 
 	/**

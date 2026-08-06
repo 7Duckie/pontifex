@@ -21,6 +21,7 @@ use Pontifex\Lock\BackupProgress;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\WordPress\WordPressContext;
@@ -274,11 +275,38 @@ final class VerifyController {
 				}
 			);
 
+			// Every hash matched, so the file is not damaged. Whether a restore would
+			// ACCEPT it is a different question, and one this screen used to leave
+			// unanswered — an archive that would place a symbolic link outside the
+			// site reported "intact" here and was then refused by the restore this
+			// verification was meant to vouch for.
+			$report = $this->preflight_report( $runner, $source );
+
 			// Read the archive's facts before finish() closes the stream.
 			$facts = $this->archive_facts( $source );
 			$this->finish( $source );
 
 			$size = $this->wordpress_context->format_size( $bytes_total );
+
+			if ( $report->archive_is_refused() ) {
+				$this->logger->warning(
+					'Admin verify: the archive is intact but a restore would refuse it.',
+					array( 'findings' => $report->archive_findings() )
+				);
+				wp_send_json_success(
+					array(
+						'sound'   => false,
+						'refused' => true,
+						'entries' => $entry_total,
+						'message' => sprintf(
+							/* translators: 1: number of entries verified, 2: the archive's size, human-readable */
+							__( 'Refused — all %1$d entries (%2$s) matched their hashes, so this file is not damaged, but a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Pontifex never produces a backup like this. Treat it as untrusted and find out where it came from. The Pontifex log has the details.', 'pontifex' ),
+							$entry_total,
+							$size
+						),
+					)
+				);
+			}
 
 			wp_send_json_success(
 				array(
@@ -292,11 +320,12 @@ final class VerifyController {
 						$facts['scope']
 					),
 					'proof'   => array(
-						'entries' => $entry_total,
-						'size'    => $size,
-						'scope'   => $facts['scope'],
-						'created' => $facts['created'],
-						'format'  => $format_version,
+						'entries'       => $entry_total,
+						'size'          => $size,
+						'scope'         => $facts['scope'],
+						'created'       => $facts['created'],
+						'format'        => $format_version,
+						'restorability' => $this->restorability_line( $report ),
 					),
 				)
 			);
@@ -324,6 +353,82 @@ final class VerifyController {
 				)
 			);
 		}
+	}
+
+	/**
+	 * Run the restore's read-only preflights over the verified archive.
+	 *
+	 * Built over this site's own destination root, so the answer is the one that
+	 * applies here. That makes a verification a statement about an archive AND a
+	 * destination rather than about the file alone — the confinement check
+	 * resolves through symbolic links already on this site — which is the right
+	 * trade, because "would this escape YOUR site" is the only useful form of
+	 * the question.
+	 *
+	 * Never turns a verified archive into a failed one by its own misfortune: if
+	 * the preflights cannot run at all, an empty report is returned and the
+	 * integrity result stands on its own.
+	 *
+	 * @param RestoreRunnerInterface $runner The engine that verified the archive.
+	 * @param resource               $source The archive stream, already verified.
+	 * @return PreflightReport What a restore on this host would find.
+	 */
+	private function preflight_report( RestoreRunnerInterface $runner, $source ): PreflightReport {
+		if ( ! $runner instanceof RestoreRunner ) {
+			return new PreflightReport( array() );
+		}
+
+		try {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource before the preflight re-reads it; not a WP_Filesystem operation.
+			rewind( $source );
+			$reader   = new ArchiveReader( $source );
+			$manifest = $reader->manifest();
+			$scope    = $reader->provenance()->scope();
+
+			return $runner->preflight()->read_only_report( $source, $manifest, $scope );
+		} catch ( Throwable $error ) {
+			// Nothing in here may escape. This runs AFTER every hash has already
+			// been checked, so an exception getting out would be caught by the
+			// screen's outer handler and reported as a broken backup — a false
+			// alarm about a file that is demonstrably intact, and the one message
+			// capable of talking somebody out of a good backup. Even the logging
+			// is guarded, because a logger that throws would do exactly that.
+			try {
+				$this->logger->warning(
+					'Admin verify: the restore preflights could not be run; the integrity result stands on its own.',
+					array( 'exception' => $error )
+				);
+			} catch ( Throwable $logging_failed ) {
+				unset( $logging_failed );
+			}
+			return new PreflightReport( array() );
+		}
+	}
+
+	/**
+	 * One sentence for the proof panel about whether this server could restore it.
+	 *
+	 * Separate from the verdict on purpose, and never able to change it. A full
+	 * disk is not a damaged backup, and a screen that said otherwise would be
+	 * telling somebody to throw away a file that is very probably their only
+	 * copy.
+	 *
+	 * The host's symbolic-link capability is deliberately absent: establishing it
+	 * means creating a link, and this screen writes nothing.
+	 *
+	 * @param PreflightReport $report The findings.
+	 * @return string The line to display.
+	 */
+	private function restorability_line( PreflightReport $report ): string {
+		if ( ! $report->host_cannot_restore() ) {
+			return __( 'This server has the room to restore it.', 'pontifex' );
+		}
+
+		return sprintf(
+			/* translators: %s: the reason this server cannot restore right now */
+			__( 'The backup is fine, but this server could not restore it right now: %s', 'pontifex' ),
+			implode( ' ', $report->host_findings() )
+		);
 	}
 
 	/**
@@ -395,7 +500,7 @@ final class VerifyController {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening a plugin-owned backup as a stream; @ traps an unopenable-file warning converted to the exception below.
 		$source = @fopen( $path, 'rb' );
 		if ( false === $source ) {
-			throw new RuntimeException( 'VerifyController: could not open the backup for reading.' );
+			throw new RuntimeException( 'Could not open the backup for reading.' );
 		}
 		return $source;
 	}

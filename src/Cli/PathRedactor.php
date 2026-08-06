@@ -77,13 +77,20 @@ final class PathRedactor {
 	 * @return self A redactor covering the supplied prefixes plus /root.
 	 */
 	public static function from_paths( string $abspath, string $wp_content_dir, string $home, string $temp_dir ): self {
+		// Trailing slashes are stripped so a path matches in both the forms it
+		// occurs in. ABSPATH carries a trailing slash by WordPress convention, but
+		// the code that reports a path has usually rtrim()ed it — so the literal
+		// "/var/www/html/" never matched a message saying "/var/www/html", and the
+		// server's real path was printed to the operator unredacted. Matching the
+		// slash-less form covers both, because the longer form simply leaves the
+		// following slash in place after the placeholder.
 		return new self(
 			array(
-				$wp_content_dir => '{WP_CONTENT_DIR}',
-				$abspath        => '{ABSPATH}',
-				$home           => '{HOME}',
-				$temp_dir       => '{TMP}',
-				'/root'         => '{ROOT}',
+				rtrim( $wp_content_dir, '/' ) => '{WP_CONTENT_DIR}',
+				rtrim( $abspath, '/' )        => '{ABSPATH}',
+				rtrim( $home, '/' )           => '{HOME}',
+				rtrim( $temp_dir, '/' )       => '{TMP}',
+				'/root'                       => '{ROOT}',
 			)
 		);
 	}
@@ -113,7 +120,13 @@ final class PathRedactor {
 	 */
 	public function redact( string $text ): string {
 		foreach ( $this->replacements as $prefix => $placeholder ) {
-			$pattern = '#' . preg_quote( $prefix, '#' ) . '(?=[/\\\\]|$)#';
+			// The prefix must not be followed by a character that would continue a
+			// path segment, so "/var/www/htmlfoo" is left alone while "/var/www/html"
+			// is replaced wherever it genuinely ends. The earlier form required a
+			// slash or the end of the string, which meant a path quoted inside a
+			// sentence — `… is not inside the site at "/var/www/html".` — never
+			// matched, and the server's real path reached the operator unredacted.
+			$pattern = '#' . preg_quote( $prefix, '#' ) . '(?![A-Za-z0-9._-])#';
 			$result  = preg_replace( $pattern, $placeholder, $text );
 			if ( null !== $result ) {
 				$text = $result;

@@ -117,18 +117,18 @@ final class Footer {
 	) {
 		if ( $manifest_offset < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'Footer: manifest_offset must be non-negative, got %d.', (int) $manifest_offset )
+				sprintf( 'manifest_offset must be non-negative, got %d.', (int) $manifest_offset )
 			);
 		}
 		if ( $manifest_length < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'Footer: manifest_length must be non-negative, got %d.', (int) $manifest_length )
+				sprintf( 'manifest_length must be non-negative, got %d.', (int) $manifest_length )
 			);
 		}
 		if ( strlen( $manifest_hash ) !== Sha256::DIGEST_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Footer: manifest_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
+					'manifest_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
 					(int) Sha256::DIGEST_SIZE,
 					(int) strlen( $manifest_hash )
 				)
@@ -137,7 +137,7 @@ final class Footer {
 		if ( strlen( $argon2id_salt ) !== self::ARGON2ID_SALT_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Footer: argon2id_salt must be exactly %d bytes, got %d.',
+					'Argon2id_salt must be exactly %d bytes, got %d.',
 					(int) self::ARGON2ID_SALT_SIZE,
 					(int) strlen( $argon2id_salt )
 				)
@@ -209,7 +209,7 @@ final class Footer {
 		if ( strlen( $bytes ) !== self::SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Footer::from_bytes: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::SIZE,
 					(int) strlen( $bytes )
 				)

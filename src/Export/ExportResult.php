@@ -78,13 +78,13 @@ final class ExportResult {
 	 */
 	public function __construct( int $bytes_written, int $entry_count, array $changed_files = array(), int $media_type_unresolved_count = 0 ) {
 		if ( $bytes_written < 0 ) {
-			throw new InvalidArgumentException( 'ExportResult: bytes_written must not be negative.' );
+			throw new InvalidArgumentException( 'bytes_written must not be negative.' );
 		}
 		if ( $entry_count < 0 ) {
-			throw new InvalidArgumentException( 'ExportResult: entry_count must not be negative.' );
+			throw new InvalidArgumentException( 'entry_count must not be negative.' );
 		}
 		if ( $media_type_unresolved_count < 0 ) {
-			throw new InvalidArgumentException( 'ExportResult: media_type_unresolved_count must not be negative.' );
+			throw new InvalidArgumentException( 'media_type_unresolved_count must not be negative.' );
 		}
 
 		$this->bytes_written               = $bytes_written;

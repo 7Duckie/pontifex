@@ -182,7 +182,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		$archive = self::build_partial_archive( $plans, Scope::files_only( array() ) );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessageMatches( '/inconsistent archive/' );
+		$this->expectExceptionMessageMatches( '/contradicts its own description/' );
 		$this->runner()->restore( $archive );
 	}
 
@@ -196,7 +196,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		$archive = self::build_partial_archive( $plans, Scope::db_only( array() ) );
 
 		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessageMatches( '/inconsistent archive/' );
+		$this->expectExceptionMessageMatches( '/contradicts its own description/' );
 		$this->runner()->restore( $archive );
 	}
 
@@ -226,7 +226,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		} catch ( AssertionFailedError $bug ) {
 			throw $bug;
 		} catch ( RuntimeException $refusal ) {
-			$this->assertMatchesRegularExpression( '/inconsistent archive/', $refusal->getMessage() );
+			$this->assertMatchesRegularExpression( '/contradicts its own description/', $refusal->getMessage() );
 		}
 
 		$this->assertFileDoesNotExist( $this->restore_root . '/wp-content/uploads/stray.txt', 'A refused archive writes nothing.' );
