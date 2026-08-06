@@ -17,6 +17,10 @@ use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
+use Pontifex\Exception\PontifexException;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Log\FileLogger;
@@ -39,6 +43,11 @@ use Pontifex\WordPress\WordPressRoot;
  * recent one — the undo button for a destructive import. Like import, it
  * restores to the **same URL** and overwrites the live site, so it confirms
  * before acting (unless `--yes`) and offers `--dry-run`.
+ *
+ * It exits 0 when the safety archive is replayed (or the dry run completes),
+ * and non-zero when it is refused or fails — reporting which of the three
+ * kinds of refusal happened (ADR 0022): the archive cannot be trusted, this
+ * host cannot comply, or the request itself needs correcting.
  *
  * ## OPTIONS
  *
@@ -213,10 +222,14 @@ final class RollbackCommand {
 	 * without writing. Exits with a clear error when there is nothing to roll
 	 * back to.
 	 *
+	 * A failure is not re-thrown. It is logged, reported as a readable verdict
+	 * naming which kind of refusal it was, and the command halts non-zero — so
+	 * an operator sees why it stopped rather than a stack trace, and a script
+	 * still sees a failing exit code.
+	 *
 	 * @param array<int, string>         $positional_args  Positional arguments. Unused for `rollback`.
 	 * @param array<string, string|bool> $associative_args Associative `--flag` arguments (`--dry-run`, `--yes`).
 	 * @return void
-	 * @throws Throwable Re-thrown after logging if the restore fails.
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
@@ -259,12 +272,27 @@ final class RollbackCommand {
 			register_shutdown_function( array( $this, 'release_lock_on_shutdown' ) );
 		}
 
+		// The failure the run ended on, or null when it succeeded. Recorded rather than
+		// re-thrown, and acted on only after the finally below: WP_CLI::halt() calls
+		// exit(), and PHP does not run a finally block when exit() is called — so
+		// halting inside the catch would skip the lock release and leave the site's
+		// operation lock to the shutdown backstop. That backstop is the last line of
+		// defence, not the primary one.
+		$failure = null;
+
+		// How many entries actually landed. RestoreRunner calls the progress callback
+		// after it has written each entry, so a non-zero count here is proof the replay
+		// had begun — which is what decides whether a failure leaves the site half
+		// rolled back or entirely untouched.
+		$entries_done = 0;
+
 		$entry_total = 0;
-		$on_entry    = function ( int $done, int $total ) use ( &$entry_total ): void {
+		$on_entry    = function ( int $done, int $total ) use ( &$entry_total, &$entries_done ): void {
 			if ( 1 === $done ) {
 				$this->progress->start( $total, 'Rolling back' );
 			}
-			$entry_total = $total;
+			$entry_total  = $total;
+			$entries_done = $done;
 			$this->progress->advance();
 		};
 
@@ -328,13 +356,25 @@ final class RollbackCommand {
 					)
 				);
 			}
-			throw $error;
+			$failure = $error;
 		} finally {
 			if ( null !== $lock ) {
 				$lock->release();
 			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing a stream resource opened in this method; not a WP_Filesystem operation.
 			fclose( $source );
+		}
+
+		// Report and halt here, outside the try, so the finally above has already
+		// released the lock and closed the archive. See the note on $failure at its
+		// declaration. Why it stopped comes first, then what state that leaves the
+		// site in — the same order import prints its verdict and its recovery warning.
+		if ( null !== $failure ) {
+			$this->print_failure_verdict( $archive_path, $failure, $dry_run );
+			if ( ! $dry_run ) {
+				$this->warn_if_partly_rolled_back( $entries_done );
+			}
+			WP_CLI::halt( 1 );
 		}
 	}
 
@@ -506,6 +546,150 @@ final class RollbackCommand {
 		WP_CLI::log(
 			sprintf( /* translators: 1: number of entries verified, 2: the archive path */ __( 'Dry run complete: %1$d entries verified in %2$s. No changes were made.', 'pontifex' ), $entry_count, $archive_path )
 		);
+	}
+
+	/**
+	 * Print why the rollback stopped, in terms an operator can act on.
+	 *
+	 * Three situations demand three different responses, and the exception's
+	 * type is what tells them apart (ADR 0022): a safety archive that cannot be
+	 * trusted means this undo is not available; a host that cannot comply means
+	 * the archive may be fine and the server is the fixable problem; a wrong
+	 * request means correct the invocation. A failure carrying none of those
+	 * types is reported plainly rather than guessed at — most of the safety
+	 * core still throws untyped exceptions, and inventing a kind for one would
+	 * be worse than admitting we do not know.
+	 *
+	 * The advice for an untrustworthy archive is not import's. An import can be
+	 * told to fetch a fresh copy of the backup; a safety archive is written
+	 * automatically, in one copy, at the moment of the import it undoes. There
+	 * is no fresh copy to fetch, and saying otherwise would send an operator
+	 * looking for a file that has never existed.
+	 *
+	 * Both the message and the path go through the redactor, because an engine
+	 * message routinely names an absolute path and this output is exactly what
+	 * an operator pastes into a support thread.
+	 *
+	 * @param string    $archive_path The safety archive the rollback was replaying.
+	 * @param Throwable $error        The failure that ended the run.
+	 * @param bool      $dry_run      True when this was a rehearsal, so nothing was written.
+	 * @return void
+	 */
+	private function print_failure_verdict( string $archive_path, Throwable $error, bool $dry_run ): void {
+		$redactor = PathRedactor::from_environment();
+		$message  = $redactor->redact( $error->getMessage() );
+		$path     = $redactor->redact( $archive_path );
+
+		WP_CLI::log( self::failure_headline( $dry_run, $error instanceof PontifexException ) );
+
+		if ( $error instanceof ArchiveNotTrustworthy ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: the reason the safety archive was refused, 2: the safety archive path */
+					__( 'This safety archive cannot be trusted: %1$s (%2$s)', 'pontifex' ),
+					$message,
+					$path
+				)
+			);
+			WP_CLI::log( __( 'A safety archive is written automatically before an import and there is no second copy of it — to undo that import, restore a backup you took yourself.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof HostCannotComply ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: the reason this host could not comply, 2: the safety archive path */
+					__( 'This host cannot complete the rollback: %1$s (%2$s)', 'pontifex' ),
+					$message,
+					$path
+				)
+			);
+			WP_CLI::log( __( 'The safety archive may be perfectly good — the problem is this server, and it is usually fixable.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof InvalidRequest ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: what was wrong with the command that was run */
+					__( 'The request needs correcting: %s', 'pontifex' ),
+					$message
+				)
+			);
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: the failure message, 2: the archive path */
+				__( 'The failure was: %1$s (%2$s)', 'pontifex' ),
+				$message,
+				$path
+			)
+		);
+		WP_CLI::log( __( 'Full details are in the Pontifex log: wp-content/pontifex/logs/pontifex.log', 'pontifex' ) );
+	}
+
+	/**
+	 * Warn that a failed rollback has left the site in a mixed state.
+	 *
+	 * A rollback that stops partway is the one failure in Pontifex with no undo
+	 * behind it: some of the site is now the safety archive's copy and the rest
+	 * is whatever the import left, and nothing will reconcile the two. Saying so
+	 * is the difference between an operator checking the site and an operator
+	 * assuming a failed command changed nothing.
+	 *
+	 * It is said only when entries actually landed. The restore engine refuses
+	 * ahead of any write when it can — a preflight rejection, an unreadable
+	 * archive — and warning about a half-restored site that was never touched
+	 * would be a false alarm about the most alarming thing this tool can report.
+	 *
+	 * @param int $entries_done How many entries were written before the failure.
+	 * @return void
+	 */
+	private function warn_if_partly_rolled_back( int $entries_done ): void {
+		if ( $entries_done < 1 ) {
+			return;
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of entries restored before the rollback stopped */
+				_n(
+					'Your site is now part rolled back: %d entry was restored from the safety archive before it stopped, and everything else is as the import left it. Check the site before using it.',
+					'Your site is now part rolled back: %d entries were restored from the safety archive before it stopped, and everything else is as the import left it. Check the site before using it.',
+					$entries_done,
+					'pontifex'
+				),
+				$entries_done
+			)
+		);
+	}
+
+	/**
+	 * The opening line of a failure verdict: what happened, and to what.
+	 *
+	 * Two facts decide it. A refusal is a decision Pontifex made and can
+	 * explain; anything else is a fault, and calling a fault a refusal would
+	 * claim an intent that was not there. And a dry run changed nothing, which
+	 * is the first thing an operator wants to know — on a real rollback
+	 * {@see self::warn_if_partly_rolled_back()} reports the site's state
+	 * instead, because there it is not something that can be promised.
+	 *
+	 * @param bool $dry_run    True when this was a rehearsal, so nothing was written.
+	 * @param bool $is_refusal True when Pontifex refused deliberately (ADR 0022's marker).
+	 * @return string
+	 */
+	private static function failure_headline( bool $dry_run, bool $is_refusal ): string {
+		if ( $dry_run ) {
+			return $is_refusal
+				? __( 'Dry run: this rollback would be refused. Your site was not changed.', 'pontifex' )
+				: __( 'Dry run: this rollback failed. Your site was not changed.', 'pontifex' );
+		}
+
+		return $is_refusal
+			? __( 'Rollback refused.', 'pontifex' )
+			: __( 'Rollback failed.', 'pontifex' );
 	}
 
 	/**
