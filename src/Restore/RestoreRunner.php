@@ -237,6 +237,30 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	}
 
 	/**
+	 * Remove every path this run's FileWriter newly created, except any $preserved_paths still declares.
+	 *
+	 * Exposed so a caller that already has a wired runner — a failed import's own
+	 * recovery handler, in ImportCommand and RestoreController — can undo exactly
+	 * what THIS run created after replaying the pre-import safety archive, without
+	 * rebuilding the FileWriter and risking a mismatch with the one that actually
+	 * did the writing. Deliberately NOT on {@see RestoreRunnerInterface}: that
+	 * contract is part of the public API frozen at v1.0.0, and adding a method to
+	 * an interface breaks every implementer. A caller holding only the interface
+	 * (a test fake, most obviously) has no ledger to consult and no cleanup to run
+	 * — see each call site's own `instanceof RestoreRunner` guard.
+	 *
+	 * See {@see FileWriter::remove_created_paths()} for what "newly created" means,
+	 * the three rules deletion obeys, and why a directory only ever disappears once
+	 * it is genuinely empty.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this run's writer created them.
+	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation.
+	 */
+	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
+		return $this->file_writer->remove_created_paths( $preserved_paths );
+	}
+
+	/**
 	 * Read, verify, and write every entry from the archive stream.
 	 *
 	 * Opens an ArchiveReader around the source (which eagerly validates

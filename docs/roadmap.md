@@ -527,6 +527,40 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
+## v1.1.1 — Recovery undoes what the failed restore added
+
+A patch. Recovery after a failed import already claimed to put the site back to
+its state before the import; it now does.
+
+- **The claim was false, and provably so.** A restore is additive — it
+  overwrites and creates and removes nothing — so replaying the safety archive
+  restored every file that existed before while leaving behind every file the
+  failed import had created. The site was the original files merged with
+  whatever the failed import managed to write, and the operator was told it was
+  back to normal. The dangerous shape is restoring a backup that is not your own
+  current site: a file it introduced at a path your site never had ends up live
+  and unmentioned.
+- **Recovery now removes exactly what the failed restore created**, tracked by a
+  ledger of paths whose target did not exist before the write. Deliberately not
+  a difference against the safety archive — a live site writes uploads, caches
+  and logs throughout a restore, and a difference would delete those too.
+- **When it cannot account for everything it added** — a very large restore, or
+  a file that would not delete — it reports a merge rather than claiming a
+  revert, the same honesty the fatal-error path already showed.
+
+See [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
+
+### What is deliberately deferred
+
+- `wp pontifex rollback` keeps its additive behaviour. It makes no claim to
+  revert, and it has no ledger to work from — the run it is undoing may have
+  been another process, or days earlier — so it could only use the
+  set-difference rule ADR 0024 rejects.
+- Full file-side restore atomicity, deferred by
+  [ADR 0009](./adr/0009-atomic-staging-table-restore.md) as "a separate, later
+  arc", is still deferred. This makes recovery honest; it does not make the file
+  half of a restore transactional.
+
 ## v1.1.0 — Verify stops promising what a restore will not honour
 
 Closes the last open finding from the hardening arc. The public API is

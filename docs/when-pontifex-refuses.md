@@ -33,7 +33,12 @@ short, generic sentence instead:
 > The backup could not be completed. Check the Pontifex log for details.
 
 > The restore failed, so your site was automatically rolled back to its state
-> before the restore.
+> before the restore. Check the Pontifex log for details.
+
+That one is worth reading closely, because there are three versions of it and
+they do not mean the same thing: the site was put back exactly, the site was put
+back but Pontifex could not account for every file it had added, or recovery
+itself failed. See [section 3](#3-your-database-is-protected-on-a-failed-restore-your-files-are-not).
 
 The real message went to the log. **If you are working in the browser and hit
 a failure, the log is not optional — it is the only place the answer exists:**
@@ -107,17 +112,32 @@ name first, and only when all of them are ready does it swap them into place
 in a single atomic step. If a restore fails at any point before that swap,
 your live tables are exactly as they were. Nothing is half-written.
 
-**The file half has no equivalent.** Restoring files means writing them over
-your site as it goes. There is no undo for that. If a restore fails part-way
-through the files, the ones already written stay written.
+**The file half is not transactional in the same way.** Restoring files means
+writing them over your site as it goes. If a restore fails part-way through the
+files, the ones already written stay written.
 
-And a restore is a **merge**, not a replacement. Pontifex writes what the
-archive contains and removes nothing else. So if a restore fails after writing
-a plugin your site never had, that plugin is still there afterwards — even
-after an automatic recovery. The recovery puts back what the safety archive
-captured; it does not sweep away files that were never yours.
+**What the automatic recovery does now.** Pontifex keeps track of every file a
+restore *creates* — as opposed to overwrites — and when the automatic recovery
+runs after a failure it puts back what the safety archive captured **and removes
+what the failed restore added**. So a plugin file your site never had, written
+moments before the failure, is taken away again rather than left behind. It only
+ever removes what that run itself created; anything your site wrote in the
+meantime, and anything the safety archive contains, is left alone.
 
-**After any failed restore, look at your site before assuming it is back to
+When Pontifex can account for every file it added, it tells you the site is back
+to how it was. When it cannot — on a very large restore, or if a file would not
+delete — it says so instead of claiming a clean revert. **Read which of the two
+you were given.**
+
+**There are still cases with no automatic recovery at all:**
+
+- You passed `--no-rollback-archive`, so there is no safety archive to replay.
+- The recovery itself failed — Pontifex says so plainly when this happens.
+- The restore ended on a fatal error (out of memory, an exceeded time limit),
+  which stops PHP outright before any recovery can run. The log says the site
+  may be partially restored.
+
+**In any of those three, look at your site before assuming it is back to
 normal.** Check your plugins list for anything you do not recognise.
 
 ---
@@ -126,7 +146,7 @@ normal.** Check your plugins list for anything you do not recognise.
 
 ### "there is not enough free disk space"
 
-> FileWriter: the restore was stopped before changing anything, because there
+> The restore was stopped before changing anything, because there
 > is not enough free disk space at "…". It needs about N MB free, and only N MB
 > is available. Free up some space and try again.
 
@@ -154,7 +174,7 @@ Check the log.
 
 ### "this host could not create a test symlink"
 
-> FileWriter: this archive contains N symbolic link(s), but this host could not
+> This backup contains N symbolic link(s), but this host could not
 > create a test symlink in "…", so restoring it would overwrite files and then
 > fail partway through, leaving neither the old site nor the archive's…
 
