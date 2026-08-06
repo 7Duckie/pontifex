@@ -256,9 +256,9 @@ package matters: it is the only way to exercise `.distignore` itself,
 rather than trust it by eye. Like the CI gate it mirrors, it fails on
 warnings as well as errors, not just errors — a clean run means zero of
 both. It needs Docker running and takes a few minutes; the first run
-also builds this environment's WordPress and CLI Docker images from
-scratch, which can take several minutes on its own — later runs reuse
-those images and are much quicker. CI only runs this check at the
+also clones WordPress and builds this environment's Docker images from
+scratch — the WordPress clone is the larger part of that wait — later
+runs reuse both and are much quicker. CI only runs this check at the
 `staging` and `main` gates, so running it locally on `dev` is how a
 release-gate failure gets caught early, before a pull request against
 `staging` even exists.

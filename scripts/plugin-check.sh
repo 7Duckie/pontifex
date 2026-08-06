@@ -80,15 +80,31 @@ fi
 # The bare `wp-env` binary is never on PATH in this project — every
 # invocation below goes through `npx @wordpress/env` deliberately.
 
-# --- rebuild build/ from scratch -----------------------------------------
+# --- prepare build/ ------------------------------------------------------
 
-phase "Recreating build/"
+phase "Preparing build/"
 
-# build/ is already in .gitignore. Both subdirectories below must exist
+# build/ is already in .gitignore. build/src and build/pkg must exist
 # before wp-env starts, because .wp-env.plugin-check.json bind-mounts them
 # in — wp-env cannot mount a path that does not yet exist on the host.
-rm -rf "$root/build"
+#
+# This empties the two directories IN PLACE rather than `rm -rf build` +
+# `mkdir -p`, and that is deliberate, not fussiness — resist "simplifying"
+# it back to `rm -rf`. build/src and build/pkg are bind-mount targets, and
+# `wp-env start` against an environment that is ALREADY running (as it is
+# with --keep, or after an interrupted or concurrent run left it up) reuses
+# the existing containers rather than recreating them. Their bind mounts
+# stay pinned to the directories' current inodes. `rm -rf` followed by
+# `mkdir -p` deletes those inodes and hands back new ones with the same
+# path but a different identity — the live container's mount then points
+# at nothing, and the next `wp-env run` inside it fails with Docker's
+# "outside of container mount namespace root" error. Deleting only the
+# CONTENTS leaves the directories — and therefore their inodes, and
+# therefore any live bind mount — untouched.
 mkdir -p "$root/build/src" "$root/build/pkg"
+find "$root/build/src" -mindepth 1 -delete
+find "$root/build/pkg" -mindepth 1 -delete
+rm -f "$root/build/pontifex.tar.gz" "$root/build/plugin-check.json"
 
 # --- copy the working tree ------------------------------------------------
 
@@ -153,11 +169,13 @@ stop_environment() {
 # does.
 trap 'exit_code=$?; stop_environment || true; exit $exit_code' EXIT
 
-# The FIRST run of this environment builds its own WordPress and CLI Docker
-# images from scratch, which alone can take several minutes with nothing
-# printed in the meantime — that silence reads as a hang if you don't know
-# it's coming. Later runs reuse the built images and start in seconds.
-echo "First run builds this environment's Docker images from scratch and can take several minutes. Later runs are much quicker."
+# A statement of general fact, true on every run, not a claim about THIS
+# run — this script has no way to know whether wp-env's clone and images
+# are already cached, and predicting that would risk announcing a
+# multi-minute wait immediately before a several-second start. Printed
+# unconditionally so the silence during an actual first-time clone (roughly
+# a gigabyte of WordPress) and image build doesn't read as a hang.
+echo "The first run for a new environment clones WordPress and builds its Docker images, which takes several minutes; later runs reuse both and start in seconds."
 
 npx @wordpress/env start --config "$wp_env_config"
 
@@ -207,7 +225,14 @@ else
     dist_status=$?
 fi
 
-if [ "$dist_status" -ne 0 ] && printf '%s\n' "$dist_output" | grep -qi 'root'; then
+# Matching the literal flag name, not the bare word "root": Docker's own
+# error text for an unrelated failure (for example a stale bind mount) can
+# easily contain the word "root" too — "mount namespace root", "container
+# breakout" — and grepping for that word alone asserts a diagnosis this
+# script has not actually established. WP-CLI's own refusal message tells
+# the user to pass --allow-root, so the flag name is a precise signal that
+# this specific cause, and no other, was hit.
+if [ "$dist_status" -ne 0 ] && printf '%s\n' "$dist_output" | grep -qF -- '--allow-root'; then
     echo "wp dist-archive refused to run as root inside the container; retrying with --allow-root."
     if dist_output=$(npx @wordpress/env run cli --env-cwd=wp-content/pontifex-src --config "$wp_env_config" \
         wp dist-archive . "$dist_target" --format=targz --allow-root 2>&1); then
