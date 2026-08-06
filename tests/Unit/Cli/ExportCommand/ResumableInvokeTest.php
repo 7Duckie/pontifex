@@ -16,9 +16,13 @@ use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
+use Pontifex\Export\ExportOptions;
+use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
@@ -152,19 +156,25 @@ final class ResumableInvokeTest extends TestCase {
 	/**
 	 * Resuming with no interrupted export is refused with a clear message.
 	 *
+	 * Unlike the two refusals above, this one is raised after the export has taken its
+	 * lock and entered the try, so the RuntimeException standing in for WP_CLI::error's
+	 * process exit is caught by the command's own failure handler and turned into a
+	 * halt. The refusal under test is unchanged — error() is raised exactly once, with
+	 * the message that names the missing job.
+	 *
 	 * @return void
 	 */
 	public function test_resume_with_nothing_interrupted_is_refused(): void {
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'error' )
 			->once()
 			->with( Mockery::pattern( '/No interrupted resumable export/' ) )
 			->andThrow( new RuntimeException( 'halt' ) );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$command = new ExportCommand( $this->environment_mock(), $this->context_mock(), $this->builder_mock(), new NullLogger(), new NullProgressBar() );
-
-		$this->expectExceptionMessage( 'halt' );
 
 		$command(
 			array(),
@@ -173,6 +183,8 @@ final class ResumableInvokeTest extends TestCase {
 				'yes'    => true,
 			)
 		);
+
+		$this->assertTrue( true, 'Reaching this line means the stand-in exit was handled rather than escaping.' );
 	}
 
 	/**
@@ -206,6 +218,167 @@ final class ResumableInvokeTest extends TestCase {
 		$this->assertSame( 2, $reader->manifest()->entry_count(), 'Both planned entries must be in the archive.' );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test's own archive handle.
 		fclose( $source );
+	}
+
+	/**
+	 * A resumable export that fails says --resume will NOT pick it up, and why.
+	 *
+	 * This is the verdict most at risk of a plausible lie. "Continue it with --resume"
+	 * is the natural thing to say about a resumable export and it is wrong: tick()
+	 * marks its job FAILED on any exception, FAILED is terminal, and --resume takes
+	 * only an active job — so it would refuse, after the operator had been told to try
+	 * it. The test asserts the absence of that advice as firmly as the presence of the
+	 * truth, and pins the orphaned .part file the run really leaves behind.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_resumable_export_says_resume_will_not_pick_it_up(): void {
+		$printed = array();
+		$collect = static function ( string $message ) use ( &$printed ): void {
+			$printed[] = $message;
+		};
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new ExportCommand(
+			$this->environment_mock(),
+			$this->context_mock(),
+			$this->failing_builder_mock(),
+			new NullLogger(),
+			new NullProgressBar()
+		);
+
+		$command(
+			array(),
+			array(
+				'output'    => $this->output_path,
+				'resumable' => true,
+				'yes'       => true,
+			)
+		);
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Export failed.', $output );
+		$this->assertStringContainsString( 'simulated tick failure', $output );
+		$this->assertStringContainsString( 'cannot be continued with --resume', $output );
+		$this->assertStringContainsString( 'A part-written file is left at', $output );
+
+		// The file is named from a glob, not predicted, so the name printed must be the
+		// name on disk. A verdict that describes a plausible file rather than the real
+		// one sends its reader to delete something that is not there.
+		$orphans = glob( $this->content_dir . '/*.part' );
+		$this->assertNotSame( array(), $orphans, 'The .part file the verdict describes must really be there.' );
+		$this->assertStringContainsString(
+			basename( (string) $orphans[0] ),
+			$output,
+			'The verdict names the orphan that is actually on disk, redacted but identifiable.'
+		);
+		// Not the bare mention of --resume: the announcement at the top of a resumable
+		// run offers it for an *interrupted* export, which stays true. What must not
+		// appear is the verdict offering it for this failure.
+		$this->assertStringNotContainsString(
+			'once the problem is fixed, continue it',
+			$output,
+			'--resume refuses a failed job, so advising it would send the operator to a second refusal.'
+		);
+
+		$this->assertNotSame(
+			array(),
+			glob( $this->content_dir . '/*.part' ),
+			'The .part file the verdict describes must really be there.'
+		);
+	}
+
+	/**
+	 * A failed --resume names the archive it was continuing, which it was never told.
+	 *
+	 * `--resume` takes no --output: the path lives in the job record an interrupted
+	 * run left behind, and __invoke holds only the empty string it started with until
+	 * run_resumable() reads the record back into it. Without that read-back reaching
+	 * the failure handler, a resumed export would report against no path at all.
+	 *
+	 * The interrupted job is created the way a real one is — through the runner's own
+	 * start() — because a job that a failure closed cannot be resumed at all, so
+	 * failing a run first would prove nothing about this path.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_resume_names_the_archive_from_the_job_record(): void {
+		$store  = new JobStore( $this->content_dir );
+		$runner = new ResumableExportRunner( $this->environment_mock(), $this->context_mock(), $store );
+		$runner->start(
+			new ExportOptions( $this->output_path, null, null, 'test', Scope::content_only( array() ) ),
+			$this->content_dir,
+			'wp-content',
+			array(),
+			1690000000
+		);
+
+		$printed = array();
+		$collect = static function ( string $message ) use ( &$printed ): void {
+			$printed[] = $message;
+		};
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new ExportCommand(
+			$this->environment_mock(),
+			$this->context_mock(),
+			$this->failing_builder_mock(),
+			new NullLogger(),
+			new NullProgressBar()
+		);
+
+		// No --output at all: everything this says about the path, it read back.
+		$command(
+			array(),
+			array(
+				'resume' => true,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertStringContainsString(
+			basename( $this->output_path ),
+			implode( "\n", $printed ),
+			'A resumed export must report against the path it read back from the job record, not the empty string it was invoked with.'
+		);
+	}
+
+	/**
+	 * A ManifestBuilderInterface whose single entry throws when the writer opens it.
+	 *
+	 * Failing at the point the entry's content is read is a faithful stand-in for a
+	 * tick that dies partway — an unreadable file, a disk that has filled since the
+	 * plan was made — and leaves the job record active, exactly as a real one would.
+	 *
+	 * @return ManifestBuilderInterface&\Mockery\MockInterface The builder mock.
+	 */
+	private function failing_builder_mock() {
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->andReturnUsing(
+			static function (): ManifestStream {
+				return ManifestStream::from_plans(
+					array(
+						new EntryPlan(
+							EntryHeader::for_file( 'wp-content/a.txt', 5, 0644, 1690000000, 'application/octet-stream', 0 ),
+							0,
+							str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+							static function () {
+								throw new RuntimeException( 'simulated tick failure' );
+							}
+						),
+					)
+				);
+			}
+		);
+		return $builder;
 	}
 
 	/**

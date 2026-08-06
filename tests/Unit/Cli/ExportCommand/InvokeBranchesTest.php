@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
 use Brain\Monkey\Functions;
 use Mockery;
+use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
@@ -19,6 +20,9 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\ManifestBuilderInterface;
@@ -54,7 +58,9 @@ use RuntimeException;
  *  2. The try-finally exception path. ExportCommand opens the
  *     destination file before invoking the manifest builder. If the
  *     manifest builder throws, the finally block must run (closing
- *     the destination) without swallowing the exception. Helper
+ *     the destination and releasing the lock), and the failure must
+ *     then be reported as a verdict naming which kind of refusal it
+ *     was (ADR 0022) before the command halts non-zero. Helper
  *     tests cannot exercise this; integration tests would catch a
  *     hung file handle eventually but not pinpoint the cause.
  *
@@ -153,25 +159,24 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * An exception thrown by ManifestBuilder::build must propagate out of __invoke.
+	 * A manifest-builder failure halts non-zero instead of escaping as an uncaught exception.
 	 *
-	 * The destination file is opened before the manifest is built. A
-	 * try-finally protects the file descriptor so it is closed on
-	 * failure paths as well as success paths. A regression that
-	 * changed the finally to a catch-and-swallow would hide the
-	 * underlying failure from the user; this test guards against
-	 * that.
+	 * It used to be re-thrown out of __invoke, where WordPress's fatal handler caught
+	 * it and printed a raw stack trace followed by "There has been a critical error on
+	 * this website" — the sentence that says Pontifex is broken when the truth is
+	 * usually that this server cannot do what was asked of it. The exit code was
+	 * already non-zero and stays so; what changes is that a human can now read why it
+	 * stopped.
 	 *
-	 * We cannot directly assert that fclose() was invoked from
-	 * inside the finally block — PHPUnit has no hook for "this
-	 * resource handle was closed." What we CAN assert is that the
-	 * exception is not swallowed; if the finally is missing or
-	 * incorrectly catches, the test would fail because the
-	 * exception either propagates wrongly-wrapped or not at all.
+	 * The destination file is opened before the manifest is built, and a try-finally
+	 * protects the file descriptor so it is closed on failure paths as well as success
+	 * paths. We cannot directly assert that fclose() was invoked from inside the
+	 * finally block — PHPUnit has no hook for "this resource handle was closed." What
+	 * we CAN assert is that the failure is reported rather than silently swallowed.
 	 *
 	 * @return void
 	 */
-	public function test_invoke_propagates_manifest_builder_exception(): void {
+	public function test_invoke_halts_instead_of_propagating_a_manifest_builder_failure(): void {
 		$environment       = $this->build_environment_mock();
 		$wordpress_context = $this->build_wordpress_context_mock();
 
@@ -181,13 +186,11 @@ final class InvokeBranchesTest extends TestCase {
 			->once()
 			->andThrow( new RuntimeException( 'simulated manifest-builder failure' ) );
 
-		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
-		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
-
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
 
 		$command(
 			array(),
@@ -195,6 +198,12 @@ final class InvokeBranchesTest extends TestCase {
 				'output' => $this->temp_output_path,
 				'yes'    => true,
 			)
+		);
+
+		$this->assertStringContainsString(
+			'simulated manifest-builder failure',
+			implode( "\n", $printed ),
+			'The failure is reported to the operator, not re-thrown (halt is mocked, so execution continues).'
 		);
 	}
 
@@ -236,12 +245,10 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * A failing export records an error log line and re-throws unchanged.
+	 * A failing export still records its error log line, now alongside the verdict.
 	 *
-	 * When the manifest builder throws, the command logs an "Export
-	 * failed" line at error level and then re-throws the original
-	 * exception, so the failure still reaches WP-CLI. This guards both
-	 * halves: that the error is logged, and that it is not swallowed.
+	 * The log entry is what a browser-side operator has to fall back on, so the
+	 * readable CLI verdict is in addition to it, never instead of it.
 	 *
 	 * @return void
 	 */
@@ -255,17 +262,15 @@ final class InvokeBranchesTest extends TestCase {
 			->once()
 			->andThrow( new RuntimeException( 'simulated manifest-builder failure' ) );
 
-		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
-		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
 		$logger->shouldReceive( 'error' )->once();
 
 		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
-
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'simulated manifest-builder failure' );
 
 		$command(
 			array(),
@@ -274,6 +279,8 @@ final class InvokeBranchesTest extends TestCase {
 				'yes'    => true,
 			)
 		);
+
+		$this->assertNotSame( array(), $printed, 'The failure is logged and reported, not re-thrown.' );
 	}
 
 	/**
@@ -578,5 +585,286 @@ final class InvokeBranchesTest extends TestCase {
 		$command->release_lock_on_shutdown();
 
 		$this->assertFalse( $lock->is_held(), 'A lock that was never held must still report unheld after the no-op shutdown call.' );
+	}
+
+	/**
+	 * An archive that cannot be trusted is named as such, and this export is not continued.
+	 *
+	 * The advice is deliberately not the output-state line the other kinds get. On a
+	 * resumable run that line says "continue it with --resume", which is the one piece
+	 * of advice that must never follow an archive Pontifex has just refused to trust.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_untrustworthy_archive_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new ArchiveNotTrustworthy( 'the entry hash does not match' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Export refused.', $output );
+		$this->assertStringContainsString( 'The archive cannot be trusted: the entry hash does not match', $output );
+		$this->assertStringContainsString( 'Do not continue this export', $output );
+		$this->assertStringNotContainsString( 'No archive was written', $output, 'The output-state line must not follow a trust refusal.' );
+	}
+
+	/**
+	 * A host that cannot comply is distinguished from a bad archive, and says nothing was written.
+	 *
+	 * A full disk is the everyday case, and the two things an operator needs are that
+	 * the server is the fixable problem and that there is no backup at the output path
+	 * despite the command having run.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_a_host_that_cannot_comply_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new HostCannotComply( 'there is not enough free disk space' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Export refused.', $output );
+		$this->assertStringContainsString( 'This host cannot complete the backup: there is not enough free disk space', $output );
+		$this->assertStringContainsString( 'The problem is this server', $output );
+		$this->assertStringContainsString( 'No archive was written to', $output );
+		$this->assertStringContainsString( 'an earlier backup, left untouched', $output );
+	}
+
+	/**
+	 * A wrong request is reported without blaming the archive or the host.
+	 *
+	 * Nothing is wrong with anything and nothing ran, so neither the log pointer nor
+	 * the output-state line belongs here.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_invalid_request_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new InvalidRequest( '--exclude-table needs at least one pattern' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'The request needs correcting: --exclude-table needs at least one pattern', $output );
+		$this->assertStringNotContainsString( 'cannot be trusted', $output );
+		$this->assertStringNotContainsString( 'Full details are in the Pontifex log', $output );
+		$this->assertStringNotContainsString( 'No archive was written', $output );
+	}
+
+	/**
+	 * A refusal Pontifex has not yet classified is still reported as a refusal.
+	 *
+	 * Most of the safety core still throws exceptions that predate the taxonomy, and
+	 * five of them carry the marker interface without being one of the three kinds.
+	 * Those are decisions Pontifex made deliberately, so calling them a failure would
+	 * misreport a refusal as a fault.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_unclassified_refusal_as_a_refusal(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new CipherException( 'the cipher could not be initialised' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Export refused.', $output );
+		$this->assertStringContainsString( 'The failure was: the cipher could not be initialised', $output );
+	}
+
+	/**
+	 * A failure carrying no Pontifex type is reported as a failure, not a refusal.
+	 *
+	 * This is why the three kinds alone are not enough: most of the export path still
+	 * raises bare SPL exceptions, and claiming a refusal for one would assert an intent
+	 * that was never there.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_an_unrecognised_failure_as_a_failure_not_a_refusal(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new RuntimeException( 'FileScanner: the directory could not be read' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Export failed.', $output );
+		$this->assertStringNotContainsString( 'Export refused.', $output );
+		$this->assertStringContainsString( 'The failure was: FileScanner: the directory could not be read', $output );
+		$this->assertStringContainsString( 'Full details are in the Pontifex log', $output );
+	}
+
+	/**
+	 * The verdict carries no absolute server paths.
+	 *
+	 * This output is exactly what an operator pastes into a support thread or a bug
+	 * report, and the engine's own messages routinely name absolute paths — so the
+	 * message is redacted as well as the output path.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_redacts_absolute_paths_from_the_verdict(): void {
+		$temp_dir = rtrim( sys_get_temp_dir(), '/' );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_export( new HostCannotComply( sprintf( 'cannot write to %s/nowhere', $temp_dir ) ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringNotContainsString( $temp_dir, $output, 'Neither the message nor the output path may leak an absolute path.' );
+		$this->assertStringContainsString( '{TMP}/nowhere', $output, 'The redacted message still names the file, just not where it lives.' );
+	}
+
+	/**
+	 * A failure after the archive was written must not claim no archive was written.
+	 *
+	 * The engine writes to a temp sibling and moves it into place, so once that move
+	 * has happened there is a real, complete backup on disk — and a later fault must
+	 * not send the operator looking for a file that is sitting right there. The lever
+	 * here is the completion log line failing, which is both the first thing to happen
+	 * after the move and a realistic way for it to go wrong: the log is a file on the
+	 * same disk that has just proved troublesome.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_says_the_archive_is_complete_when_the_failure_came_after_it(): void {
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->with( 'Export complete.', Mockery::any() )->once()->andThrow( new RuntimeException( 'simulated post-write failure' ) );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'error' )->once();
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new ExportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_manifest_builder_mock_returning_empty(),
+			$logger,
+			new NullProgressBar()
+		);
+
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'was written to', $output );
+		$this->assertStringContainsString( 'and is complete; the failure came after it', $output );
+		$this->assertStringNotContainsString( 'No archive was written', $output );
+	}
+
+	/**
+	 * The operation lock is released before the command halts.
+	 *
+	 * WP_CLI::halt() calls exit(), and PHP does not run a finally block when exit() is
+	 * called — so halting inside the catch would skip the release in the finally and
+	 * leave the site's lock to the shutdown backstop. That backstop exists for a
+	 * mid-work fatal, not as the normal path off a handled failure.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_releases_the_lock_before_halting(): void {
+		$lock_context = Mockery::mock( WordPressContext::class );
+		$lock_context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$lock_context->shouldReceive( 'release_named_lock' )->once();
+		$lock = new OperationLock( $lock_context, new JobStore( sys_get_temp_dir() . '/pontifex-export-lock-test-' . uniqid( '', true ) ) );
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andThrow( new RuntimeException( 'simulated manifest-builder failure' ) );
+
+		$held_at_halt = null;
+		$wp_cli       = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 )->andReturnUsing(
+			static function () use ( $lock, &$held_at_halt ): void {
+				$held_at_halt = $lock->is_held();
+			}
+		);
+
+		$command = new ExportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$manifest_builder,
+			new NullLogger(),
+			new NullProgressBar(),
+			null,
+			$lock
+		);
+
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertFalse( $held_at_halt, 'The lock must already be released by the time the command halts.' );
+	}
+
+	/**
+	 * Run an export whose manifest build raises the given failure.
+	 *
+	 * The manifest builder is the earliest injectable collaborator that can fail, so
+	 * it is the shortest path to the failure handler with nothing else in the way.
+	 *
+	 * @param \Throwable $failure The failure the manifest build raises.
+	 * @return void
+	 */
+	private function run_failing_export( \Throwable $failure ): void {
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andThrow( $failure );
+
+		$command = new ExportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$manifest_builder,
+			new NullLogger(),
+			new NullProgressBar()
+		);
+
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+	}
+
+	/**
+	 * Build the WP_CLI alias mock, collecting everything it prints in order.
+	 *
+	 * Both streams land in one list so a test can assert not just that a line was
+	 * printed but where it came in the sequence.
+	 *
+	 * @param array<int, string> $printed Receives each printed line, by reference.
+	 * @return \Mockery\MockInterface The WP_CLI alias mock, for adding further expectations.
+	 */
+	private function mock_wp_cli_capturing_output( array &$printed ) {
+		$collect = static function ( string $message ) use ( &$printed ): void {
+			$printed[] = $message;
+		};
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes()->andReturnUsing( $collect );
+		return $wp_cli;
 	}
 }

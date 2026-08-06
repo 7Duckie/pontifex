@@ -155,6 +155,13 @@ final class SigningInvokeTest extends TestCase {
 	/**
 	 * --sign without --signing-key is refused.
 	 *
+	 * WP_CLI::error() exits the real process, so the RuntimeException the mock raises
+	 * in its place stands in for that exit. Since the export now handles its own
+	 * failures rather than letting them escape, that stand-in is caught and reported
+	 * like any other — hence the halt expectation. What the test is actually about is
+	 * unchanged: error() is raised exactly once, and the manifest builder, a bare mock
+	 * that would fail on any call, is never reached.
+	 *
 	 * @return void
 	 */
 	public function test_invoke_sign_without_signing_key_errors(): void {
@@ -162,6 +169,7 @@ final class SigningInvokeTest extends TestCase {
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
 		$wp_cli->shouldReceive( 'error' )->once()->andThrow( new RuntimeException( 'halt' ) );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
 		// The command errors out in the signing step, before the manifest is built,
 		// so build() is never called — a bare mock with no expectation.
@@ -173,8 +181,6 @@ final class SigningInvokeTest extends TestCase {
 			new NullProgressBar()
 		);
 
-		$this->expectException( RuntimeException::class );
-
 		$command(
 			array(),
 			array(
@@ -183,6 +189,8 @@ final class SigningInvokeTest extends TestCase {
 				'sign'   => true,
 			)
 		);
+
+		$this->assertTrue( true, 'Reaching this line means the stand-in exit was handled rather than escaping.' );
 	}
 
 	/**

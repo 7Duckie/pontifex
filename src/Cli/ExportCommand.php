@@ -22,6 +22,10 @@ use Pontifex\Destination\DestinationSpec;
 use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
+use Pontifex\Exception\PontifexException;
 use Pontifex\Export\ExportCounters;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportResult;
@@ -49,6 +53,11 @@ use Pontifex\WordPress\WordPressRoot;
  * instead, including core and wp-config.php, for cloning onto a bare
  * destination. Either way the archive is the on-disk artefact needed
  * to restore the site on a different host.
+ *
+ * It exits 0 when the backup completes, and non-zero when it is refused or
+ * fails — reporting which of the three kinds of refusal happened (ADR 0022):
+ * the archive cannot be trusted, this host cannot comply, or the request
+ * itself needs correcting.
  *
  * ## OPTIONS
  *
@@ -345,10 +354,14 @@ final class ExportCommand {
 	 * exclusion rules, optionally confirm, build provenance, run the
 	 * manifest builder, write the archive, print a summary.
 	 *
+	 * A failure is not re-thrown. It is logged, reported as a readable verdict
+	 * naming which kind of refusal it was, and the command halts non-zero — so
+	 * an operator sees why it stopped rather than a stack trace, and a script
+	 * still sees a failing exit code.
+	 *
 	 * @param array<int, string>         $positional_args  Positional arguments passed on the CLI. Unused for `export`.
 	 * @param array<string, string|bool> $associative_args Associative `--key=value` and `--flag` arguments.
 	 * @return void
-	 * @throws Throwable Re-thrown after logging if the archive write fails.
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
 
@@ -409,6 +422,19 @@ final class ExportCommand {
 		}
 		$this->lock = $lock;
 		register_shutdown_function( array( $this, 'release_lock_on_shutdown' ) );
+
+		// The failure the run ended on, or null when it succeeded. Recorded rather than
+		// re-thrown, and acted on only after the finally below: WP_CLI::halt() calls
+		// exit(), and PHP does not run a finally block when exit() is called — so
+		// halting inside the catch would skip the lock release and leave the site's
+		// operation lock to the shutdown backstop. That backstop is the last line of
+		// defence, not the primary one.
+		$failure = null;
+
+		// Whether this run got as far as a complete archive on disk. Only an upload
+		// can fail after that point, and the verdict must not then tell the operator
+		// no archive was written when one is sitting there.
+		$archive_written = false;
 
 		try {
 			if ( ! $resume ) {
@@ -549,6 +575,10 @@ final class ExportCommand {
 				);
 				$this->progress->finish();
 
+				// The engine moved the completed archive into place, so from here a
+				// failure (an upload, a retention prune) leaves a real backup behind.
+				$archive_written = true;
+
 				$this->print_changed_file_warnings( $result );
 				$this->print_media_type_warning( $result->media_type_unresolved_count() );
 
@@ -587,17 +617,34 @@ final class ExportCommand {
 				);
 				$this->bump_counters( array( 'failed' => 1 ) );
 				TransferHistory::record( $this->wordpress_context, 'export', 'failed', 0, gmdate( 'c' ) );
-				throw $error;
+				$failure = $error;
 			}
 
-			$this->upload_archive(
-				$destination_adapter,
-				$output_path,
-				$encrypting,
-				null !== $destination_spec ? $destination_spec->retention() : 0
-			);
+			// Only upload an archive that exists. A failed write has already been
+			// recorded above; pushing on to the destination would fail a second time
+			// and bury the first, real reason under a transfer error.
+			if ( null === $failure ) {
+				$this->upload_archive(
+					$destination_adapter,
+					$output_path,
+					$encrypting,
+					null !== $destination_spec ? $destination_spec->retention() : 0
+				);
+			}
+		} catch ( Throwable $error ) {
+			// Everything the inner handler above does not cover: a rejected exclusion
+			// pattern, a failed upload, and the resumable tick loop, which logs and
+			// counts its own failure and then re-throws to here.
+			$failure = $error;
 		} finally {
 			$lock->release();
+		}
+
+		// Report and halt here, outside the try, so the finally above has already
+		// released the lock. See the note on $failure at its declaration.
+		if ( null !== $failure ) {
+			$this->print_failure_verdict( $output_path, $failure, $resumable || $resume, $archive_written );
+			WP_CLI::halt( 1 );
 		}
 	}
 
@@ -624,8 +671,13 @@ final class ExportCommand {
 	 * one tick's unlogged work, and `--resume` picks up from the last verified
 	 * entry.
 	 *
+	 * $output_path is taken by reference because a resume learns it from the
+	 * job record rather than from the command line: without the reference the
+	 * caller would still be holding the empty string it passed in, and would
+	 * report a failure against no path at all.
+	 *
 	 * @param bool                                         $resume                     True to continue the interrupted job, false to start a new one.
-	 * @param string                                       $output_path                The archive destination ('' on resume until the job supplies it).
+	 * @param string                                       $output_path                The archive destination ('' on resume until the job supplies it); set here on resume.
 	 * @param \Pontifex\Archive\Crypto\SigningContext|null $signing                  Signing inputs, or null.
 	 * @param string|null                                  $encryption_disabled_reason The recorded reason the archive is unencrypted.
 	 * @param string                                       $scan_root                  Absolute path the file scan starts from.
@@ -634,9 +686,9 @@ final class ExportCommand {
 	 * @param Scope                                        $scope                      The scope facts to record in provenance.
 	 * @return void
 	 * @throws RuntimeException If the job record disappears mid-run.
-	 * @throws Throwable        Re-thrown after logging if a tick fails (drift refusal, write failure).
+	 * @throws Throwable        Re-thrown after logging if a tick fails (drift refusal, write failure); __invoke reports it and halts.
 	 */
-	private function run_resumable( bool $resume, string $output_path, $signing, ?string $encryption_disabled_reason, string $scan_root, string $path_prefix, ExclusionRules $exclusion_rules, Scope $scope ): void {
+	private function run_resumable( bool $resume, string &$output_path, $signing, ?string $encryption_disabled_reason, string $scan_root, string $path_prefix, ExclusionRules $exclusion_rules, Scope $scope ): void {
 		$store   = new JobStore( $this->resolve_content_root() );
 		$factory = null !== $this->manifest_builder
 			? fn (): ManifestBuilderInterface => $this->manifest_builder
@@ -1303,5 +1355,204 @@ final class ExportCommand {
 				$output_path
 			)
 		);
+	}
+
+	/**
+	 * Print why the export stopped, in terms an operator can act on.
+	 *
+	 * Three situations demand three different responses, and the exception's
+	 * type is what tells them apart (ADR 0022): an archive that cannot be
+	 * trusted means this backup is not one; a host that cannot comply means the
+	 * site is fine and the server is the fixable problem; a wrong request means
+	 * correct the invocation. A failure carrying none of those types is
+	 * reported plainly rather than guessed at — most of the safety core still
+	 * throws untyped exceptions, and inventing a kind for one would be worse
+	 * than admitting we do not know.
+	 *
+	 * Unlike import's verdict, the kind lines carry no path: an operator
+	 * exporting already knows where they asked the archive to go, and what they
+	 * do not know is whether one is now there. {@see self::print_output_state()}
+	 * answers that instead, once, at the end.
+	 *
+	 * The engine's message goes through the redactor, because it routinely
+	 * names an absolute path and this output is exactly what an operator pastes
+	 * into a support thread.
+	 *
+	 * @param string    $output_path     Where the archive was being written ('' if a resume failed before learning it).
+	 * @param Throwable $error           The failure that ended the run.
+	 * @param bool      $resumable       True when this run was resumable, so its finished work is kept.
+	 * @param bool      $archive_written True when a complete archive reached the output path before the failure.
+	 * @return void
+	 */
+	private function print_failure_verdict( string $output_path, Throwable $error, bool $resumable, bool $archive_written ): void {
+		$message = PathRedactor::from_environment()->redact( $error->getMessage() );
+
+		WP_CLI::log( self::failure_headline( $error instanceof PontifexException ) );
+
+		if ( $error instanceof ArchiveNotTrustworthy ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: the reason the archive was refused */
+					__( 'The archive cannot be trusted: %s', 'pontifex' ),
+					$message
+				)
+			);
+			// Deliberately no output-state line: on a resumable run this is the one
+			// failure where "continue it with --resume" would be the wrong advice.
+			WP_CLI::log( __( 'Do not continue this export — start a fresh one.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof HostCannotComply ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: the reason this host could not comply */
+					__( 'This host cannot complete the backup: %s', 'pontifex' ),
+					$message
+				)
+			);
+			WP_CLI::log( __( 'The problem is this server — usually disk space, memory, or permissions — and it is usually fixable.', 'pontifex' ) );
+			$this->print_output_state( $output_path, $resumable, $archive_written );
+			return;
+		}
+
+		if ( $error instanceof InvalidRequest ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: what was wrong with the command that was run */
+					__( 'The request needs correcting: %s', 'pontifex' ),
+					$message
+				)
+			);
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %s: the failure message */
+				__( 'The failure was: %s', 'pontifex' ),
+				$message
+			)
+		);
+		WP_CLI::log( __( 'Full details are in the Pontifex log: wp-content/pontifex/logs/pontifex.log', 'pontifex' ) );
+		$this->print_output_state( $output_path, $resumable, $archive_written );
+	}
+
+	/**
+	 * Say what, if anything, this run left at the output path.
+	 *
+	 * The question a failed backup raises is not only why it stopped but
+	 * whether there is now a backup — and all three answers are different. A
+	 * completed archive that failed on upload is a usable backup sitting on
+	 * this server. A one-shot run leaves nothing: the engine writes to a temp
+	 * sibling and removes it, so any file still at the output path is an
+	 * earlier archive it never replaced — which is exactly the file an operator
+	 * could otherwise mistake for the backup they just tried to take.
+	 *
+	 * A resumable run is the case that most invites a wrong answer. "Continue
+	 * it with --resume" is the obvious thing to say and it is false: a tick
+	 * that raises marks its job FAILED, that status is terminal, and --resume
+	 * accepts only an active job — so it would refuse. Whether such a run also
+	 * strands its part-written file depends on where it died (a tick leaves
+	 * one; a failure at the final move discards it), which is too fine a
+	 * distinction to assert blind — so this looks for the file rather than
+	 * predicting it. The output path it looks beside is one a resumed run
+	 * learned from the job record rather than the command line, so its operator
+	 * may never have typed it.
+	 *
+	 * @param string $output_path     Where the archive was being written ('' if a resume failed before learning it).
+	 * @param bool   $resumable       True when this run was resumable.
+	 * @param bool   $archive_written True when a complete archive reached the output path before the failure.
+	 * @return void
+	 */
+	private function print_output_state( string $output_path, bool $resumable, bool $archive_written ): void {
+		$path = PathRedactor::from_environment()->redact( $output_path );
+
+		if ( $archive_written ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: the output file path */
+					__( 'The archive itself was written to %s and is complete; the failure came after it.', 'pontifex' ),
+					$path
+				)
+			);
+			return;
+		}
+
+		if ( $resumable ) {
+			WP_CLI::log( __( 'This export cannot be continued with --resume: a failed job is closed, and only an interrupted one can be picked up again.', 'pontifex' ) );
+
+			$orphan = self::orphaned_part_file( $output_path );
+			if ( null !== $orphan ) {
+				WP_CLI::log(
+					sprintf(
+						/* translators: %s: the path of the part-written file left behind */
+						__( 'A part-written file is left at %s. It is not a backup and nothing will resume it — delete it and export again.', 'pontifex' ),
+						PathRedactor::from_environment()->redact( $orphan )
+					)
+				);
+				return;
+			}
+
+			WP_CLI::log( __( 'No archive was written. Export again once the problem is fixed.', 'pontifex' ) );
+			return;
+		}
+
+		if ( '' === $output_path ) {
+			WP_CLI::log( __( 'No archive was written.', 'pontifex' ) );
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %s: the output file path */
+				__( 'No archive was written to %s. Anything already there is an earlier backup, left untouched.', 'pontifex' ),
+				$path
+			)
+		);
+	}
+
+	/**
+	 * The part-written file a failed resumable export left beside its output, if any.
+	 *
+	 * A resumable run writes to `<output>.pontifex-job-<unique>.part` and moves
+	 * it into place at the end, so whether one survives a failure depends on
+	 * where the failure happened. Rather than guess, look: telling an operator
+	 * to delete a file that is not there, or leaving a large one unmentioned,
+	 * are both worse than the one glob this costs.
+	 *
+	 * @param string $output_path The archive destination ('' when a resume failed before learning it).
+	 * @return string|null The first matching part file, or null when there is none to report.
+	 */
+	private static function orphaned_part_file( string $output_path ): ?string {
+		if ( '' === $output_path ) {
+			return null;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Listing the plugin's own part-written files beside the output path; WP_Filesystem is unavailable in CLI contexts.
+		$matches = glob( $output_path . '.pontifex-job-*.part' );
+		if ( false === $matches || array() === $matches ) {
+			return null;
+		}
+
+		sort( $matches );
+		return $matches[0];
+	}
+
+	/**
+	 * The opening line of a failure verdict: what happened.
+	 *
+	 * A refusal is a decision Pontifex made and can explain; anything else is a
+	 * fault, and calling a fault a refusal would claim an intent that was not
+	 * there. Export has no dry run, so unlike import there is no rehearsal to
+	 * distinguish — every failure here is a real one.
+	 *
+	 * @param bool $is_refusal True when Pontifex refused deliberately (ADR 0022's marker).
+	 * @return string
+	 */
+	private static function failure_headline( bool $is_refusal ): string {
+		return $is_refusal
+			? __( 'Export refused.', 'pontifex' )
+			: __( 'Export failed.', 'pontifex' );
 	}
 }
