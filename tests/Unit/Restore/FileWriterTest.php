@@ -3153,6 +3153,107 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A symlinked sweep root itself is refused, not merely descended into carefully.
+	 *
+	 * {@see self::test_sweep_never_descends_through_a_symlink()} above places
+	 * its symlink INSIDE the sweep root and proves the walk does not follow
+	 * an interior link — a different case entirely, already protected by
+	 * {@see RecursiveIteratorIterator}'s own `hasChildren( $allowLinks = false )`
+	 * default. This test covers the case a follow-up adversarial mutation
+	 * audit found completely unpinned: deleting the `is_link( $sweep_root )`
+	 * guard from {@see FileWriter::sweep_orphaned_temp_files()} left all 1862
+	 * tests in this project green, because no existing test ever made
+	 * "wp-content" — the sweep root itself — a symlink.
+	 *
+	 * That guard exists because is_dir() FOLLOWS a symlink to ask whether its
+	 * TARGET is a directory, so, without it, `is_dir( $sweep_root )` would
+	 * report true for a symlinked "wp-content" and
+	 * {@see RecursiveDirectoryIterator}'s own constructor would then open
+	 * whatever the link resolves to just as readily as it opens a real
+	 * directory — `hasChildren( $allowLinks = false )` only governs a symlink
+	 * the walk MEETS while descending, never what it was HANDED as its own
+	 * starting point. And {@see FileWriter::assert_no_symlinked_ancestor()}
+	 * refuses every entry {@see FileWriter::write_entry()} is asked to write
+	 * through a symlinked "wp-content", so in this exact layout the writer's
+	 * own reach is zero, while the sweep's — without this guard — would have
+	 * been the link's whole foreign target tree.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_refuses_a_symlinked_sweep_root(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$outside = $this->make_fixture_directory( 'outside' );
+		$orphan  = $outside . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; "wp-content" — the sweep root itself — is the symlink under test.
+		symlink( 'outside', $this->fixture_root . '/wp-content' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed, 'a symlinked sweep root must refuse the whole sweep' );
+		$this->assertFileExists( $orphan, 'a file behind a symlinked sweep root must never be swept' );
+	}
+
+	/**
+	 * A sweep root that RESOLVES outside the destination root, via a symlinked intermediate component, is refused — independently of the is_link() guard above.
+	 *
+	 * The realpath() block in {@see FileWriter::sweep_orphaned_temp_files()}
+	 * is a SECOND, independent confinement guard, and the same mutation audit
+	 * found it just as unpinned as the is_link() guard above: deleting the
+	 * whole realpath() block also left all 1862 tests green, because
+	 * {@see self::test_sweep_refuses_a_symlinked_sweep_root()} above trips
+	 * `is_link( $sweep_root )` first and never reaches this code at all — no
+	 * existing test exercised the realpath() block on its own.
+	 *
+	 * So this fixture is built deliberately to avoid that overlap: the sweep
+	 * root's own FINAL path component ("wp-content") is a genuine directory,
+	 * never itself a symlink, so `is_link( $sweep_root )` reads false and the
+	 * first guard cannot be what refuses this case — proven below by an
+	 * explicit precondition assertion, not merely assumed. What sends the
+	 * sweep root somewhere outside the destination root instead is an
+	 * INTERMEDIATE path component: required_prefix is set to
+	 * "link/wp-content", and "link" is a symlink pointing at an entirely
+	 * separate temporary directory that also happens to contain a
+	 * "wp-content" child. is_dir( $sweep_root ) still reports true — the
+	 * directory really is there, on the far side of the link — so the walk
+	 * would otherwise proceed unhindered; only realpath() resolving the
+	 * whole path the way the kernel actually would, and finding it lands
+	 * outside $this->destination_root, is what refuses it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_refuses_a_sweep_root_that_resolves_outside_the_destination_root(): void {
+		$outside_root    = sys_get_temp_dir() . '/pontifex-filewriter-test-outside-' . bin2hex( random_bytes( 8 ) );
+		$outside_content = $outside_root . '/wp-content';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; a real directory entirely outside the destination root, reached only via the symlinked "link" component below.
+		mkdir( $outside_content, 0o755, true );
+		$orphan = $outside_content . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		try {
+			$writer = new FileWriter( $this->fixture_root, false, 'link/wp-content' );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; the INTERMEDIATE component "link" is the symlink under test, not the sweep root's own final component.
+			symlink( $outside_root, $this->fixture_root . '/link' );
+
+			$sweep_root = $this->fixture_root . '/link/wp-content';
+			$this->assertFalse( is_link( $sweep_root ), 'precondition: the sweep root itself must not be a symlink, so the is_link() guard cannot be what refuses this case' );
+			$this->assertTrue( is_dir( $sweep_root ), 'precondition: the sweep root must genuinely resolve to a real, existing directory, so is_dir() cannot be what refuses this case' );
+
+			$removed = $writer->sweep_orphaned_temp_files();
+
+			$this->assertSame( 0, $removed, 'a sweep root resolving outside the destination root must refuse the whole sweep' );
+			$this->assertFileExists( $orphan, 'a file behind a sweep root that resolves outside the destination root must never be swept' );
+		} finally {
+			self::rmtree( $outside_root );
+		}
+	}
+
+	/**
 	 * Pontifex's own working directory is skipped.
 	 *
 	 * A matching name under wp-content/pontifex/jobs survives — the same

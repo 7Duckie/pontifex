@@ -797,21 +797,27 @@ versions.
 - **A restore that fails part-way through the file walk leaves a merged
   tree.** The database cuts over atomically, but files already written
   are not rolled back.
-- **Two kinds of orphaned `*.pontifex-*.tmp` file are still never swept.**
-  The two that mattered now are: the ones an interrupted restore leaves out
-  in the site — a half-written file beside the real one, or the symlink
-  capability probe's dangling link — are removed at the start of the next
-  restore, and the partial safety archive a killed import leaves in
-  `wp-content/pontifex/rollback`, which can be as large as however much of
-  the site it had written before it died, is removed at the start of the
-  next import. What remains is smaller and deliberate. A killed background
-  job can leave a temporary file in `wp-content/pontifex/jobs`; those are
-  small, and that directory also holds the temporary files a *running* job
-  is writing, which nothing can safely tell apart from abandoned ones. And
-  a killed `wp pontifex export` leaves one beside the `--output` path it
-  was given: Pontifex does not sweep there, because that is a directory the
-  operator nominated rather than one Pontifex owns, and quietly deleting
-  inside it is a wider licence than a backup tool should take.
+- **Four kinds of temporary file a killed run leaves behind are still
+  never swept.** The two that mattered now are: the ones an interrupted
+  restore leaves out in the site — a half-written file beside the real
+  one, or the symlink capability probe's dangling link — are removed at the
+  start of the next restore, and the partial safety archive a killed import
+  leaves in `wp-content/pontifex/rollback`, which can be as large as
+  however much of the site it had written before it died, is removed at the
+  start of the next import. What remains is smaller, and only the last of
+  the four is deliberate. A killed background job can leave a temporary
+  file in `wp-content/pontifex/jobs`; those are small, and that directory
+  also holds the temporary files a *running* job is writing, which nothing
+  can safely tell apart from abandoned ones. A killed
+  `wp pontifex diagnostics` can leave a `.pontifex-diagnostics-*.tar` in
+  the directory it was writing to, which nothing removes on the way out.
+  The case-sensitivity probe a restore runs at the installation root writes
+  a `.PontifexCaseProbe*` file that survives a kill, and it does not carry
+  the shape any sweep recognises. And a killed `wp pontifex export` leaves
+  one beside the `--output` path it was given: Pontifex does not sweep
+  there, because that is a directory the operator nominated rather than one
+  Pontifex owns, and quietly deleting inside it is a wider licence than a
+  backup tool should take.
 - **The test-adequacy programme is substantially untouched**, above all a
   completeness oracle: a test asserting set equality between a real
   filesystem tree and the archive's entry paths, driven through the real

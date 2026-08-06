@@ -2253,16 +2253,42 @@ final class FileWriter {
 	 * root does not exist yet (a first-ever restore onto a fresh destination),
 	 * there is nothing to sweep and this returns 0 without creating anything.
 	 *
-	 * NO AGE THRESHOLD. {@see \Pontifex\Lock\OperationLock} guarantees only one
-	 * site-mutating operation — backup, restore, or rollback — runs against
-	 * this site at a time, so by the time this method runs (inside a restore
-	 * that has just acquired that lock) no LIVE temp file of this writer's own
-	 * can possibly exist to be swept out from under a concurrent write; every
-	 * match found here is necessarily a leftover from a run that is no longer
-	 * running. An age threshold would actively break the commonest real
-	 * case — kill a restore, retry immediately — where the orphans left
-	 * behind are still only seconds old. The database-side twin this mirrors
-	 * has no threshold either.
+	 * NO AGE THRESHOLD. {@see \Pontifex\Lock\OperationLock} guarantees only
+	 * one DESTRUCTIVE, site-mutating operation — backup, restore, or
+	 * rollback — runs against this site at a time, and it is THAT guarantee,
+	 * not "only one operation of any kind whatsoever", that the absence of an
+	 * age threshold actually rests on: by the time this method runs (inside a
+	 * restore that has just acquired the lock) no OTHER destructive run can
+	 * be mid-write to a FILE temp of this writer's own, so every match found
+	 * here is necessarily a leftover from a run that is no longer running.
+	 *
+	 * A concurrent `wp pontifex import --dry-run` is the one demonstrated
+	 * exception. {@see \Pontifex\Cli\ImportCommand} deliberately acquires no
+	 * lock for a dry run, because it changes nothing and two rehearsals have
+	 * no reason to queue behind one another — but a dry run still reaches
+	 * {@see \Pontifex\Restore\RestorePreflight::assert_host_can_write()},
+	 * which calls {@see self::assert_symlinks_creatable()}, which calls
+	 * {@see self::probe_symlink_creation()}: a genuinely LIVE
+	 * `.symlink-probe` artefact can therefore exist while this sweep runs
+	 * concurrently, inside a second, lock-holding process. An earlier version
+	 * of this docblock claimed that could not happen at all; two concurrent
+	 * processes, run deliberately against each other, proved it false — the
+	 * sweeper removed the dry run's own live probe artefact out from under it.
+	 *
+	 * That race is harmless, though, and demonstrably so rather than merely
+	 * assumed. {@see self::probe_symlink_creation()}'s `return` statement
+	 * captures `@symlink()`'s own success-or-failure result BEFORE its
+	 * `finally` block ever runs, so the answer the probe gives back to the
+	 * dry run is already decided by the moment a concurrent sweep could
+	 * remove the artefact underneath it. The `finally` block's own
+	 * `is_link()` check then simply finds nothing left to remove and skips
+	 * its unlink() quietly — no error, no changed answer, nothing for the
+	 * dry run to notice at all.
+	 *
+	 * An age threshold would still actively break the commonest real case
+	 * regardless — kill a restore, retry immediately — where the orphans
+	 * left behind are still only seconds old. The database-side twin this
+	 * mirrors has no threshold either.
 	 *
 	 * WHAT COUNTS AS AN ORPHAN. Only a basename matching
 	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} — the exact
