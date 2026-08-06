@@ -370,6 +370,7 @@ final class Menu {
 					'failed'              => __( 'The verification could not be completed. Check the Pontifex log for details.', 'pontifex' ),
 					'verdictIntact'       => __( 'Verified — this backup is intact.', 'pontifex' ),
 					'verdictBroken'       => __( 'Not verified — this backup is broken.', 'pontifex' ),
+					'verdictRefused'      => __( 'Refused — this backup is intact, but a restore will not accept it.', 'pontifex' ),
 					'factEntries'         => __( 'Entries checked', 'pontifex' ),
 					'factSize'            => __( 'Total size', 'pontifex' ),
 					'factContains'        => __( 'Contains', 'pontifex' ),

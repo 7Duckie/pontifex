@@ -73,6 +73,23 @@ Creates a backup.
 `--resumable` and `--resume` cannot be combined, and neither works with
 encryption — the derived key exists for one run and is never stored.
 
+A refused or failed export prints a verdict rather than propagating the
+exception: which of the three kinds of refusal it was (ADR 0022 — the archive
+cannot be trusted, this host cannot comply, or the request needs correcting),
+the engine's own message with absolute paths redacted, and then exit 1. It also
+says whether there is now a backup, because the answer is not always no: a
+one-shot export leaves nothing at the output path (the archive is written to a
+temp sibling and moved into place only when complete, so any file still there
+is an earlier one), and an archive that was completed before a later step
+failed is still a usable backup.
+
+A **failed** resumable export cannot be continued with `--resume`. A tick that
+raises marks its job `failed`, that status is terminal, and `--resume` accepts
+only an active job — so `--resume` is for a run that was *interrupted* (killed,
+timed out, disconnected), never for one that failed. The verdict says so, and
+names the orphaned `.part` file if the run left one, which it establishes by
+looking rather than by assuming.
+
 ### `wp pontifex import <archive>`
 
 Restores an archive over the current site.
@@ -88,9 +105,19 @@ Restores an archive over the current site.
 | `--passphrase-stdin` | Read the decryption passphrase from stdin. |
 | `--public-key=<path>` | Require a valid signature from this key. |
 
-`--dry-run` runs the signature and scope gates but **not** the disk-space or
-symlink preflights, which live in the restore path. A clean dry run is not a
-promise a real restore will proceed.
+`--dry-run` is a full rehearsal: it runs every gate and every preflight a real
+restore runs — signature, scope, host symlink capability, symlink target
+confinement, free space — and writes nothing. The host capability probe creates
+and removes one test symbolic link, which is the only thing a dry run touches
+and the only check `verify` cannot perform. See
+[ADR 0023](adr/0023-verify-and-restorability.md).
+
+A refused or failed import prints a verdict rather than propagating the
+exception: which of the three kinds of refusal it was (ADR 0022 — the archive
+cannot be trusted, this host cannot comply, or the request needs correcting),
+the engine's own message with absolute paths redacted, and then exit 1. A
+failure carrying none of those types is reported as a failure rather than a
+refusal, because claiming a refusal would assert an intent that was not there.
 
 ### `wp pontifex verify <archive>`
 
@@ -101,13 +128,44 @@ promise a real restore will proceed.
 | `--passphrase-stdin` | Read a passphrase from stdin. |
 | `--public-key=<path>` | Require a valid signature from this key. |
 
-Verify checks structure, the entry-count ceiling, and per-entry hashes. It does
-not decode payloads, so it does not test a passphrase and does not run the
-restore-time preflights. See [section 5](#5-the-restore-pipeline).
+Verify checks structure, the entry-count ceiling, and per-entry hashes, then
+runs every restore preflight that writes nothing: scope-versus-manifest,
+symlink target confinement, and free space. Three outcomes, distinguished by
+exit code and wording:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| Sound | 0 | Undamaged, and a restore would accept it. |
+| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, or contents contradicting the recorded scope. |
+| Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
+
+A finding against the **host** — no free space — is reported as a warning
+alongside a sound verdict, never as the verdict: a full disk is not a damaged
+backup. The host symlink-capability probe is not run, because establishing it
+requires creating a link; use `doctor`, or `import --dry-run` for a specific
+archive. Verify does not decode payloads, so it still does not test a
+passphrase.
+
+Because confinement is resolved against this site's own root, a verification is
+a statement about an archive **and** a destination. See
+[ADR 0023](adr/0023-verify-and-restorability.md) and
+[section 5](#5-the-restore-pipeline).
 
 ### `wp pontifex rollback`
 
 Replays the most recent safety archive. Flags: `--yes`, `--dry-run`.
+
+A refused or failed rollback prints the same three-way verdict, redacted, and
+exits 1. Where import's advice for an untrustworthy archive is to fetch a fresh
+copy of the backup, rollback's cannot be: a safety archive is written
+automatically, in one copy, at the moment of the import it undoes, so there is
+none to fetch — restore a backup you took yourself instead.
+
+A real rollback that stops partway also says so, and how many entries it had
+restored. Nothing reconciles a half-replayed site automatically, so this is the
+one failure whose verdict describes the site rather than the archive. It is
+said only when entries actually landed; a preflight refusal that wrote nothing
+does not raise it.
 
 ### `wp pontifex keygen`
 

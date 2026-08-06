@@ -132,6 +132,12 @@ What follows from this choice — positive, negative, and neutral?
   comply, an invalid request — under one marker interface, so a caller can
   tell them apart instead of collapsing every failure into one message.
   Adopted incrementally; the SPL parents are kept so no existing catch changes.
+- [ADR 0023](./0023-verify-and-restorability.md) —
+  Verify answers for the archive and additionally runs every preflight that
+  changes nothing, so it stops calling an archive sound that a restore then
+  refuses; a dry run answers for the restore and runs all of them, including
+  the one that writes. Refused, cannot-restore-here and could-not-tell are
+  three separate outcomes, because each calls for a different response.
 
 ## Further reading
 

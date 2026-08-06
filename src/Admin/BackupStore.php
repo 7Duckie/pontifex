@@ -182,7 +182,7 @@ final class BackupStore {
 		if ( ! ProtectedDirectory::ensure( $this->directory, self::DIRECTORY_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'BackupStore: could not create the backups directory: %s', $this->directory )
+				sprintf( 'Could not create the backups directory: %s', $this->directory )
 			);
 		}
 	}
@@ -372,7 +372,7 @@ final class BackupStore {
 		if ( ! ProtectedDirectory::ensure( $this->uploads, self::DIRECTORY_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'BackupStore: could not create the uploads directory: %s', $this->uploads )
+				sprintf( 'Could not create the uploads directory: %s', $this->uploads )
 			);
 		}
 	}
@@ -397,7 +397,7 @@ final class BackupStore {
 		if ( null === $part ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
-				'BackupStore: refusing a malformed upload id.'
+				'Refusing a malformed upload id.'
 			);
 		}
 
@@ -406,7 +406,7 @@ final class BackupStore {
 		if ( false === $source ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
-				'BackupStore: could not read the uploaded chunk.'
+				'Could not read the uploaded chunk.'
 			);
 		}
 
@@ -417,7 +417,7 @@ final class BackupStore {
 			fclose( $source );
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
-				'BackupStore: could not open the upload part file.'
+				'Could not open the upload part file.'
 			);
 		}
 
@@ -506,7 +506,7 @@ final class BackupStore {
 		if ( null === $part || ! is_file( $part ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; not web output.
-				'BackupStore: there is no completed upload to finalise.'
+				'There is no completed upload to finalise.'
 			);
 		}
 
@@ -523,7 +523,7 @@ final class BackupStore {
 		if ( ! rename( $part, $target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
-				sprintf( 'BackupStore: could not store the uploaded backup at %s', $target )
+				sprintf( 'Could not store the uploaded backup at %s', $target )
 			);
 		}
 

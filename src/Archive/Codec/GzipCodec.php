@@ -80,7 +80,7 @@ final class GzipCodec implements Codec {
 		if ( $chunk_size < 1 || $chunk_size > self::MAX_CHUNK_SIZE ) {
 			throw new CodecException(
 				sprintf(
-					'GzipCodec: chunk size %d is out of range (1..%d).',
+					'Chunk size %d is out of range (1..%d).',
 					(int) $chunk_size,
 					(int) self::MAX_CHUNK_SIZE
 				)
@@ -120,7 +120,7 @@ final class GzipCodec implements Codec {
 
 		$ctx = deflate_init( ZLIB_ENCODING_GZIP );
 		if ( false === $ctx ) {
-			throw new CodecException( 'GzipCodec: deflate_init() failed.' );
+			throw new CodecException( 'deflate_init() failed.' );
 		}
 
 		$written = 0;
@@ -129,7 +129,7 @@ final class GzipCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$chunk = fread( $input, $this->chunk_size );
 			if ( false === $chunk ) {
-				throw new CodecException( 'GzipCodec: fread() failed during encode.' );
+				throw new CodecException( 'fread() failed during encode.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -141,7 +141,7 @@ final class GzipCodec implements Codec {
 
 			$compressed = deflate_add( $ctx, $chunk, ZLIB_NO_FLUSH );
 			if ( false === $compressed ) {
-				throw new CodecException( 'GzipCodec: deflate_add() failed during encode.' );
+				throw new CodecException( 'deflate_add() failed during encode.' );
 			}
 
 			$written += $this->write_to_stream( $output, $compressed );
@@ -149,7 +149,7 @@ final class GzipCodec implements Codec {
 
 		$final = deflate_add( $ctx, '', ZLIB_FINISH );
 		if ( false === $final ) {
-			throw new CodecException( 'GzipCodec: deflate_add() failed to finalise the encode stream.' );
+			throw new CodecException( 'deflate_add() failed to finalise the encode stream.' );
 		}
 
 		$written += $this->write_to_stream( $output, $final );
@@ -182,7 +182,7 @@ final class GzipCodec implements Codec {
 
 		$ctx = inflate_init( ZLIB_ENCODING_GZIP );
 		if ( false === $ctx ) {
-			throw new CodecException( 'GzipCodec: inflate_init() failed.' );
+			throw new CodecException( 'inflate_init() failed.' );
 		}
 
 		$written  = 0;
@@ -192,7 +192,7 @@ final class GzipCodec implements Codec {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 			$chunk = fread( $input, $this->chunk_size );
 			if ( false === $chunk ) {
-				throw new CodecException( 'GzipCodec: fread() failed during decode.' );
+				throw new CodecException( 'fread() failed during decode.' );
 			}
 			if ( '' === $chunk ) {
 				break;
@@ -202,14 +202,14 @@ final class GzipCodec implements Codec {
 			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- inflate_add() emits a warning on malformed input before returning false; we already handle the false return by throwing CodecException, so the warning is redundant noise.
 			$decompressed = @inflate_add( $ctx, $chunk );
 			if ( false === $decompressed ) {
-				throw new CodecException( 'GzipCodec: inflate_add() failed; input may be malformed or truncated.' );
+				throw new CodecException( 'inflate_add() failed; input may be malformed or truncated.' );
 			}
 
 			$written += $this->write_to_stream( $output, $decompressed );
 
 			if ( null !== $max_output_bytes && $written > $max_output_bytes ) {
 				throw new CodecException(
-					sprintf( 'GzipCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+					sprintf( 'Decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
 				);
 			}
 		}
@@ -218,13 +218,13 @@ final class GzipCodec implements Codec {
 			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- inflate_add() emits a warning on truncated input before returning false; we already handle the false return by throwing CodecException, so the warning is redundant noise.
 			$final = @inflate_add( $ctx, '', ZLIB_FINISH );
 			if ( false === $final ) {
-				throw new CodecException( 'GzipCodec: inflate_add() failed to finalise the decode stream; input may be truncated.' );
+				throw new CodecException( 'inflate_add() failed to finalise the decode stream; input may be truncated.' );
 			}
 			$written += $this->write_to_stream( $output, $final );
 
 			if ( null !== $max_output_bytes && $written > $max_output_bytes ) {
 				throw new CodecException(
-					sprintf( 'GzipCodec: decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
+					sprintf( 'Decoded output exceeded the maximum of %d bytes.', (int) $max_output_bytes )
 				);
 			}
 		}
@@ -242,10 +242,10 @@ final class GzipCodec implements Codec {
 	 */
 	private function assert_streams( $input, $output ): void {
 		if ( ! is_resource( $input ) ) {
-			throw new CodecException( 'GzipCodec: input argument is not a valid stream resource.' );
+			throw new CodecException( 'Input argument is not a valid stream resource.' );
 		}
 		if ( ! is_resource( $output ) ) {
-			throw new CodecException( 'GzipCodec: output argument is not a valid stream resource.' );
+			throw new CodecException( 'Output argument is not a valid stream resource.' );
 		}
 	}
 
@@ -265,7 +265,7 @@ final class GzipCodec implements Codec {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Codec operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API and is the wrong abstraction for byte-stream codecs.
 		$count = fwrite( $stream, $bytes );
 		if ( false === $count ) {
-			throw new CodecException( 'GzipCodec: fwrite() failed during codec operation.' );
+			throw new CodecException( 'fwrite() failed during codec operation.' );
 		}
 		return $count;
 	}

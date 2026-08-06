@@ -101,21 +101,21 @@ final class ScannedDbChunk {
 		callable $sql_provider
 	) {
 		if ( '' === $table_name ) {
-			throw new InvalidArgumentException( 'ScannedDbChunk: table_name must be non-empty.' );
+			throw new InvalidArgumentException( 'table_name must be non-empty.' );
 		}
 		if ( $chunk_index < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedDbChunk: chunk_index %d must be non-negative.', (int) $chunk_index )
+				sprintf( 'chunk_index %d must be non-negative.', (int) $chunk_index )
 			);
 		}
 		if ( $statement_count < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedDbChunk: statement_count %d must be non-negative.', (int) $statement_count )
+				sprintf( 'statement_count %d must be non-negative.', (int) $statement_count )
 			);
 		}
 		if ( $byte_count < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'ScannedDbChunk: byte_count %d must be non-negative.', (int) $byte_count )
+				sprintf( 'byte_count %d must be non-negative.', (int) $byte_count )
 			);
 		}
 
@@ -178,7 +178,7 @@ final class ScannedDbChunk {
 		$stream = ( $this->sql_provider )();
 		if ( ! is_resource( $stream ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->table_name reported verbatim in exception message for diagnostic context; not HTML output.
-			throw new RuntimeException( sprintf( 'ScannedDbChunk: sql_provider for table "%s" chunk %d did not return a stream resource.', $this->table_name, (int) $this->chunk_index ) );
+			throw new RuntimeException( sprintf( 'sql_provider for table "%s" chunk %d did not return a stream resource.', $this->table_name, (int) $this->chunk_index ) );
 		}
 		return $stream;
 	}

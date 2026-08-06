@@ -142,26 +142,56 @@ An untested backup is a hope, not a plan.
 wp pontifex verify /path/to/backup.wpmig
 ```
 
-### What "sound" means — and what it does not
+### The three things verifying can tell you
 
-When Pontifex reports an archive is **sound**, it has recalculated a
-fingerprint for every single file inside and compared it against the
-fingerprint recorded when the backup was made. If any byte anywhere had
-changed, it would say so. That is a strong guarantee, and it is the check that
-catches a backup quietly corrupted by a failing disk.
+**Sound.** Pontifex has recalculated a fingerprint for every single file inside
+the backup and compared it against the fingerprint recorded when the backup was
+made. If any byte anywhere had changed, it would say so. It has also checked
+that a restore would accept the backup. This is the answer you want.
 
-Be clear about the limits, because "sound" is easy to over-read:
+**Broken.** Something inside the backup is damaged or unreadable — the usual
+cause is a failing disk or a copy that did not finish. Do not rely on this file;
+find another copy.
+
+**Refused.** The rarest and the strangest: the file is *not* damaged — every
+fingerprint matched — but a restore will not accept it, because it would place a
+symbolic link outside your site, or because its contents contradict what it says
+it holds. **Pontifex never produces a backup like this.** Do not restore it, do
+not delete it, and find out where it came from. If you made it yourself with
+Pontifex and see this, please report it.
+
+### What verifying still does not tell you
 
 - It does **not** check your passphrase. An encrypted backup verifies as sound
   without one, because verifying never unlocks anything.
-- It does **not** check whether your server has room to restore it.
-- It does **not** check whether your host can perform every operation the
-  restore needs.
+- It does **not** check whether your host can create symbolic links, because
+  finding that out means creating one, and verifying never writes anything at
+  all. `wp pontifex doctor` reports it for your server, and
+  `wp pontifex import --dry-run` settles it for one particular backup.
 
-So sound means **this backup is not damaged**. It does not mean **this backup
-will restore onto this server today**. A restore runs several further checks
-that verifying deliberately skips. If one of those stops a restore, see
-[When Pontifex refuses](when-pontifex-refuses.md).
+If your server has no room to restore the backup, verifying says so — but as a
+separate note, never as the verdict. **A full disk is not a damaged backup**,
+and Pontifex will not imply that it is.
+
+One consequence worth knowing: because Pontifex checks where the backup's
+symbolic links would land *on this server*, a verification is a statement about
+a backup **and** a destination, not about the file on its own. In rare cases the
+same file can report differently on two different servers. That is deliberate —
+"would this escape *your* site" is the only version of the question worth
+answering.
+
+### Rehearsing a whole restore
+
+To find out whether a restore would actually succeed here, right now, rehearse
+it:
+
+```
+wp pontifex import /path/to/backup.wpmig --dry-run
+```
+
+This runs every check a real restore runs and writes nothing to your site. It is
+the strongest answer available short of restoring. See
+[When Pontifex refuses](when-pontifex-refuses.md) if it stops.
 
 ---
 

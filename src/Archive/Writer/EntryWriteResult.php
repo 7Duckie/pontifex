@@ -114,18 +114,18 @@ final class EntryWriteResult {
 	public function __construct( int $payload_length, int $total_entry_length, string $entry_hash, ?int $declared_size = null, ?int $actual_size = null, bool $media_type_unresolved = false ) {
 		if ( $payload_length < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryWriteResult: payload_length %d must be non-negative.', (int) $payload_length )
+				sprintf( 'payload_length %d must be non-negative.', (int) $payload_length )
 			);
 		}
 		if ( $total_entry_length < 0 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryWriteResult: total_entry_length %d must be non-negative.', (int) $total_entry_length )
+				sprintf( 'total_entry_length %d must be non-negative.', (int) $total_entry_length )
 			);
 		}
 		if ( Sha256::DIGEST_SIZE !== strlen( $entry_hash ) ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryWriteResult: entry_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
+					'entry_hash must be exactly %d bytes (one SHA-256 digest), got %d.',
 					(int) Sha256::DIGEST_SIZE,
 					(int) strlen( $entry_hash )
 				)
@@ -133,10 +133,10 @@ final class EntryWriteResult {
 		}
 
 		if ( ( null === $declared_size ) !== ( null === $actual_size ) ) {
-			throw new InvalidArgumentException( 'EntryWriteResult: declared_size and actual_size must both be null or both be set.' );
+			throw new InvalidArgumentException( 'declared_size and actual_size must both be null or both be set.' );
 		}
 		if ( null !== $declared_size && ( $declared_size < 0 || $actual_size < 0 ) ) {
-			throw new InvalidArgumentException( 'EntryWriteResult: declared_size and actual_size must be non-negative.' );
+			throw new InvalidArgumentException( 'declared_size and actual_size must be non-negative.' );
 		}
 
 		$this->payload_length        = $payload_length;

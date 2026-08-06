@@ -66,7 +66,7 @@ final class Encryption {
 			$confirm    = $source->prompt_hidden( 'Confirm passphrase' );
 			try {
 				if ( ! hash_equals( $passphrase, $confirm ) ) {
-					throw new RuntimeException( 'Encryption: the passphrases did not match.' );
+					throw new RuntimeException( 'The passphrases did not match.' );
 				}
 			} finally {
 				// Scrub the confirmation copy whether or not it matched.
@@ -78,7 +78,7 @@ final class Encryption {
 
 		if ( self::character_length( $passphrase ) < self::MIN_PASSPHRASE_LENGTH ) {
 			throw new RuntimeException(
-				sprintf( 'Encryption: the passphrase must be at least %d characters.', (int) self::MIN_PASSPHRASE_LENGTH )
+				sprintf( 'The passphrase must be at least %d characters.', (int) self::MIN_PASSPHRASE_LENGTH )
 			);
 		}
 
@@ -128,7 +128,7 @@ final class Encryption {
 			$salt = random_bytes( Argon2idKdf::SALT_SIZE );
 		} catch ( Exception $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying randomness-source exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new RuntimeException( 'Encryption: could not generate a random salt for the archive.', 0, $e );
+			throw new RuntimeException( 'Could not generate a random salt for the archive.', 0, $e );
 		}
 
 		$key    = ( new Argon2idKdf() )->derive( $passphrase, $salt );
@@ -155,7 +155,7 @@ final class Encryption {
 			return new EntryReader( $registry );
 		}
 		if ( null === $passphrase ) {
-			throw new RuntimeException( 'Encryption: the archive is encrypted; a passphrase is required to read it.' );
+			throw new RuntimeException( 'The archive is encrypted; a passphrase is required to read it.' );
 		}
 
 		$key    = ( new Argon2idKdf() )->derive( $passphrase, $reader->footer()->argon2id_salt() );

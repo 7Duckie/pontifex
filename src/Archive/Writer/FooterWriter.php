@@ -55,7 +55,7 @@ final class FooterWriter {
 	 */
 	public function write_footer( Footer $footer, $destination ): int {
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'FooterWriter: $destination must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a valid stream resource.' );
 		}
 
 		$bytes  = $footer->to_bytes();
@@ -66,12 +66,12 @@ final class FooterWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- FooterWriter operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API.
 		$written = fwrite( $destination, $bytes );
 		if ( false === $written ) {
-			throw new RuntimeException( 'FooterWriter: fwrite() failed on destination stream.' );
+			throw new RuntimeException( 'fwrite() failed on destination stream.' );
 		}
 		if ( $written !== $length ) {
 			throw new RuntimeException(
 				sprintf(
-					'FooterWriter: partial write detected (%d of %d bytes); aborting to preserve footer integrity.',
+					'Partial write detected (%d of %d bytes); aborting to preserve footer integrity.',
 					(int) $written,
 					(int) $length
 				)

@@ -146,23 +146,23 @@ final class Header {
 	public function __construct( int $major, int $minor, int $flags ) {
 		if ( $major < 0 || $major > ByteOrder::MAX_UINT16 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'Header: major version %d is outside the uint16 range.', (int) $major )
+				sprintf( 'Major version %d is outside the uint16 range.', (int) $major )
 			);
 		}
 		if ( $minor < 0 || $minor > ByteOrder::MAX_UINT16 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'Header: minor version %d is outside the uint16 range.', (int) $minor )
+				sprintf( 'Minor version %d is outside the uint16 range.', (int) $minor )
 			);
 		}
 		if ( $flags < 0 || $flags > ByteOrder::MAX_UINT32 ) {
 			throw new InvalidArgumentException(
-				sprintf( 'Header: flags value %d is outside the uint32 range.', (int) $flags )
+				sprintf( 'Flags value %d is outside the uint32 range.', (int) $flags )
 			);
 		}
 		if ( ( $flags & ~self::ALL_DEFINED_FLAGS ) !== 0 ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Header: reserved flag bits set in 0x%08X; only bits 0-2 are defined in the v1 format.',
+					'Reserved flag bits set in 0x%08X; only bits 0-2 are defined in the v1 format.',
 					(int) $flags
 				)
 			);
@@ -267,7 +267,7 @@ final class Header {
 		if ( strlen( $bytes ) !== self::SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'Header::from_bytes: expected exactly %d bytes, got %d.',
+					'Expected exactly %d bytes, got %d.',
 					(int) self::SIZE,
 					(int) strlen( $bytes )
 				)
@@ -276,7 +276,7 @@ final class Header {
 		$magic_part = substr( $bytes, 0, 8 );
 		if ( self::MAGIC !== $magic_part ) {
 			throw new InvalidArgumentException(
-				'Header::from_bytes: magic bytes do not match; the file is not a Pontifex archive.'
+				'Magic bytes do not match; the file is not a Pontifex archive.'
 			);
 		}
 

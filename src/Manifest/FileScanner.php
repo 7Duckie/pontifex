@@ -140,13 +140,13 @@ final class FileScanner {
 	 */
 	public function scan( string $root, ?callable $on_progress = null ): array {
 		if ( '' === $root ) {
-			throw new InvalidArgumentException( 'FileScanner: scan root must be non-empty.' );
+			throw new InvalidArgumentException( 'Scan root must be non-empty.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_dir -- Filesystem read for archive enumeration; WP_Filesystem has no equivalent abstraction.
 		if ( ! is_dir( $root ) ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $root is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileScanner: scan root "%s" is not an existing directory.', $root )
+				sprintf( 'Scan root "%s" is not an existing directory.', $root )
 			);
 		}
 
@@ -229,7 +229,7 @@ final class FileScanner {
 			}
 		} catch ( UnexpectedValueException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message (carrying the unreadable path from the iterator) for diagnostics; surfaced on the CLI, not HTML output.
-			throw new RuntimeException( sprintf( 'FileScanner: could not read a directory while scanning "%s": %s', $root, $e->getMessage() ), 0, $e );
+			throw new RuntimeException( sprintf( 'Could not read a directory while scanning "%s": %s', $root, $e->getMessage() ), 0, $e );
 		}
 
 		usort(
@@ -328,7 +328,7 @@ final class FileScanner {
 		}
 		throw new RuntimeException(
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $absolute_path is reported verbatim for diagnostic context; exception path, not HTML output.
-			sprintf( 'FileScanner: path "%s" is none of file, directory, or symlink; aborting scan.', $absolute_path )
+			sprintf( 'Path "%s" is none of file, directory, or symlink; aborting scan.', $absolute_path )
 		);
 	}
 
@@ -366,7 +366,7 @@ final class FileScanner {
 			if ( false === $target ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $absolute_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileScanner: could not read symlink target for "%s".', $absolute_path )
+					sprintf( 'Could not read symlink target for "%s".', $absolute_path )
 				);
 			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_lstat -- Filesystem read for archive enumeration; WP_Filesystem has no equivalent.
@@ -374,7 +374,7 @@ final class FileScanner {
 			if ( false === $lstat ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $absolute_path is reported verbatim for diagnostic context; exception path, not HTML output.
-					sprintf( 'FileScanner: could not lstat symlink "%s".', $absolute_path )
+					sprintf( 'Could not lstat symlink "%s".', $absolute_path )
 				);
 			}
 			$mode  = (int) ( $lstat['mode'] & 07777 );
@@ -386,7 +386,7 @@ final class FileScanner {
 		if ( ! $info->isReadable() ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $absolute_path is reported verbatim for diagnostic context; exception path, not HTML output.
-				sprintf( 'FileScanner: path "%s" is not readable; check filesystem permissions or add it to ExclusionRules.', $absolute_path )
+				sprintf( 'Path "%s" is not readable; check filesystem permissions or add it to ExclusionRules.', $absolute_path )
 			);
 		}
 

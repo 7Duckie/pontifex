@@ -72,12 +72,12 @@ final class EncryptionContext {
 	public function __construct( Cipher $cipher, string $key, string $salt ) {
 		if ( Cipher::KEY_SIZE !== strlen( $key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EncryptionContext: key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
+				sprintf( 'Key must be exactly %d bytes, got %d.', (int) Cipher::KEY_SIZE, (int) strlen( $key ) )
 			);
 		}
 		if ( Argon2idKdf::SALT_SIZE !== strlen( $salt ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EncryptionContext: salt must be exactly %d bytes, got %d.', (int) Argon2idKdf::SALT_SIZE, (int) strlen( $salt ) )
+				sprintf( 'Salt must be exactly %d bytes, got %d.', (int) Argon2idKdf::SALT_SIZE, (int) strlen( $salt ) )
 			);
 		}
 
@@ -118,7 +118,7 @@ final class EncryptionContext {
 	 */
 	public function key(): string {
 		if ( null === $this->key ) {
-			throw new LogicException( 'EncryptionContext: the key has been wiped from memory and is no longer available.' );
+			throw new LogicException( 'The key has been wiped from memory and is no longer available.' );
 		}
 		return $this->key;
 	}
@@ -144,7 +144,7 @@ final class EncryptionContext {
 	public function consume(): void {
 		if ( $this->consumed ) {
 			throw new LogicException(
-				'EncryptionContext: a context may be used for only one archive; derive a fresh context (with a fresh salt) per archive.'
+				'A context may be used for only one archive; derive a fresh context (with a fresh salt) per archive.'
 			);
 		}
 		$this->consumed = true;

@@ -340,7 +340,7 @@ final class ArchiveManifest {
 			if ( ! $entry instanceof ManifestEntry ) {
 				throw new InvalidArgumentException(
 					sprintf(
-						'ArchiveManifest: entry at index %d is not a ManifestEntry instance.',
+						'Entry at index %d is not a ManifestEntry instance.',
 						(int) $index
 					)
 				);
@@ -487,7 +487,7 @@ final class ArchiveManifest {
 			EntryHeader::KIND_DB_CHUNK  => self::MINIMAL_DB_CHUNK_ENTRY_BYTES,
 			default                     => throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $kind comes from a validated EntryHeader; exception path, not HTML output.
-				sprintf( 'ArchiveManifest::project_payload_bytes: unknown entry kind "%s".', $kind )
+				sprintf( 'Unknown entry kind "%s".', $kind )
 			),
 		};
 	}
@@ -532,7 +532,7 @@ final class ArchiveManifest {
 	private static function require_db_chunk_index( EntryHeader $header ): int {
 		$chunk_index = $header->chunk_index();
 		if ( null === $chunk_index ) {
-			throw new InvalidArgumentException( 'ArchiveManifest::project_payload_bytes: a database-chunk header must carry a chunk_index.' );
+			throw new InvalidArgumentException( 'A database-chunk header must carry a chunk_index.' );
 		}
 		return $chunk_index;
 	}
@@ -588,7 +588,7 @@ final class ArchiveManifest {
 		if ( strlen( $bytes ) < self::HEADER_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ArchiveManifest::from_bytes: input must be at least %d bytes, got %d.',
+					'Input must be at least %d bytes, got %d.',
 					(int) self::HEADER_SIZE,
 					(int) strlen( $bytes )
 				)
@@ -600,7 +600,7 @@ final class ArchiveManifest {
 		if ( $length > self::MAX_PAYLOAD_SIZE ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ArchiveManifest::from_bytes: declared payload size %d exceeds maximum %d bytes.',
+					'Declared payload size %d exceeds maximum %d bytes.',
 					(int) $length,
 					(int) self::MAX_PAYLOAD_SIZE
 				)
@@ -611,7 +611,7 @@ final class ArchiveManifest {
 		if ( strlen( $bytes ) !== $expected_total ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'ArchiveManifest::from_bytes: expected exactly %d bytes (4 length + 32 hash + %d payload), got %d.',
+					'Expected exactly %d bytes (4 length + 32 hash + %d payload), got %d.',
 					(int) $expected_total,
 					(int) $length,
 					(int) strlen( $bytes )
@@ -625,7 +625,7 @@ final class ArchiveManifest {
 		$computed_hash = Sha256::of( $payload );
 		if ( ! hash_equals( $stored_hash, $computed_hash ) ) {
 			throw new InvalidArgumentException(
-				'ArchiveManifest::from_bytes: payload hash does not match stored hash; the block is corrupt or has been tampered with.'
+				'Payload hash does not match stored hash; the block is corrupt or has been tampered with.'
 			);
 		}
 
@@ -672,20 +672,20 @@ final class ArchiveManifest {
 		} catch ( JsonException $e ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Internal exception message embedded for diagnostic context; not HTML output.
-				'ArchiveManifest: JSON payload is malformed: ' . $e->getMessage()
+				'JSON payload is malformed: ' . $e->getMessage()
 			);
 		}
 
 		if ( ! is_array( $data ) ) {
-			throw new InvalidArgumentException( 'ArchiveManifest: JSON payload must decode to an object.' );
+			throw new InvalidArgumentException( 'JSON payload must decode to an object.' );
 		}
 
 		if ( ! array_key_exists( 'entries', $data ) ) {
-			throw new InvalidArgumentException( 'ArchiveManifest: JSON payload is missing required field "entries".' );
+			throw new InvalidArgumentException( 'JSON payload is missing required field "entries".' );
 		}
 
 		if ( ! is_array( $data['entries'] ) ) {
-			throw new InvalidArgumentException( 'ArchiveManifest: field "entries" must be an array.' );
+			throw new InvalidArgumentException( 'Field "entries" must be an array.' );
 		}
 
 		$entries = array();
@@ -693,7 +693,7 @@ final class ArchiveManifest {
 			if ( ! is_array( $entry_data ) ) {
 				throw new InvalidArgumentException(
 					sprintf(
-						'ArchiveManifest: entry at index %d must be an object.',
+						'Entry at index %d must be an object.',
 						(int) $index
 					)
 				);

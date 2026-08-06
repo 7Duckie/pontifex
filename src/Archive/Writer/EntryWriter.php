@@ -181,33 +181,33 @@ final class EntryWriter {
 
 		if ( $is_encrypted && CodecId::ENCRYPTION_AES_GCM !== $encryption_family ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryWriter: unknown encryption family 0x%04X in codec id 0x%04X.', (int) $encryption_family, (int) $codec_id )
+				sprintf( 'Unknown encryption family 0x%04X in codec id 0x%04X.', (int) $encryption_family, (int) $codec_id )
 			);
 		}
 		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryWriter: compression codec 0x%04X (from codec id 0x%04X) is not registered with the codec registry.', (int) $compression_codec_id, (int) $codec_id )
+				sprintf( 'Compression codec 0x%04X (from codec id 0x%04X) is not registered with the codec registry.', (int) $compression_codec_id, (int) $codec_id )
 			);
 		}
 		if ( $is_encrypted && ( null === $cipher || null === $key ) ) {
 			throw new InvalidArgumentException(
-				sprintf( 'EntryWriter: codec id 0x%04X is encrypted but no cipher and key were supplied.', (int) $codec_id )
+				sprintf( 'Codec id 0x%04X is encrypted but no cipher and key were supplied.', (int) $codec_id )
 			);
 		}
 		if ( self::NONCE_SIZE !== strlen( $nonce ) ) {
 			throw new InvalidArgumentException(
 				sprintf(
-					'EntryWriter: nonce must be exactly %d bytes, got %d.',
+					'Nonce must be exactly %d bytes, got %d.',
 					(int) self::NONCE_SIZE,
 					(int) strlen( $nonce )
 				)
 			);
 		}
 		if ( ! is_resource( $source ) ) {
-			throw new InvalidArgumentException( 'EntryWriter: $source must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$source must be a valid stream resource.' );
 		}
 		if ( ! is_resource( $destination ) ) {
-			throw new InvalidArgumentException( 'EntryWriter: $destination must be a valid stream resource.' );
+			throw new InvalidArgumentException( '$destination must be a valid stream resource.' );
 		}
 
 		// A file entry with no media_type yet gets one sniffed here, from the
@@ -229,7 +229,7 @@ final class EntryWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://temp is an in-process buffer, not a file; WP_Filesystem has no equivalent abstraction and would be the wrong tool here.
 		$temp = fopen( 'php://temp', 'r+b' );
 		if ( false === $temp ) {
-			throw new RuntimeException( 'EntryWriter: could not open php://temp buffer for the encoded payload.' );
+			throw new RuntimeException( 'Could not open php://temp buffer for the encoded payload.' );
 		}
 
 		try {
@@ -282,7 +282,7 @@ final class EntryWriter {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Operating on a php://temp stream resource, not a filesystem path.
 				$compressed = stream_get_contents( $temp );
 				if ( false === $compressed ) {
-					throw new RuntimeException( 'EntryWriter: could not read the compressed payload from the temp buffer for encryption.' );
+					throw new RuntimeException( 'Could not read the compressed payload from the temp buffer for encryption.' );
 				}
 				$sealed_payload = $cipher->encrypt( $compressed, $nonce, $header_bytes, $key );
 			}
@@ -455,12 +455,12 @@ final class EntryWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- EntryWriter operates on arbitrary stream resources from the archive layer; WP_Filesystem has no streaming API.
 		$written = fwrite( $destination, $bytes );
 		if ( false === $written ) {
-			throw new RuntimeException( 'EntryWriter: fwrite() failed on destination stream.' );
+			throw new RuntimeException( 'fwrite() failed on destination stream.' );
 		}
 		if ( $written !== $length ) {
 			throw new RuntimeException(
 				sprintf(
-					'EntryWriter: partial write detected (%d of %d bytes); aborting to preserve entry integrity.',
+					'Partial write detected (%d of %d bytes); aborting to preserve entry integrity.',
 					(int) $written,
 					(int) $length
 				)

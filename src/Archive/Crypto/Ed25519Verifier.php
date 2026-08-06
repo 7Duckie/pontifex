@@ -53,17 +53,17 @@ final class Ed25519Verifier {
 	public function verify( string $message, string $signature, string $public_key ): bool {
 		if ( ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
 			throw new SignatureException(
-				'Ed25519Verifier: ext-sodium is required to verify a signature but is not available.'
+				'Ext-sodium is required to verify a signature but is not available.'
 			);
 		}
 		if ( self::SIGNATURE_SIZE !== strlen( $signature ) ) {
 			throw new SignatureException(
-				sprintf( 'Ed25519Verifier: signature must be exactly %d bytes, got %d.', (int) self::SIGNATURE_SIZE, (int) strlen( $signature ) )
+				sprintf( 'Signature must be exactly %d bytes, got %d.', (int) self::SIGNATURE_SIZE, (int) strlen( $signature ) )
 			);
 		}
 		if ( SigningKeypair::PUBLIC_KEY_SIZE !== strlen( $public_key ) ) {
 			throw new SignatureException(
-				sprintf( 'Ed25519Verifier: public key must be exactly %d bytes, got %d.', (int) SigningKeypair::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
+				sprintf( 'Public key must be exactly %d bytes, got %d.', (int) SigningKeypair::PUBLIC_KEY_SIZE, (int) strlen( $public_key ) )
 			);
 		}
 
@@ -71,7 +71,7 @@ final class Ed25519Verifier {
 			return sodium_crypto_sign_verify_detached( $signature, $message, $public_key );
 		} catch ( SodiumException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying libsodium exception, chained as the previous exception for diagnostics; not HTML output.
-			throw new SignatureException( 'Ed25519Verifier: Ed25519 verification could not be performed.', 0, $e );
+			throw new SignatureException( 'Ed25519 verification could not be performed.', 0, $e );
 		}
 	}
 }
