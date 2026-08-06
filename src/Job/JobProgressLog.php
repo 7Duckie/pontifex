@@ -11,6 +11,7 @@ namespace Pontifex\Job;
 
 use JsonException;
 use RuntimeException;
+use Pontifex\Filesystem\TempArtefact;
 
 /**
  * Append-only JSON-lines sidecar carrying a job's per-item progress.
@@ -150,7 +151,7 @@ final class JobProgressLog {
 				throw new RuntimeException( 'Could not re-encode the progress log.', 0, $e );
 			}
 		}
-		$temp = $this->path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+		$temp = $this->path . TempArtefact::suffix();
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Rewriting the plugin's own progress sidecar; WP_Filesystem is unavailable in CLI/cron contexts.
 		if ( false === @file_put_contents( $temp, $lines ) ) {
 			throw new RuntimeException(

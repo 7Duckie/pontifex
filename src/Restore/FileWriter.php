@@ -23,6 +23,7 @@ use Throwable;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Filesystem\TempArtefact;
 
 /**
  * Writes one decoded archive entry back to the filesystem.
@@ -148,80 +149,6 @@ final class FileWriter {
 	 * @var int
 	 */
 	private const BYTES_PER_MEGABYTE = 1048576;
-
-	/**
-	 * The uniqid() prefix embedded in every temp artefact this writer creates.
-	 *
-	 * Shared, via {@see self::temp_artefact_suffix()}, by both temp-file
-	 * producers this class has: {@see self::temp_sibling_path()} (a file's
-	 * sibling temp, renamed into place once the write completes) and
-	 * {@see self::probe_symlink_creation()} (the create-then-remove symlink
-	 * capability probe). Neither producer formats its own uniqid() call any
-	 * more — see {@see self::temp_artefact_suffix()}'s docblock for why
-	 * routing both through one method is what keeps the shape a producer
-	 * WRITES and the shape {@see self::sweep_orphaned_temp_files()}
-	 * RECOGNISES from ever drifting apart.
-	 *
-	 * @var string
-	 */
-	private const TEMP_ARTEFACT_PREFIX = 'pontifex-';
-
-	/**
-	 * The fixed extension appended to every temp artefact this writer creates.
-	 *
-	 * @var string
-	 */
-	private const TEMP_ARTEFACT_EXTENSION = '.tmp';
-
-	/**
-	 * Matches the basename of any temp artefact {@see self::temp_artefact_suffix()} can produce.
-	 *
-	 * Used only by {@see self::sweep_orphaned_temp_files()}, to recognise a
-	 * temp file or dangling probe symlink an earlier, interrupted restore left
-	 * behind. Anchored at the END of the basename with `$`, and matched
-	 * against the basename alone (never the full path), so a legitimate file
-	 * that merely happens to sit inside a path segment shaped like this is
-	 * never mistaken for one — this pattern is consulted only by the sweep,
-	 * never by write_entry()'s own path guards, so no archive-supplied path is
-	 * ever checked against it.
-	 *
-	 * Deliberately narrow, not a loose `*.tmp` glob:
-	 *
-	 *  - It must NOT match a resumable export's `*.part` file — that is live
-	 *    state a still-running export is writing to, and deleting one would
-	 *    destroy real, unrecoverable work. `.part` never appears in this
-	 *    pattern at all.
-	 *  - It must NOT match an ordinary user file that merely happens to carry
-	 *    "pontifex" or ".tmp" in its name, such as "notes.pontifex-backup.tmp",
-	 *    "data.pontifex.tmp", "archive.pontifex-2024.01.tmp", or
-	 *    "db.pontifex-1.2.tmp" — none has the uniqid() shape this pattern
-	 *    requires (a run of at least eight hex digits, a literal dot, a run of
-	 *    decimal digits), so none matches.
-	 *
-	 * The hex/decimal split mirrors uniqid()'s own output shape with the
-	 * `$more_entropy` argument true, which both producers pass: a hexadecimal
-	 * timestamp-and-counter (an 8-digit seconds component immediately
-	 * followed by a 5-digit microseconds component — 13 hex digits with no
-	 * separator between them), then a literal ".", then a pseudorandom value
-	 * from PHP's combined LCG scaled and formatted as `%.8F` — not, as an
-	 * earlier version of this docblock claimed, a fraction of a microsecond.
-	 * That formatted value's own single leading integer digit (0-9) is
-	 * itself a valid hex character, so it is silently absorbed into what
-	 * this pattern reads as the hex run rather than starting the decimal
-	 * run — which is why the hex run in every one of uniqid()'s real outputs
-	 * is 14 characters, not 13, and why the eight-digit FLOOR below is a
-	 * floor and not an exact count: pinning it at exactly 14 would be one
-	 * accident of the current implementation away from silently no longer
-	 * recognising this writer's own artefacts, whereas eight is comfortably
-	 * below every real output while still ruling out a short, human-typed
-	 * number such as the "2024" or "1" in the two false positives above.
-	 * This pattern does not pin the digit COUNT after the dot at all, only
-	 * the shape (hex run, dot, decimal run), so it keeps matching even if a
-	 * future PHP release ever changes uniqid()'s precision.
-	 *
-	 * @var string
-	 */
-	private const ORPHANED_TEMP_FILE_PATTERN = '/\.pontifex-[0-9a-f]{8,}\.[0-9]+\.tmp$/';
 
 	/**
 	 * Absolute path of the directory under which all entries are restored.
@@ -862,15 +789,15 @@ final class FileWriter {
 			return false;
 		}
 
-		// Built through self::temp_artefact_suffix() — the same helper
+		// Built through TempArtefact::suffix() — the same helper
 		// self::temp_sibling_path() uses — rather than formatting its own
 		// uniqid() call, so this probe's shape and a real write's temp shape can
-		// never drift apart; see that method's docblock. The finally below
+		// never drift apart; see that class's docblock. The finally below
 		// removes it on every normal outcome, but a SIGKILL between the
 		// symlink() and the finally cannot be caught by anything — and an
 		// orphan left this way is exactly what self::sweep_orphaned_temp_files()
 		// recognises and removes at the start of the next restore.
-		$probe_name   = '.symlink-probe' . self::temp_artefact_suffix();
+		$probe_name   = '.symlink-probe' . TempArtefact::suffix();
 		$probe_path   = $directory . '/' . $probe_name;
 		$probe_target = $probe_name . '.target';
 
@@ -1882,48 +1809,11 @@ final class FileWriter {
 	}
 
 	/**
-	 * Build the shared suffix appended to every temp artefact this writer creates.
-	 *
-	 * The one place, WITHIN THIS CLASS, that knows the shape of a Pontifex
-	 * temp file — not, as an earlier version of this docblock overstated,
-	 * the one place in the whole plugin. Both {@see self::temp_sibling_path()}
-	 * and {@see self::probe_symlink_creation()} build their names by calling
-	 * this method rather than each formatting
-	 * `'.' . uniqid( 'pontifex-', true ) . '.tmp'` independently, so the shape
-	 * THIS CLASS writes and the shape {@see self::sweep_orphaned_temp_files()}
-	 * later recognises as an orphan cannot silently drift apart from each
-	 * other — a future edit to either of this class's two producers that
-	 * changed the suffix without touching this method simply has nowhere left
-	 * to make that change in isolation. It does not, and cannot, prevent a
-	 * DIFFERENT class from formatting the identical shape independently:
-	 * {@see \Pontifex\Job\JobStore::save()},
-	 * {@see \Pontifex\Job\JobProgressLog::truncate_to()}, and
-	 * {@see \Pontifex\Export\ExportRunner::temp_destination_path()} each do
-	 * exactly that, none of them routed through this method — see
-	 * {@see self::sweep_orphaned_temp_files()}'s docblock for why that
-	 * overlap is safe rather than a hazard. {@see \Pontifex\Tests\Unit\Restore\FileWriterTest}
-	 * asserts, over several dozen generated outputs, that every string this
-	 * method produces matches {@see self::ORPHANED_TEMP_FILE_PATTERN}.
-	 *
-	 * uniqid() with $more_entropy true is what supplies the actual
-	 * uniqueness (a seconds-and-microseconds hex timestamp, plus a
-	 * pseudorandom value from PHP's combined LCG — see
-	 * {@see self::ORPHANED_TEMP_FILE_PATTERN}'s docblock for the exact
-	 * shape), so two concurrent writers — or two hops of the same probe run
-	 * moments apart — never collide on one temp name.
-	 *
-	 * @return string A leading-dot suffix, e.g. ".pontifex-6a743b0b47cff2.47524803.tmp".
-	 */
-	private static function temp_artefact_suffix(): string {
-		return '.' . uniqid( self::TEMP_ARTEFACT_PREFIX, true ) . self::TEMP_ARTEFACT_EXTENSION;
-	}
-
-	/**
 	 * Build the sibling temp path a file is written to before its atomic rename.
 	 *
 	 * A sibling of the target (same directory), so the final rename is a
 	 * same-filesystem move; the unique suffix — built by
-	 * {@see self::temp_artefact_suffix()}, the same helper
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()}, the same helper
 	 * {@see self::probe_symlink_creation()} uses, so the two producers can
 	 * never drift apart — keeps concurrent writers apart and lets
 	 * {@see self::sweep_orphaned_temp_files()} recognise one left behind by an
@@ -1933,7 +1823,7 @@ final class FileWriter {
 	 * @return string The temp path to write to first.
 	 */
 	private static function temp_sibling_path( string $target_path ): string {
-		return $target_path . self::temp_artefact_suffix();
+		return $target_path . TempArtefact::suffix();
 	}
 
 	/**
@@ -2220,12 +2110,12 @@ final class FileWriter {
 	 * has no threshold either.
 	 *
 	 * WHAT COUNTS AS AN ORPHAN. Only a basename matching
-	 * {@see self::ORPHANED_TEMP_FILE_PATTERN} — the exact shape
-	 * {@see self::temp_artefact_suffix()} produces, anchored at the end of the
-	 * basename — never a loose "*.tmp" glob; see that constant's own docblock
-	 * for the two shapes it deliberately does not match (a resumable export's
-	 * "*.part" file, and an ordinary user file that merely contains
-	 * "pontifex" or ".tmp" somewhere in its name).
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} — the exact
+	 * shape {@see \Pontifex\Filesystem\TempArtefact::suffix()} produces,
+	 * anchored at the end of the basename — never a loose "*.tmp" glob; see
+	 * that class's own docblocks for the two shapes it deliberately does not
+	 * match (a resumable export's "*.part" file, and an ordinary user file
+	 * that merely contains "pontifex" or ".tmp" somewhere in its name).
 	 *
 	 * TRAVERSAL, the one way this could be catastrophic if it were wrong.
 	 * Built from {@see RecursiveDirectoryIterator} with
@@ -2399,7 +2289,7 @@ final class FileWriter {
 				if ( ! $info instanceof SplFileInfo ) {
 					continue;
 				}
-				if ( 1 !== preg_match( self::ORPHANED_TEMP_FILE_PATTERN, $info->getFilename() ) ) {
+				if ( ! TempArtefact::is_orphan_name( $info->getFilename() ) ) {
 					continue;
 				}
 
@@ -2440,7 +2330,7 @@ final class FileWriter {
 						if ( '.' === $child_name || '..' === $child_name ) {
 							continue;
 						}
-						if ( 1 !== preg_match( self::ORPHANED_TEMP_FILE_PATTERN, $child_name ) ) {
+						if ( ! TempArtefact::is_orphan_name( $child_name ) ) {
 							continue;
 						}
 
