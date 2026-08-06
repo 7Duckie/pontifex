@@ -1,6 +1,8 @@
 # 0024 — recovery undoes what the restore added, by ledger rather than by difference
 
-- **Status:** Accepted, 2026-08-06. Implemented and shipped in v1.1.1.
+- **Status:** Accepted, 2026-08-06. Implemented and shipped in v1.1.1. Amended
+  2026-08-06 (implicitly created directories are recorded too, and a preserved
+  path preserves the directories containing it — see Amendment).
 - **Deciders:** 7Duckie.
 
 ## Context
@@ -137,3 +139,41 @@ arc", remains deferred. This decision makes recovery honest; it does not make th
 file half of a restore transactional. A restore that fails and is *not* recovered
 — because the safety archive was skipped with `--no-rollback-archive`, or because
 recovery itself failed — still leaves a merged tree, and both surfaces say so.
+
+## Amendment — 2026-08-06: the ledger records the directories it creates implicitly
+
+The decision above says the restore "records every path where the target did not
+exist before it wrote". As first implemented it recorded every path an *entry
+named*, which is not the same thing.
+
+Both places that create directories used a recursive `mkdir`, so every
+intermediate directory brought into existence on the way to a recorded path was
+itself unrecorded. Recovery therefore neither removed those directories nor
+reported them as failures, and `is_precise_revert()` still answered **true**. A
+single file entry at `wp-content/plugins/intruder/evil.php` left
+`wp-content/plugins/` and `wp-content/plugins/intruder/` standing while the
+operator was told the revert was precise — the same class of false reassurance
+this decision exists to remove, one level down. It bites hardest on an archive
+whose manifest omits directory entries, which is squarely inside the threat
+model above.
+
+**Amended decision:** directories are created one level at a time, and each
+level is recorded the moment it exists. The ordering rule is unchanged and now
+applies per level, which is why level-by-level was chosen over recording after a
+recursive call: if creation fails half way, the levels that *were* created are
+still in the ledger, and a part-failed directory creation is precisely the
+failed-restore case this decision serves.
+
+**And a rule the first implementation did not need.** Recording intermediates
+made a second gap reachable: a directory that cannot be removed *because a
+deliberately preserved path lives inside it* was being reported as a failed
+removal, which flipped the verdict to false. Preserving a path is not the same
+as failing to remove one — keeping a file while calling its surviving parent a
+failure is incoherent. A recorded directory whose subtree contains any preserved
+path is therefore skipped: it appears in neither the removed nor the failed list,
+exactly as an explicitly preserved file already did.
+
+**Cost.** More recorded paths reach `CREATION_LEDGER_CAP` sooner, which flips
+`ledger_was_complete` — and so the verdict — to false earlier. That is the cap
+reporting honestly, and is preferable to a precise-looking verdict measured
+against an incomplete record of what the restore did.
