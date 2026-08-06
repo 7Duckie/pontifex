@@ -11,11 +11,13 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use RuntimeException;
+use Throwable;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ManifestTooLargeException;
+use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
@@ -161,6 +163,15 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null, ?callable $on_total = null ): string {
 		$this->store->ensure_directory();
 
+		// Runs BEFORE the free-space preflight below, deliberately: an earlier,
+		// interrupted safety-archive write can leave a temp behind that is as
+		// large as however much of the archive had been written, and removing
+		// it is exactly what can let that preflight pass. See
+		// {@see self::sweep_orphaned_archive_temps()}'s own docblock for the
+		// full reasoning, including why this is silent and why it deliberately
+		// does not refuse when the rollback directory is a symlink.
+		$this->sweep_orphaned_archive_temps();
+
 		// The safety archive follows the restore's scope (ADR 0008): a content-only
 		// restore takes a content-only safety archive (wp-content under a "wp-content"
 		// prefix), so it captures exactly what is about to be overwritten and rolls
@@ -266,5 +277,166 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 				)
 			);
 		}
+	}
+
+	/**
+	 * Remove every leftover temp artefact an earlier, interrupted safety-archive write abandoned.
+	 *
+	 * The rollback-directory twin of
+	 * {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()}:
+	 * {@see \Pontifex\Export\ExportRunner::temp_destination_path()} — which
+	 * {@see self::create()} drives via {@see ExportRunner::export()} — writes
+	 * the safety archive to a sibling temp path and renames it into place only
+	 * once the whole archive is complete. An import killed between that write
+	 * and its rename (SIGKILL, a host timeout, a fatal error) leaves the temp
+	 * sitting in the rollback directory, potentially as large as however much
+	 * of the archive had been written when it died. Nothing else ever
+	 * revisits this directory to notice: a NEW safety archive is taken before
+	 * EVERY import (ADR 0005), so the directory only ever grows, and
+	 * {@see RollbackStoreInterface::prune()} matches archives by their
+	 * `pre-import-rollback-<UTC>.wpmig` name, never a temp shape, so it walks
+	 * straight past an orphan without ever counting or removing it.
+	 *
+	 * CALLED ONCE, by {@see self::create()}, immediately after
+	 * {@see RollbackStoreInterface::ensure_directory()} and BEFORE
+	 * {@see self::preflight_disk_space()}. That ordering is deliberate and
+	 * load-bearing, not incidental: removing gigabytes an earlier abandoned
+	 * write left behind is exactly what can let the free-space preflight PASS.
+	 * Sweeping AFTER that preflight instead would refuse a safety archive
+	 * that, once the orphan was accounted for, actually had room all along —
+	 * which for a pre-import safety net is a worse failure than a slightly
+	 * slower import: a refusal to take the very undo the destructive step
+	 * depends on, over space an orphan was itself occupying for no reason.
+	 *
+	 * NON-RECURSIVE, deliberately. {@see RollbackStoreInterface::directory()}
+	 * only ever holds flat files — the safety archives themselves, plus
+	 * whatever this method is here to remove — so a single directory listing
+	 * is a COMPLETE listing; there is no subtree a recursive walk could reach
+	 * that a flat one would miss.
+	 *
+	 * WHAT COUNTS AS AN ORPHAN. Only a basename matching
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} — the exact
+	 * shape {@see \Pontifex\Filesystem\TempArtefact::suffix()} produces. See
+	 * that class's own docblocks for the two shapes it deliberately does not
+	 * match: an ordinary file that merely contains "pontifex" or ".tmp"
+	 * somewhere in its name, and a resumable export's `*.part` file. The
+	 * second exclusion is unconditional in {@see TempArtefact}, not scoped by
+	 * directory, even though this particular directory could never legitimately
+	 * hold one anyway — admin and scheduled backups write their `.part` files
+	 * through {@see \Pontifex\Export\ResumableExportRunner}, a different
+	 * caller entirely, never through this archiver.
+	 *
+	 * REMOVAL. isLink() is checked BEFORE isFile(), the same ordering
+	 * {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()} uses,
+	 * for the identical reason: a dangling symlink reports false from
+	 * isFile(), because isFile() follows the link to ask what the TARGET is,
+	 * and a dangling link has none. Nothing this archiver writes ever leaves a
+	 * dangling symlink behind — unlike FileWriter's symlink-capability probe,
+	 * nothing here creates one — but matching the ordering costs nothing and
+	 * is what stops this sweep and its sibling from silently disagreeing about
+	 * how an orphan is recognised and removed. A directory that happens to be
+	 * NAMED like a temp artefact — never produced by anything in this plugin,
+	 * but not this method's business to assume impossible — is left alone
+	 * entirely and does not contribute to the count.
+	 *
+	 * The returned count is the number of unlink() calls that actually
+	 * returned true — never the number of matching names FOUND. A name that
+	 * matched but failed to unlink (a permissions problem, a race) is not
+	 * counted as removed, because it was not.
+	 *
+	 * THE RETURN VALUE IS DELIBERATELY UNUSED AT THE CALL SITE. Sweeping here
+	 * is silent, exactly like {@see RollbackStoreInterface::prune()} — called
+	 * a few lines later in {@see self::create()} — which already deletes
+	 * whole, VALID safety archives from this same directory with no report at
+	 * all. This method returns its count only so it is independently
+	 * testable, not because any caller today surfaces it.
+	 *
+	 * MUST NEVER THROW. The whole body runs inside
+	 * `try { … } catch ( Throwable $error )`, returning however many
+	 * artefacts were actually removed before whatever happened, happened.
+	 * This is best-effort housekeeping run immediately before a restore's own
+	 * undo — the safety archive itself — is taken; its own failure must never
+	 * be capable of stopping that safety archive, still less the destructive
+	 * import it protects against, from proceeding.
+	 *
+	 * DELIBERATE DIFFERENCE FROM THE RESTORE-SIDE SWEEP — do not "fix" this.
+	 * {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()} refuses
+	 * outright when its sweep root is a symlink, because it walks a
+	 * potentially deep tree RECURSIVELY and a symlinked root could redirect
+	 * that whole walk onto a foreign tree it has no business touching (see
+	 * that method's own TRAVERSAL section). This method deliberately does NOT
+	 * apply that guard, and must not gain one: it performs a single, flat
+	 * listing of exactly one directory that this plugin itself creates and
+	 * owns, so there is no recursive traversal here for a symlink to redirect
+	 * — listing a symlinked directory lists that directory's own real
+	 * contents, nothing more, exactly as if the symlink were not there.
+	 * Meanwhile symlinking `wp-content/pontifex/rollback` onto a larger disk
+	 * is a legitimate thing for an operator to do — safety archives are
+	 * whole-database, whole-site copies, and a host with an undersized primary
+	 * disk but a roomy secondary one is a real, ordinary shape — and refusing
+	 * to sweep through that link would let orphans accumulate forever in
+	 * exactly the directory an operator moved specifically because they were
+	 * short on room, which is the very problem this method exists to fix.
+	 * Applying FileWriter's guard here would trade a security property this
+	 * method does not need for a false refusal this method exists to prevent.
+	 *
+	 * @return int How many leftover temp artefacts were actually removed.
+	 */
+	private function sweep_orphaned_archive_temps(): int {
+		$removed = 0;
+
+		try {
+			// is_link()/is_file() results are cached by PHP for the rest of the
+			// request, and a deleter must read the filesystem as it is now, not
+			// as it was earlier in the same request — the same reason the
+			// sibling sweep, {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()},
+			// clears it.
+			clearstatcache();
+
+			$directory = $this->store->directory();
+
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort housekeeping listing of this plugin's own rollback directory; a read failure here simply means there is nothing this step can find to sweep.
+			$entries = @scandir( $directory );
+			if ( false === $entries ) {
+				return $removed;
+			}
+
+			foreach ( $entries as $entry ) {
+				if ( '.' === $entry || '..' === $entry ) {
+					continue;
+				}
+				if ( ! TempArtefact::is_orphan_name( $entry ) ) {
+					continue;
+				}
+
+				$path = $directory . '/' . $entry;
+
+				// isLink() FIRST: a dangling symlink reports false from isFile() —
+				// see REMOVAL in this method's docblock.
+				if ( is_link( $path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted safety-archive write; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+					continue;
+				}
+
+				if ( is_file( $path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted safety-archive write; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+				}
+
+				// Anything else (a directory named like a temp artefact) is left
+				// alone and does not contribute to the count.
+			}
+		} catch ( Throwable $error ) {
+			// Best-effort housekeeping must never abort the safety archive it runs
+			// ahead of; whatever was removed before the failure is still reported.
+			unset( $error );
+		}
+
+		return $removed;
 	}
 }
