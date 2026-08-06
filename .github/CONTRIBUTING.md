@@ -263,6 +263,12 @@ runs reuse both and are much quicker. CI only runs this check at the
 release-gate failure gets caught early, before a pull request against
 `staging` even exists.
 
+The Plugin Check version is pinned in `scripts/plugin-check.sh`, and CI
+runs that very same script, so a local pass and the CI gate mean the
+same thing — but the pin must be bumped deliberately, because
+wordpress.org itself always applies the *current* Plugin Check at
+submission.
+
 ### Your daily cycle
 
 1. Edit code in your editor of choice (pointed at the project root).
