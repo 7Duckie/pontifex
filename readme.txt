@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.0
 Requires PHP: 8.2
-Stable tag: 1.0.3
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.1.0 =
+* Verifying a backup now checks whether a restore would accept it, not only whether the file is undamaged, and answers with one of three verdicts. Sound means intact and restorable. Broken means damaged. Refused is new and means the backup is NOT damaged — every fingerprint matched — but a restore will not accept it, because it would place a symbolic link outside your site or its contents contradict what it says it holds; keep such a file, do not restore it, and find out where it came from, because Pontifex never produces one. A server that has no room to restore is reported beside the verdict and never as the verdict, because a full disk is not a damaged backup. Fixed: a failed import, export or rollback re-raised the failure into WordPress's fatal handler, so you saw a page of PHP internals and "There has been a critical error on this website" instead of an explanation; all three now say what went wrong and what to do. Fixed: `import --dry-run` ran fewer checks than the import it claimed to rehearse, and now runs all of them. Fixed: the admin Restore screen refuses a backup it will not accept before making the safety copy rather than after, saving minutes of work and a second copy of your site on disk. Also: messages no longer begin with the name of Pontifex's own internal code, which meant nothing to anyone outside the project; that detail goes to the log instead, which now records the exact file and line. No breaking changes.
+
 = 1.0.3 =
 * Closes the last of the findings from the audit behind 1.0.1 and 1.0.2. Fixed: the Backup screen silently rewrote the exclusion patterns you typed, stripping every percent sign followed by two hex digits — sensible for a web address, wrong for a file path, where those are just characters in a name. `wp-content/uploads/2024%2F*` became `wp-content/uploads/2024*`, which leaves out vastly more than you asked, and those files were missing from every backup afterwards; a scheduled backup stores the pattern, so every unattended run reused the rewritten version. If you use exclusion patterns containing a percent sign, check them on the Backup screen and take a fresh backup. Fixed: pruning an offsite destination reported how many old backups it removed but nothing about the ones it could not, so a destination quietly filling up looked like a destination being kept tidy. No breaking changes.
 
@@ -154,6 +157,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.1.0 =
+Verifying a backup now also checks whether a restore would accept it, and answers sound, broken, or refused — refused meaning intact but unsafe. A failed import, export or rollback explains itself instead of printing a crash. Messages no longer name Pontifex internals.
 
 = 1.0.3 =
 If you use exclusion patterns containing a percent sign, check them on the Backup screen: they were being silently rewritten to exclude far more than you asked, so files were missing from every backup. Pruning an offsite destination now reports deletions it could not make.

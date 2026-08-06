@@ -5,7 +5,7 @@
 Pontifex reached **v1.0.0** on 2026-08-05 — the commitment release (see
 [`docs/roadmap.md`](../docs/roadmap.md)): the public API is frozen and
 the `.wpmig` archive format is locked at specification version 1.1. The
-current release is **v1.0.3**, a security and correctness patch; upgrade
+current release is **v1.1.0**; upgrade
 before restoring an archive you did not create yourself.
 
 Security fixes ship on the current `1.x` line as a patch release. A
