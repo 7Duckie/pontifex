@@ -158,7 +158,8 @@ That gives you WordPress on `http://localhost:8910` with Pontifex active.
 The integration suite runs against a second wp-env configuration
 (`.wp-env.tests.json`, port 8911) —
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) has the exact commands,
-the commit conventions, and the quality gates.
+the commit conventions, and the quality gates. `composer check:plugin` runs
+Plugin Check — the wordpress.org listing gate — against the built package.
 
 Security reports: [`.github/SECURITY.md`](.github/SECURITY.md), via GitHub's
 private vulnerability reporting.

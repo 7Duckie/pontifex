@@ -44,6 +44,7 @@ and rely on CI to catch issues.
 | `composer test:unit` | Unit tests only — same as `composer test` |
 | `composer test:integration` | Integration suite — real WordPress via wp-env (see below) |
 | `composer check` | Lint + analyse + unit tests + audit — the pre-PR sweep |
+| `composer check:plugin` | Plugin Check on the built package — the wordpress.org gate, via wp-env (needs Docker) |
 
 ## Pre-commit / pre-push budget
 
@@ -132,6 +133,8 @@ build.
 - Static analysis — `phpstan.neon.dist` (level 6)
 - Tests — `phpunit.xml.dist` (unit) and `phpunit-integration.xml.dist`
   (integration, via wp-env)
+- Plugin Check — `.wp-env.plugin-check.json` and `scripts/plugin-check.sh`
+  (the wordpress.org listing gate, run against the built package)
 - Pre-commit — `.pre-commit-config.yaml`
 - CI — `.github/workflows/ci.yml`
 
@@ -238,6 +241,27 @@ drop a `.wp-env.tests.override.json` containing
 tests environment; CI does exactly this — on the PHP 8.2 floor for a
 pull request into `dev`, and across the whole 8.2–8.5 matrix for a
 pull request into `staging` or `main`.
+
+### Run Plugin Check locally
+
+```bash
+composer check:plugin
+```
+
+This builds the real distributable — the exact tree `.distignore`
+produces, with production-only dependencies — inside its own wp-env
+environment (`.wp-env.plugin-check.json`, port 8912), then runs
+WordPress.org's own Plugin Check tool against it. Building the real
+package matters: it is the only way to exercise `.distignore` itself,
+rather than trust it by eye. Like the CI gate it mirrors, it fails on
+warnings as well as errors, not just errors — a clean run means zero of
+both. It needs Docker running and takes a few minutes; the first run
+also clones WordPress and builds this environment's Docker images from
+scratch — the WordPress clone is the larger part of that wait — later
+runs reuse both and are much quicker. CI only runs this check at the
+`staging` and `main` gates, so running it locally on `dev` is how a
+release-gate failure gets caught early, before a pull request against
+`staging` even exists.
 
 ### Your daily cycle
 
