@@ -56,6 +56,60 @@ v0.0.x decision log for the reasoning.
   handler caught the fatal, printed the critical-error sentence, and exited `1`.
   All that changes is what is printed on the way out.
 
+## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
+
+A minor release rather than a patch: no public API moved — not an interface, a
+constructor, a signature or a return type — but `verify` gains an outcome, so a
+script that checks its exit code can now see a failure it could not see before.
+No breaking changes.
+
+### Fixed
+
+- **Verifying a backup no longer tells you it is fine when a restore will
+  refuse it.** Verifying recalculated a fingerprint for every file and reported
+  the backup **sound**. Restoring settled four further questions that verifying
+  never asked — so a backup engineered to place a symbolic link outside your
+  site, which by its nature has perfectly valid fingerprints, was reported sound
+  and then refused by the very restore the check was meant to vouch for. The
+  person misled by this was the one checking their backups. Verifying now runs
+  every check that changes nothing, and answers with one of three verdicts
+  rather than two. See [ADR 0023](docs/adr/0023-verify-and-restorability.md).
+- **"Refused" is now its own answer, separate from "broken".** A refused backup
+  is **not damaged** — every fingerprint matched — but a restore will not accept
+  it. The two call for opposite actions: broken sends you to delete the file and
+  find another copy, whereas a refused backup should be kept, not restored, and
+  traced, because Pontifex never produces one.
+- **A server that cannot restore is reported beside the verdict, never as the
+  verdict.** A full disk is not a damaged backup, and saying otherwise is the
+  one message capable of talking somebody out of a good backup.
+- **A failed command explains itself instead of printing a crash.** `import`,
+  `export` and `rollback` each ended a failure by re-raising it into WordPress's
+  fatal handler, so what you actually saw was a page of PHP internals followed
+  by "There has been a critical error on this website." All three now say what
+  went wrong, in which of three categories, and what to do about it.
+- **Messages no longer name Pontifex's own internal parts.** 523 of them began
+  with the name of the code that raised them — "FileWriter: could not create
+  directory" — which means nothing to anybody who does not work on Pontifex.
+  That information now goes to the log instead, which records the exact file and
+  line, so support diagnosis got better while the text you read got clearer.
+
+### Changed
+
+- **`wp pontifex import --dry-run` is now a real rehearsal.** It ran the
+  integrity check and nothing else, which meant it ran *fewer* checks than the
+  import it claimed to be rehearsing. It now runs every one of them, including
+  the one that briefly creates and removes a test symbolic link to find out
+  whether this server can — the single check a plain verify cannot make, because
+  verifying never writes anything at all.
+- **The admin Restore screen refuses a bad backup before making the safety
+  copy**, not after. On a large site that copy is minutes of work and a second
+  full copy of the site on disk, all of it previously spent to arrive at a
+  refusal that was knowable up front.
+
+### Internal
+
+- `actions/upload-artifact` 4.6.2 → 7.0.1.
+
 ## [1.0.3] — 2026-08-05 — Exclusion patterns are kept as you typed them
 
 Closes the last of the findings from the full-build audit that produced
@@ -1350,6 +1404,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v0.9.5...HEAD
+[1.1.0]: https://github.com/7Duckie/pontifex/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/7Duckie/pontifex/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/7Duckie/pontifex/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/7Duckie/pontifex/compare/v1.0.0...v1.0.1

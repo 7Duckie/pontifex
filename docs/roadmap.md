@@ -560,6 +560,25 @@ so this is a minor rather than a patch.
 
 See [ADR 0023](./adr/0023-verify-and-restorability.md).
 
+Two further pieces of the same theme — Pontifex saying clearly what it has
+decided — ship alongside it.
+
+- **A failed command gives a verdict, not a stack trace.** `import`, `export`
+  and `rollback` each ended a failure by re-raising it into WordPress's fatal
+  handler, so the operator saw a page of PHP internals and "There has been a
+  critical error on this website". All three now render what went wrong, in
+  which of the three [ADR 0022](./adr/0022-exception-taxonomy.md) categories,
+  and what to do about it — while keeping everything the old handlers did:
+  the log entry, the counters, the transfer history, and the automatic
+  safety-archive recovery.
+- **Messages no longer name Pontifex's own internal classes.** 523 of them
+  began with the class that raised them — "FileWriter: could not create
+  directory" — which is meaningless to anyone outside the project, and which
+  became the headline text of a verify verdict rather than a line buried in a
+  stack trace. The origin moved to the log, which now records the file and line
+  the exception came from: strictly better than a class name, because it names
+  the exact statement.
+
 ### What is deliberately deferred
 
 - Verify still does not decode payloads, so it still does not test a
