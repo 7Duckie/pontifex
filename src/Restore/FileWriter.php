@@ -1832,13 +1832,98 @@ final class FileWriter {
 		if ( '' === $parent || $parent === $target_path || is_dir( $parent ) ) {
 			return;
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-		if ( ! @mkdir( $parent, self::PARENT_DIR_MODE, true ) && ! is_dir( $parent ) ) {
+		if ( ! $this->create_directory_recording_intermediates( $parent, self::PARENT_DIR_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $parent is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not create parent directory "%s".', $parent )
 			);
 		}
+	}
+
+	/**
+	 * Create every missing directory level between the deepest existing ancestor and $absolute_directory, recording each one the instant it exists.
+	 *
+	 * {@see self::ensure_parent_directory()} and {@see self::write_directory()}
+	 * used to hand $absolute_directory straight to a single RECURSIVE mkdir()
+	 * call. PHP's recursive mkdir() silently creates every missing intermediate
+	 * level in one sweep, but this class's creation ledger only ever heard about
+	 * the ONE path the caller passed in — never about the intermediate levels
+	 * PHP brought into existence along the way to get there. A single file entry
+	 * "wp-content/plugins/intruder/evil.php", restored into a destination that
+	 * has neither "wp-content/plugins" nor "wp-content/plugins/intruder" yet,
+	 * left BOTH of those directories on disk with no ledger entry for either:
+	 * recovery would neither remove them nor report them as failures, and
+	 * {@see CreationLedgerCleanupReport::is_precise_revert()} would still answer
+	 * true even though the intruder's whole directory tree survived. This is
+	 * squarely inside ADR 0024's own threat model — nothing requires an
+	 * archive's manifest to carry directory entries for every level its file
+	 * entries imply, so an archive that omits them exercises exactly this path.
+	 *
+	 * This method replaces the recursive call with a level-by-level walk, via
+	 * {@see self::deepest_existing_ancestor()}, so every level THIS CALL creates
+	 * gets its own ledger entry immediately after it exists — never batched,
+	 * never deferred to a pass over what turned out to be new afterward. That
+	 * ordering — record the level the instant it lands, not "mkdir recursively,
+	 * then work out afterwards which levels were new" — is the same rule
+	 * {@see self::record_created_path()}'s own docblock states for every other
+	 * write in this class, applied per level instead of once per entry: if
+	 * creation fails half-way through a multi-level path, the levels that DID
+	 * get created are still recorded as each one lands, so a part-failed
+	 * directory creation is precisely the failed-restore case this ledger
+	 * exists to answer for, rather than a gap in it.
+	 *
+	 * A level is recorded only when THIS call actually created it. If mkdir()
+	 * reports failure but is_dir() is then true for that level, a concurrent
+	 * creator won the race for it — it existed by the time this call could
+	 * know, so it is not this run's to claim in the ledger, matching the
+	 * "existed before" gate every other write_*() method applies via
+	 * {@see self::path_exists_before_write()}.
+	 *
+	 * $mode is applied to every level this call creates — the exact figure the
+	 * caller's own (formerly recursive) mkdir() applied to every level PHP
+	 * created on its behalf, subject to the process umask exactly as a single
+	 * recursive mkdir() call already was. This method changes what gets
+	 * RECORDED, never what gets CREATED: the directories that end up on disk,
+	 * and their modes, are identical to what the recursive call produced.
+	 *
+	 * Recording more paths than before can reach {@see self::CREATION_LEDGER_CAP}
+	 * sooner on a restore that creates many new directory trees. That is honest
+	 * reporting doing its job, not a regression: those intermediate directories
+	 * were always being created; the ledger's own cap-driven
+	 * "ledger_was_complete" flag now honestly reflects the fuller picture, which
+	 * is exactly the trade-off ADR 0024's own "The cap" section already accepts
+	 * for an ordinary fresh-server restore.
+	 *
+	 * @param string $absolute_directory Absolute path of the directory that must exist by the time this returns; at or beneath $this->destination_root.
+	 * @param int    $mode                Mode applied to every level this call creates.
+	 * @return bool True once $absolute_directory exists — whether it already did, was created here, or was created by a concurrent process — false only if a level could not be created and still does not exist.
+	 */
+	private function create_directory_recording_intermediates( string $absolute_directory, int $mode ): bool {
+		$deepest_existing = $this->deepest_existing_ancestor( $absolute_directory );
+		if ( $deepest_existing === $absolute_directory ) {
+			return true;
+		}
+
+		$missing_levels = array();
+		for ( $level = $absolute_directory; $level !== $deepest_existing; $level = dirname( $level ) ) {
+			$missing_levels[] = $level;
+		}
+		$missing_levels = array_reverse( $missing_levels );
+
+		foreach ( $missing_levels as $level ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write, one level at a time (never recursive) so each level can be recorded the instant it exists; see this method's own docblock for why.
+			if ( @mkdir( $level, $mode ) ) {
+				$this->record_created_path( substr( $level, strlen( $this->destination_root ) + 1 ), self::LEDGER_KIND_DIRECTORY );
+				continue;
+			}
+			if ( ! is_dir( $level ) ) {
+				return false;
+			}
+			// A concurrent creator already made this level real by the time this
+			// call could tell; it is not this run's creation to claim.
+		}
+
+		return true;
 	}
 
 	/**
@@ -2124,8 +2209,28 @@ final class FileWriter {
 		$working_mode = $mode | 0o700;
 
 		if ( ! is_dir( $target_path ) ) {
+			// Every ancestor above this entry's OWN directory is ensured first,
+			// via the same {@see self::create_directory_recording_intermediates()}
+			// helper {@see self::ensure_parent_directory()} uses — write_entry()
+			// already calls ensure_parent_directory() with this exact $target_path
+			// before dispatching here, so in practice this is a cheap no-op
+			// confirming that guarantee still holds; calling it again here rather
+			// than relying on that call order is what keeps this method correct on
+			// its own, even if a future change ever calls it some other way. What
+			// is left below is then always a single, non-recursive mkdir() for the
+			// entry's OWN directory — never a level this call would need to record
+			// as an "intermediate", since it is the very path $relative_path names,
+			// and the existed_before-gated record_created_path() call below already
+			// accounts for it.
+			$parent = dirname( $target_path );
+			if ( '' !== $parent && $parent !== $target_path && ! $this->create_directory_recording_intermediates( $parent, $working_mode ) ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'Could not create directory "%s".', $target_path )
+				);
+			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-			if ( ! @mkdir( $target_path, $working_mode, true ) && ! is_dir( $target_path ) ) {
+			if ( ! @mkdir( $target_path, $working_mode ) && ! is_dir( $target_path ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 					sprintf( 'Could not create directory "%s".', $target_path )
@@ -2590,6 +2695,56 @@ final class FileWriter {
 	}
 
 	/**
+	 * Every directory that lies strictly above one of $preserve's own paths.
+	 *
+	 * B1 made {@see self::create_directory_recording_intermediates()} record
+	 * an entry's implicit intermediate directories, not only the entry's own
+	 * path — correctly, since those directories genuinely are something this
+	 * run created. But that exposed an incoherence in how rule 2 (below)
+	 * judged them: a directory that survives cleanup ONLY because something
+	 * deliberately preserved inside it is still there is not a FAILED
+	 * removal, it is the preservation working as intended one level up. Rule
+	 * 2 already never removes a path $preserve names outright; this extends
+	 * that same "leave it alone, and say nothing about it either way" verdict
+	 * to a directory that CONTAINS one, for exactly the same reason. Without
+	 * this, {@see self::remove_created_paths()} would call rmdir() on such a
+	 * directory anyway, watch it refuse (rule 3 — a non-empty directory is
+	 * never removed) because the preserved file is still inside it, and
+	 * report that refusal as a cleanup FAILURE — flipping
+	 * {@see CreationLedgerCleanupReport::is_precise_revert()} to false over a
+	 * directory that is exactly where the caller asked it to be.
+	 *
+	 * Built ONCE, up front, from the already-normalised $preserve set — never
+	 * per created-directory — so the later check in
+	 * {@see self::remove_created_paths()} stays a single isset() rather than a
+	 * scan repeated once per directory in the ledger. For a preserved path of
+	 * depth N this method does N constant-time inserts (one per ancestor
+	 * prefix), so building the whole set costs O(preserved paths × depth),
+	 * not O(preserved paths × directories in the ledger).
+	 *
+	 * @param array<string, true> $preserve The already-normalised preserved-path set {@see self::normalised_preserve_set()} returns.
+	 * @return array<string, true> Every strict ancestor directory of every path in $preserve, as a set suitable for isset() lookups.
+	 */
+	private static function preserved_ancestor_directories( array $preserve ): array {
+		$ancestors = array();
+		foreach ( array_keys( $preserve ) as $preserved_path ) {
+			$components = self::path_components( (string) $preserved_path );
+			// The preserved path's own last segment names the preserved entry
+			// itself, not one of its ancestors — rule 2's exact-match skip
+			// already covers that path; this method's job is only the
+			// directories strictly ABOVE it.
+			array_pop( $components );
+
+			$prefix = array();
+			foreach ( $components as $component ) {
+				$prefix[]                             = $component;
+				$ancestors[ implode( '/', $prefix ) ] = true;
+			}
+		}
+		return $ancestors;
+	}
+
+	/**
 	 * Remove every path this run newly created, except any $preserved_paths still declares.
 	 *
 	 * Called only by a FAILED import's recovery, after the pre-import safety
@@ -2609,19 +2764,28 @@ final class FileWriter {
 	 *     restore (an upload, a cache file, a session file, a log line
 	 *     written mid-request) merely for not being in the archive being
 	 *     replayed back.
-	 *  2. NEVER a path also present in $preserved_paths. The caller passes the
-	 *     safety archive's own declared paths: anything the safety archive
-	 *     carries belongs to the site's prior state, restoring it there was
-	 *     already correct, and this method's job is only to remove what
-	 *     neither the original site nor the safety archive ever had. Each
-	 *     incoming preserved path is run through
-	 *     {@see self::normalise_entry_path()} — the same normalisation the
-	 *     ledger's own paths already went through in {@see self::write_entry()}
-	 *     — before comparison, so "wp-content/foo.php" and
-	 *     "./wp-content/foo.php" are recognised as the same path rather than
-	 *     missing each other as two different strings. A preserved path that
-	 *     normalisation refuses outright is skipped rather than thrown: it
-	 *     cannot match a ledger entry anyway, and this method must never throw.
+	 *  2. NEVER a path also present in $preserved_paths, AND NEVER a directory
+	 *     that CONTAINS one. The caller passes the safety archive's own
+	 *     declared paths: anything the safety archive carries belongs to the
+	 *     site's prior state, restoring it there was already correct, and
+	 *     this method's job is only to remove what neither the original site
+	 *     nor the safety archive ever had. Each incoming preserved path is
+	 *     run through {@see self::normalise_entry_path()} — the same
+	 *     normalisation the ledger's own paths already went through in
+	 *     {@see self::write_entry()} — before comparison, so
+	 *     "wp-content/foo.php" and "./wp-content/foo.php" are recognised as
+	 *     the same path rather than missing each other as two different
+	 *     strings. A preserved path that normalisation refuses outright is
+	 *     skipped rather than thrown: it cannot match a ledger entry anyway,
+	 *     and this method must never throw. The "contains one" half — see
+	 *     {@see self::preserved_ancestor_directories()} — exists because B1
+	 *     now records a directory this run created even when nothing but an
+	 *     implicit intermediate step ever pointed at it directly: a directory
+	 *     that survives only because a path deliberately preserved inside it
+	 *     is still there is not a failed removal, it is the SAME preservation
+	 *     one level up, and must be treated identically — counted in neither
+	 *     {@see CreationLedgerCleanupReport::removed_paths()} nor
+	 *     {@see CreationLedgerCleanupReport::failed_paths()}.
 	 *  3. A directory is removed only once it is genuinely EMPTY. rmdir()
 	 *     enforces that on its own, so directories are processed
 	 *     deepest-path-first — the same strlen-descending heuristic
@@ -2640,16 +2804,18 @@ final class FileWriter {
 	 * failure for that path and the rest of the cleanup continues.
 	 *
 	 * Each ledger path is turned back into an absolute path via
-	 * {@see self::resolve_safe_path()} — the same path-safety check
-	 * {@see self::write_entry()} itself uses — rather than a second,
-	 * independently-written join, so deletion is confined by exactly the
-	 * guard writing already trusted.
+	 * {@see self::resolve_safe_path()} and then re-checked with
+	 * {@see self::assert_no_symlinked_ancestor()} — see
+	 * {@see self::remove_one_created_path()}'s own docblock for why re-running
+	 * that SPECIFIC guard (and not the others {@see self::write_entry()} also
+	 * runs) is what confinement here actually needs.
 	 *
 	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this writer's own ledger created them.
 	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation — so the caller can tell a precise revert from a capped merge.
 	 */
 	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
-		$preserve = $this->normalised_preserve_set( $preserved_paths );
+		$preserve            = $this->normalised_preserve_set( $preserved_paths );
+		$preserved_ancestors = self::preserved_ancestor_directories( $preserve );
 
 		$non_directory_paths = array();
 		$directory_paths     = array();
@@ -2659,6 +2825,9 @@ final class FileWriter {
 				continue;
 			}
 			if ( self::LEDGER_KIND_DIRECTORY === $kind ) {
+				if ( isset( $preserved_ancestors[ $path ] ) ) {
+					continue;
+				}
 				$directory_paths[] = $path;
 			} else {
 				$non_directory_paths[] = $path;
@@ -2698,12 +2867,42 @@ final class FileWriter {
 	 * A missing path (already gone, somehow) counts as removed: the outcome
 	 * this method exists to guarantee — nothing this writer created remains —
 	 * already holds. The whole body, INCLUDING resolving the relative path back
-	 * to an absolute one via {@see self::resolve_safe_path()}, sits inside the
-	 * try/catch — not only the filesystem calls — so that this method really
-	 * does never throw, exactly as {@see self::remove_created_paths()} promises
-	 * its own caller; an unexpected failure (a filesystem race, a permissions
-	 * check that itself errors) is reported as a failure for this one path
-	 * rather than escaping and aborting the rest of that cleanup.
+	 * to an absolute one via {@see self::resolve_safe_path()} and the
+	 * symlinked-ancestor check that follows it, sits inside the try/catch —
+	 * not only the filesystem calls — so that this method really does never
+	 * throw, exactly as {@see self::remove_created_paths()} promises its own
+	 * caller; an unexpected failure (a filesystem race, a permissions check
+	 * that itself errors) is reported as a failure for this one path rather
+	 * than escaping and aborting the rest of that cleanup.
+	 *
+	 * WHY THE SYMLINKED-ANCESTOR CHECK IS RE-RUN HERE, and not merely inherited
+	 * from write_entry(). Every path this method is ever asked to remove
+	 * already passed EVERY guard write_entry() runs, once, at the moment
+	 * {@see self::record_created_path()} put it in the ledger — including
+	 * assert_within_required_prefix() and assert_not_pontifex_working_path().
+	 * Those two test the PATH STRING alone, so a path that passed them at
+	 * record time still passes them now; re-running them here would answer a
+	 * question that cannot have changed. {@see self::assert_no_symlinked_ancestor()}
+	 * is different in kind: it tests the LIVE FILESYSTEM, which can change
+	 * between the write that recorded a path and the recovery that later
+	 * removes it — the whole ledger's reason to exist is that time passes, and
+	 * potentially other entries are written, between those two moments. An
+	 * earlier version of this method ran only {@see self::resolve_safe_path()},
+	 * a purely textual join, and its own docblock claimed that was "confined by
+	 * exactly the guard writing already trusted" — which was false: writing
+	 * runs FOUR guards before it ever touches disk, and cleanup ran one of
+	 * them. The gap was demonstrated as a real mechanism: with
+	 * "wp-content/languages" made a symlink by the time cleanup ran, this
+	 * method deleted the REAL file the link pointed at and reported the
+	 * removal as a success. It could not, however, be reached through the
+	 * shipped write path when this was found — {@see self::write_symlink()}'s
+	 * own `@unlink()` cannot replace a non-empty directory, so replaying an
+	 * archive that tries to turn an existing populated directory into a
+	 * symlink throws before recovery is ever reached — so this closes a real
+	 * gap that was not, at the time it was found, reachable end to end. That a
+	 * gap is not reachable today is not a reason to leave it open: the
+	 * unreachability depends on write_symlink()'s current implementation, not
+	 * on anything this method itself guarantees.
 	 *
 	 * @param string $relative_path The ledger's own normalised relative path.
 	 * @param bool   $is_directory  True to rmdir() (fails on a non-empty directory, by design); false to unlink().
@@ -2712,6 +2911,7 @@ final class FileWriter {
 	private function remove_one_created_path( string $relative_path, bool $is_directory ): bool {
 		try {
 			$absolute_path = $this->resolve_safe_path( $relative_path );
+			$this->assert_no_symlinked_ancestor( $relative_path );
 
 			if ( $is_directory ) {
 				if ( ! is_dir( $absolute_path ) ) {
