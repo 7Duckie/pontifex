@@ -1636,6 +1636,29 @@ final class FileWriter {
 	 * probe file into is a root the restore is about to fail on anyway, for
 	 * the identical reason, on its very first real entry.
 	 *
+	 * The try/finally above covers every ORDINARY exit from this method —
+	 * it does not, and cannot, cover a SIGKILL or a host timeout that kills
+	 * the PHP process between the write and the finally block ever running,
+	 * because nothing in the interpreter executes at all once the process
+	 * is gone. Until this method's probe carried
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()}'s own shape, a kill
+	 * at that exact moment left a `.PontifexCaseProbe<hex>` file sitting
+	 * directly in the installation root that no sweep recognised —
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} matches
+	 * only a name ending in that shape, and this probe's name carried none
+	 * of it. Both {@see self::case_probe_basenames()}'s returned names now
+	 * end with the SAME suffix (generated once, never per-name — see that
+	 * method's own docblock for why calling it twice would break the
+	 * comparison below), for exactly that reason: it is what lets
+	 * {@see self::sweep_orphaned_temp_files()} recognise and remove this
+	 * probe's leftover artefact on the next restore, the same way it
+	 * already recognises {@see self::probe_symlink_creation()}'s own
+	 * dangling-symlink orphan — including via that method's REACH section,
+	 * which lists $this->destination_root's own immediate children on a
+	 * required-prefix-narrowed restore precisely because this probe, like
+	 * that one, writes directly to the installation root rather than
+	 * somewhere under the prefix.
+	 *
 	 * @return bool True if the destination filesystem is case-sensitive.
 	 */
 	private function destination_is_case_sensitive(): bool {
@@ -1643,9 +1666,9 @@ final class FileWriter {
 			return $this->case_sensitive_destination;
 		}
 
-		$name         = 'PontifexCaseProbe' . bin2hex( random_bytes( 8 ) );
-		$probe_path   = $this->destination_root . '/.' . $name;
-		$flipped_path = $this->destination_root . '/.' . self::flip_case( $name );
+		list( $probe_name, $flipped_name ) = self::case_probe_basenames();
+		$probe_path                        = $this->destination_root . '/' . $probe_name;
+		$flipped_path                      = $this->destination_root . '/' . $flipped_name;
 
 		$this->case_sensitive_destination = false;
 
@@ -1674,6 +1697,52 @@ final class FileWriter {
 				@unlink( $probe_path );
 			}
 		}
+	}
+
+	/**
+	 * Build the case-sensitivity probe's own basename and its case-flipped twin.
+	 *
+	 * Pure and side-effect-free — no filesystem I/O — and deliberately pulled
+	 * out of {@see self::destination_is_case_sensitive()} rather than left
+	 * inline there, for one reason: that method's probe file exists on disk
+	 * for only the handful of instructions between its own
+	 * file_put_contents() and its finally block's unlink(), so there is no
+	 * moment at which anything outside that method could observe the real
+	 * name in use. Extracting the name-construction into its own method
+	 * gives a test a way to drive this EXACT logic through reflection and
+	 * pin its output against
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()}, rather than
+	 * having to retype the shape by hand — which would prove only that a
+	 * test author's own mental model of the code is self-consistent, not
+	 * that the real code is.
+	 *
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()} is called exactly
+	 * ONCE, into a local variable, and that same value is appended,
+	 * UNFLIPPED, to both returned names — never re-generated per name. Two
+	 * things follow from that:
+	 *
+	 *  - Calling suffix() twice, once per name, would produce two DIFFERENT
+	 *    suffixes, and {@see self::destination_is_case_sensitive()}'s
+	 *    file_exists()/fileinode() comparison would then be comparing two
+	 *    names that never had any relationship to begin with, not two
+	 *    spellings of the same one — the probe would always read as
+	 *    case-sensitive, on every filesystem, because the flipped path could
+	 *    never resolve to the same file even where the OS folds case.
+	 *  - Because flip_case() is applied only to the "PontifexCaseProbe<hex>"
+	 *    portion, before the shared suffix is appended, the suffix itself
+	 *    never passes through flip_case() at all — so the two returned names
+	 *    are guaranteed to differ in exactly the same way they always did,
+	 *    only in the case of that portion, never in the newly-added suffix.
+	 *    That is what keeps the probe's own comparison provably unchanged by
+	 *    this method's addition.
+	 *
+	 * @return array{0: string, 1: string} The probe's own basename (leading dot included), then its case-flipped twin.
+	 */
+	private static function case_probe_basenames(): array {
+		$suffix = TempArtefact::suffix();
+		$name   = 'PontifexCaseProbe' . bin2hex( random_bytes( 8 ) );
+
+		return array( '.' . $name . $suffix, '.' . self::flip_case( $name ) . $suffix );
 	}
 
 	/**

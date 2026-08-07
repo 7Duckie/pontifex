@@ -266,6 +266,70 @@ final class InvokeTest extends TestCase {
 	}
 
 	/**
+	 * A failure while bundling leaves neither the intermediate .tar nor its gzipped .tar.gz sibling behind.
+	 *
+	 * The write_bundle() method builds an uncompressed .pontifex-diagnostics-<random>.tar, gzips
+	 * it to a .pontifex-diagnostics-<random>.tar.gz sibling, and only then renames that onto
+	 * --output. This test forces the LAST of those three steps to fail — deliberately without
+	 * touching filesystem permissions, which behave inconsistently between an unprivileged CI
+	 * process and a root process inside the container this suite also runs under (see
+	 * FileWriterTest's own capability-probing tests for that exact trap) — by pre-creating a
+	 * DIRECTORY at the --output path itself. rename() refusing to move a file onto an existing
+	 * directory (EISDIR) is filesystem-type semantics, not a permission any calling process
+	 * could ever have regardless of its uid, so this reliably reaches the rename-failure branch
+	 * on any host, root or not.
+	 *
+	 * Both the uncompressed intermediate tar AND its gzipped sibling are built successfully
+	 * before the rename is even attempted, so both genuinely exist on disk at the moment it
+	 * fails — proving the fix covers BOTH artefacts, not just the uncompressed one the
+	 * pre-existing code already unlinked on this branch. The single remaining directory-listing
+	 * assertion at the end is deliberately the whole directory's contents, not a narrower glob,
+	 * so a leak of any shape (not only the two named here) would be caught.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_leaves_no_intermediate_tar_or_gz_behind_when_bundling_fails(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+
+		$output_dir  = $this->fixture_dir . '/out';
+		$output_path = $output_dir . '/support.tar.gz';
+		$this->make_dir( $output_path );
+		$this->assertTrue( is_dir( $output_path ), 'fixture set-up: the output path itself must already exist as a directory, or the test would prove nothing.' );
+
+		$captured_error = null;
+		$wp_cli         = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'runcommand' )->with( 'pontifex doctor', Mockery::any() )->once()->andReturn( 'doctor report' );
+		$wp_cli->shouldReceive( 'runcommand' )->with( 'pontifex stats', Mockery::any() )->once()->andReturn( 'stats report' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andReturnUsing(
+			static function ( string $message ) use ( &$captured_error ): void {
+				$captured_error = $message;
+				throw new RuntimeException( 'sentinel: wp-cli-error' );
+			}
+		);
+
+		$command = new DiagnosticsCommand( $environment, $wordpress_context );
+
+		try {
+			$this->invoke_without_patchwork_stream_wrapper( $command, array(), array( 'output' => $output_path ) );
+			$this->fail( 'Expected the sentinel exception modelling WP_CLI::error() exiting.' );
+		} catch ( RuntimeException $exception ) {
+			$this->assertSame( 'sentinel: wp-cli-error', $exception->getMessage() );
+		}
+
+		$this->assertNotNull( $captured_error, 'WP_CLI::error() should have been called once the rename onto an existing directory failed.' );
+		$this->assertStringContainsString( 'could not move the bundle into place', $captured_error );
+
+		$remaining = array_values( array_diff( (array) scandir( $output_dir ), array( '.', '..' ) ) );
+		$this->assertSame(
+			array( 'support.tar.gz' ),
+			$remaining,
+			'Only the pre-existing directory fixture should remain in the output directory; every intermediate artefact write_bundle() created must have been cleaned up.'
+		);
+	}
+
+	/**
 	 * A wrong --output extension is refused before anything is written, and the error names the redacted path.
 	 *
 	 * The resolve_output_path() method checks the extension before the redactor, the

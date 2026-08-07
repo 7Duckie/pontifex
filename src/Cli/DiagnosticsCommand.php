@@ -307,6 +307,47 @@ final class DiagnosticsCommand {
 	 * Builds an uncompressed tar at a unique temporary path, gzips it, moves the
 	 * result into place, and removes the intermediate tar.
 	 *
+	 * This class cleans up its own intermediate artefacts — $temp_tar and
+	 * $temp_tar . '.gz' — rather than relying on a sweep the way
+	 * {@see \Pontifex\Restore\FileWriter::sweep_orphaned_temp_files()} and
+	 * {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}
+	 * do for their own write-then-rename temps. Both of those give their temps
+	 * the shape {@see \Pontifex\Filesystem\TempArtefact} builds and recognises;
+	 * $temp_tar deliberately does NOT carry that shape, and never should:
+	 *
+	 *  - $temp_tar's name is built from random_bytes(), not
+	 *    {@see \Pontifex\Filesystem\TempArtefact::suffix()}'s uniqid(), because
+	 *    the comment on its construction below states a real security
+	 *    property — an unpredictable name an attacker cannot pre-create or
+	 *    symlink ahead of PharData's write. uniqid() is TIME-BASED and
+	 *    therefore guessable; routing this name through TempArtefact::suffix()
+	 *    would trade that property away for a shape a sweep could recognise,
+	 *    which is a strictly worse deal for a file whose whole point is to be
+	 *    unguessable.
+	 *  - Even if it carried that shape, sweeping this directory would still be
+	 *    wrong: unlike a restore destination or the rollback directory, both of
+	 *    which Pontifex itself owns outright, $temp_tar's directory is
+	 *    dirname( $output_path ) — a location the OPERATOR nominated via
+	 *    --output. Pontifex does not delete files inside a directory it does
+	 *    not own merely because one happens to be shaped like one of its own.
+	 *
+	 * So the only correct owner of cleanup here is this method itself, on
+	 * every exit path: the `finally` block below runs after a successful
+	 * build (where only $temp_tar remains, its '.gz' sibling having just been
+	 * renamed away), after a thrown exception from the PharData constructor,
+	 * addFromString(), or compress() (where either, both, or neither may exist
+	 * on disk, depending how far the build got), and after a failed rename
+	 * (where BOTH still exist — the second of those two artefacts is what an
+	 * earlier version of this method left behind on that branch, unlinking
+	 * only $temp_tar and never its '.gz' sibling). Every removal is
+	 * best-effort and guarded by is_file(), so a call that finds nothing to
+	 * remove is a silent no-op, never a second failure — and, critically,
+	 * nothing in the `finally` block returns or throws, so whatever this
+	 * method was already going to return (on success) or throw (the rename
+	 * failure's RuntimeException below, or whatever PharData itself threw)
+	 * propagates completely unchanged; cleanup must never mask the original
+	 * failure.
+	 *
 	 * @param string                $output_path The .tar.gz path to write.
 	 * @param array<string, string> $artifacts   Archive path => content.
 	 * @return void
@@ -321,21 +362,34 @@ final class DiagnosticsCommand {
 		// .tar suffix is required for PharData to recognise the format.
 		$temp_tar = $directory . '/.pontifex-diagnostics-' . bin2hex( random_bytes( 16 ) ) . '.tar';
 
-		$phar = new PharData( $temp_tar );
-		foreach ( $artifacts as $name => $content ) {
-			$phar->addFromString( $name, $content );
-		}
-		$phar->compress( Phar::GZ );
-		unset( $phar );
+		try {
+			$phar = new PharData( $temp_tar );
+			foreach ( $artifacts as $name => $content ) {
+				$phar->addFromString( $name, $content );
+			}
+			$phar->compress( Phar::GZ );
+			unset( $phar );
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Moving the just-built bundle into place on the same filesystem; @ traps a move failure converted to an exception below. WP_Filesystem is not loaded in a WP-CLI command.
-		if ( false === @rename( $temp_tar . '.gz', $output_path ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the intermediate tar.
-			@unlink( $temp_tar );
-			throw new \RuntimeException( 'could not move the bundle into place.' );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Moving the just-built bundle into place on the same filesystem; @ traps a move failure converted to an exception below. WP_Filesystem is not loaded in a WP-CLI command.
+			if ( false === @rename( $temp_tar . '.gz', $output_path ) ) {
+				throw new \RuntimeException( 'could not move the bundle into place.' );
+			}
+		} finally {
+			// Best-effort cleanup of both intermediate artefacts this method can
+			// leave behind; see this method's own docblock for the full reasoning
+			// (why this class cleans up after itself instead of being swept, and
+			// why every exit path — success, a PharData throw, or a failed
+			// rename — reaches here). Neither removal may mask whatever this
+			// method is already returning or throwing.
+			if ( is_file( $temp_tar ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the intermediate uncompressed tar.
+				@unlink( $temp_tar );
+			}
+			if ( is_file( $temp_tar . '.gz' ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort cleanup of the intermediate gzipped tar; present here only when something after compress() failed, most commonly the rename above.
+				@unlink( $temp_tar . '.gz' );
+			}
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Removing the intermediate uncompressed tar.
-		@unlink( $temp_tar );
 	}
 
 	/**

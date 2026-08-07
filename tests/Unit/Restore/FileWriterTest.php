@@ -1372,6 +1372,120 @@ final class FileWriterTest extends TestCase {
 		$this->assertTrue( $result, 'The cached value must be returned unchanged; a re-probe against an unwritable root could not have produced true.' );
 	}
 
+	/**
+	 * The name the case-sensitivity probe actually builds is recognised as an orphan.
+	 *
+	 * The destination_is_case_sensitive() probe file exists on disk for only
+	 * the handful of instructions between its own file_put_contents() and its
+	 * finally block's unlink() — there is no external vantage point from
+	 * which a test could observe the transient name directly while the file
+	 * exists, so this cannot be driven by, say, a glob() taken mid-call.
+	 * {@see FileWriter::case_probe_basenames()} is the pure, side-effect-free
+	 * name-construction logic that method calls to decide what to write and
+	 * then remove; driving THAT method through reflection — rather than
+	 * retyping the shape by hand into this test — proves this property
+	 * against the real code that runs, not against this test's own mental
+	 * model of it. See that method's own docblock for why it exists at all.
+	 *
+	 * Looped, for the same reason
+	 * {@see self::test_temp_artefact_suffix_always_matches_the_orphan_pattern()}
+	 * loops: a single sample could pass even if the construction were subtly
+	 * inconsistent with what {@see \Pontifex\Filesystem\TempArtefact} expects,
+	 * because both random_bytes() and TempArtefact::suffix() themselves vary
+	 * per call.
+	 *
+	 * @return void
+	 */
+	public function test_case_probe_basename_is_recognised_as_an_orphan(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$names = (array) $method->invoke( null );
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( (string) $names[0] ),
+				sprintf( 'The case-sensitivity probe\'s own basename "%s" must be recognised by TempArtefact::is_orphan_name().', $names[0] )
+			);
+		}
+	}
+
+	/**
+	 * A probe-shaped orphan left at the installation root by a killed case-sensitivity probe is swept.
+	 *
+	 * {@see FileWriter::destination_is_case_sensitive()} always writes its
+	 * probe file directly at $this->destination_root — never under the
+	 * required prefix — so a restore killed between that write and its own
+	 * finally's unlink() leaves the orphan exactly where
+	 * {@see FileWriter::sweep_orphaned_temp_files()}'s REACH section already
+	 * looks on a content-only restore: $this->destination_root's own
+	 * immediate children, listed there specifically because a capability
+	 * probe of this shape can fall in the installation root rather than
+	 * under "wp-content". Before Task 1's fix this orphan carried no
+	 * recognisable shape at all and would have survived every restore
+	 * indefinitely; this proves it is now removed like any other of this
+	 * writer's own temp artefacts.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_case_probe_orphan_at_the_installation_root_under_a_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+		$this->make_fixture_directory( 'wp-content' );
+
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+		$names  = (array) $method->invoke( null );
+		$orphan = $this->fixture_root . '/' . $names[0];
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: stands in for a case-sensitivity probe abandoned mid-restore by a kill.
+		file_put_contents( $orphan, '' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * The probe's two derived names still differ only by the case of their letters, never by the newly-shared suffix.
+	 *
+	 * Proves the invariant the whole probe depends on, directly against
+	 * {@see FileWriter::case_probe_basenames()}'s real output rather than a
+	 * hand-typed example: strtolower() of one name must equal strtolower()
+	 * of the other, so a case-FOLDING filesystem's file_exists() check for
+	 * the flipped spelling still resolves to the very file just written —
+	 * while the raw byte strings must still differ, so a case-SENSITIVE
+	 * filesystem's identical check still reports two distinct files rather
+	 * than one. Both properties held before {@see \Pontifex\Filesystem\TempArtefact}'s
+	 * shared suffix was appended to each name; this pins that appending the
+	 * SAME suffix, unflipped, to both spellings (rather than flipping the
+	 * whole name including the suffix) could not have disturbed either one.
+	 *
+	 * "PontifexCaseProbe" always contributes at least one ASCII letter
+	 * regardless of what random_bytes() happens to draw, so the two names
+	 * are guaranteed to be byte-distinct on every run — this is not a
+	 * property that could pass by luck the way a purely random comparison
+	 * might, but the loop still guards against a construction-order mistake
+	 * (e.g. flipping the suffix too) that only a particular hex draw would
+	 * expose.
+	 *
+	 * @return void
+	 */
+	public function test_case_probe_names_differ_only_by_case(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$names = (array) $method->invoke( null );
+
+			$this->assertNotSame(
+				$names[0],
+				$names[1],
+				'the two spellings must be byte-distinct, or a case-sensitive filesystem could never tell them apart'
+			);
+			$this->assertSame(
+				strtolower( (string) $names[0] ),
+				strtolower( (string) $names[1] ),
+				'the two spellings must fold to the same name, or a case-insensitive filesystem could never tell they are "the same" file'
+			);
+		}
+	}
+
 	// -------------------------------------------------------------------
 	// Pontifex working-directory refusal
 	// -------------------------------------------------------------------
