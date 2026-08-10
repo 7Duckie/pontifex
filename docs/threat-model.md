@@ -339,10 +339,12 @@ cannot be used to escape that directory.
 
 That gate covers the ajax actions, not a direct web request for the
 archive file itself. The backups directory is additionally guarded by a
-deny-all `.htaccess` and an `index.php` written best-effort when the
-directory is created (`ProtectedDirectory`) — an Apache-only mechanism:
-it does nothing on nginx, and every write is silently swallowed on
-failure, so it cannot be relied on. A backup's filename is a predictable
+deny-all `.htaccess` and an `index.php`, checked and repaired every time
+the directory is ensured (`ProtectedDirectory`) — repair only replaces a
+file that is a truncated or empty write Pontifex made itself, never one
+it did not write. It remains an Apache-only mechanism: it does nothing on
+nginx, and every write is silently swallowed on failure, so it cannot be
+relied on. A backup's filename is a predictable
 UTC timestamp (`pontifex-backup-<UTC>.wpmig`), so on nginx, or on any
 host where those guard writes failed, an unauthenticated request for
 that filename under `wp-content/pontifex/backups/` can reach the
