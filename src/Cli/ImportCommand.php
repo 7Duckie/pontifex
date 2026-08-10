@@ -36,6 +36,7 @@ use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -732,14 +733,21 @@ final class ImportCommand {
 			}
 		}
 
-		// Read the source table prefix from the archive's provenance (format v1.1).
-		// When it differs from the destination site's prefix, the DatabaseWriter
-		// rewrites table identifiers and the options/usermeta key columns so the
-		// restored database adopts the destination's prefix (ADR 0008). Both prefixes
-		// are validated to a sane identifier shape; the source prefix is from the
-		// archive, so an invalid one is dropped (treated as no rewrite) rather than
-		// reaching the SQL.
-		$source_prefix = self::valid_table_prefix( $archive_reader->provenance()->table_prefix() );
+		// The source table prefix, for the cross-prefix rewrite: when it differs
+		// from the destination site's prefix, the DatabaseWriter rewrites table
+		// identifiers and the options/usermeta key columns so the restored
+		// database adopts the destination's prefix (ADR 0008). Preferably the
+		// value recorded in the archive's own provenance (format v1.1) — but that
+		// field is optional, so an archive written before it existed carries none,
+		// and SourceTablePrefix::resolve() then derives the same fact from the
+		// database chunks' own table names instead, cheaply (headers only, one
+		// per table) and safely (see that class's docblock for why a wrong or
+		// hostile derived SOURCE prefix cannot make a rewritten name escape this
+		// site — DatabaseWriter's cross-site guard is the backstop either way).
+		// Both the recorded and the derived value are validated to a sane
+		// identifier shape before use. The destination prefix is this site's own
+		// and is validated the same way, purely as defence in depth.
+		$source_prefix = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
 		$dest_prefix   = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
 
 		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
@@ -760,13 +768,15 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Validate a table prefix to a sane identifier shape, or drop it.
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
 	 *
-	 * Returns the prefix only when it is a non-empty run of ASCII letters, digits, and
-	 * underscores — the shape a WordPress table prefix always takes. Anything else
-	 * (null, empty, or a value carrying SQL metacharacters from a crafted archive)
-	 * yields '', which the DatabaseWriter reads as "no rewrite", so an untrusted prefix
-	 * can never reach a rewrite statement. Pure function.
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see \Pontifex\Restore\SourceTablePrefix::resolve()} instead.
+	 * Returns the prefix only when it is a non-empty run of ASCII letters, digits,
+	 * and underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
 	 *
 	 * @param string|null $prefix The candidate prefix.
 	 * @return string The prefix when valid, otherwise ''.

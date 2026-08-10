@@ -48,31 +48,53 @@ use Pontifex\Restore\RestoreRunner;
 final class DbChunkStatementContainmentTest extends TestCase {
 
 	/**
+	 * Prefix a bare scratch-table basename with the live database's own
+	 * table prefix, derived from $wpdb->prefix at runtime — never
+	 * hardcoded to "wp_" — so DatabaseWriter's cross-site guard accepts
+	 * every fixture table this file creates as belonging to this site. The
+	 * "pontifextest_" element every basename carries is kept, so the
+	 * scratch namespace stays obviously not a real WordPress table.
+	 *
+	 * The single place every other reference to a scratch table name in
+	 * this file goes through, so the live prefix is introduced once rather
+	 * than scattered across dozens of literal strings.
+	 *
+	 * @param string $basename The bare basename, e.g. "pontifextest_canary".
+	 * @return string The live-prefixed table name.
+	 */
+	private static function scratch_table( string $basename ): string {
+		global $wpdb;
+		return $wpdb->prefix . $basename;
+	}
+
+	/**
 	 * Every scratch table this test can create, dropped in set_up and tear_down.
 	 *
-	 * @var string[]
+	 * Computed at runtime, via {@see self::scratch_table()}, rather than a
+	 * compile-time constant — a class constant cannot read $wpdb->prefix.
+	 *
+	 * @return string[]
 	 */
-	private const SCRATCH_TABLES = array(
-		'pontifextest_canary',
-		'pontifextest_alpha',
-		'pontifextest_beta',
-		'pontifextest_loot',
-		'pontifextest_myisam_canary',
-		'pontifextest_sysver',
-		'pontifextest_partitioned',
-		'pontifexstg_pontifextest_canary',
-		'pontifexstg_pontifextest_alpha',
-		'pontifexstg_pontifextest_beta',
-		'pontifexstg_pontifextest_loot',
-		'pontifexstg_pontifextest_sysver',
-		'pontifexstg_pontifextest_partitioned',
-		'pontifexold_pontifextest_canary',
-		'pontifexold_pontifextest_alpha',
-		'pontifexold_pontifextest_beta',
-		'pontifexold_pontifextest_loot',
-		'pontifexold_pontifextest_sysver',
-		'pontifexold_pontifextest_partitioned',
-	);
+	private static function scratch_tables(): array {
+		$basenames = array(
+			'pontifextest_canary',
+			'pontifextest_alpha',
+			'pontifextest_beta',
+			'pontifextest_loot',
+			'pontifextest_myisam_canary',
+			'pontifextest_sysver',
+			'pontifextest_partitioned',
+		);
+
+		$tables = array();
+		foreach ( $basenames as $basename ) {
+			$table    = self::scratch_table( $basename );
+			$tables[] = $table;
+			$tables[] = 'pontifexstg_' . $table;
+			$tables[] = 'pontifexold_' . $table;
+		}
+		return $tables;
+	}
 
 	/**
 	 * The canary row's value before the restore attempt, for the byte-unchanged assertion.
@@ -242,7 +264,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 			throw $bug;
 		} catch ( RuntimeException $refusal ) {
 			$this->assertStringContainsString( 'produced rows', $refusal->getMessage() );
-			$this->assertStringContainsString( 'pontifexstg_pontifextest_loot', $refusal->getMessage() );
+			$this->assertStringContainsString( 'pontifexstg_' . self::scratch_table( 'pontifextest_loot' ), $refusal->getMessage() );
 			$this->assertStringNotContainsString( self::CANARY_VALUE, $refusal->getMessage(), 'The refusal message must never contain the statement bytes or the exfiltrated data.' );
 		}
 
@@ -277,7 +299,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 			throw $bug;
 		} catch ( RuntimeException $refusal ) {
 			$this->assertStringContainsString( 'produced rows', $refusal->getMessage() );
-			$this->assertStringContainsString( 'pontifexstg_pontifextest_loot', $refusal->getMessage() );
+			$this->assertStringContainsString( 'pontifexstg_' . self::scratch_table( 'pontifextest_loot' ), $refusal->getMessage() );
 			$this->assertStringNotContainsString( self::CANARY_VALUE, $refusal->getMessage(), 'The refusal message must never contain the statement bytes or the exfiltrated data.' );
 		}
 
@@ -295,10 +317,12 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function create_table_select_archive( bool $with_as_keyword ) {
-		$as  = $with_as_keyword ? 'AS ' : '';
-		$sql = "CREATE TABLE `pontifextest_loot` (`marker` INT) {$as}SELECT id, val FROM `pontifextest_canary`;\n";
+		$as     = $with_as_keyword ? 'AS ' : '';
+		$loot   = self::scratch_table( 'pontifextest_loot' );
+		$canary = self::scratch_table( 'pontifextest_canary' );
+		$sql    = "CREATE TABLE `{$loot}` (`marker` INT) {$as}SELECT id, val FROM `{$canary}`;\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_loot', 1, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $loot, 1, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -556,7 +580,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 		$runner->restore( $this->ordinary_partitioned_archive() );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: confirm the legitimately partitioned table actually exists after the restore.
-		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', 'pontifextest_partitioned' ) );
+		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', self::scratch_table( 'pontifextest_partitioned' ) ) );
 		$this->assertSame( '1', (string) $count, 'A legitimately partitioned table must restore its row.' );
 		$this->assertSame( array(), $this->leftover_pontifex_tables(), 'A successful restore must leave no staging or parked residue.' );
 	}
@@ -575,7 +599,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	public function test_table_comment_mentioning_data_directory_round_trips(): void {
 		$this->assert_partition_mention_round_trips(
-			"CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=InnoDB COMMENT='old DATA DIRECTORY = /mnt no really' "
+			"CREATE TABLE `%1\$s` (`id` INT NOT NULL) ENGINE=InnoDB COMMENT='old DATA DIRECTORY = /mnt no really' "
 				. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100));'
 		);
 	}
@@ -587,7 +611,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	public function test_column_comment_mentioning_data_directory_round_trips(): void {
 		$this->assert_partition_mention_round_trips(
-			"CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL COMMENT 'old DATA DIRECTORY = /mnt') ENGINE=InnoDB "
+			"CREATE TABLE `%1\$s` (`id` INT NOT NULL COMMENT 'old DATA DIRECTORY = /mnt') ENGINE=InnoDB "
 				. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100));'
 		);
 	}
@@ -599,7 +623,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	public function test_partition_comment_mentioning_index_directory_round_trips(): void {
 		$this->assert_partition_mention_round_trips(
-			'CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=MyISAM '
+			'CREATE TABLE `%1$s` (`id` INT NOT NULL) ENGINE=MyISAM '
 				. "PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100) COMMENT 'old INDEX DIRECTORY = /mnt');"
 		);
 	}
@@ -611,7 +635,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	public function test_column_default_mentioning_data_directory_round_trips(): void {
 		$this->assert_partition_mention_round_trips(
-			"CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL, `note` VARCHAR(64) DEFAULT 'DATA DIRECTORY = /mnt') ENGINE=InnoDB "
+			"CREATE TABLE `%1\$s` (`id` INT NOT NULL, `note` VARCHAR(64) DEFAULT 'DATA DIRECTORY = /mnt') ENGINE=InnoDB "
 				. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100));'
 		);
 	}
@@ -623,27 +647,37 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	public function test_column_named_data_directory_round_trips(): void {
 		$this->assert_partition_mention_round_trips(
-			'CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL, `DATA DIRECTORY =` INT NOT NULL) ENGINE=InnoDB '
+			'CREATE TABLE `%1$s` (`id` INT NOT NULL, `DATA DIRECTORY =` INT NOT NULL) ENGINE=InnoDB '
 				. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100));'
 		);
 	}
 
 	/**
-	 * Restore a partitioned table built from $create_sql through the REAL RestoreRunner
-	 * and a real MariaDB server, and assert it round-trips (is not refused) and leaves
-	 * no residue — the shared body of the five must-permit tests above.
+	 * Restore a partitioned table built from $create_sql_template through the REAL
+	 * RestoreRunner and a real MariaDB server, and assert it round-trips (is not
+	 * refused) and leaves no residue — the shared body of the five must-permit
+	 * tests above.
 	 *
-	 * @param string $create_sql The table's CREATE statement (no leading DROP, no trailing INSERT).
+	 * $create_sql_template is a sprintf() template carrying a single `%1$s`
+	 * placeholder for the live-prefixed table name, rather than the table name
+	 * baked in by each of the five callers — the one place this method (and,
+	 * through it, every caller) gets the live prefix, so it is never scattered
+	 * across the five call sites individually.
+	 *
+	 * @param string $create_sql_template The table's CREATE statement (no leading DROP, no trailing INSERT), with `%1$s` standing in for the table name.
 	 * @return void
 	 */
-	private function assert_partition_mention_round_trips( string $create_sql ): void {
+	private function assert_partition_mention_round_trips( string $create_sql_template ): void {
 		global $wpdb;
 
-		$sql = "DROP TABLE IF EXISTS `pontifextest_partitioned`;\n"
-			. $create_sql . "\n"
-			. "INSERT INTO `pontifextest_partitioned` (`id`) VALUES (1);\n";
+		$table      = self::scratch_table( 'pontifextest_partitioned' );
+		$create_sql = sprintf( $create_sql_template, $table );
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_partitioned', 3, strlen( $sql ), 0 );
+		$sql = "DROP TABLE IF EXISTS `{$table}`;\n"
+			. $create_sql . "\n"
+			. "INSERT INTO `{$table}` (`id`) VALUES (1);\n";
+
+		$header = EntryHeader::for_db_chunk( 0, $table, 3, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer  = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -660,7 +694,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 		$runner->restore( $archive );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: confirm the table actually exists and carries its row after the restore.
-		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', 'pontifextest_partitioned' ) );
+		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $table ) );
 		$this->assertSame( '1', (string) $count, 'A partitioned table that merely mentions the words must still restore its row.' );
 		$this->assertSame( array(), $this->leftover_pontifex_tables(), 'A successful restore must leave no staging or parked residue.' );
 	}
@@ -830,13 +864,14 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	private function create_system_versioned_table(): string {
 		global $wpdb;
+		$table = self::scratch_table( 'pontifextest_sysver' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: create a WITH SYSTEM VERSIONING table.
-		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (id INT NOT NULL PRIMARY KEY, val VARCHAR(64)) WITH SYSTEM VERSIONING', 'pontifextest_sysver' ) );
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (id INT NOT NULL PRIMARY KEY, val VARCHAR(64)) WITH SYSTEM VERSIONING', $table ) );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: seed the row that must survive the restore.
-		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (id, val) VALUES (1, %s)', 'pontifextest_sysver', self::SYSVER_VALUE ) );
+		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (id, val) VALUES (1, %s)', $table, self::SYSVER_VALUE ) );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: capture the server's own CREATE TABLE definition, exactly as SHOW CREATE TABLE reports it.
-		$row = $wpdb->get_row( $wpdb->prepare( 'SHOW CREATE TABLE %i', 'pontifextest_sysver' ), ARRAY_N );
+		$row = $wpdb->get_row( $wpdb->prepare( 'SHOW CREATE TABLE %i', $table ), ARRAY_N );
 		$this->assertIsArray( $row, 'SHOW CREATE TABLE must succeed for the fixture table.' );
 		$create_sql = (string) $row[1];
 		$this->assertStringContainsString( 'WITH SYSTEM VERSIONING', $create_sql, 'The fixture table must genuinely be system-versioned.' );
@@ -844,7 +879,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 		// The fixture table is dropped so the archive's own DROP + CREATE replays
 		// cleanly against staging without colliding with the live one.
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: drop the live table now that its definition has been captured, so the restore's own DROP/CREATE builds it back via staging.
-		$wpdb->query( $wpdb->prepare( 'DROP TABLE %i', 'pontifextest_sysver' ) );
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE %i', $table ) );
 
 		return $create_sql;
 	}
@@ -856,11 +891,12 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function system_versioned_archive( string $create_sql ) {
-		$sql = "DROP TABLE IF EXISTS `pontifextest_sysver`;\n"
+		$table = self::scratch_table( 'pontifextest_sysver' );
+		$sql   = "DROP TABLE IF EXISTS `{$table}`;\n"
 			. "{$create_sql};\n"
-			. "INSERT INTO `pontifextest_sysver` (`id`, `val`) VALUES (1, '" . self::SYSVER_VALUE . "');\n";
+			. "INSERT INTO `{$table}` (`id`, `val`) VALUES (1, '" . self::SYSVER_VALUE . "');\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_sysver', 3, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $table, 3, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -879,7 +915,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function sysver_value(): ?string {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: read back the system-versioned fixture row.
-		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT val FROM %i WHERE id = 1', 'pontifextest_sysver' ) );
+		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT val FROM %i WHERE id = 1', self::scratch_table( 'pontifextest_sysver' ) ) );
 		return null === $value ? null : (string) $value;
 	}
 
@@ -906,11 +942,12 @@ final class DbChunkStatementContainmentTest extends TestCase {
 			$clauses[] = "INDEX DIRECTORY='/tmp'";
 		}
 
-		$sql = "DROP TABLE IF EXISTS `pontifextest_partitioned`;\n"
-			. 'CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=MyISAM '
+		$table = self::scratch_table( 'pontifextest_partitioned' );
+		$sql   = "DROP TABLE IF EXISTS `{$table}`;\n"
+			. "CREATE TABLE `{$table}` (`id` INT NOT NULL) ENGINE=MyISAM "
 			. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100) ' . implode( ' ', $clauses ) . ");\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_partitioned', 2, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $table, 2, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -946,7 +983,8 @@ final class DbChunkStatementContainmentTest extends TestCase {
 			$clauses[] = "INDEX DIRECTORY='/tmp'";
 		}
 
-		$sql = 'CREATE TABLE `pontifexstg_pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=MyISAM '
+		$probe = 'pontifexstg_' . self::scratch_table( 'pontifextest_partitioned' );
+		$sql   = "CREATE TABLE `{$probe}` (`id` INT NOT NULL) ENGINE=MyISAM "
 			. 'PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100) ' . implode( ' ', $clauses ) . ')';
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: recreate a fixed, test-controlled table at the exact physical DATA/INDEX DIRECTORY path the refused restore used, to prove via a real server error (not an inert LOAD_FILE() read) that no file was left behind.
 		$wpdb->query( $sql );
@@ -957,7 +995,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 		);
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop the probe table created immediately above.
-		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', 'pontifexstg_pontifextest_partitioned' ) );
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $probe ) );
 	}
 
 	/**
@@ -971,11 +1009,12 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function partition_comment_apostrophe_archive() {
-		$sql = "DROP TABLE IF EXISTS `pontifextest_partitioned`;\n"
-			. 'CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=MyISAM PARTITION BY RANGE (`id`) '
+		$table = self::scratch_table( 'pontifextest_partitioned' );
+		$sql   = "DROP TABLE IF EXISTS `{$table}`;\n"
+			. "CREATE TABLE `{$table}` (`id` INT NOT NULL) ENGINE=MyISAM PARTITION BY RANGE (`id`) "
 			. "(PARTITION p0 VALUES LESS THAN (100) COMMENT = 'it''s', PARTITION p1 VALUES LESS THAN MAXVALUE DATA DIRECTORY='/tmp');\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_partitioned', 2, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $table, 2, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -1006,7 +1045,8 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function assert_no_orphaned_partition_p1_file_at_tmp(): void {
 		global $wpdb;
 
-		$sql = 'CREATE TABLE `pontifexstg_pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=MyISAM PARTITION BY RANGE (`id`) '
+		$probe = 'pontifexstg_' . self::scratch_table( 'pontifextest_partitioned' );
+		$sql   = "CREATE TABLE `{$probe}` (`id` INT NOT NULL) ENGINE=MyISAM PARTITION BY RANGE (`id`) "
 			. "(PARTITION p0 VALUES LESS THAN (100) COMMENT = 'it''s', PARTITION p1 VALUES LESS THAN MAXVALUE DATA DIRECTORY='/tmp')";
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: recreate a fixed, test-controlled table at the exact physical DATA DIRECTORY path partition "p1" of the refused restore would have used, to prove via a real server error (not an inert LOAD_FILE() read) that no file was left behind.
 		$wpdb->query( $sql );
@@ -1017,7 +1057,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 		);
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop the probe table created immediately above.
-		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', 'pontifexstg_pontifextest_partitioned' ) );
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $probe ) );
 	}
 
 	/**
@@ -1027,12 +1067,13 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function ordinary_partitioned_archive() {
-		$sql = "DROP TABLE IF EXISTS `pontifextest_partitioned`;\n"
-			. 'CREATE TABLE `pontifextest_partitioned` (`id` INT NOT NULL) ENGINE=InnoDB '
+		$table = self::scratch_table( 'pontifextest_partitioned' );
+		$sql   = "DROP TABLE IF EXISTS `{$table}`;\n"
+			. "CREATE TABLE `{$table}` (`id` INT NOT NULL) ENGINE=InnoDB "
 			. "PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE);\n"
-			. "INSERT INTO `pontifextest_partitioned` (`id`) VALUES (1);\n";
+			. "INSERT INTO `{$table}` (`id`) VALUES (1);\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_partitioned', 3, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $table, 3, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -1056,12 +1097,15 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function merge_write_through_archive() {
-		$create_sql = 'CREATE TABLE `pontifextest_beta` (`ID` INT NOT NULL, `user_pass` VARCHAR(64) NOT NULL, PRIMARY KEY (`ID`)) '
-			. "ENGINE=MRG_MyISAM UNION=(`pontifextest_myisam_canary`) INSERT_METHOD=LAST;\n";
-		$insert_sql = "INSERT INTO `pontifextest_beta` (`ID`, `user_pass`) VALUES (99, 'ATTACKER-PLANTED');\n";
+		$beta          = self::scratch_table( 'pontifextest_beta' );
+		$myisam_canary = self::scratch_table( 'pontifextest_myisam_canary' );
 
-		$create_header = EntryHeader::for_db_chunk( 0, 'pontifextest_beta', 1, strlen( $create_sql ), 0 );
-		$insert_header = EntryHeader::for_db_chunk( 1, 'pontifextest_beta', 1, strlen( $insert_sql ), 0 );
+		$create_sql = "CREATE TABLE `{$beta}` (`ID` INT NOT NULL, `user_pass` VARCHAR(64) NOT NULL, PRIMARY KEY (`ID`)) "
+			. "ENGINE=MRG_MyISAM UNION=(`{$myisam_canary}`) INSERT_METHOD=LAST;\n";
+		$insert_sql = "INSERT INTO `{$beta}` (`ID`, `user_pass`) VALUES (99, 'ATTACKER-PLANTED');\n";
+
+		$create_header = EntryHeader::for_db_chunk( 0, $beta, 1, strlen( $create_sql ), 0 );
+		$insert_header = EntryHeader::for_db_chunk( 1, $beta, 1, strlen( $insert_sql ), 0 );
 
 		$plans = array(
 			new EntryPlan( $create_header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $create_sql ) ),
@@ -1094,10 +1138,11 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	private function create_myisam_canary_table(): void {
 		global $wpdb;
+		$table = self::scratch_table( 'pontifextest_myisam_canary' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: create the MyISAM canary table.
-		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (ID INT NOT NULL, user_pass VARCHAR(64) NOT NULL, PRIMARY KEY (ID)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4', 'pontifextest_myisam_canary' ) );
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (ID INT NOT NULL, user_pass VARCHAR(64) NOT NULL, PRIMARY KEY (ID)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4', $table ) );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: seed the MyISAM canary row.
-		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (ID, user_pass) VALUES (1, %s)', 'pontifextest_myisam_canary', self::MYISAM_CANARY_VALUE ) );
+		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (ID, user_pass) VALUES (1, %s)', $table, self::MYISAM_CANARY_VALUE ) );
 	}
 
 	/**
@@ -1108,7 +1153,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function myisam_canary_value(): ?string {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: read back the MyISAM canary row.
-		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT user_pass FROM %i WHERE ID = 1', 'pontifextest_myisam_canary' ) );
+		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT user_pass FROM %i WHERE ID = 1', self::scratch_table( 'pontifextest_myisam_canary' ) ) );
 		return null === $value ? null : (string) $value;
 	}
 
@@ -1124,7 +1169,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function myisam_canary_row_count(): int {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: count rows in the MyISAM canary table.
-		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', 'pontifextest_myisam_canary' ) );
+		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', self::scratch_table( 'pontifextest_myisam_canary' ) ) );
 		return null === $count ? 0 : (int) $count;
 	}
 
@@ -1139,10 +1184,12 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function hostile_embedded_semicolon_archive() {
-		$sql = 'CREATE TABLE `pontifextest_alpha` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4; '
-			. "UPDATE `pontifextest_canary` SET val = 'HACKED' WHERE id = 1;\n";
+		$alpha  = self::scratch_table( 'pontifextest_alpha' );
+		$canary = self::scratch_table( 'pontifextest_canary' );
+		$sql    = "CREATE TABLE `{$alpha}` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4; "
+			. "UPDATE `{$canary}` SET val = 'HACKED' WHERE id = 1;\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_alpha', 1, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $alpha, 1, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -1165,11 +1212,13 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function hostile_archive() {
-		$sql = "DROP TABLE IF EXISTS `pontifextest_alpha`;\n"
-			. "CREATE TABLE `pontifextest_alpha` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
-			. "UPDATE `pontifextest_canary` SET val = 'HACKED' WHERE id = 1;\n";
+		$alpha  = self::scratch_table( 'pontifextest_alpha' );
+		$canary = self::scratch_table( 'pontifextest_canary' );
+		$sql    = "DROP TABLE IF EXISTS `{$alpha}`;\n"
+			. "CREATE TABLE `{$alpha}` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
+			. "UPDATE `{$canary}` SET val = 'HACKED' WHERE id = 1;\n";
 
-		$header = EntryHeader::for_db_chunk( 0, 'pontifextest_alpha', 3, strlen( $sql ), 0 );
+		$header = EntryHeader::for_db_chunk( 0, $alpha, 3, strlen( $sql ), 0 );
 		$plans  = array( new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) ) );
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -1187,10 +1236,11 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	private function create_canary_table(): void {
 		global $wpdb;
+		$table = self::scratch_table( 'pontifextest_canary' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: create the canary table.
-		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (id INT NOT NULL PRIMARY KEY, val VARCHAR(64)) DEFAULT CHARSET=utf8mb4', 'pontifextest_canary' ) );
+		$wpdb->query( $wpdb->prepare( 'CREATE TABLE %i (id INT NOT NULL PRIMARY KEY, val VARCHAR(64)) DEFAULT CHARSET=utf8mb4', $table ) );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test fixture: seed the canary row.
-		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (id, val) VALUES (1, %s)', 'pontifextest_canary', self::CANARY_VALUE ) );
+		$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (id, val) VALUES (1, %s)', $table, self::CANARY_VALUE ) );
 	}
 
 	/**
@@ -1201,7 +1251,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function canary_value(): ?string {
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: read back the canary row.
-		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT val FROM %i WHERE id = 1', 'pontifextest_canary' ) );
+		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT val FROM %i WHERE id = 1', self::scratch_table( 'pontifextest_canary' ) ) );
 		return null === $value ? null : (string) $value;
 	}
 
@@ -1213,7 +1263,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	private function leftover_pontifex_tables(): array {
 		global $wpdb;
 		$leftovers = array();
-		foreach ( array( 'pontifexstg_pontifextest_%', 'pontifexold_pontifextest_%' ) as $pattern ) {
+		foreach ( array( 'pontifexstg_' . $wpdb->prefix . 'pontifextest_%', 'pontifexold_' . $wpdb->prefix . 'pontifextest_%' ) as $pattern ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: list leftover scratch tables.
 			$found = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern ) );
 			foreach ( $found as $table ) {
@@ -1231,7 +1281,7 @@ final class DbChunkStatementContainmentTest extends TestCase {
 	 */
 	private function drop_scratch_tables(): void {
 		global $wpdb;
-		foreach ( self::SCRATCH_TABLES as $table ) {
+		foreach ( self::scratch_tables() as $table ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop a scratch table.
 			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
 		}

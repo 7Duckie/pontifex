@@ -28,6 +28,7 @@ use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -406,7 +407,7 @@ final class RestoreController {
 			rewind( $source );
 			// A content-only restore restricts the file writer to the wp-content tree — the
 			// write-boundary backstop behind the scope gate above.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content' );
+			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content', $source );
 
 			// Phase 1: verify the backup as a gate. A broken backup is refused before
 			// the safety archive or any write — the whole point of previewing first.
@@ -538,7 +539,7 @@ final class RestoreController {
 			$source = $this->open_source( $path );
 			// A safety archive is the site's own undo, so its replay is unrestricted — no
 			// required prefix, matching a rollback.
-			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
 
 			if ( self::GATE_OK !== $this->verify_gate( $recovery_runner, $source, $size ) ) {
 				$this->finish( $source );
@@ -642,7 +643,7 @@ final class RestoreController {
 			// (content-only for an admin restore, or whole-site for a CLI --whole-site
 			// import), so its replay is unrestricted — no required prefix, matching
 			// `wp pontifex rollback`.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
 
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
@@ -1019,17 +1020,54 @@ final class RestoreController {
 	 * outside the wp-content tree; a rollback passes null, replaying the safety
 	 * archive whatever its scope.
 	 *
+	 * The DatabaseWriter is wired with both table prefixes, mirroring
+	 * `Cli\ImportCommand`: the source prefix comes from the archive's own
+	 * provenance when it carries one, or is derived from its table names via
+	 * {@see SourceTablePrefix::resolve()} when it does not, so a cross-prefix
+	 * restore works in the browser too, not only from WP-CLI. For a rollback or
+	 * recovery replay this is normally a no-op — a safety archive is this
+	 * site's own, so its recorded (or derived) prefix and the destination
+	 * prefix already agree — but wiring every restore path the same way is
+	 * what keeps that true rather than assumed.
+	 *
 	 * @param string|null $required_prefix Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
+	 * @param resource    $source          The open, seekable archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
 	 * @return RestoreRunner A runner ready to verify and restore a plain archive.
 	 */
-	private function default_restore_runner( ?string $required_prefix ): RestoreRunner {
+	private function default_restore_runner( ?string $required_prefix, $source ): RestoreRunner {
+		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader = new ArchiveReader( $source );
+		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
 		return new RestoreRunner(
-			new EntryReader( CodecRegistry::with_defaults() ),
+			$entry_reader,
 			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) ),
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix ),
 			null,
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);
+	}
+
+	/**
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see SourceTablePrefix::resolve()} instead. Returns the
+	 * prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**

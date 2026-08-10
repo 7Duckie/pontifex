@@ -163,6 +163,20 @@ interface DatabaseAdapter {
 	public function list_tables_by_prefix( string $prefix ): array;
 
 	/**
+	 * The WordPress table prefix of the database this adapter is connected to.
+	 *
+	 * This is the scope every restore is confined to: {@see \Pontifex\Restore\DatabaseWriter}
+	 * refuses to stage a table whose name does not begin with it, because on
+	 * shared hosting several WordPress installations often share one
+	 * database, kept apart only by each site's own table prefix
+	 * (`wpa_options`, `wpb_options`) — a table name outside this prefix
+	 * belongs to a neighbouring site, never to the one being restored onto.
+	 *
+	 * @return string The live prefix; an empty string means an unconfigured connection whose prefix cannot be established.
+	 */
+	public function table_prefix(): string;
+
+	/**
 	 * The table's average stored row width, in bytes, or 0 when unknown.
 	 *
 	 * Used by {@see DatabaseScanner} to size chunks from the table's real row
