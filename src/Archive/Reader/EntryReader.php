@@ -541,20 +541,28 @@ final class EntryReader {
 	}
 
 	/**
-	 * Read and parse only an entry's header from the source stream.
+	 * Read and parse only an entry's header from the source stream, decoding no payload.
 	 *
-	 * A light alternative to {@see self::read_entry()} for a caller that needs the
-	 * header's declared metadata without decoding the payload — the verify path's
-	 * budget check. Seeks to the entry, reads the length-prefixed header block, and
-	 * parses it; the stream position afterwards is inside the record, so the caller
-	 * re-seeks before its own read.
+	 * A light alternative to {@see self::read_entry()} for a caller that needs only
+	 * the header's declared metadata, cheaply — originally the verify path's budget
+	 * check, and now also {@see \Pontifex\Restore\SourceTablePrefix::resolve()}'s
+	 * inspection of a db_chunk's declared table name, to recover a source prefix an
+	 * archive did not record. Seeks to the entry, reads the length-prefixed header
+	 * block, and parses it; the stream position afterwards is inside the record, so
+	 * the caller re-seeks before its own read. Verifies the record's kind agrees
+	 * with the manifest's, the same check {@see self::read_entry()} performs, but
+	 * reads and decodes nothing beyond the header itself — safe to call on every
+	 * entry in a large archive without the cost of decoding any of them, and safe
+	 * to call on an encrypted archive's entries too: the header sits outside the
+	 * ciphertext (it is the AES-GCM AAD, not the encrypted payload), so reading it
+	 * needs no passphrase.
 	 *
 	 * @param resource      $source         The source stream.
 	 * @param ManifestEntry $manifest_entry The entry pointing at the record.
 	 * @return EntryHeader The parsed header.
 	 * @throws ArchiveNotTrustworthy If the seek or read fails, the header is malformed, or the record's kind contradicts the manifest.
 	 */
-	private function peek_header( $source, ManifestEntry $manifest_entry ): EntryHeader {
+	public function peek_header( $source, ManifestEntry $manifest_entry ): EntryHeader {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
 		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
 			throw new ArchiveNotTrustworthy(

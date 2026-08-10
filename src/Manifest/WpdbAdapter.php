@@ -330,6 +330,15 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Return the WordPress table prefix of the wrapped $wpdb connection.
+	 *
+	 * @return string The live prefix; an empty string when $wpdb has none configured.
+	 */
+	public function table_prefix(): string {
+		return (string) $this->wpdb->prefix;
+	}
+
+	/**
 	 * The table's average stored row width from SHOW TABLE STATUS, or 0 when unknown.
 	 *
 	 * Reads the storage engine's own `Avg_row_length` figure — for InnoDB an

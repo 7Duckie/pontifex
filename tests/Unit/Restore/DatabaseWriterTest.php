@@ -20,6 +20,7 @@ use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Archive\Reader\EntryReader;
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 
@@ -375,6 +376,242 @@ final class DatabaseWriterTest extends TestCase {
 		$none = new FakeDbAdapter();
 		( new DatabaseWriter( $none ) )->finalise_prefix_rewrite();
 		$this->assertSame( array(), $none->rewrite_calls() );
+	}
+
+	// -----------------------------------------------------------------
+	// Cross-site table confinement (the destination-table guard).
+	//
+	// On shared hosting, several WordPress sites often share one database,
+	// kept apart only by table prefix (wpa_options, wpb_options). Without
+	// this guard a db_chunk naming a NEIGHBOURING site's table is staged and
+	// then RENAMEd over that site's real table at cut-over — confirmed live,
+	// with no undo, because the pre-restore safety archive covers only this
+	// site's own tables.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A db_chunk naming a table outside the live database's own prefix must
+	 * be refused with ArchiveNotTrustworthy — this project's exception for an
+	 * archive that cannot be trusted, not a host limitation — and the message
+	 * must name the refused table.
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if write_entry() failed to throw (see test_failed_rename_leaves_staging_for_abort() above for why this rethrow must run before the catch below).
+	 */
+	public function test_table_outside_live_prefix_refused_with_archive_not_trustworthy(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->set_table_prefix( 'wpa_' );
+		$writer = new DatabaseWriter( $adapter );
+		$sql    = "CREATE TABLE `wpb_options` (id INT);\n";
+
+		try {
+			$writer->write_entry( self::db_chunk_result( 'wpb_options', 1, $sql ) );
+			$this->fail( 'write_entry() should refuse a table outside the live prefix.' );
+		} catch ( AssertionFailedError $bug ) {
+			throw $bug;
+		} catch ( ArchiveNotTrustworthy $refusal ) {
+			$this->assertStringContainsString( 'wpb_options', $refusal->getMessage(), 'The message must name the refused table.' );
+			$this->assertStringContainsString( 'wpa_', $refusal->getMessage(), 'The message must name the live prefix the table failed to match.' );
+		}
+	}
+
+	/**
+	 * The cross-site refusal must land before any statement executes and
+	 * before the table is recorded as staged.
+	 *
+	 * FakeDbAdapter records executed_sql() calls but not staging bookkeeping
+	 * directly, so "nothing was staged" is proven the same way
+	 * test_over_long_table_name_refused_before_any_write() proves it for its
+	 * own refusal: abort_staging() only ever drops tables write_entry() has
+	 * recorded, so calling it afterwards and seeing no DROP confirms none
+	 * was recorded.
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if write_entry() failed to throw (see test_failed_rename_leaves_staging_for_abort() above for why this rethrow must run before the catch below).
+	 */
+	public function test_table_outside_live_prefix_refused_before_any_write_or_staging(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->set_table_prefix( 'wpa_' );
+		$writer = new DatabaseWriter( $adapter );
+
+		try {
+			$writer->write_entry( self::db_chunk_result( 'wpb_options', 1, "CREATE TABLE `wpb_options` (id INT);\n" ) );
+			$this->fail( 'write_entry() should refuse a table outside the live prefix.' );
+		} catch ( AssertionFailedError $bug ) {
+			throw $bug;
+		} catch ( ArchiveNotTrustworthy $refusal ) {
+			unset( $refusal ); // The refusal is expected; only its effect matters here.
+		}
+
+		$this->assertSame( array(), $adapter->executed_statements(), 'The refusal must land before any statement executes.' );
+
+		$writer->abort_staging();
+		$this->assertSame( array(), $adapter->executed_statements(), 'abort_staging() dropped nothing, proving nothing was staged.' );
+	}
+
+	/**
+	 * An ordinary chunk whose table matches the live prefix must still be
+	 * accepted and staged — a regression guard against the new refusal
+	 * firing on a legitimate, same-site restore.
+	 *
+	 * @return void
+	 */
+	public function test_table_matching_live_prefix_still_accepted_and_staged(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->set_table_prefix( 'wp_' );
+		$writer = new DatabaseWriter( $adapter );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+
+		$executed = $adapter->executed_statements();
+		$this->assertCount( 1, $executed );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_wp_options` (id INT)', $executed[0] );
+	}
+
+	/**
+	 * A cross-prefix restore must be accepted and staged under its REWRITTEN
+	 * destination name even when the live connection's own reported prefix
+	 * is something else entirely.
+	 *
+	 * The guard compares against $dest_prefix — a constructor argument this
+	 * writer was built with, supplied by Pontifex's own calling code, never
+	 * read from the archive — not against the live connection's own
+	 * reported prefix, which need not agree with it: DatabaseWriter is a
+	 * general-purpose class, and only `Cli\ImportCommand` happens to set
+	 * $dest_prefix from the live prefix. A prior version of this guard
+	 * assumed that equivalence and refused exactly this shape of restore
+	 * outright, confirmed against a real database — this is the regression
+	 * test for that.
+	 *
+	 * @return void
+	 */
+	public function test_cross_prefix_restore_accepted_even_when_live_prefix_differs_from_destination_prefix(): void {
+		$adapter = new FakeDbAdapter();
+		// Deliberately unrelated to the destination prefix below.
+		$adapter->set_table_prefix( 'wp_' );
+		$writer = new DatabaseWriter( $adapter, 'wp_', 'xyz_' );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 1, "CREATE TABLE `wp_posts` (id INT);\n" ) );
+
+		$executed = $adapter->executed_statements();
+		$this->assertCount( 1, $executed );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_xyz_posts` (id INT)', $executed[0] );
+	}
+
+	/**
+	 * During a cross-prefix restore, a chunk whose table name does not begin
+	 * with the archive's own declared source prefix passes through
+	 * destination_table_name() UNREWRITTEN (see that method) — so it still
+	 * must be checked against $dest_prefix, and refused when it does not
+	 * match, rather than sailing through untouched. The live connection's
+	 * own reported prefix is deliberately unrelated to $dest_prefix here too,
+	 * so a pass could not be explained by the two happening to coincide.
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if write_entry() failed to throw (see test_failed_rename_leaves_staging_for_abort() above for why this rethrow must run before the catch below).
+	 */
+	public function test_cross_prefix_chunk_not_matching_source_prefix_refused(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->set_table_prefix( 'wp_' );
+		$writer = new DatabaseWriter( $adapter, 'wp_', 'xyz_' );
+
+		try {
+			$writer->write_entry( self::db_chunk_result( 'evil_table', 1, "CREATE TABLE `evil_table` (id INT);\n" ) );
+			$this->fail( 'write_entry() should refuse a chunk that bypasses the cross-prefix rewrite.' );
+		} catch ( AssertionFailedError $bug ) {
+			throw $bug;
+		} catch ( ArchiveNotTrustworthy $refusal ) {
+			$this->assertStringContainsString( 'evil_table', $refusal->getMessage() );
+			$this->assertStringContainsString( 'xyz_', $refusal->getMessage(), 'The refusal must name the DESTINATION prefix, not the unrelated live prefix.' );
+		}
+
+		$this->assertSame( array(), $adapter->executed_statements(), 'The refusal must land before any statement executes.' );
+	}
+
+	/**
+	 * An empty live prefix — an unconfigured connection whose scope cannot be
+	 * established — must skip the guard entirely, mirroring
+	 * WpdbAdapter::assert_prefixed_table()'s identical skip.
+	 *
+	 * @return void
+	 */
+	public function test_empty_live_prefix_skips_the_guard(): void {
+		$adapter = new FakeDbAdapter();
+		// FakeDbAdapter's table_prefix() already defaults to '', but set it
+		// explicitly so the test states its premise rather than leaning on a
+		// default that could silently change.
+		$adapter->set_table_prefix( '' );
+		$writer = new DatabaseWriter( $adapter );
+
+		$writer->write_entry( self::db_chunk_result( 'anything_at_all', 1, "CREATE TABLE `anything_at_all` (id INT);\n" ) );
+
+		$executed = $adapter->executed_statements();
+		$this->assertCount( 1, $executed );
+		$this->assertSame( 'CREATE TABLE `pontifexstg_anything_at_all` (id INT)', $executed[0] );
+	}
+
+	/**
+	 * Beginning a restore must sweep only THIS site's own leftover staging
+	 * and parked tables — never a neighbour's, on a database shared by more
+	 * than one WordPress install. Mirrors write_entry()'s cross-site guard,
+	 * applied to the best-effort leftover sweep.
+	 *
+	 * @return void
+	 */
+	public function test_begin_staging_sweeps_only_this_sites_leftovers(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->set_table_prefix( 'wpa_' );
+		$adapter->mark_table_existing( 'pontifexstg_wpa_options' );
+		$adapter->mark_table_existing( 'pontifexold_wpa_posts' );
+		$adapter->mark_table_existing( 'pontifexstg_wpb_options' );
+		$adapter->mark_table_existing( 'pontifexold_wpb_posts' );
+
+		( new DatabaseWriter( $adapter ) )->begin_staging();
+
+		$this->assertSame(
+			array(
+				'DROP TABLE IF EXISTS `pontifexstg_wpa_options`',
+				'DROP TABLE IF EXISTS `pontifexold_wpa_posts`',
+			),
+			$adapter->executed_statements(),
+			"A neighbouring site's own staging/parked tables must never be swept."
+		);
+	}
+
+	/**
+	 * Beginning a CROSS-PREFIX restore must sweep leftovers under BOTH the
+	 * live connection's own prefix and the destination prefix this restore
+	 * is actually targeting.
+	 *
+	 * A crashed cross-prefix restore stages under the destination prefix
+	 * (see write_entry()'s guard and expected_destination_prefix()), which
+	 * need not equal the live prefix — sweeping only the live one would
+	 * never find those leftovers, and they would sit there for ever.
+	 *
+	 * @return void
+	 */
+	public function test_begin_staging_sweeps_leftovers_under_both_live_and_destination_prefix(): void {
+		$adapter = new FakeDbAdapter();
+		// Deliberately unrelated to the destination prefix below, so the two
+		// lookups cannot be confused for one another.
+		$adapter->set_table_prefix( 'wp_' );
+		$adapter->mark_table_existing( 'pontifexstg_wp_posts' );
+		$adapter->mark_table_existing( 'pontifexold_wp_options' );
+		$adapter->mark_table_existing( 'pontifexstg_xyz_posts' );
+		$adapter->mark_table_existing( 'pontifexold_xyz_options' );
+
+		( new DatabaseWriter( $adapter, 'wp_', 'xyz_' ) )->begin_staging();
+
+		$this->assertSame(
+			array(
+				'DROP TABLE IF EXISTS `pontifexstg_wp_posts`',
+				'DROP TABLE IF EXISTS `pontifexstg_xyz_posts`',
+				'DROP TABLE IF EXISTS `pontifexold_wp_options`',
+				'DROP TABLE IF EXISTS `pontifexold_xyz_options`',
+			),
+			$adapter->executed_statements(),
+			'Leftovers under both the live prefix and the destination prefix must be swept.'
+		);
 	}
 
 	/**

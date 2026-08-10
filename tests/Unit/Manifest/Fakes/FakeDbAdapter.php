@@ -549,4 +549,37 @@ final class FakeDbAdapter implements DatabaseAdapter {
 		sort( $names, SORT_STRING );
 		return $names;
 	}
+
+	/**
+	 * The canned WordPress table prefix; defaults to '' — the value
+	 * DatabaseWriter's cross-site guard treats as "no scope to confine to"
+	 * and therefore skips, mirroring WpdbAdapter's identical skip for an
+	 * unconfigured $wpdb. Kept empty by default so every pre-existing
+	 * DatabaseWriter test — the great majority of which register table names
+	 * such as "t" or "wp_posts" without regard to any prefix — keeps passing
+	 * unmodified; only a test that opts in via {@see self::set_table_prefix()}
+	 * exercises the guard.
+	 *
+	 * @var string
+	 */
+	private string $table_prefix = '';
+
+	/**
+	 * Register the WordPress table prefix table_prefix() must report.
+	 *
+	 * @param string $prefix The prefix to report.
+	 * @return void
+	 */
+	public function set_table_prefix( string $prefix ): void {
+		$this->table_prefix = $prefix;
+	}
+
+	/**
+	 * Report the canned WordPress table prefix, defaulting to ''.
+	 *
+	 * @return string
+	 */
+	public function table_prefix(): string {
+		return $this->table_prefix;
+	}
 }
