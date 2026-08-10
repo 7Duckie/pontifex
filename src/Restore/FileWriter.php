@@ -295,7 +295,9 @@ final class FileWriter {
 	 * own upload-time disk check, since a host can disable or restrict the
 	 * function) only so unit tests — which cannot make the real disk report an
 	 * arbitrary free-space figure — can substitute a controlled reading;
-	 * production always reads the real filesystem.
+	 * production always reads the real filesystem. When disk_free_space()
+	 * itself is absent from this host, the default closure reads as false,
+	 * same as any other unreadable figure.
 	 *
 	 * @var Closure(string): (float|false)
 	 */
@@ -342,7 +344,11 @@ final class FileWriter {
 		$this->disk_free_space       = null !== $disk_free_space
 			? Closure::fromCallable( $disk_free_space )
 			: static function ( string $path ) {
-				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled or restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
+				if ( ! function_exists( 'disk_free_space' ) ) {
+					return false;
+				}
+
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
 				return @disk_free_space( $path );
 			};
 		$this->symlink_probe         = null !== $symlink_probe
@@ -1133,6 +1139,7 @@ final class FileWriter {
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
 	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
+	 * @throws HostCannotComply If readlink() is not available on this host to read an existing on-disk link's target.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1163,6 +1170,21 @@ final class FileWriter {
 		$absolute = self::absolute_from_components( $candidate );
 		if ( ! is_link( $absolute ) ) {
 			return null;
+		}
+
+		// Fail closed, but as a host limitation rather than an archive defect: the
+		// archive itself may be perfectly sound, and it is only this host's inability
+		// to read an existing link's target that stands in the way, so the refusal is
+		// HostCannotComply here rather than the ArchiveNotTrustworthy thrown below for
+		// a link this host genuinely could not read.
+		if ( ! function_exists( 'readlink' ) ) {
+			$message = sprintf(
+				'Cannot check the symbolic link "%s": resolving its target "%s" reaches an existing link on disk, but readlink() is not available on this host, commonly because it is listed in disable_functions. Where that link points cannot be established, so the restore is refused rather than risk writing outside your site.',
+				$link_path,
+				$raw_target
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
+			throw new HostCannotComply( $message );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Reading an existing link's target during the restore preflight; WP_Filesystem has no symlink primitive, and a failure is turned into a refusal immediately below rather than silenced.

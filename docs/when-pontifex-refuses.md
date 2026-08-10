@@ -200,6 +200,39 @@ the answer and is not. That flag controls *where links are allowed to point*,
 not *whether your host can create them at all*. It will not help here, and you
 will have switched off a genuine security protection for nothing.
 
+### "resolving its target … reaches an existing link on disk, but readlink() is not available"
+
+> Cannot check the symbolic link "…": resolving its target "…" reaches an
+> existing link on disk, but readlink() is not available on this host, commonly
+> because it is listed in disable_functions. Where that link points cannot be
+> established, so the restore is refused rather than risk writing outside your
+> site.
+
+**Uncommon, and specific to hosts that have disabled `readlink`. An environment
+problem, not a fault in your backup.**
+
+**What happened.** Deciding whether a symbolic link in your backup is safe
+sometimes means reading the target of a link that is *already* on disk at the
+destination — for instance, from an earlier, partial restore. Reading a link's
+target needs PHP's `readlink()` function, and some hosts switch it off,
+commonly through `disable_functions`. Without an answer, Pontifex cannot tell
+whether the link is safe, so it fails closed rather than guess.
+
+**Your backup is not the problem, and should not be deleted.** The archive can
+be entirely sound; it is this host that cannot answer the question. Restoring
+the very same file on a host where `readlink` is enabled will succeed.
+
+**What to do.** Ask your host to remove `readlink` from `disable_functions`,
+the same way you would for `symlink` (see the entry above). You can check for
+this in advance with `wp pontifex doctor`.
+
+**What not to do.** Do not assume the backup is corrupt and make a fresh one to
+replace it. A new backup taken *on this same host* will run into the identical
+problem the moment it tries to record a symbolic link — see
+["a site that contains symbolic links cannot be backed up" below](#a-site-that-contains-symbolic-links-cannot-be-backed-up-until-it-is-enabled)
+— because the cause is the host's configuration, not anything about this
+particular archive.
+
 ### "refusing symlink … Re-run with --allow-unsafe-symlinks only if you trust this archive"
 
 **Uncommon in ordinary use. This one is protecting you, and you should take it
@@ -421,6 +454,28 @@ automatic updates paused.
 
 **What not to do.** Running `--resume` again will not help; the fresh scan
 disagrees the same way each time.
+
+### "a site that contains symbolic links cannot be backed up until it is enabled"
+
+> Could not read the symbolic link "…": readlink() is not available on this
+> host, commonly because it is listed in disable_functions. A site that
+> contains symbolic links cannot be backed up until it is enabled.
+
+**Uncommon. An environment problem.**
+
+**What happened.** Your site contains a symbolic link, and recording it in a
+backup means reading where it points with PHP's `readlink()` function. Some
+hosts disable it, commonly through `disable_functions`. Without this check,
+the backup would either drop the link silently or record it wrongly.
+
+**Nothing has been written.** The backup stops before anything is created.
+
+**What to do.** Ask your host to remove `readlink` from `disable_functions`.
+You can check for this in advance with `wp pontifex doctor`.
+
+**What not to do.** Do not just retry — the same check runs every time your
+site still contains the link. If you do not need that link included, `--exclude`
+it and the rest of the backup will proceed.
 
 ---
 
