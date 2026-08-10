@@ -288,6 +288,71 @@ it is your own and this happens, the file is damaged — use an older backup.
 `wp db query`. That is precisely the outcome the check prevents, performed
 manually.
 
+### "it is not part of this site, whose tables begin with…"
+
+> Refusing to restore table "wpb_options": it is not part of this site, whose
+> tables begin with "wpa_". A backup can only replace the site it belongs to.
+> Nothing has been changed.
+
+**Rare, and one of the more serious refusals on this page.**
+
+**What happened.** Some hosting plans put several WordPress sites in one
+database, keeping them apart only by giving each site's tables a different
+name prefix (`wpa_options`, `wpb_options`). Before staging any table from the
+archive, Pontifex works out the archive's own source prefix and checks that
+every table it stages begins with the live database's prefix — rewriting the
+table names to match first, when the two genuinely differ (see below). This
+table did not belong under either.
+
+**Refusing is the last resort, not the first answer.** Pontifex tries two
+things before it ever reaches this refusal. First, the prefix recorded in the
+archive's own provenance — every archive written by a current Pontifex
+carries one. Failing that, a prefix worked out from the archive's own table
+names: `wp_options`, `wp_posts` and the rest of a normal WordPress install all
+share one leading run, and that shared run is taken as the prefix, provided
+it genuinely is shared by every table the archive holds — so a plugin table
+such as `wp_myplugin_options` cannot narrow it down to `wp_myplugin_`, because
+that narrower run is not shared by the archive's own `wp_posts`. Either route
+lets a genuinely different, but legitimate, prefix be rewritten onto this
+site automatically, with nothing for you to do. **This message only appears
+once both have been tried and neither could account for the table.**
+
+**Pontifex never produces an archive like this** in the ordinary case. A
+backup Pontifex writes always carries this site's own table names sharing one
+prefix, so once both recovery routes above have failed, this file either
+genuinely belongs to a different WordPress installation or has been altered
+to claim one it does not own. **Keep it, and do not delete it** — the same
+advice as the [symlink refusal above](#refusing-symlink--re-run-with---allow-unsafe-symlinks-only-if-you-trust-this-archive):
+a refused archive is undamaged, and its existence is information. Find out
+where the file actually came from before doing anything else with it.
+
+**Nothing has been changed.** This is checked before the table is staged and
+before any SQL runs.
+
+**The legitimate case this can still catch.** One narrow case remains, and it
+needs an old archive: one written before Pontifex recorded a source prefix at
+all (a field the archive format added in v1.1; every archive from a current
+Pontifex has it), **and** whose own table names cannot establish one shared
+prefix either — for instance, a database-only backup that deliberately
+excluded every recognisable WordPress core table with `--exclude-table`,
+leaving only custom tables Pontifex has no core table name to anchor a prefix
+to. Restoring that archive onto a site with a genuinely different prefix hits
+this refusal on a backup that is genuinely yours.
+
+**What to do.** In almost every case, nothing — Pontifex now recovers the
+right prefix on its own, from the recorded value or the table names, so a
+restore that would once have needed a fresh export usually just works. If you
+do still hit this message, and you are confident the archive is your own, the
+fix is to re-export the source site with a current version of Pontifex — the
+new archive will record its own prefix directly, which is not affected by
+which tables the backup includes. There is no supported way to force a
+rewrite onto an old archive that carries neither the recorded field nor
+table names a prefix can be derived from.
+
+**What not to do.** Do not edit the SQL inside the archive to relabel the
+tables. That reintroduces exactly the risk this check exists to close, by
+hand, on your own live site.
+
 ### "the archive records a files-only scope but carries database chunks"
 
 **Corrupt or hand-edited archive. Protecting you. Nothing has been changed.**
