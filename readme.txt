@@ -27,7 +27,7 @@ Pontifex can be driven two ways: through WP-CLI (`wp pontifex …`), or from the
 * `wp pontifex rollback` — undo the most recent import from its safety archive.
 * `wp pontifex keygen` with `export --sign` and `verify/import --public-key` — Ed25519 signing and verification.
 * `export --encrypt` — optional AES-256-GCM encryption with an Argon2id-derived key (or `--passphrase-stdin` to supply the passphrase non-interactively, for scripts).
-* `import --url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
+* `import --new-url=…` — cross-URL migration, with defences against the classic serialised-data corruption bug.
 * `wp pontifex stats`, `diagnostics`, and `doctor` — observability and a sanitised, never-uploaded diagnostics bundle.
 * `export --resumable` and `export --resume` — an export that survives timeouts, lost connections, and killed processes, continued from where it stopped.
 * `wp pontifex schedule` — automatic backups on a daily or weekly schedule (at an hour given in UTC), with old scheduled backups pruned to a retention count. Also configurable from the Backup screen.
@@ -68,7 +68,7 @@ Yes, since v0.5.0: Overview, Backup, Verify, and Restore/Rollback screens, plus 
 
 = Can I migrate to a different site URL? =
 
-Yes, with `wp pontifex import --url=…`, which rewrites the database safely (including serialised data) rather than doing a naive search-replace.
+Yes, with `wp pontifex import --new-url=…`, which rewrites the database safely (including serialised data) rather than doing a naive search-replace.
 
 = Are backups encrypted? =
 
@@ -84,7 +84,7 @@ A backup started from the admin screen runs as a persisted job: if the page is c
 
 = What happens if a restore fails part-way through? =
 
-A failed restore leaves your live tables as they were: a restore replays into staging tables and only cuts them over to the live tables in one atomic step, once the whole archive has been read and verified, so the restore itself never leaves your live tables half-changed. (A `--url` migration runs afterwards, directly against the live database, so a failure during that step can leave it partly rewritten.) Files are written directly as the restore goes, so a failure part-way through can leave some already written. For that reason Pontifex takes a safety archive of your site before every restore (unless you pass `--no-rollback-archive` on the CLI, which skips it — and with it, the automatic recovery) and, if the restore then fails, automatically replays it (unless PHP itself dies outright — out of memory, or a host time limit — in which case nothing is replayed and you roll back yourself), putting back every file and table it captured. Files the failed restore had already written that were not part of your site before are left in place, so check the site afterwards. If that automatic recovery does not run, or runs but cannot finish — a full disk, say — you can replay the same safety archive yourself: the Roll back control on the Pontifex → Restore screen, or `wp pontifex rollback` on the CLI. When the recovery does run, you are told plainly whether it succeeded.
+A failed restore leaves your live tables as they were: a restore replays into staging tables and only cuts them over to the live tables in one atomic step, once the whole archive has been read and verified, so the restore itself never leaves your live tables half-changed. (A `--new-url` migration runs afterwards, directly against the live database, so a failure during that step can leave it partly rewritten.) Files are written directly as the restore goes, so a failure part-way through can leave some already written. For that reason Pontifex takes a safety archive of your site before every restore (unless you pass `--no-rollback-archive` on the CLI, which skips it — and with it, the automatic recovery) and, if the restore then fails, automatically replays it (unless PHP itself dies outright — out of memory, or a host time limit — in which case nothing is replayed and you roll back yourself), putting back every file and table it captured. Files the failed restore had already written that were not part of your site before are left in place, so check the site afterwards. If that automatic recovery does not run, or runs but cannot finish — a full disk, say — you can replay the same safety archive yourself: the Roll back control on the Pontifex → Restore screen, or `wp pontifex rollback` on the CLI. When the recovery does run, you are told plainly whether it succeeded.
 
 = Can Pontifex store backups offsite? =
 

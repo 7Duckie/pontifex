@@ -277,7 +277,7 @@ Going from `oldsite.com` to `newsite.com`, or from a staging address to a live
 one, the address is written into your database in thousands of places.
 
 ```
-wp pontifex import backup.wpmig --url=https://newsite.com
+wp pontifex import backup.wpmig --new-url=https://newsite.com
 ```
 
 In the browser, Pontifex notices when a backup came from a different address

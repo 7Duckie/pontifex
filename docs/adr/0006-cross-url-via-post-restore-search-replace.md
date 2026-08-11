@@ -1,7 +1,7 @@
 # 0006 — cross-URL migration via a post-restore guarded search-replace
 
-- **Status:** Accepted, 2026-06-23.
-- **Deciders:** 7Duckie (v0.3.0 slice 3 planning).
+- **Status:** Accepted, 2026-06-23. Amended 2026-08-11 (the CLI flag renamed from `--url` to `--new-url` — see Amendment).
+- **Deciders:** 7Duckie (v0.3.0 slice 3 planning; amendment: 2026-08-11, the `--new-url` rename).
 
 ## Context
 
@@ -65,3 +65,33 @@ integration.
 - Any CVE touching `unserialize`, the serialisation format, or the replacer
   is P0 (threat-model §1).
 - Superseding this approach requires a new ADR, not a mid-sprint change.
+
+## Amendment — 2026-08-11: the CLI flag renamed `--url` → `--new-url`
+
+**New information:** WP-CLI reserves `--url` as one of its own global
+parameters (confirmed against `wp cli param-dump`: the reserved list is
+`path url ssh http blog user skip-plugins skip-themes skip-packages require
+exec context disabled_commands color debug prompt quiet apache_modules
+allow-root`) and consumes it before dispatching to any command. That means
+`wp pontifex import --url=<new-url>`, exactly as slice 3c above wired it up
+and as it shipped in v0.3.0, never reached this command at all:
+`$associative_args` never carried the key, the code that reads it found
+nothing, and the restore silently took the same-URL branch — exit 0,
+"Restoring to the same site URL; no URL rewriting," and every URL left on
+the old domain. This was confirmed end to end on a real site; the only way
+to make the documented invocation actually migrate was the undocumented
+`WP_CLI_STRICT_ARGS_MODE=1` environment variable.
+
+**Amended decision:** the flag is renamed from `--url=<new-url>` to
+`--new-url=<new-url>`, which is not in WP-CLI's reserved list and so reaches
+the command normally. This is a breaking change to the CLI surface. The
+command additionally now detects a bare `--url` on its own command line
+(read from `$_SERVER['argv']` directly, since WP-CLI's own config merges
+`wp-cli.yml` and would over-refuse an operator whose config merely sets an
+unrelated `url:` line) and refuses via `WP_CLI::error()` rather than
+silently taking the same-URL branch, so an operator following stale
+documentation or an old script is corrected loudly instead of migrating
+nothing. Everything else this ADR decided — the guarded, serialised-safe
+search-replace pass, the threat-model defences, the pre-import safety
+archive as the undo — stands unchanged; only the flag's name and the
+up-front refusal of the old one are new.

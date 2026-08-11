@@ -16,6 +16,22 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **`wp pontifex import <archive> --url=<new-url>` silently did nothing.**
+  WP-CLI reserves `--url` as one of its own global parameters and strips it
+  before any command ever sees it, so the migration flag documented since
+  v0.3.0 never reached Pontifex at all: the command printed "Restoring to
+  the same site URL; no URL rewriting," exited `0`, and left every URL on
+  the old domain — the opposite of what was asked for, with nothing said
+  about it. **The flag is renamed to `--new-url`**, which is not one of
+  WP-CLI's reserved names and so reaches the command normally. A bare
+  `--url` typed on the command line — an old script, or documentation from
+  before this fix — is now refused outright rather than silently ignored:
+  `wp pontifex import <archive> --url=<new-url>` now stops with an error
+  naming `--new-url`, instead of restoring to the same address without
+  telling you it did. **This is a breaking change**: any script or
+  scheduled job passing `--url` to `wp pontifex import` must be updated to
+  `--new-url`, or it will now fail loudly rather than quietly not migrate.
+
 - **A failed `wp pontifex import`, `export` or `rollback` showed a PHP stack
   trace and told you your website had a critical error.** Every failure — a
   truncated archive, a server with no room, a mistyped flag — was re-thrown out

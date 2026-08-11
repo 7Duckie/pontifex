@@ -98,7 +98,7 @@ Restores an archive over the current site.
 |---|---|
 | `--yes` | Skip the confirmation prompt. |
 | `--dry-run` | Validate without writing. Skips the lock and the safety archive. |
-| `--url=<new-url>` | Rewrite the site address during restore. |
+| `--new-url=<new-url>` | Rewrite the site address during restore. |
 | `--whole-site` | Permit writing outside `wp-content`, including core and `wp-config.php`. |
 | `--allow-unsafe-symlinks` | Disable symlink target confinement. |
 | `--no-rollback-archive` | Skip the pre-restore safety archive — **and the automatic recovery, and any future rollback**. |
