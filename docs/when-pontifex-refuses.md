@@ -155,10 +155,14 @@ normal.** Check your plugins list for anything you do not recognise.
 **What happened.** Your server does not have room. Pontifex works out how much
 the restore would *add* rather than the archive's total size, so restoring a
 site over itself costs almost nothing while restoring a larger site onto a
-small disk is caught. The estimate deliberately leans low, so if it fires you
-are genuinely short.
+small disk is caught. Before checking, it also clears away any temp files an
+earlier, interrupted restore left behind, so a previous failed attempt's own
+debris is never what is holding up the retry. The estimate deliberately leans
+low, so if it still fires you are genuinely short.
 
-**Nothing has been changed.** This runs before the first byte is written.
+**Nothing has been changed** beyond clearing away another restore's own
+leftover debris, as described above. This still runs before the first byte of
+your site is written.
 
 **What to do.** Free up space and try again. Old archives elsewhere on the
 server, other sites' logs, and your host's own temp directories are usually
