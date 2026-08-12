@@ -222,4 +222,97 @@ final class SerialisedReplacerTest extends TestCase {
 		$decoded = unserialize( $result, array( 'allowed_classes' => array( 'stdClass' ) ) );
 		$this->assertInstanceOf( stdClass::class, $decoded );
 	}
+
+	/**
+	 * A value nested legitimately deeper than a handful of levels is still rewritten normally.
+	 *
+	 * Proves the depth bound does not refuse ordinary data: 20 levels of
+	 * array nesting is far beyond anything real WordPress data produces,
+	 * yet comfortably inside the budget.
+	 *
+	 * @return void
+	 */
+	public function test_a_legitimately_deep_value_is_still_rewritten_normally(): void {
+		$replacer = new SerialisedReplacer();
+		$original = serialize( $this->nested_array( 20, 'https://old.test' ) );
+
+		$result = $replacer->replace( 'old.test', 'new.example', $original );
+
+		$this->assertNotSame( $original, $result, 'A legitimately deep value must still be rewritten.' );
+		$this->assertSame( $this->nested_array( 20, 'https://new.example' ), unserialize( $result, array( 'allowed_classes' => false ) ) );
+	}
+
+	/**
+	 * A value beyond the depth bound is kept unchanged.
+	 *
+	 * Not cyclic — just deeper than the walk permits — so this is safe to
+	 * run directly: a finite structure terminates whatever the bound logic
+	 * does, so no deadline guard is needed here (unlike the cyclic cases
+	 * below).
+	 *
+	 * @return void
+	 */
+	public function test_a_value_beyond_the_depth_bound_is_kept_unchanged(): void {
+		$replacer = new SerialisedReplacer();
+		$original = serialize( $this->nested_array( 80, 'https://old.test' ) );
+
+		$this->assertSame( $original, $replacer->replace( 'old.test', 'new.example', $original ) );
+	}
+
+	/**
+	 * Build a value nested $levels deep, e.g. array( 'a' => array( 'a' => $leaf ) ) for $levels = 2.
+	 *
+	 * @param int   $levels How many levels of array nesting to build.
+	 * @param mixed $leaf   The innermost value.
+	 * @return mixed The nested structure.
+	 */
+	private function nested_array( int $levels, mixed $leaf ): mixed {
+		$value = $leaf;
+		for ( $i = 0; $i < $levels; $i++ ) {
+			$value = array( 'a' => $value );
+		}
+		return $value;
+	}
+
+	/**
+	 * A self-referencing value is kept unchanged.
+	 *
+	 * The measured case: `a:1:{i:0;R:1;}` — fourteen bytes, an array whose
+	 * only element is a reference to its own enclosing array. Also proves
+	 * `contains_blocked_object()`'s own bound, not just `replace_value()`'s:
+	 * it runs FIRST on this decoded value, and this value holds no blocked
+	 * object at all, so a wrongly-rewritten result here would mean its bound
+	 * (or its breach signal) is broken, not `replace_value()`'s. A
+	 * regression to unbounded recursion would hang this call; every CI job
+	 * carries its own `timeout-minutes`, so such a regression fails the job
+	 * loudly rather than needing this test to detect it itself.
+	 *
+	 * @return void
+	 */
+	public function test_a_self_referencing_value_is_kept_unchanged_rather_than_hanging(): void {
+		$replacer = new SerialisedReplacer();
+		$cyclic   = 'a:1:{i:0;R:1;}';
+
+		$this->assertSame( $cyclic, $replacer->replace( 'old.test', 'new.example', $cyclic ) );
+	}
+
+	/**
+	 * A wide self-referencing value is kept unchanged.
+	 *
+	 * `a:3:{i:0;R:1;i:1;R:1;i:2;R:1;}` — three siblings, all referencing the
+	 * same enclosing array. This is the regression guard for the
+	 * abandon-versus-truncate distinction: a depth cap that truncates one
+	 * branch and carries on to explore its siblings still passes the single
+	 * self-reference test above (there is only one branch to truncate) but
+	 * hangs on this shape, because each of the three siblings independently
+	 * re-explores the same cycle up to the cap.
+	 *
+	 * @return void
+	 */
+	public function test_a_wide_self_referencing_value_is_kept_unchanged_rather_than_hanging(): void {
+		$replacer = new SerialisedReplacer();
+		$cyclic   = 'a:3:{i:0;R:1;i:1;R:1;i:2;R:1;}';
+
+		$this->assertSame( $cyclic, $replacer->replace( 'old.test', 'new.example', $cyclic ) );
+	}
 }

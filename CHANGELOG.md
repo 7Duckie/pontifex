@@ -16,6 +16,22 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A URL migration could run for seven minutes, print the single word
+  `Killed`, and leave the site half-moved.** A serialised value crafted (or
+  corrupted) to reference itself — fourteen bytes, `a:1:{i:0;R:1;}` — sent
+  the search-replace pass into a walk with no bound of any kind. Measured on
+  a real `wp pontifex import --new-url=<new-url>`: because WP-CLI runs with
+  no memory limit, the process ground for 434 seconds before the operating
+  system killed it, and the only thing printed was `Killed`. By then
+  `siteurl` and `home` had already been moved to the new address, but every
+  post was still left pointing at the old one — a half-migration that had
+  every appearance of a clean run, because nothing survived to say
+  otherwise. The walk is now bounded by depth and by a total-nodes-visited
+  budget, and breaching either abandons the whole value rather than
+  rewriting part of it: the value is kept exactly as it was, counted in the
+  same "value(s) kept unchanged for safety" total every other value left
+  alone for safety already is.
+
 - **`wp pontifex import <archive> --url=<new-url>` silently did nothing.**
   WP-CLI reserves `--url` as one of its own global parameters and strips it
   before any command ever sees it, so the migration flag documented since
