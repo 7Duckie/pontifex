@@ -100,6 +100,55 @@ v0.0.x decision log for the reasoning.
   them to accumulate until you remove them yourself, which is safer than
   guessing which of your existing backups the scheduler made.
 
+- **Offsite retention could delete the backup an export had just uploaded,
+  moments after uploading it — and call the run a success when every delete
+  had in fact failed.** Retention ordered a destination's archives oldest-first
+  by remote NAME, sound only if every name follows Pontifex's own timestamped
+  shape and the newest one really does sort last. On a real server it did not
+  hold: at a retention of 1, `wp pontifex export --destination` logged
+  "Uploaded the archive to the destination." and, two lines later, "Pruned old
+  archive from the destination:" naming that very same archive — a
+  future-dated name sorts last for ever, so any backup uploaded ahead of it
+  looked "oldest" and was deleted in its place. Separately, `prune()` reported
+  only the names it deleted, so "nothing needed pruning" and "every delete was
+  refused" were the same empty list: measured against a real server holding
+  five archives against a keep-count of two, `wp pontifex destination prune`
+  reported "already within its retention; nothing was pruned" while every
+  delete had actually failed — and the warning meant to catch exactly this
+  was never logged, because neither CLI call site ever gave the retention
+  pruner a logger to write to. Retention is now ordered by each archive's real
+  modification time at the destination instead of its name (the same fix
+  already shipped for local backups, above), and a prune that could not
+  delete everything it needed to now says so instead of reporting success:
+  `wp pontifex destination prune` stops with an error naming how many archives
+  remain, and `wp pontifex export --destination=<name>` warns rather than
+  staying silent. A listing failure part-way through `prune` no longer
+  surfaces as an uncaught PHP exception either — it is now the same readable
+  error every other failure in that command already produces.
+
+- **A killed or partially failed upload could leave a fragment sitting under a
+  real backup's name, which retention then treated as the newest backup on
+  the destination and pruned a sound one to make room for.** Measured against
+  a real server: a killed upload left 274,025,430 bytes of a
+  419,645,479-byte archive under the exact name a finished backup would have
+  used, and because a fresh fragment genuinely has a fresh modification time,
+  ordering by real age (above) cannot catch this on its own. Uploads now go to
+  a temporary remote name first and are renamed into place only once the
+  transfer has completed and the destination's own reported size matches the
+  local file — the same temporary-name-then-rename protection Pontifex's own
+  file restores have used since v0.6.0. A fragment stranded under the
+  temporary name is invisible to every listing, because it does not match the
+  shape retention was already refusing to touch. Because SFTP's own rename
+  will not overwrite an existing file, re-running an export to a name already
+  on the destination — the same `--output`, a retried upload that had in fact
+  landed, or two sites sharing one destination — now clears the old file
+  immediately before the rename that replaces it, once the new upload is
+  already verified. That is a narrower version of what every upload already
+  did before this change (write straight over whatever held the name), not a
+  new risk: the destination now holds a half-written file for a few
+  milliseconds around one rename, instead of for the entire length of a
+  transfer.
+
 ## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
 
 A minor release rather than a patch: no public API moved — not an interface, a
