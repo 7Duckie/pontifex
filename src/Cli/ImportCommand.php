@@ -1425,6 +1425,13 @@ final class ImportCommand {
 		$preflight->assert_scope_consistent_with_manifest( $scope, $manifest );
 		$declared_links = $preflight->assert_host_can_write( $archive_source, $manifest );
 		$preflight->assert_symlink_targets_confined( $declared_links );
+
+		// Deliberately stricter than the restore it rehearses: RestoreRunner::restore()
+		// now sweeps a crashed earlier attempt's leftover temp file before this same
+		// check, so it can pass on space the sweep would have freed, while this dry
+		// run — which must delete nothing — cannot. Accepted: it errs toward warning
+		// rather than false reassurance. The proper fix is the wider dry-run parity
+		// work, already a planned job; do not "fix" this by making a dry run sweep.
 		$preflight->assert_free_space_for( $manifest );
 
 		$this->logger->info( 'Import dry-run: every restore preflight passed.', array( 'archive' => $archive_path ) );
