@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Schedule;
 
 use Brain\Monkey\Functions;
+use DateTimeImmutable;
 use Mockery;
 use RuntimeException;
 use Pontifex\Admin\BackupStore;
@@ -20,6 +21,7 @@ use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Schedule\JobTicker;
 use Pontifex\Schedule\Schedule;
+use Pontifex\Schedule\ScheduledBackups;
 use Pontifex\Schedule\ScheduleStore;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
@@ -314,26 +316,31 @@ final class JobTickerTest extends TestCase {
 
 	/**
 	 * Build a WordPressContext mock wired for a full tick-to-completion run,
-	 * whose ScheduleStore::load() answers with the given retention.
+	 * whose ScheduleStore::load() answers with the given retention and whose
+	 * ScheduledBackups ledger is backed by a real array passed by reference,
+	 * so record() and recorded() calls made during the run observe each
+	 * other's writes the way a real wp_options row would — rather than each
+	 * independently seeing the empty default a plain stateless mock would
+	 * hand back on every call.
 	 *
 	 * Built on {@see self::locking_context()} so the lock take/release
 	 * expectations stay in one place; adds the provenance reads finalise()'s
-	 * tick needs, a keyed option_value() so ScheduleStore's option is
-	 * distinguished from the export counters' option, and an unconstrained
-	 * save_option() since these tests assert on the backup store, not on
-	 * what gets written back to wp_options.
+	 * tick needs, and a keyed option_value()/save_option() pair so
+	 * ScheduleStore's option, ScheduledBackups's ledger, and the export
+	 * counters' option are all distinguished from one another.
 	 *
-	 * @param int $retention The retention count ScheduleStore::load() must answer.
+	 * @param int      $retention        The retention count ScheduleStore::load() must answer.
+	 * @param string[] $recorded_backups The ScheduledBackups ledger's starting content; updated in place by any record()/recorded() call the run makes, so a caller can inspect it afterwards.
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
-	private function completion_context( int $retention ) {
+	private function completion_context( int $retention, array &$recorded_backups = array() ) {
 		$context = $this->locking_context();
 		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
 		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
 		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
 		$context->shouldReceive( 'option_value' )->andReturnUsing(
-			static function ( string $key, $fallback ) use ( $retention ) {
+			static function ( string $key, $fallback ) use ( $retention, &$recorded_backups ) {
 				if ( ScheduleStore::OPTION === $key ) {
 					return array(
 						'enabled'   => true,
@@ -342,19 +349,34 @@ final class JobTickerTest extends TestCase {
 						'retention' => $retention,
 					);
 				}
+				if ( ScheduledBackups::OPTION === $key ) {
+					return $recorded_backups;
+				}
 				return $fallback;
 			}
 		);
-		$context->shouldReceive( 'save_option' );
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $key, $value ) use ( &$recorded_backups ) {
+				if ( ScheduledBackups::OPTION === $key ) {
+					$recorded_backups = $value;
+				}
+			}
+		);
 		return $context;
 	}
 
 	/**
 	 * Plant a real, minimal backup file under a valid, timestamped name.
 	 *
-	 * Creates the backups directory on first use. The stamp shapes the
-	 * filename BackupStore::backups() sorts on, so callers control fixture
-	 * age purely through the stamp's lexical order.
+	 * Creates the backups directory on first use. Every planted file is
+	 * written back-to-back within the same test, so their real modification
+	 * times land within the same wall-clock second in practice — meaning
+	 * BackupStore::backups()'s ordering (modification time, then name;
+	 * see {@see \Pontifex\Admin\BackupStore::compare_by_age()}) falls through
+	 * to its name tie-break, which happens to agree with the stamps' own
+	 * chronological order here. Callers relying on a SPECIFIC modification
+	 * time — as opposed to "planted in this order" — should stamp the file
+	 * explicitly instead.
 	 *
 	 * @param string $stamp A 'Ymd\THis\Z'-shaped UTC stamp, e.g. '20260101T000000Z'.
 	 * @return void
@@ -374,13 +396,19 @@ final class JobTickerTest extends TestCase {
 	 * ResumableExportRunner::start() would leave it, ready to complete on one
 	 * tick against an empty manifest.
 	 *
-	 * @param JobStore $job_store The store to create the job in.
-	 * @param bool     $schedule  Whether the payload carries schedule => true.
+	 * @param JobStore    $job_store The store to create the job in.
+	 * @param bool        $schedule  Whether the payload carries schedule => true.
+	 * @param string|null $output    Optional. The job's own output path; defaults to a
+	 *                               path outside the backups directory, which is fine
+	 *                               for tests that only assert on PRE-PLANTED fixtures.
+	 *                               Pass a real BackupStore::next_backup_path() when the
+	 *                               job's own completed output needs to be a real,
+	 *                               listable backup itself.
 	 * @return Job The pending job.
 	 */
-	private function create_completable_job( JobStore $job_store, bool $schedule ): Job {
+	private function create_completable_job( JobStore $job_store, bool $schedule, ?string $output = null ): Job {
 		$payload = array(
-			'output'                => $this->content_dir . '/done.wpmig',
+			'output'                => $output ?? $this->content_dir . '/done.wpmig',
 			'temp'                  => $this->content_dir . '/done.part',
 			'scan_root'             => $this->content_dir,
 			'path_prefix'           => 'wp-content',
@@ -436,7 +464,10 @@ final class JobTickerTest extends TestCase {
 	 * backups and keep the stale ones, or delete nothing at all and quietly
 	 * fill the disk. Five real fixture files are planted with valid,
 	 * strictly-increasing timestamped names — first proven to be accepted by
-	 * BackupStore::backups() — then a schedule-flagged job is ticked to
+	 * BackupStore::backups() — and, because retention now only ever considers
+	 * RECORDED filenames (see {@see \Pontifex\Schedule\ScheduledBackups}),
+	 * every one of them is pre-seeded into the ledger, standing in for five
+	 * earlier scheduled runs. A schedule-flagged job is then ticked to
 	 * completion and the exact surviving set is asserted by name.
 	 *
 	 * @return void
@@ -454,9 +485,11 @@ final class JobTickerTest extends TestCase {
 		$this->create_completable_job( $job_store, true );
 		$this->stub_completion_wp_functions();
 
+		$recorded = array_map( 'basename', $backup_store->backups() );
+
 		$ticker = new JobTicker(
 			$this->environment_mock(),
-			$this->completion_context( 2 ),
+			$this->completion_context( 2, $recorded ),
 			$job_store,
 			$backup_store,
 			new NullLogger(),
@@ -470,7 +503,97 @@ final class JobTickerTest extends TestCase {
 		$this->assertSame(
 			array( 'pontifex-backup-20260104T000000Z.wpmig', 'pontifex-backup-20260105T000000Z.wpmig' ),
 			$surviving,
-			'Retention 2 must keep exactly the two newest backups by name, not merely two backups of some kind.'
+			'Retention 2 must keep exactly the two newest RECORDED backups by name, not merely two backups of some kind.'
+		);
+	}
+
+	/**
+	 * A hand-made backup — never recorded in the ledger, because nothing
+	 * scheduled ever wrote it — does not consume a retention slot: with
+	 * retention 2 and two RECORDED (scheduled) backups plus one unrecorded
+	 * (hand-made) one, both scheduled backups survive and so does the
+	 * hand-made one. Before this fix, retention counted every backup on disk
+	 * regardless of origin, so this exact shape could prune the hand-made
+	 * backup, or a scheduled one, depending on nothing more meaningful than
+	 * name order.
+	 *
+	 * @return void
+	 */
+	public function test_prune_never_counts_a_hand_made_backup_against_the_retention_slot(): void {
+		$this->plant_backup( '20260101T000000Z' ); // Scheduled.
+		$this->plant_backup( '20260102T000000Z' ); // Scheduled.
+		$this->plant_backup( '20260103T000000Z' ); // Hand-made; never recorded.
+
+		$backup_store = new BackupStore( $this->content_dir );
+		$this->assertCount( 3, $backup_store->backups() );
+
+		$job_store = new JobStore( $this->content_dir );
+		$this->create_completable_job( $job_store, true );
+		$this->stub_completion_wp_functions();
+
+		$recorded = array(
+			'pontifex-backup-20260101T000000Z.wpmig',
+			'pontifex-backup-20260102T000000Z.wpmig',
+		);
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 2, $recorded ),
+			$job_store,
+			$backup_store,
+			new NullLogger(),
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$surviving = array_map( 'basename', $backup_store->backups() );
+		sort( $surviving );
+		$this->assertSame(
+			array(
+				'pontifex-backup-20260101T000000Z.wpmig',
+				'pontifex-backup-20260102T000000Z.wpmig',
+				'pontifex-backup-20260103T000000Z.wpmig',
+			),
+			$surviving,
+			'Retention 2 on two RECORDED backups must not prune either of them, and the unrecorded hand-made third must never even be considered.'
+		);
+	}
+
+	/**
+	 * A completed SCHEDULE-originated job records its own output filename in
+	 * the ledger — the fact {@see \Pontifex\Schedule\JobTicker::prune_to_retention()}
+	 * depends on to tell a scheduler-written backup apart from a hand-made
+	 * one sharing the exact same generated name.
+	 *
+	 * @return void
+	 */
+	public function test_finalise_records_the_scheduled_backups_own_filename(): void {
+		$backup_store = new BackupStore( $this->content_dir );
+		$backup_store->ensure_directory();
+		$output = $backup_store->next_backup_path( new DateTimeImmutable( '2026-01-05T00:00:00+00:00' ) );
+
+		$job_store = new JobStore( $this->content_dir );
+		$this->create_completable_job( $job_store, true, $output );
+		$this->stub_completion_wp_functions();
+
+		$recorded = array();
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 5, $recorded ),
+			$job_store,
+			$backup_store,
+			new NullLogger(),
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$this->assertSame(
+			array( 'pontifex-backup-20260105T000000Z.wpmig' ),
+			$recorded,
+			'The scheduled run must record exactly its own output filename in the ledger.'
 		);
 	}
 
@@ -537,9 +660,11 @@ final class JobTickerTest extends TestCase {
 		$this->create_completable_job( $job_store, true );
 		$this->stub_completion_wp_functions();
 
+		$recorded = array_map( 'basename', $backup_store->backups() );
+
 		$ticker = new JobTicker(
 			$this->environment_mock(),
-			$this->completion_context( 0 ),
+			$this->completion_context( 0, $recorded ),
 			$job_store,
 			$backup_store,
 			new NullLogger(),
