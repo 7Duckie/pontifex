@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
@@ -29,6 +30,7 @@ use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\WordPress\RealWordPressContext;
@@ -253,7 +255,7 @@ final class RollbackCommand {
 
 		// 4. Open the safety archive and wire the restore engine.
 		$source         = $this->open_source( $archive_path );
-		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
+		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source );
 
 		// 4a. Single-runner lock: acquire only now, after every exit-prone step above
 		// (finding the safety archive, the confirmation prompt, opening the archive)
@@ -445,20 +447,30 @@ final class RollbackCommand {
 	 *
 	 * Identical to ImportCommand's wiring: an EntryReader with the v0.1.0
 	 * default codecs, a FileWriter rooted at the WordPress installation, and a
-	 * DatabaseWriter over the real $wpdb. This command's own $this->logger is
-	 * passed through as the runner's optional sixth argument, so the few
-	 * things RestoreRunner itself still only mentions in passing — a
-	 * directory mode that could not be restored, temp artefacts an
-	 * interrupted earlier restore left behind and this run swept up — reach
-	 * the real per-transfer log file instead of the NullLogger a caller that
-	 * passes nothing would silently get.
+	 * DatabaseWriter over the real $wpdb, wired with both table prefixes the
+	 * same way — the source prefix from the archive's own provenance when it
+	 * carries one, or derived from its table names via
+	 * {@see SourceTablePrefix::resolve()} when it does not. A safety archive is
+	 * written by this site, so in the ordinary case its recorded (or derived)
+	 * prefix already agrees with the destination and this is a no-op — but
+	 * leaving a restore path unwired is how these gaps start, and consistency
+	 * costs nothing here. This command's own $this->logger is passed through
+	 * as the runner's optional sixth argument, so the few things RestoreRunner
+	 * itself still only mentions in passing — a directory mode that could not
+	 * be restored, temp artefacts an interrupted earlier restore left behind
+	 * and this run swept up — reach the real per-transfer log file instead of
+	 * the NullLogger a caller that passes nothing would silently get.
 	 *
+	 * @param resource $source The open, seekable safety-archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner(): RestoreRunner {
+	private function build_default_restore_runner( $source ): RestoreRunner {
 		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader  = new ArchiveReader( $source );
+		$source_prefix   = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix     = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
 		return new RestoreRunner(
 			$entry_reader,
 			$file_writer,
@@ -467,6 +479,27 @@ final class RollbackCommand {
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) ),
 			$this->logger
 		);
+	}
+
+	/**
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see SourceTablePrefix::resolve()} instead. Returns the
+	 * prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**

@@ -145,6 +145,15 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	/**
 	 * Delegate to the real adapter.
 	 *
+	 * @return string The live prefix; '' when unconfigured.
+	 */
+	public function table_prefix(): string {
+		return $this->inner->table_prefix();
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
 	 * @param string $table_name Fully prefixed table name.
 	 * @return int Average bytes per row; 0 when unknown.
 	 */

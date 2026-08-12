@@ -882,9 +882,14 @@ final class ExportCommand {
 	 * large archive is not bound by a request limit. An unencrypted upload warns
 	 * first: the archive leaves the server for storage whose safety Pontifex
 	 * cannot vouch for. Once uploaded, the destination's configured retention is
-	 * enforced by pruning the oldest surplus archives; a prune failure only
-	 * warns — the backup itself is already safely uploaded, so a retention
-	 * problem must never fail the export.
+	 * enforced by pruning the oldest surplus archives; a prune failure — whether
+	 * the listing itself failed, or individual deletes were attempted and
+	 * refused — only warns and never fails the export, because the backup
+	 * itself is already safely uploaded by the time retention runs. Silence
+	 * used to cover both "nothing needed pruning" and "every delete was
+	 * refused" alike; a refused delete is now always reported, because a
+	 * destination quietly filling up looks identical to a healthy one until
+	 * someone needs the space retention was supposed to have freed.
 	 *
 	 * @param DestinationAdapter|null $adapter     The resolved destination, or null for none.
 	 * @param string                  $output_path The finished archive to upload.
@@ -926,9 +931,29 @@ final class ExportCommand {
 
 		if ( $retention >= DestinationRetention::MIN_RETENTION ) {
 			try {
-				$deleted = ( new DestinationRetention( $adapter, $retention ) )->prune();
-				foreach ( $deleted as $remote_name ) {
+				$result = ( new DestinationRetention( $adapter, $retention, $this->logger ) )->prune();
+				foreach ( $result->deleted() as $remote_name ) {
 					WP_CLI::log( sprintf( /* translators: %s: the remote archive name that was deleted */ __( 'Pruned old archive from the destination: %s', 'pontifex' ), $remote_name ) );
+				}
+
+				$failed = $result->failed();
+				if ( array() !== $failed ) {
+					// Deletes were attempted and refused: reported, never silent — see
+					// this method's own docblock for the false "nothing was pruned"
+					// this replaces. Still only a warning: the backup is already
+					// safely uploaded, so a retention problem must never fail the export.
+					WP_CLI::warning(
+						sprintf(
+							/* translators: %d: number of archives that could not be pruned */
+							_n(
+								'The archive uploaded successfully, but %d old archive at the destination could not be pruned and remains in place. Check the Pontifex log for the reason.',
+								'The archive uploaded successfully, but %d old archives at the destination could not be pruned and remain in place. Check the Pontifex log for the reason.',
+								count( $failed ),
+								'pontifex'
+							),
+							count( $failed )
+						)
+					);
 				}
 			} catch ( DestinationException $error ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::warning renders the message to the terminal, not HTML; the message is redacted, not escaped for markup.

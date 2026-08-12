@@ -155,10 +155,14 @@ normal.** Check your plugins list for anything you do not recognise.
 **What happened.** Your server does not have room. Pontifex works out how much
 the restore would *add* rather than the archive's total size, so restoring a
 site over itself costs almost nothing while restoring a larger site onto a
-small disk is caught. The estimate deliberately leans low, so if it fires you
-are genuinely short.
+small disk is caught. Before checking, it also clears away any temp files an
+earlier, interrupted restore left behind, so a previous failed attempt's own
+debris is never what is holding up the retry. The estimate deliberately leans
+low, so if it still fires you are genuinely short.
 
-**Nothing has been changed.** This runs before the first byte is written.
+**Nothing has been changed** beyond clearing away another restore's own
+leftover debris, as described above. This still runs before the first byte of
+your site is written.
 
 **What to do.** Free up space and try again. Old archives elsewhere on the
 server, other sites' logs, and your host's own temp directories are usually
@@ -287,6 +291,71 @@ it is your own and this happens, the file is damaged — use an older backup.
 **What not to do.** Do not extract the SQL and run it by hand with
 `wp db query`. That is precisely the outcome the check prevents, performed
 manually.
+
+### "it is not part of this site, whose tables begin with…"
+
+> Refusing to restore table "wpb_options": it is not part of this site, whose
+> tables begin with "wpa_". A backup can only replace the site it belongs to.
+> Nothing has been changed.
+
+**Rare, and one of the more serious refusals on this page.**
+
+**What happened.** Some hosting plans put several WordPress sites in one
+database, keeping them apart only by giving each site's tables a different
+name prefix (`wpa_options`, `wpb_options`). Before staging any table from the
+archive, Pontifex works out the archive's own source prefix and checks that
+every table it stages begins with the live database's prefix — rewriting the
+table names to match first, when the two genuinely differ (see below). This
+table did not belong under either.
+
+**Refusing is the last resort, not the first answer.** Pontifex tries two
+things before it ever reaches this refusal. First, the prefix recorded in the
+archive's own provenance — every archive written by a current Pontifex
+carries one. Failing that, a prefix worked out from the archive's own table
+names: `wp_options`, `wp_posts` and the rest of a normal WordPress install all
+share one leading run, and that shared run is taken as the prefix, provided
+it genuinely is shared by every table the archive holds — so a plugin table
+such as `wp_myplugin_options` cannot narrow it down to `wp_myplugin_`, because
+that narrower run is not shared by the archive's own `wp_posts`. Either route
+lets a genuinely different, but legitimate, prefix be rewritten onto this
+site automatically, with nothing for you to do. **This message only appears
+once both have been tried and neither could account for the table.**
+
+**Pontifex never produces an archive like this** in the ordinary case. A
+backup Pontifex writes always carries this site's own table names sharing one
+prefix, so once both recovery routes above have failed, this file either
+genuinely belongs to a different WordPress installation or has been altered
+to claim one it does not own. **Keep it, and do not delete it** — the same
+advice as the [symlink refusal above](#refusing-symlink--re-run-with---allow-unsafe-symlinks-only-if-you-trust-this-archive):
+a refused archive is undamaged, and its existence is information. Find out
+where the file actually came from before doing anything else with it.
+
+**Nothing has been changed.** This is checked before the table is staged and
+before any SQL runs.
+
+**The legitimate case this can still catch.** One narrow case remains, and it
+needs an old archive: one written before Pontifex recorded a source prefix at
+all (a field the archive format added in v1.1; every archive from a current
+Pontifex has it), **and** whose own table names cannot establish one shared
+prefix either — for instance, a database-only backup that deliberately
+excluded every recognisable WordPress core table with `--exclude-table`,
+leaving only custom tables Pontifex has no core table name to anchor a prefix
+to. Restoring that archive onto a site with a genuinely different prefix hits
+this refusal on a backup that is genuinely yours.
+
+**What to do.** In almost every case, nothing — Pontifex now recovers the
+right prefix on its own, from the recorded value or the table names, so a
+restore that would once have needed a fresh export usually just works. If you
+do still hit this message, and you are confident the archive is your own, the
+fix is to re-export the source site with a current version of Pontifex — the
+new archive will record its own prefix directly, which is not affected by
+which tables the backup includes. There is no supported way to force a
+rewrite onto an old archive that carries neither the recorded field nor
+table names a prefix can be derived from.
+
+**What not to do.** Do not edit the SQL inside the archive to relabel the
+tables. That reintroduces exactly the risk this check exists to close, by
+hand, on your own live site.
 
 ### "the archive records a files-only scope but carries database chunks"
 
@@ -533,6 +602,48 @@ permanently, for every future upload of your entire database.
 
 Read the second half. **The backup succeeded; only the copy failed.** Do not
 delete the local file. Fix the connection and upload it again.
+
+### "could not be verified: the destination holds … bytes, but the local archive is … bytes"
+
+**Protecting you.** An upload goes to a temporary name first and is only
+renamed into place once its size is checked against the local archive. This
+message means the destination reported a different size than the file that
+was sent — a connection that dropped partway through, without the transfer
+itself reporting failure. Without this check, that partial file would have
+been renamed into the archive's real name, listed as a backup, and — being
+the newest thing at the destination — could evict a genuinely sound backup
+from retention to make room for it.
+
+The partial upload under the temporary name is removed automatically as part
+of this refusal; nothing is left behind for retention to trip over.
+
+**What to do.** Check the connection to the destination, then retry the
+upload. The local archive this backup produced is unaffected either way —
+this is the same situation as "The local archive is still at …" above, just
+caught one step later.
+
+### "finished and was verified, but the SFTP destination refused to move it into place"
+
+**Not something a retry fixes — read it fully before doing anything.** The
+upload itself succeeded and was checked byte-for-byte against the local
+archive; it is sitting safely on the destination under the temporary name the
+message gives you. What failed is the final step, moving it from that
+temporary name to its real one, and that step fails for a reason that is
+still true the next time you try: almost always, the account Pontifex
+connects as does not have permission to rename (or delete) files in that
+directory, even though it was able to write the temporary file in the first
+place.
+
+**What to do.** Check the destination account's permissions on the remote
+directory — it needs to be able to rename and delete there, not just create
+files. Once that is fixed, either re-run the export (a fresh temporary file
+will be uploaded and renamed normally) or, if you would rather not upload the
+archive again, rename the temporary file yourself over SFTP.
+
+**What not to do.** Do not keep retrying the export hoping it will go through
+— a permissions problem does not resolve itself between attempts, and each
+retry uploads the whole archive again for no reason. And do not delete the
+temporary file: it is a complete, verified copy of your backup.
 
 ---
 

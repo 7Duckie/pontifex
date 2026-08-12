@@ -98,7 +98,7 @@ Restores an archive over the current site.
 |---|---|
 | `--yes` | Skip the confirmation prompt. |
 | `--dry-run` | Validate without writing. Skips the lock and the safety archive. |
-| `--url=<new-url>` | Rewrite the site address during restore. |
+| `--new-url=<new-url>` | Rewrite the site address during restore. |
 | `--whole-site` | Permit writing outside `wp-content`, including core and `wp-config.php`. |
 | `--allow-unsafe-symlinks` | Disable symlink target confinement. |
 | `--no-rollback-archive` | Skip the pre-restore safety archive — **and the automatic recovery, and any future rollback**. |
@@ -200,6 +200,19 @@ Generates an Ed25519 keypair. Flags: `--secret-key=<path>`,
 Credentials are never passed as a flag value — only the environment variable's
 name is. `test`, `archives`, `pull` and `prune` open a connection; `list` and
 `doctor` do not.
+
+`prune` orders archives oldest-first by their real modification time at the
+destination, never by name — a name is self-reported data (a killed upload can
+leave a partial file under the canonical name; a hand-set clock can mint a
+future-dated one) and neither is trustworthy as a proxy for age. A future
+modification time is treated as the oldest thing at the destination and
+pruned first; a modification time the destination did not report at all is
+treated as current, so it is never mistaken for the oldest. Only names
+matching Pontifex's own generated shape (`pontifex-backup-<UTC>.wpmig`) are
+ever counted or deleted; anything else sharing the directory is left alone.
+A prune that could not delete everything it needed to reports the failure —
+via `WP_CLI::error()` for `wp pontifex destination prune`, or a warning after
+export's own upload — rather than a false "nothing was pruned".
 
 ### `wp pontifex doctor` / `stats` / `diagnostics`
 
@@ -379,7 +392,21 @@ Host keys are pinned and verified **before** authentication, so credentials
 never reach an unverified server. Comparison is constant-time. Credentials
 come from a named environment variable, never a flag value.
 
-Retention keeps the newest N with a floor that never prunes to nothing.
+An upload writes to a temporary remote name first (`<archive>.wpmig.part`)
+and renames it into place only once the transfer has completed and the
+destination's own reported size matches the local file. A killed or
+part-failed upload therefore never leaves a fragment under the archive's real
+name — the temporary name does not match `.wpmig` at all, so listing and
+retention never see it as a backup in the first place. If a file already sits
+at the final name (re-running an export to the same `--output`, or two sites
+sharing one destination), it is removed immediately before the rename that
+replaces it — never earlier, and only once the new upload is verified — so
+the destination is briefly without a file for one rename rather than holding
+a part-written one for the whole transfer.
+
+Retention keeps the newest N with a floor that never prunes to nothing,
+ordered by each archive's real modification time at the destination rather
+than its name (see the `prune` action above for the full ordering rule).
 `doctor` grades every destination without connecting.
 
 The architecture test `NoNetworkOutsideDestinationTest` fails the build if any
