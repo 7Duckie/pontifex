@@ -1,5 +1,5 @@
 {
-	"core": null,
+	"core": "WordPress/WordPress#7.0.3",
 	"phpVersion": "8.3",
 	"port": 8912,
 	"testsEnvironment": false,

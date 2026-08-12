@@ -182,6 +182,24 @@ you: `.wp-env.json` for day-to-day development, and a separate
 `.wp-env.tests.json` that only the integration suite uses (see "Run
 the tests" below) — these are two independent environments, not one
 environment with two sites, so each is started on its own.
+
+**The WordPress version is pinned**, in all three wp-env configurations
+(`.wp-env.json`, `.wp-env.tests.json` and `.wp-env.plugin-check.json`),
+rather than tracking whatever is latest. It has to be: wp-env asks
+wordpress.org's version API what "latest" is and then fetches that
+release's tag from the WordPress git mirror, and the API starts
+answering with a new version before the mirror has the tag — so an
+unpinned environment stops being buildable the moment WordPress ships
+a point release, until the mirror catches up. That happened on
+2026-08-12 with 7.0.4 and took every pull request's integration suite
+down with it.
+
+The trade-off is real and worth stating: pull requests no longer test
+against the newest WordPress automatically. **Bump the pin
+deliberately**, in all three files together, as its own change, so the
+move to a new WordPress is something the suite proves rather than
+something that happens to a build.
+
 `@wordpress/env` is pinned in `package.json`, so install it first:
 
 ```bash
