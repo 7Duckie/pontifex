@@ -149,6 +149,18 @@ v0.0.x decision log for the reasoning.
   milliseconds around one rename, instead of for the entire length of a
   transfer.
 
+- **A restore that failed for lack of disk space could not be retried,
+  because the space its own failed attempt had used stayed counted against
+  it.** The free-space preflight ran before the sweep that clears away a
+  crashed restore's leftover temp file, so a large half-written file the
+  FIRST attempt left behind was still sitting on disk — still counted as
+  used — when the retry asked whether there was room, and a large enough
+  leftover could refuse every subsequent attempt for ever. The sweep now
+  runs first, immediately before the free-space check, so a previous
+  attempt's own debris is cleared away before its size is ever weighed
+  against the retry — the same order `SafetyArchiver` already used ahead of
+  its own free-space check, for the same reason.
+
 ## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
 
 A minor release rather than a patch: no public API moved — not an interface, a

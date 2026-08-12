@@ -335,23 +335,25 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// and refuses the same archive rather than calling it sound.
 		$this->preflight->assert_symlink_targets_confined( $declared_symlink_targets );
 
-		// Refuse before anything is touched — filesystem or database — when the
-		// destination cannot hold this restore. FileWriter owns the destination
-		// directory, so it owns this estimate; see its own docblock for why the
-		// figure leans low rather than risk refusing a restore that would have
-		// succeeded.
-		$this->preflight->assert_free_space_for( $manifest );
-
 		// Sweep leftover temp artefacts a crashed earlier restore abandoned on
 		// the filesystem — the file-side twin of the leftover-table sweep
-		// DatabaseWriter::begin_staging() performs immediately below (ADR 0009).
-		// Both run here, after every preflight above has already had its
-		// chance to refuse, so no archive this restore rejects has had any of
-		// its content applied — not, as an earlier version of this comment
-		// claimed, that the sweep changes nothing at all: it writes a one-off
-		// case-sensitivity probe file of its own, removed again before it
-		// reasons about an orphan. See FileWriter::sweep_orphaned_temp_files()
-		// for why this is best-effort and can never itself gate a restore.
+		// DatabaseWriter::begin_staging() performs a little further below
+		// (ADR 0009). Runs after every OTHER preflight above has already had
+		// its chance to refuse — this one is not itself among them, and it is
+		// not side-effect-free: it writes a one-off case-sensitivity probe
+		// file of its own, removed again before it reasons about an orphan.
+		// See FileWriter::sweep_orphaned_temp_files() for why this is
+		// best-effort and can never itself gate a restore.
+		//
+		// It runs BEFORE the free-space preflight immediately below,
+		// deliberately: a leftover from a crashed earlier restore can be as
+		// large as however much of that attempt had been written before it
+		// died, and removing it is exactly what can let the free-space
+		// preflight pass on the retry it would otherwise wrongly refuse.
+		// SafetyArchiver::create() reached the same conclusion for the same
+		// reason ahead of its own free-space preflight — see the comment
+		// there, next to {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}
+		// — so the two now agree.
 		$swept = $this->file_writer->sweep_orphaned_temp_files();
 		if ( $swept > 0 ) {
 			$this->logger->info(
@@ -359,6 +361,13 @@ final class RestoreRunner implements RestoreRunnerInterface {
 				array( 'count' => $swept )
 			);
 		}
+
+		// Refuse before anything is touched — filesystem or database — when the
+		// destination cannot hold this restore. FileWriter owns the destination
+		// directory, so it owns this estimate; see its own docblock for why the
+		// figure leans low rather than risk refusing a restore that would have
+		// succeeded.
+		$this->preflight->assert_free_space_for( $manifest );
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
