@@ -1,6 +1,6 @@
 # 0023 — verify answers for the archive, a dry run answers for the restore
 
-- **Status:** Accepted, 2026-08-05. Implemented; shipping version to be set at the cut (v1.1.0 on the reading below).
+- **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.1.0.
 - **Deciders:** 7Duckie (raised by the hardening arc; the last of its open findings).
 
 ## Context

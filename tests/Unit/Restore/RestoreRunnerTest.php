@@ -306,6 +306,115 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * Restore() actually sweeps orphaned temp files an earlier, interrupted restore left behind.
+	 *
+	 * A leftover temp artefact is placed under the fixture root exactly as a
+	 * killed restore would have left one, before the runner is ever touched.
+	 * Running a real restore through the same archive-stream harness every
+	 * other test in this file uses, then asserting the artefact is gone
+	 * afterwards, proves RestoreRunner::restore() actually calls
+	 * FileWriter::sweep_orphaned_temp_files() as part of a real restore — not
+	 * merely that the method exists and behaves correctly in isolation,
+	 * which FileWriterTest already covers on its own.
+	 *
+	 * @return void
+	 */
+	public function test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileDoesNotExist( $orphan, 'restore() must sweep an orphaned temp file left by an earlier, interrupted restore.' );
+	}
+
+	/**
+	 * Verify() must NEVER sweep orphaned temp files — it is read-only.
+	 *
+	 * Adding a call to FileWriter::sweep_orphaned_temp_files() inside
+	 * verify() was found, under mutation, to leave the whole suite green: a
+	 * read-only verification silently deleting live files on disk is exactly
+	 * the regression FileWriter::sweep_orphaned_temp_files()'s own docblock
+	 * says never happens, because verify() "writes nothing and so has
+	 * nothing to sweep". This places an orphan exactly as
+	 * {@see self::test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore()}
+	 * does, but calls verify() instead of restore() through the same real
+	 * archive-stream harness every other test in this file uses, and asserts
+	 * the orphan is still there afterwards.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_sweep_orphaned_temp_files(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->verify( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileExists( $orphan, 'verify() must never sweep — it is read-only and must leave every file on disk untouched.' );
+	}
+
+	/**
+	 * The orphan sweep must run BEFORE the free-space preflight, not after — proven behaviourally.
+	 *
+	 * A restore that ran out of disk can leave a large temp file behind; the
+	 * NEXT restore's free-space preflight must see that space as already
+	 * reclaimed, or the leftover from the failed attempt permanently counts
+	 * against the retry it is blocking. Asserting call order would not prove
+	 * that — a fake could record "sweep, then check" while the real check
+	 * still measured a disk that had not actually been freed yet. Instead the
+	 * injected free-space reader ({@see FileWriter}'s constructor takes it as
+	 * a `Closure(string): (float|false)`) answers according to whether the
+	 * orphan is STILL on disk at the moment it is actually asked: an
+	 * insufficient figure while the orphan remains, standing in for the space
+	 * it still occupies, and ample room once it is gone. A restore that
+	 * proceeds and writes its entry therefore proves the sweep had already
+	 * run by the time the free-space preflight asked — the same fixture, run
+	 * against the ordering this change replaces (free space checked before
+	 * the sweep), would instead see the orphan still occupying space and
+	 * refuse with HostCannotComply.
+	 *
+	 * @return void
+	 */
+	public function test_restore_sweeps_the_orphan_before_the_free_space_preflight_measures_it(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: stands in for the space a crashed restore's leftover temp file still occupies.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore, standing in for the disk space it still occupies' );
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and instead answers according to whether the orphan is still on disk — insufficient while it remains, ample once it is swept.
+			function ( string $path ) use ( $orphan ) {
+				return file_exists( $orphan ) ? 1 : PHP_INT_MAX;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileDoesNotExist( $orphan, 'The orphan must have been swept.' );
+		$this->assertFileExists(
+			$this->fixture_root . '/note.txt',
+			'The restore must have got past the free-space preflight and written its entry; it could only have passed because the orphan was already gone by the time the preflight asked.'
+		);
+	}
+
+	/**
 	 * A directory entry must be restored to the destination filesystem.
 	 *
 	 * @return void

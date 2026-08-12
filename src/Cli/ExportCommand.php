@@ -279,6 +279,19 @@ final class ExportCommand {
 	private ?OperationLock $lock;
 
 	/**
+	 * A destination adapter to use for the upload step, in place of the factory.
+	 *
+	 * The seam that lets a test observe the upload step — that it happens, that
+	 * it does not, and what the command does when it fails — without a live
+	 * remote server to upload to. Null in production, where
+	 * {@see self::build_destination_adapter()} builds the real adapter from the
+	 * resolved destination spec.
+	 *
+	 * @var DestinationAdapter|null
+	 */
+	private ?DestinationAdapter $destination_adapter;
+
+	/**
 	 * Construct an ExportCommand instance.
 	 *
 	 * WP-CLI registers the command via its class name and does not
@@ -292,6 +305,7 @@ final class ExportCommand {
 	 * @param ProgressReporter|null         $progress Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 * @param PassphraseSource|null         $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
 	 * @param OperationLock|null            $lock Optional. When null, a default OperationLock is built lazily at run time.
+	 * @param DestinationAdapter|null       $destination_adapter Optional. When null, a live adapter is built from the resolved destination spec.
 	 */
 	public function __construct(
 		?Environment $environment = null,
@@ -300,7 +314,8 @@ final class ExportCommand {
 		?LoggerInterface $logger = null,
 		?ProgressReporter $progress = null,
 		?PassphraseSource $passphrase_source = null,
-		?OperationLock $lock = null
+		?OperationLock $lock = null,
+		?DestinationAdapter $destination_adapter = null
 	) {
 		$this->environment          = $environment ?? new RealEnvironment();
 		$this->wordpress_context    = $wordpress_context ?? new RealWordPressContext();
@@ -310,6 +325,7 @@ final class ExportCommand {
 		$this->progress             = $progress ?? new WpCliProgressBar();
 		$this->passphrase_source    = $passphrase_source ?? new CliPassphraseSource();
 		$this->lock                 = $lock;
+		$this->destination_adapter  = $destination_adapter;
 	}
 
 	/**
@@ -467,7 +483,9 @@ final class ExportCommand {
 			// 2a. Resolve the offsite destination now (if one was named), so a mistyped
 			// name or a missing credential fails before the export does any work.
 			$destination_spec    = $this->resolve_destination_spec( $destination_name );
-			$destination_adapter = null !== $destination_spec ? $this->build_destination_adapter( $destination_spec ) : null;
+			$destination_adapter = null !== $destination_spec
+				? ( $this->destination_adapter ?? $this->build_destination_adapter( $destination_spec ) )
+				: null;
 
 			// 3. Confirm with the user (unless --yes; a resume was confirmed when it started).
 			if ( ! $skip_confirmation && ! $resume ) {
@@ -853,7 +871,7 @@ final class ExportCommand {
 			return ( new DestinationFactory() )->from_spec( $spec );
 		} catch ( DestinationException $error ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
-			WP_CLI::error( $error->getMessage() );
+			WP_CLI::error( PathRedactor::from_environment()->redact( $error->getMessage() ) );
 		}
 	}
 
@@ -864,9 +882,14 @@ final class ExportCommand {
 	 * large archive is not bound by a request limit. An unencrypted upload warns
 	 * first: the archive leaves the server for storage whose safety Pontifex
 	 * cannot vouch for. Once uploaded, the destination's configured retention is
-	 * enforced by pruning the oldest surplus archives; a prune failure only
-	 * warns — the backup itself is already safely uploaded, so a retention
-	 * problem must never fail the export.
+	 * enforced by pruning the oldest surplus archives; a prune failure — whether
+	 * the listing itself failed, or individual deletes were attempted and
+	 * refused — only warns and never fails the export, because the backup
+	 * itself is already safely uploaded by the time retention runs. Silence
+	 * used to cover both "nothing needed pruning" and "every delete was
+	 * refused" alike; a refused delete is now always reported, because a
+	 * destination quietly filling up looks identical to a healthy one until
+	 * someone needs the space retention was supposed to have freed.
 	 *
 	 * @param DestinationAdapter|null $adapter     The resolved destination, or null for none.
 	 * @param string                  $output_path The finished archive to upload.
@@ -879,6 +902,12 @@ final class ExportCommand {
 			return;
 		}
 
+		// Both messages below routinely name an absolute server path (the local
+		// archive, or a path inside the failure reason itself), and this output is
+		// exactly what an operator pastes into a support thread — the same reason
+		// print_failure_verdict() redacts. One instance, reused for both.
+		$redactor = PathRedactor::from_environment();
+
 		if ( ! $encrypted ) {
 			WP_CLI::warning( __( 'Uploading an unencrypted archive to the destination — anyone who can read the destination can read this backup. Consider --encrypt.', 'pontifex' ) );
 		}
@@ -887,20 +916,48 @@ final class ExportCommand {
 		try {
 			$adapter->put( $output_path );
 		} catch ( DestinationException $error ) {
-			WP_CLI::error( sprintf( /* translators: 1: the failure reason, 2: the local archive path */ __( 'The upload to the destination failed: %1$s The local archive is still at %2$s.', 'pontifex' ), $error->getMessage(), $output_path ) );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is redacted, not escaped for markup.
+			WP_CLI::error(
+				sprintf(
+					/* translators: 1: the failure reason, 2: the local archive path */
+					__( 'The upload to the destination failed: %1$s The local archive is still at %2$s.', 'pontifex' ),
+					$redactor->redact( $error->getMessage() ),
+					$redactor->redact( $output_path )
+				)
+			);
 		}
 
 		WP_CLI::success( __( 'Uploaded the archive to the destination.', 'pontifex' ) );
 
 		if ( $retention >= DestinationRetention::MIN_RETENTION ) {
 			try {
-				$deleted = ( new DestinationRetention( $adapter, $retention ) )->prune();
-				foreach ( $deleted as $remote_name ) {
+				$result = ( new DestinationRetention( $adapter, $retention, $this->logger ) )->prune();
+				foreach ( $result->deleted() as $remote_name ) {
 					WP_CLI::log( sprintf( /* translators: %s: the remote archive name that was deleted */ __( 'Pruned old archive from the destination: %s', 'pontifex' ), $remote_name ) );
 				}
+
+				$failed = $result->failed();
+				if ( array() !== $failed ) {
+					// Deletes were attempted and refused: reported, never silent — see
+					// this method's own docblock for the false "nothing was pruned"
+					// this replaces. Still only a warning: the backup is already
+					// safely uploaded, so a retention problem must never fail the export.
+					WP_CLI::warning(
+						sprintf(
+							/* translators: %d: number of archives that could not be pruned */
+							_n(
+								'The archive uploaded successfully, but %d old archive at the destination could not be pruned and remains in place. Check the Pontifex log for the reason.',
+								'The archive uploaded successfully, but %d old archives at the destination could not be pruned and remain in place. Check the Pontifex log for the reason.',
+								count( $failed ),
+								'pontifex'
+							),
+							count( $failed )
+						)
+					);
+				}
 			} catch ( DestinationException $error ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::warning renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
-				WP_CLI::warning( sprintf( /* translators: %s: the failure reason */ __( 'The archive uploaded successfully, but pruning old archives at the destination failed: %s', 'pontifex' ), $error->getMessage() ) );
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::warning renders the message to the terminal, not HTML; the message is redacted, not escaped for markup.
+				WP_CLI::warning( sprintf( /* translators: %s: the failure reason */ __( 'The archive uploaded successfully, but pruning old archives at the destination failed: %s', 'pontifex' ), $redactor->redact( $error->getMessage() ) ) );
 			}
 		}
 	}

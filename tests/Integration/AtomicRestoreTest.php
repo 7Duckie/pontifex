@@ -47,18 +47,45 @@ use Pontifex\Tests\Integration\Fakes\FailingDatabaseAdapter;
 final class AtomicRestoreTest extends TestCase {
 
 	/**
+	 * Prefix a bare scratch-table basename with the live database's own
+	 * table prefix, derived from $wpdb->prefix at runtime — never
+	 * hardcoded to "wp_" — so DatabaseWriter's cross-site guard accepts
+	 * every fixture table this file creates as belonging to this site. The
+	 * "pontifextest_" element every basename carries is kept, so the
+	 * scratch namespace stays obviously not a real WordPress table.
+	 *
+	 * The single place every other reference to a scratch table name in
+	 * this file goes through, so the live prefix is introduced once rather
+	 * than scattered across dozens of literal strings.
+	 *
+	 * @param string $basename The bare basename, e.g. "pontifextest_alpha".
+	 * @return string The live-prefixed table name.
+	 */
+	private static function scratch_table( string $basename ): string {
+		global $wpdb;
+		return $wpdb->prefix . $basename;
+	}
+
+	/**
 	 * Every scratch table this test can create, dropped in set_up and tear_down.
 	 *
-	 * @var string[]
+	 * Computed at runtime, via {@see self::scratch_table()}, rather than a
+	 * compile-time constant — a class constant cannot read $wpdb->prefix.
+	 *
+	 * @return string[]
 	 */
-	private const SCRATCH_TABLES = array(
-		'pontifextest_alpha',
-		'pontifextest_beta',
-		'pontifexstg_pontifextest_alpha',
-		'pontifexstg_pontifextest_beta',
-		'pontifexold_pontifextest_alpha',
-		'pontifexold_pontifextest_beta',
-	);
+	private static function scratch_tables(): array {
+		$alpha = self::scratch_table( 'pontifextest_alpha' );
+		$beta  = self::scratch_table( 'pontifextest_beta' );
+		return array(
+			$alpha,
+			$beta,
+			'pontifexstg_' . $alpha,
+			'pontifexstg_' . $beta,
+			'pontifexold_' . $alpha,
+			'pontifexold_' . $beta,
+		);
+	}
 
 	/**
 	 * Temp directory FileWriter is rooted at (no file entries are used).
@@ -99,8 +126,8 @@ final class AtomicRestoreTest extends TestCase {
 	 */
 	public function test_successful_restore_replaces_live_tables_atomically(): void {
 		global $wpdb;
-		$this->create_live_table( 'pontifextest_alpha', 'live-alpha' );
-		$this->create_live_table( 'pontifextest_beta', 'live-beta' );
+		$this->create_live_table( self::scratch_table( 'pontifextest_alpha' ), 'live-alpha' );
+		$this->create_live_table( self::scratch_table( 'pontifextest_beta' ), 'live-beta' );
 
 		$runner = new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults() ),
@@ -110,8 +137,8 @@ final class AtomicRestoreTest extends TestCase {
 
 		$runner->restore( $this->archive_with_both_tables() );
 
-		$this->assertSame( 'restored-alpha', $this->value_in( 'pontifextest_alpha' ) );
-		$this->assertSame( 'restored-beta', $this->value_in( 'pontifextest_beta' ) );
+		$this->assertSame( 'restored-alpha', $this->value_in( self::scratch_table( 'pontifextest_alpha' ) ) );
+		$this->assertSame( 'restored-beta', $this->value_in( self::scratch_table( 'pontifextest_beta' ) ) );
 		$this->assertSame( array(), $this->leftover_pontifex_tables(), 'A clean restore must leave no staging or parked tables.' );
 	}
 
@@ -127,8 +154,8 @@ final class AtomicRestoreTest extends TestCase {
 	 */
 	public function test_failed_restore_leaves_live_tables_untouched(): void {
 		global $wpdb;
-		$this->create_live_table( 'pontifextest_alpha', 'live-alpha' );
-		$this->create_live_table( 'pontifextest_beta', 'live-beta' );
+		$this->create_live_table( self::scratch_table( 'pontifextest_alpha' ), 'live-alpha' );
+		$this->create_live_table( self::scratch_table( 'pontifextest_beta' ), 'live-beta' );
 
 		// Statement ordinals during restore: alpha DROP(1), CREATE(2), INSERT(3),
 		// beta DROP(4), CREATE(5) — the 5th call fails, before any cut-over.
@@ -146,8 +173,8 @@ final class AtomicRestoreTest extends TestCase {
 			$this->assertStringContainsString( 'simulated mid-replay failure', $failure->getMessage() );
 		}
 
-		$this->assertSame( 'live-alpha', $this->value_in( 'pontifextest_alpha' ), 'The live alpha table must be untouched by the failed restore.' );
-		$this->assertSame( 'live-beta', $this->value_in( 'pontifextest_beta' ), 'The live beta table must be untouched by the failed restore.' );
+		$this->assertSame( 'live-alpha', $this->value_in( self::scratch_table( 'pontifextest_alpha' ) ), 'The live alpha table must be untouched by the failed restore.' );
+		$this->assertSame( 'live-beta', $this->value_in( self::scratch_table( 'pontifextest_beta' ) ), 'The live beta table must be untouched by the failed restore.' );
 		$this->assertSame( array(), $this->leftover_pontifex_tables(), 'The aborted staging tables must be dropped.' );
 	}
 
@@ -157,16 +184,19 @@ final class AtomicRestoreTest extends TestCase {
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
 	private function archive_with_both_tables() {
-		$alpha_sql = "DROP TABLE IF EXISTS `pontifextest_alpha`;\n"
-			. "CREATE TABLE `pontifextest_alpha` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
-			. "INSERT INTO `pontifextest_alpha` (`id`, `val`) VALUES (1, 'restored-alpha');\n";
-		$beta_sql  = "DROP TABLE IF EXISTS `pontifextest_beta`;\n"
-			. "CREATE TABLE `pontifextest_beta` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
-			. "INSERT INTO `pontifextest_beta` (`id`, `val`) VALUES (1, 'restored-beta');\n";
+		$alpha = self::scratch_table( 'pontifextest_alpha' );
+		$beta  = self::scratch_table( 'pontifextest_beta' );
+
+		$alpha_sql = "DROP TABLE IF EXISTS `{$alpha}`;\n"
+			. "CREATE TABLE `{$alpha}` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
+			. "INSERT INTO `{$alpha}` (`id`, `val`) VALUES (1, 'restored-alpha');\n";
+		$beta_sql  = "DROP TABLE IF EXISTS `{$beta}`;\n"
+			. "CREATE TABLE `{$beta}` (id INT NOT NULL PRIMARY KEY, val VARCHAR(50)) DEFAULT CHARSET=utf8mb4;\n"
+			. "INSERT INTO `{$beta}` (`id`, `val`) VALUES (1, 'restored-beta');\n";
 
 		$plans = array(
-			self::db_chunk_plan( 'pontifextest_alpha', 3, $alpha_sql ),
-			self::db_chunk_plan( 'pontifextest_beta', 3, $beta_sql ),
+			self::db_chunk_plan( $alpha, 3, $alpha_sql ),
+			self::db_chunk_plan( $beta, 3, $beta_sql ),
 		);
 
 		$writer = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
@@ -213,7 +243,7 @@ final class AtomicRestoreTest extends TestCase {
 	private function leftover_pontifex_tables(): array {
 		global $wpdb;
 		$leftovers = array();
-		foreach ( array( 'pontifexstg_pontifextest_%', 'pontifexold_pontifextest_%' ) as $pattern ) {
+		foreach ( array( 'pontifexstg_' . $wpdb->prefix . 'pontifextest_%', 'pontifexold_' . $wpdb->prefix . 'pontifextest_%' ) as $pattern ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test assertion: list leftover scratch tables.
 			$found = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $pattern ) );
 			foreach ( $found as $table ) {
@@ -231,7 +261,7 @@ final class AtomicRestoreTest extends TestCase {
 	 */
 	private function drop_scratch_tables(): void {
 		global $wpdb;
-		foreach ( self::SCRATCH_TABLES as $table ) {
+		foreach ( self::scratch_tables() as $table ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test cleanup: drop a scratch table.
 			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
 		}

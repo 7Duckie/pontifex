@@ -14,10 +14,16 @@ use Pontifex\Exception\HostCannotComply;
 
 use Closure;
 use InvalidArgumentException;
+use RecursiveCallbackFilterIterator;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use RuntimeException;
+use SplFileInfo;
+use Throwable;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Filesystem\TempArtefact;
 
 /**
  * Writes one decoded archive entry back to the filesystem.
@@ -145,6 +151,85 @@ final class FileWriter {
 	private const BYTES_PER_MEGABYTE = 1048576;
 
 	/**
+	 * Kind tag for a newly created FILE path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_FILE = 'file';
+
+	/**
+	 * Kind tag for a newly created DIRECTORY path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_DIRECTORY = 'directory';
+
+	/**
+	 * Kind tag for a newly created SYMLINK path in {@see self::$created_paths}.
+	 *
+	 * @var string
+	 */
+	private const LEDGER_KIND_SYMLINK = 'symlink';
+
+	/**
+	 * How many newly-created paths the creation ledger will record before giving up.
+	 *
+	 * The ledger (see {@see self::$created_paths}) exists so a FAILED restore's
+	 * recovery can delete exactly what this run created and nothing else — see
+	 * {@see self::remove_created_paths()}. It has to live in memory for the length
+	 * of EVERY restore, not only a failing one, so its ceiling is sized for the
+	 * ordinary case, not the archive that would most benefit from a complete
+	 * record.
+	 *
+	 * A restore inside a 128 MB web request already spends up to a quarter of
+	 * that on a single entry's decode buffer (RestoreRunner's own memory
+	 * budgeting), so the ledger's own share has to be a small slice of whatever
+	 * is left over. Each recorded path costs a two-element PHP array plus its
+	 * own bytes — call it 150-250 bytes for a typical WordPress-shaped relative
+	 * path such as "wp-content/plugins/some-plugin/includes/class-something.php"
+	 * — so 20,000 entries costs on the order of 3-5 MB, a small fraction of what
+	 * remains once the per-entry decode budget is accounted for.
+	 *
+	 * That sits well below what a real restore can create: a fresh-server
+	 * whole-site restore (WordPress core, a handful of plugins, any real media
+	 * library) clears it easily. Hitting the cap is therefore the ORDINARY
+	 * outcome for a large restore, not a rare one — which is fine, because past
+	 * it {@see self::remove_created_paths()} honestly reports a merge instead of
+	 * a revert. An honest "this cannot be proven complete" is worth more than a
+	 * precise-sounding claim this ledger has no way to back up.
+	 *
+	 * @var int
+	 */
+	private const CREATION_LEDGER_CAP = 20000;
+
+	/**
+	 * Every path this restore run's writer newly created, in creation order.
+	 *
+	 * Populated only by {@see self::write_file()}, {@see self::write_file_from_stream()},
+	 * {@see self::write_directory()}, and {@see self::write_symlink()} — and, within each
+	 * of those, only once the write has actually landed (the rename for a file, the
+	 * mkdir+chmod for a directory, the symlink() call itself). Recording BEFORE that
+	 * point would let an aborted mid-write leave a ledger entry for a path that was
+	 * never really created, and {@see self::remove_created_paths()} would then delete
+	 * something it did not put there — the exact failure this ledger exists to
+	 * prevent, aimed at itself.
+	 *
+	 * Each element is a two-tuple of the entry's normalised relative path and one of
+	 * the LEDGER_KIND_* constants. Bounded by {@see self::CREATION_LEDGER_CAP}; see
+	 * {@see self::record_created_path()}.
+	 *
+	 * @var array<int, array{0: string, 1: string}>
+	 */
+	private array $created_paths = array();
+
+	/**
+	 * Whether the creation ledger stopped recording once {@see self::CREATION_LEDGER_CAP} was reached.
+	 *
+	 * @var bool
+	 */
+	private bool $creation_ledger_incomplete = false;
+
+	/**
 	 * Absolute path of the directory under which all entries are restored.
 	 *
 	 * Always stored without a trailing slash.
@@ -210,7 +295,9 @@ final class FileWriter {
 	 * own upload-time disk check, since a host can disable or restrict the
 	 * function) only so unit tests — which cannot make the real disk report an
 	 * arbitrary free-space figure — can substitute a controlled reading;
-	 * production always reads the real filesystem.
+	 * production always reads the real filesystem. When disk_free_space()
+	 * itself is absent from this host, the default closure reads as false,
+	 * same as any other unreadable figure.
 	 *
 	 * @var Closure(string): (float|false)
 	 */
@@ -257,7 +344,11 @@ final class FileWriter {
 		$this->disk_free_space       = null !== $disk_free_space
 			? Closure::fromCallable( $disk_free_space )
 			: static function ( string $path ) {
-				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled or restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
+				if ( ! function_exists( 'disk_free_space' ) ) {
+					return false;
+				}
+
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
 				return @disk_free_space( $path );
 			};
 		$this->symlink_probe         = null !== $symlink_probe
@@ -338,18 +429,18 @@ final class FileWriter {
 
 		if ( $header->is_file() ) {
 			if ( $result->is_streamed() ) {
-				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+				$this->write_file_from_stream( $target_path, $result->payload_stream(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime(), $relative_path );
 			} else {
-				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime() );
+				$this->write_file( $target_path, $result->payload(), self::clamp_mode( (int) $header->mode() ), (int) $header->mtime(), $relative_path );
 			}
 			return;
 		}
 		if ( $header->is_directory() ) {
-			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ) );
+			$this->write_directory( $target_path, self::clamp_mode( (int) $header->mode() ), $relative_path );
 			return;
 		}
 		if ( $header->is_symlink() ) {
-			$this->write_symlink( $target_path, (string) $header->target() );
+			$this->write_symlink( $target_path, (string) $header->target(), $relative_path );
 			return;
 		}
 
@@ -783,14 +874,15 @@ final class FileWriter {
 			return false;
 		}
 
-		// Named to match the project's temp-artefact shape (*.pontifex-*.tmp, as
-		// built by self::temp_sibling_path() and its siblings elsewhere) rather
-		// than a shape of its own. The finally below removes it on every normal
-		// outcome, but a SIGKILL between the symlink() and the finally cannot be
-		// caught by anything — and an orphan nobody sweeps would then sit under
-		// wp-content forever and be recorded as a dangling symlink by the next
-		// backup. Matching the known shape is what lets a sweep find it at all.
-		$probe_name   = '.symlink-probe.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// Built through TempArtefact::suffix() — the same helper
+		// self::temp_sibling_path() uses — rather than formatting its own
+		// uniqid() call, so this probe's shape and a real write's temp shape can
+		// never drift apart; see that class's docblock. The finally below
+		// removes it on every normal outcome, but a SIGKILL between the
+		// symlink() and the finally cannot be caught by anything — and an
+		// orphan left this way is exactly what self::sweep_orphaned_temp_files()
+		// recognises and removes at the start of the next restore.
+		$probe_name   = '.symlink-probe' . TempArtefact::suffix();
 		$probe_path   = $directory . '/' . $probe_name;
 		$probe_target = $probe_name . '.target';
 
@@ -1047,6 +1139,7 @@ final class FileWriter {
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
 	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
+	 * @throws HostCannotComply If readlink() is not available on this host to read an existing on-disk link's target.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1077,6 +1170,21 @@ final class FileWriter {
 		$absolute = self::absolute_from_components( $candidate );
 		if ( ! is_link( $absolute ) ) {
 			return null;
+		}
+
+		// Fail closed, but as a host limitation rather than an archive defect: the
+		// archive itself may be perfectly sound, and it is only this host's inability
+		// to read an existing link's target that stands in the way, so the refusal is
+		// HostCannotComply here rather than the ArchiveNotTrustworthy thrown below for
+		// a link this host genuinely could not read.
+		if ( ! function_exists( 'readlink' ) ) {
+			$message = sprintf(
+				'Cannot check the symbolic link "%s": resolving its target "%s" reaches an existing link on disk, but readlink() is not available on this host, commonly because it is listed in disable_functions. Where that link points cannot be established, so the restore is refused rather than risk writing outside your site.',
+				$link_path,
+				$raw_target
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target for diagnostic context; exception path, not HTML output.
+			throw new HostCannotComply( $message );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Reading an existing link's target during the restore preflight; WP_Filesystem has no symlink primitive, and a failure is turned into a refusal immediately below rather than silenced.
@@ -1550,6 +1658,29 @@ final class FileWriter {
 	 * probe file into is a root the restore is about to fail on anyway, for
 	 * the identical reason, on its very first real entry.
 	 *
+	 * The try/finally above covers every ORDINARY exit from this method —
+	 * it does not, and cannot, cover a SIGKILL or a host timeout that kills
+	 * the PHP process between the write and the finally block ever running,
+	 * because nothing in the interpreter executes at all once the process
+	 * is gone. Until this method's probe carried
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()}'s own shape, a kill
+	 * at that exact moment left a `.PontifexCaseProbe<hex>` file sitting
+	 * directly in the installation root that no sweep recognised —
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} matches
+	 * only a name ending in that shape, and this probe's name carried none
+	 * of it. Both {@see self::case_probe_basenames()}'s returned names now
+	 * end with the SAME suffix (generated once, never per-name — see that
+	 * method's own docblock for why calling it twice would break the
+	 * comparison below), for exactly that reason: it is what lets
+	 * {@see self::sweep_orphaned_temp_files()} recognise and remove this
+	 * probe's leftover artefact on the next restore, the same way it
+	 * already recognises {@see self::probe_symlink_creation()}'s own
+	 * dangling-symlink orphan — including via that method's REACH section,
+	 * which lists $this->destination_root's own immediate children on a
+	 * required-prefix-narrowed restore precisely because this probe, like
+	 * that one, writes directly to the installation root rather than
+	 * somewhere under the prefix.
+	 *
 	 * @return bool True if the destination filesystem is case-sensitive.
 	 */
 	private function destination_is_case_sensitive(): bool {
@@ -1557,9 +1688,9 @@ final class FileWriter {
 			return $this->case_sensitive_destination;
 		}
 
-		$name         = 'PontifexCaseProbe' . bin2hex( random_bytes( 8 ) );
-		$probe_path   = $this->destination_root . '/.' . $name;
-		$flipped_path = $this->destination_root . '/.' . self::flip_case( $name );
+		list( $probe_name, $flipped_name ) = self::case_probe_basenames();
+		$probe_path                        = $this->destination_root . '/' . $probe_name;
+		$flipped_path                      = $this->destination_root . '/' . $flipped_name;
 
 		$this->case_sensitive_destination = false;
 
@@ -1588,6 +1719,52 @@ final class FileWriter {
 				@unlink( $probe_path );
 			}
 		}
+	}
+
+	/**
+	 * Build the case-sensitivity probe's own basename and its case-flipped twin.
+	 *
+	 * Pure and side-effect-free — no filesystem I/O — and deliberately pulled
+	 * out of {@see self::destination_is_case_sensitive()} rather than left
+	 * inline there, for one reason: that method's probe file exists on disk
+	 * for only the handful of instructions between its own
+	 * file_put_contents() and its finally block's unlink(), so there is no
+	 * moment at which anything outside that method could observe the real
+	 * name in use. Extracting the name-construction into its own method
+	 * gives a test a way to drive this EXACT logic through reflection and
+	 * pin its output against
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()}, rather than
+	 * having to retype the shape by hand — which would prove only that a
+	 * test author's own mental model of the code is self-consistent, not
+	 * that the real code is.
+	 *
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()} is called exactly
+	 * ONCE, into a local variable, and that same value is appended,
+	 * UNFLIPPED, to both returned names — never re-generated per name. Two
+	 * things follow from that:
+	 *
+	 *  - Calling suffix() twice, once per name, would produce two DIFFERENT
+	 *    suffixes, and {@see self::destination_is_case_sensitive()}'s
+	 *    file_exists()/fileinode() comparison would then be comparing two
+	 *    names that never had any relationship to begin with, not two
+	 *    spellings of the same one — the probe would always read as
+	 *    case-sensitive, on every filesystem, because the flipped path could
+	 *    never resolve to the same file even where the OS folds case.
+	 *  - Because flip_case() is applied only to the "PontifexCaseProbe<hex>"
+	 *    portion, before the shared suffix is appended, the suffix itself
+	 *    never passes through flip_case() at all — so the two returned names
+	 *    are guaranteed to differ in exactly the same way they always did,
+	 *    only in the case of that portion, never in the newly-added suffix.
+	 *    That is what keeps the probe's own comparison provably unchanged by
+	 *    this method's addition.
+	 *
+	 * @return array{0: string, 1: string} The probe's own basename (leading dot included), then its case-flipped twin.
+	 */
+	private static function case_probe_basenames(): array {
+		$suffix = TempArtefact::suffix();
+		$name   = 'PontifexCaseProbe' . bin2hex( random_bytes( 8 ) );
+
+		return array( '.' . $name . $suffix, '.' . self::flip_case( $name ) . $suffix );
 	}
 
 	/**
@@ -1746,13 +1923,98 @@ final class FileWriter {
 		if ( '' === $parent || $parent === $target_path || is_dir( $parent ) ) {
 			return;
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-		if ( ! @mkdir( $parent, self::PARENT_DIR_MODE, true ) && ! is_dir( $parent ) ) {
+		if ( ! $this->create_directory_recording_intermediates( $parent, self::PARENT_DIR_MODE ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $parent is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not create parent directory "%s".', $parent )
 			);
 		}
+	}
+
+	/**
+	 * Create every missing directory level between the deepest existing ancestor and $absolute_directory, recording each one the instant it exists.
+	 *
+	 * {@see self::ensure_parent_directory()} and {@see self::write_directory()}
+	 * used to hand $absolute_directory straight to a single RECURSIVE mkdir()
+	 * call. PHP's recursive mkdir() silently creates every missing intermediate
+	 * level in one sweep, but this class's creation ledger only ever heard about
+	 * the ONE path the caller passed in — never about the intermediate levels
+	 * PHP brought into existence along the way to get there. A single file entry
+	 * "wp-content/plugins/intruder/evil.php", restored into a destination that
+	 * has neither "wp-content/plugins" nor "wp-content/plugins/intruder" yet,
+	 * left BOTH of those directories on disk with no ledger entry for either:
+	 * recovery would neither remove them nor report them as failures, and
+	 * {@see CreationLedgerCleanupReport::is_precise_revert()} would still answer
+	 * true even though the intruder's whole directory tree survived. This is
+	 * squarely inside ADR 0024's own threat model — nothing requires an
+	 * archive's manifest to carry directory entries for every level its file
+	 * entries imply, so an archive that omits them exercises exactly this path.
+	 *
+	 * This method replaces the recursive call with a level-by-level walk, via
+	 * {@see self::deepest_existing_ancestor()}, so every level THIS CALL creates
+	 * gets its own ledger entry immediately after it exists — never batched,
+	 * never deferred to a pass over what turned out to be new afterward. That
+	 * ordering — record the level the instant it lands, not "mkdir recursively,
+	 * then work out afterwards which levels were new" — is the same rule
+	 * {@see self::record_created_path()}'s own docblock states for every other
+	 * write in this class, applied per level instead of once per entry: if
+	 * creation fails half-way through a multi-level path, the levels that DID
+	 * get created are still recorded as each one lands, so a part-failed
+	 * directory creation is precisely the failed-restore case this ledger
+	 * exists to answer for, rather than a gap in it.
+	 *
+	 * A level is recorded only when THIS call actually created it. If mkdir()
+	 * reports failure but is_dir() is then true for that level, a concurrent
+	 * creator won the race for it — it existed by the time this call could
+	 * know, so it is not this run's to claim in the ledger, matching the
+	 * "existed before" gate every other write_*() method applies via
+	 * {@see self::path_exists_before_write()}.
+	 *
+	 * $mode is applied to every level this call creates — the exact figure the
+	 * caller's own (formerly recursive) mkdir() applied to every level PHP
+	 * created on its behalf, subject to the process umask exactly as a single
+	 * recursive mkdir() call already was. This method changes what gets
+	 * RECORDED, never what gets CREATED: the directories that end up on disk,
+	 * and their modes, are identical to what the recursive call produced.
+	 *
+	 * Recording more paths than before can reach {@see self::CREATION_LEDGER_CAP}
+	 * sooner on a restore that creates many new directory trees. That is honest
+	 * reporting doing its job, not a regression: those intermediate directories
+	 * were always being created; the ledger's own cap-driven
+	 * "ledger_was_complete" flag now honestly reflects the fuller picture, which
+	 * is exactly the trade-off ADR 0024's own "The cap" section already accepts
+	 * for an ordinary fresh-server restore.
+	 *
+	 * @param string $absolute_directory Absolute path of the directory that must exist by the time this returns; at or beneath $this->destination_root.
+	 * @param int    $mode                Mode applied to every level this call creates.
+	 * @return bool True once $absolute_directory exists — whether it already did, was created here, or was created by a concurrent process — false only if a level could not be created and still does not exist.
+	 */
+	private function create_directory_recording_intermediates( string $absolute_directory, int $mode ): bool {
+		$deepest_existing = $this->deepest_existing_ancestor( $absolute_directory );
+		if ( $deepest_existing === $absolute_directory ) {
+			return true;
+		}
+
+		$missing_levels = array();
+		for ( $level = $absolute_directory; $level !== $deepest_existing; $level = dirname( $level ) ) {
+			$missing_levels[] = $level;
+		}
+		$missing_levels = array_reverse( $missing_levels );
+
+		foreach ( $missing_levels as $level ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write, one level at a time (never recursive) so each level can be recorded the instant it exists; see this method's own docblock for why.
+			if ( @mkdir( $level, $mode ) ) {
+				$this->record_created_path( substr( $level, strlen( $this->destination_root ) + 1 ), self::LEDGER_KIND_DIRECTORY );
+				continue;
+			}
+			if ( ! is_dir( $level ) ) {
+				return false;
+			}
+			// A concurrent creator already made this level real by the time this
+			// call could tell; it is not this run's creation to claim.
+		}
+
+		return true;
 	}
 
 	/**
@@ -1774,19 +2036,71 @@ final class FileWriter {
 	}
 
 	/**
+	 * Whether something already sits at $target_path, of any kind, before a write touches it.
+	 *
+	 * PHP's file_exists() alone misses a DANGLING symlink (it follows the link to
+	 * ask about the target, and reports false when that target is absent), so it
+	 * is paired with is_link() — exactly the same pairing {@see self::write_symlink()}
+	 * already used to decide whether to unlink a conflicting entry first. Called at
+	 * the very start of each write_*() method, before that method changes anything,
+	 * so the answer reflects the filesystem as the restore found it, not as this
+	 * write is about to leave it.
+	 *
+	 * @param string $target_path Absolute path about to be written.
+	 * @return bool True if a file, directory, or symlink (dangling or not) already exists there.
+	 */
+	private static function path_exists_before_write( string $target_path ): bool {
+		return file_exists( $target_path ) || is_link( $target_path );
+	}
+
+	/**
+	 * Record that this run created $relative_path, unless the creation ledger has already given up.
+	 *
+	 * Called ONLY after a write has actually landed — see each write_*() method's
+	 * own call site for what "landed" means for that kind. Once
+	 * {@see self::CREATION_LEDGER_CAP} is reached this stops recording (and marks
+	 * the ledger incomplete) rather than growing without bound; a restore that
+	 * creates more paths than the cap allows is exactly the case
+	 * {@see self::remove_created_paths()} is built to answer honestly, not silently.
+	 *
+	 * @param string $relative_path The entry's normalised relative path.
+	 * @param string $kind          One of the LEDGER_KIND_* constants.
+	 * @return void
+	 */
+	private function record_created_path( string $relative_path, string $kind ): void {
+		if ( $this->creation_ledger_incomplete ) {
+			return;
+		}
+		if ( count( $this->created_paths ) >= self::CREATION_LEDGER_CAP ) {
+			$this->creation_ledger_incomplete = true;
+			return;
+		}
+		$this->created_paths[] = array( $relative_path, $kind );
+	}
+
+	/**
 	 * Write file contents and set mode and mtime.
 	 *
 	 * The bytes land in a sibling temp file which is renamed over the target
 	 * once complete — see {@see self::finalise_temp()} for the two properties
 	 * that buys (per-file crash atomicity, and replacing read-only targets).
 	 *
-	 * @param string $target_path Absolute path of the file to write.
-	 * @param string $payload     Decoded file contents.
-	 * @param int    $mode        POSIX mode bits to set after writing.
-	 * @param int    $mtime       Unix modification timestamp to set after writing.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, and the creation ledger is updated only once
+	 * {@see self::finalise_temp()} has returned — meaning the rename already
+	 * succeeded — never before. See {@see self::record_created_path()}'s
+	 * docblock for why recording early would be the same class of bug this
+	 * ledger exists to prevent.
+	 *
+	 * @param string $target_path   Absolute path of the file to write.
+	 * @param string $payload       Decoded file contents.
+	 * @param int    $mode          POSIX mode bits to set after writing.
+	 * @param int    $mtime         Unix modification timestamp to set after writing.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
 	 */
-	private function write_file( string $target_path, string $payload, int $mode, int $mtime ): void {
+	private function write_file( string $target_path, string $payload, int $mode, int $mtime, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 		$temp_path = self::temp_sibling_path( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
@@ -1799,19 +2113,27 @@ final class FileWriter {
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_FILE );
+		}
 	}
 
 	/**
 	 * Build the sibling temp path a file is written to before its atomic rename.
 	 *
 	 * A sibling of the target (same directory), so the final rename is a
-	 * same-filesystem move; a unique suffix keeps concurrent writers apart.
+	 * same-filesystem move; the unique suffix — built by
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()}, the same helper
+	 * {@see self::probe_symlink_creation()} uses, so the two producers can
+	 * never drift apart — keeps concurrent writers apart and lets
+	 * {@see self::sweep_orphaned_temp_files()} recognise one left behind by an
+	 * interrupted restore.
 	 *
 	 * @param string $target_path The final file path.
 	 * @return string The temp path to write to first.
 	 */
 	private static function temp_sibling_path( string $target_path ): string {
-		return $target_path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+		return $target_path . TempArtefact::suffix();
 	}
 
 	/**
@@ -1885,13 +2207,20 @@ final class FileWriter {
 	 * reader handed the stream over. The source stream is closed here — the
 	 * result's consumer owns it, and this is where it is consumed.
 	 *
-	 * @param string   $target_path Absolute path of the file to write.
-	 * @param resource $payload     Decoded file contents, positioned at the start.
-	 * @param int      $mode        POSIX mode bits to set after writing.
-	 * @param int      $mtime       Unix modification timestamp to set after writing.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, and the creation ledger is updated only once
+	 * {@see self::finalise_temp()} has returned — meaning the rename already
+	 * succeeded — never before, mirroring {@see self::write_file()}.
+	 *
+	 * @param string   $target_path   Absolute path of the file to write.
+	 * @param resource $payload       Decoded file contents, positioned at the start.
+	 * @param int      $mode          POSIX mode bits to set after writing.
+	 * @param int      $mtime         Unix modification timestamp to set after writing.
+	 * @param string   $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If writing, chmod, touch, or the final rename fails.
 	 */
-	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime ): void {
+	private function write_file_from_stream( string $target_path, $payload, int $mode, int $mtime, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 		$temp_path = self::temp_sibling_path( $target_path );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
@@ -1918,6 +2247,9 @@ final class FileWriter {
 			);
 		}
 		$this->finalise_temp( $temp_path, $target_path, $mode, $mtime );
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_FILE );
+		}
 	}
 
 	/**
@@ -1936,11 +2268,18 @@ final class FileWriter {
 	 * Idempotent: if the directory already exists, its mode is
 	 * updated to match.
 	 *
-	 * @param string $target_path Absolute path of the directory to create.
-	 * @param int    $mode        POSIX mode bits to set.
+	 * Whether the target already existed is captured BEFORE anything below
+	 * changes the filesystem, so a directory that already existed (the
+	 * ordinary idempotent case) is never mistaken for one this run created —
+	 * see {@see self::record_created_path()}.
+	 *
+	 * @param string $target_path   Absolute path of the directory to create.
+	 * @param int    $mode          POSIX mode bits to set.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If the directory cannot be created or its mode cannot be set.
 	 */
-	private function write_directory( string $target_path, int $mode ): void {
+	private function write_directory( string $target_path, int $mode, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
 		$this->remove_conflicting_symlink( $target_path );
 
 		// Keep the directory owner-writable for the duration of the walk, and
@@ -1961,8 +2300,28 @@ final class FileWriter {
 		$working_mode = $mode | 0o700;
 
 		if ( ! is_dir( $target_path ) ) {
+			// Every ancestor above this entry's OWN directory is ensured first,
+			// via the same {@see self::create_directory_recording_intermediates()}
+			// helper {@see self::ensure_parent_directory()} uses — write_entry()
+			// already calls ensure_parent_directory() with this exact $target_path
+			// before dispatching here, so in practice this is a cheap no-op
+			// confirming that guarantee still holds; calling it again here rather
+			// than relying on that call order is what keeps this method correct on
+			// its own, even if a future change ever calls it some other way. What
+			// is left below is then always a single, non-recursive mkdir() for the
+			// entry's OWN directory — never a level this call would need to record
+			// as an "intermediate", since it is the very path $relative_path names,
+			// and the existed_before-gated record_created_path() call below already
+			// accounts for it.
+			$parent = dirname( $target_path );
+			if ( '' !== $parent && $parent !== $target_path && ! $this->create_directory_recording_intermediates( $parent, $working_mode ) ) {
+				throw new RuntimeException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'Could not create directory "%s".', $target_path )
+				);
+			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time filesystem write; WP_Filesystem is unavailable in CLI/non-WP contexts where this code may run.
-			if ( ! @mkdir( $target_path, $working_mode, true ) && ! is_dir( $target_path ) ) {
+			if ( ! @mkdir( $target_path, $working_mode ) && ! is_dir( $target_path ) ) {
 				throw new RuntimeException(
 					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 					sprintf( 'Could not create directory "%s".', $target_path )
@@ -1976,6 +2335,10 @@ final class FileWriter {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path is reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not chmod directory "%s".', $target_path )
 			);
+		}
+
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_DIRECTORY );
 		}
 
 		if ( $working_mode !== $mode ) {
@@ -2015,6 +2378,652 @@ final class FileWriter {
 	}
 
 	/**
+	 * Remove every leftover temp artefact an earlier, interrupted restore abandoned.
+	 *
+	 * The file-side twin of the sweep {@see \Pontifex\Restore\DatabaseWriter::begin_staging()}
+	 * already performs for a crashed earlier run's leftover `pontifexstg_*` /
+	 * `pontifexold_*` tables (ADR 0009): same policy, same moment in the
+	 * restore, same failure posture. {@see self::write_file()} and
+	 * {@see self::write_file_from_stream()} both land their bytes in a sibling
+	 * temp file — {@see self::temp_sibling_path()} — before renaming it over
+	 * the target, and {@see self::probe_symlink_creation()} briefly creates a
+	 * temp-shaped symlink of its own. A restore killed between either write
+	 * and its rename (SIGKILL, a host timeout, a fatal error) leaves that temp
+	 * artefact sitting next to the real file, inside the live site. Nothing
+	 * else ever removes it: it is not the manifest's problem (the archive that
+	 * caused it is long finished), and it is not
+	 * {@see self::discard_temp()}'s problem either — that only ever runs for a
+	 * failure THIS call caught, never for one a previous, separate PHP process
+	 * never got the chance to catch at all. Left alone, these accumulate under
+	 * wp-content, can approach the size of the file they shadow, and —
+	 * because {@see \Pontifex\Manifest\FileScanner} only prunes
+	 * wp-content/pontifex, never a "*.tmp" shape — are scanned into the NEXT
+	 * backup as ordinary content and faithfully restored onto whatever site
+	 * that backup is later used to recover.
+	 *
+	 * CALLED ONCE, by {@see \Pontifex\Restore\RestoreRunner::restore()},
+	 * immediately before the database-side sweep — after every preflight has
+	 * already had its chance to refuse, so no archive this restore rejects has
+	 * had any of its content applied. That is not quite the same as saying
+	 * this call itself changes nothing: {@see self::destination_is_case_sensitive()}
+	 * runs inside it and writes a one-off probe file at $this->destination_root,
+	 * removed again in its own `finally` before this method ever reasons about
+	 * an orphan. Never called from verify(), which writes nothing and so has
+	 * nothing to sweep.
+	 *
+	 * REACH. The recursive walk below is rooted at $this->destination_root,
+	 * narrowed to `$this->destination_root . '/' . $this->required_prefix`
+	 * when a required prefix is set (a content-only restore is confined to
+	 * "wp-content"; a rollback has none, so the whole destination root is
+	 * walked). An earlier version of this docblock called that "exactly
+	 * complete, no more and no less" — an adversarial audit demonstrated both
+	 * halves of that claim false against a real filesystem.
+	 *
+	 * Too little: {@see self::assert_within_required_prefix()} does confine
+	 * every entry {@see self::write_entry()} performs to that same boundary,
+	 * but the CAPABILITY PREFLIGHT that runs ahead of it does not. See
+	 * {@see self::symlink_creation_probe_directories()}'s own docblock for why
+	 * {@see self::assert_symlinks_creatable()}'s probe directories fall back
+	 * to $this->destination_root itself once a declared link's own parent has
+	 * no existing ancestor closer than the root — which a symlink declared at
+	 * exactly the required-prefix path ("wp-content" itself), or a restore
+	 * onto a fresh destination where nothing has been created yet, both
+	 * produce. A probe interrupted there ({@see self::probe_symlink_creation()})
+	 * leaves its dangling-symlink orphan AT the installation root, outside a
+	 * required-prefix-narrowed recursive walk, where a content-only restore
+	 * would otherwise never look again. So, when a required prefix is set,
+	 * this method ALSO lists $this->destination_root's own immediate
+	 * children — never descending, because the recursive walk already covers
+	 * the whole prefixed subtree — applying the same pattern match and the
+	 * same isLink()-before-isFile() removal described under REMOVAL below,
+	 * and counting those removals the same way. See the second loop in this
+	 * method's body.
+	 *
+	 * Too much: $sweep_root itself can be a symlink — see TRAVERSAL below for
+	 * why that is caught separately, before the recursive walk is even built.
+	 *
+	 * The honest claim REACH can make, then, is: everywhere this writer can
+	 * actually have created an artefact, which is the prefixed subtree PLUS
+	 * the installation root the capability probe can fall back to — never
+	 * more, and, since the two fixes above, never less either. If the sweep
+	 * root does not exist yet (a first-ever restore onto a fresh destination),
+	 * there is nothing to sweep and this returns 0 without creating anything.
+	 *
+	 * NO AGE THRESHOLD. {@see \Pontifex\Lock\OperationLock} guarantees only
+	 * one DESTRUCTIVE, site-mutating operation — backup, restore, or
+	 * rollback — runs against this site at a time, and it is THAT guarantee,
+	 * not "only one operation of any kind whatsoever", that the absence of an
+	 * age threshold actually rests on: by the time this method runs (inside a
+	 * restore that has just acquired the lock) no OTHER destructive run can
+	 * be mid-write to a FILE temp of this writer's own, so every match found
+	 * here is necessarily a leftover from a run that is no longer running.
+	 *
+	 * A concurrent `wp pontifex import --dry-run` is the one demonstrated
+	 * exception. {@see \Pontifex\Cli\ImportCommand} deliberately acquires no
+	 * lock for a dry run, because it changes nothing and two rehearsals have
+	 * no reason to queue behind one another — but a dry run still reaches
+	 * {@see \Pontifex\Restore\RestorePreflight::assert_host_can_write()},
+	 * which calls {@see self::assert_symlinks_creatable()}, which calls
+	 * {@see self::probe_symlink_creation()}: a genuinely LIVE
+	 * `.symlink-probe` artefact can therefore exist while this sweep runs
+	 * concurrently, inside a second, lock-holding process. An earlier version
+	 * of this docblock claimed that could not happen at all; two concurrent
+	 * processes, run deliberately against each other, proved it false — the
+	 * sweeper removed the dry run's own live probe artefact out from under it.
+	 *
+	 * That race is harmless, though, and demonstrably so rather than merely
+	 * assumed. {@see self::probe_symlink_creation()}'s `return` statement
+	 * captures `@symlink()`'s own success-or-failure result BEFORE its
+	 * `finally` block ever runs, so the answer the probe gives back to the
+	 * dry run is already decided by the moment a concurrent sweep could
+	 * remove the artefact underneath it. The `finally` block's own
+	 * `is_link()` check then simply finds nothing left to remove and skips
+	 * its unlink() quietly — no error, no changed answer, nothing for the
+	 * dry run to notice at all.
+	 *
+	 * An age threshold would still actively break the commonest real case
+	 * regardless — kill a restore, retry immediately — where the orphans
+	 * left behind are still only seconds old. The database-side twin this
+	 * mirrors has no threshold either.
+	 *
+	 * WHAT COUNTS AS AN ORPHAN. Only a basename matching
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} — the exact
+	 * shape {@see \Pontifex\Filesystem\TempArtefact::suffix()} produces,
+	 * anchored at the end of the basename — never a loose "*.tmp" glob; see
+	 * that class's own docblocks for the two shapes it deliberately does not
+	 * match (a resumable export's "*.part" file, and an ordinary user file
+	 * that merely contains "pontifex" or ".tmp" somewhere in its name).
+	 *
+	 * TRAVERSAL, the one way this could be catastrophic if it were wrong.
+	 * Built from {@see RecursiveDirectoryIterator} with
+	 * `SKIP_DOTS | UNIX_PATHS` — the same flags
+	 * {@see \Pontifex\Manifest\FileScanner::scan()} uses — and, critically,
+	 * NEVER `FOLLOW_SYMLINKS`. A live site may legitimately contain a symlink
+	 * (a Composer vendor/ layout, an aliased uploads directory), and one
+	 * shaped like `wp-content/uploads/x -> /` would otherwise turn a sweep
+	 * that followed it into a walk of the ENTIRE filesystem looking for
+	 * something to delete. {@see RecursiveIteratorIterator} calls
+	 * `hasChildren()` with its own default `$allowLinks = false`, so a
+	 * symlinked directory encountered DURING the walk is never descended into
+	 * — this method must not defeat that default by passing anything else.
+	 *
+	 * That default protects every INTERIOR symlink the walk encounters, but
+	 * it says nothing about $sweep_root ITSELF, and an adversarial audit
+	 * demonstrated the gap: `is_dir( $sweep_root )` follows a symlink to ask
+	 * whether its TARGET is a directory, and {@see RecursiveDirectoryIterator}'s
+	 * own constructor then opens whatever a symlinked root resolves to just
+	 * as readily as it opens a real one — `$allowLinks` governs only whether
+	 * the walk descends INTO a child it finds while walking, never what it
+	 * was handed as its starting point. A required prefix of "wp-content"
+	 * whose "wp-content" happens to be a symlink to a foreign tree was
+	 * therefore walked, and swept, in full — while
+	 * {@see self::assert_no_symlinked_ancestor()} refuses every entry
+	 * {@see self::write_entry()} is asked to write through that identical
+	 * symlinked directory, so the writer's own reach there is zero and the
+	 * sweep's was a whole foreign tree. So $sweep_root is checked separately,
+	 * before a single {@see RecursiveDirectoryIterator} is even constructed,
+	 * with BOTH of two guards — this project does not take the lighter
+	 * single-guard option: `is_link( $sweep_root )` refuses outright,
+	 * mirroring {@see self::assert_no_symlinked_ancestor()}'s posture exactly
+	 * (a tree the writer refuses to write THROUGH is a tree the sweep must
+	 * refuse to walk); and, independently, `realpath( $sweep_root )` must
+	 * resolve to $this->destination_root itself or somewhere beneath it,
+	 * with a false or unreadable realpath() result refused rather than
+	 * trusted. Either guard refusing returns 0 without touching anything.
+	 *
+	 * The directory iterator is
+	 * wrapped in a {@see RecursiveCallbackFilterIterator} — INSIDE the
+	 * {@see RecursiveIteratorIterator}, so a pruned directory is never opened
+	 * at all, mirroring {@see \Pontifex\Manifest\FileScanner::scan()} — whose
+	 * callback prunes Pontifex's own working directory via the existing
+	 * {@see self::is_pontifex_working_path()}, fed the candidate's path made
+	 * relative to $this->destination_root, DELIBERATELY NOT to the (possibly
+	 * narrower) sweep root: that method expects the shape
+	 * "wp-content/pontifex/…", and slicing against a sweep root already
+	 * inside wp-content would cut the string in the wrong place and never
+	 * recognise it. The callback's `: bool` return type is declared for the
+	 * same reason FileScanner's is: an edit that fell off the end without
+	 * returning would prune EVERYTHING silently, sweeping nothing and
+	 * reporting success regardless.
+	 *
+	 * TWO deliberate differences from {@see \Pontifex\Manifest\FileScanner::scan()},
+	 * each the opposite choice for the opposite reason:
+	 *
+	 *  1. This walk passes `RecursiveIteratorIterator::CATCH_GET_CHILD`, which
+	 *     FileScanner's deliberately omits. For an export, a silently skipped
+	 *     unreadable directory would be a silent hole in someone's backup —
+	 *     unacceptable. Here the opposite is true: a directory this process
+	 *     cannot even read cannot have been written into by THIS writer
+	 *     either, so it can hold no orphan of ours to sweep; and this is
+	 *     best-effort housekeeping run at the very start of a restore, so its
+	 *     own failure must never be capable of stopping that restore from
+	 *     proceeding.
+	 *  2. The whole walk is wrapped in `try { … } catch ( Throwable $error )`.
+	 *     This method must NEVER throw — not a permissions error, not an
+	 *     iterator failure, nothing. It returns however many artefacts were
+	 *     actually removed before whatever happened, happened.
+	 *
+	 * clearstatcache() runs once at the start: isLink()/isFile() results can
+	 * be cached from earlier in the same request (an earlier restore's own
+	 * probes, in a long-running CLI process), and a stale reading here would
+	 * misclassify what is actually on disk right now.
+	 *
+	 * REMOVAL. For each visited entry whose basename matches the pattern,
+	 * isLink() is checked BEFORE isFile() — an ordering that is load-bearing,
+	 * not stylistic. {@see self::probe_symlink_creation()}'s own orphan is a
+	 * DANGLING symlink (its target, a sibling name chosen to never exist, is
+	 * exactly what makes that probe work at all — see its own docblock), and
+	 * PHP's isFile() reports FALSE for a dangling symlink, because it follows
+	 * the link to ask what the TARGET is, and there is no target. A sweep
+	 * that checked isFile() first would therefore silently pass over every
+	 * probe orphan while still reporting success. unlink() on a symlink
+	 * removes the link itself, never anything at the far end of a (here,
+	 * nonexistent) target — the same guarantee
+	 * {@see self::remove_conflicting_symlink()} relies on elsewhere in this
+	 * class. A directory that happens to be NAMED like a temp artefact — never
+	 * produced by this class, but not this method's business to assume
+	 * impossible — is left alone entirely and does not contribute to the
+	 * count. The same ordering, and the same directory exemption, govern the
+	 * installation-root scan described under REACH above; it is not a
+	 * separate policy, only a second place the same one is applied.
+	 *
+	 * The returned count is the number of unlink() calls that actually
+	 * returned true — never the number of matching names FOUND. A reported
+	 * figure in this project describes what was actually done, never what was
+	 * merely predicted; a name that matched but failed to unlink (a
+	 * permissions problem, a race) is not counted as removed, because it was
+	 * not.
+	 *
+	 * @return int How many leftover temp artefacts were actually removed.
+	 */
+	public function sweep_orphaned_temp_files(): int {
+		clearstatcache();
+
+		$sweep_root = null === $this->required_prefix
+			? $this->destination_root
+			: $this->destination_root . '/' . $this->required_prefix;
+
+		// Both guards run before a single RecursiveDirectoryIterator is built,
+		// and both refuse the whole sweep (returning 0) rather than merely
+		// skipping the offending part — see TRAVERSAL in this method's
+		// docblock for why $sweep_root itself needs checks the interior
+		// walk's own hasChildren( $allowLinks = false ) default cannot provide.
+		if ( is_link( $sweep_root ) ) {
+			return 0;
+		}
+
+		if ( ! is_dir( $sweep_root ) ) {
+			return 0;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_realpath -- Confirming the sweep root resolves inside this writer's own, already-resolved destination_root before any recursive walk begins; see TRAVERSAL above.
+		$resolved_sweep_root = realpath( $sweep_root );
+		if ( false === $resolved_sweep_root
+			|| ( $resolved_sweep_root !== $this->destination_root
+				&& ! str_starts_with( $resolved_sweep_root, $this->destination_root . '/' ) )
+		) {
+			return 0;
+		}
+
+		$removed = 0;
+
+		try {
+			$destination_root           = $this->destination_root;
+			$case_sensitive_destination = $this->destination_is_case_sensitive();
+			$root_prefix_len            = strlen( $destination_root ) + 1;
+
+			$flags = RecursiveDirectoryIterator::SKIP_DOTS | RecursiveDirectoryIterator::UNIX_PATHS;
+			$inner = new RecursiveDirectoryIterator( $sweep_root, $flags );
+
+			// Pruning happens HERE, inside the recursive walk, exactly as it does in
+			// FileScanner::scan() — a callback that returns false for a directory
+			// means PHP never opens that directory at all, so Pontifex's own working
+			// directory is genuinely never entered by this sweep.
+			$filtered = new RecursiveCallbackFilterIterator(
+				$inner,
+				static function ( SplFileInfo $current ) use ( $root_prefix_len, $case_sensitive_destination ): bool {
+					$relative_path = str_replace( '\\', '/', substr( $current->getPathname(), $root_prefix_len ) );
+
+					return ! self::is_pontifex_working_path( $relative_path, $case_sensitive_destination );
+				}
+			);
+
+			// SELF_FIRST, so a directory whose own name happens to match the
+			// orphan pattern is visited (and correctly left alone; see the
+			// removal loop below) rather than only its contents being seen.
+			// CATCH_GET_CHILD is the deliberate difference from FileScanner's own
+			// walk — see this method's docblock for why the two must disagree.
+			$walker = new RecursiveIteratorIterator(
+				$filtered,
+				RecursiveIteratorIterator::SELF_FIRST,
+				RecursiveIteratorIterator::CATCH_GET_CHILD
+			);
+
+			foreach ( $walker as $info ) {
+				// RecursiveDirectoryIterator yields SplFileInfo (in practice, itself);
+				// the instanceof narrows the iterator's mixed current() for static
+				// analysis rather than trusting that in silence.
+				if ( ! $info instanceof SplFileInfo ) {
+					continue;
+				}
+				if ( ! TempArtefact::is_orphan_name( $info->getFilename() ) ) {
+					continue;
+				}
+
+				$path = $info->getPathname();
+
+				// isLink() FIRST: a probe orphan is a dangling symlink, and isFile()
+				// reports false for one — see this method's docblock.
+				if ( $info->isLink() ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+					continue;
+				}
+
+				if ( $info->isFile() ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+					if ( @unlink( $path ) ) {
+						++$removed;
+					}
+				}
+
+				// Anything else (a directory named like a temp artefact) is left
+				// alone and does not contribute to the count.
+			}
+
+			// REACH's second half: when a required prefix narrows the recursive
+			// walk above to a subtree, this writer can still have left a probe
+			// orphan directly at the installation root — see REACH in this
+			// method's docblock for the two real cases. Never recursive: the
+			// walk above already covers the whole prefixed subtree, so only
+			// $destination_root's own immediate children are listed here.
+			if ( null !== $this->required_prefix ) {
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Restore-time housekeeping listing of this writer's own, already-resolved destination_root; a read failure here simply means there is nothing further this step can find to sweep.
+				$installation_root_children = @scandir( $destination_root );
+				if ( false !== $installation_root_children ) {
+					foreach ( $installation_root_children as $child_name ) {
+						if ( '.' === $child_name || '..' === $child_name ) {
+							continue;
+						}
+						if ( ! TempArtefact::is_orphan_name( $child_name ) ) {
+							continue;
+						}
+
+						$child_path = $destination_root . '/' . $child_name;
+
+						// Same isLink()-before-isFile() ordering as the loop above, and
+						// for the same reason: a dangling probe orphan reports false
+						// from isFile() — see REMOVAL in this method's docblock.
+						if ( is_link( $child_path ) ) {
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+							if ( @unlink( $child_path ) ) {
+								++$removed;
+							}
+							continue;
+						}
+
+						if ( is_file( $child_path ) ) {
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of a leftover artefact from an earlier, interrupted restore; this method must never throw, so a failure here is simply not counted rather than surfaced.
+							if ( @unlink( $child_path ) ) {
+								++$removed;
+							}
+						}
+
+						// A directory named like a temp artefact, at the installation
+						// root, is left alone — the same posture as the loop above.
+					}
+				}
+			}
+		} catch ( Throwable $error ) {
+			// Best-effort housekeeping must never abort the restore it runs ahead
+			// of; whatever was removed before the failure is still reported.
+			unset( $error );
+		}
+
+		return $removed;
+	}
+
+	/**
+	 * Normalise every preserved path the same way the ledger's own paths were normalised.
+	 *
+	 * {@see self::write_entry()} normalises an entry's path via
+	 * {@see self::normalise_entry_path()} BEFORE it is ever recorded into
+	 * {@see self::$created_paths} — so "./wp-content/foo.php",
+	 * "wp-content//foo.php", and "wp-content/foo.php" all land in the ledger as
+	 * the identical string "wp-content/foo.php". A caller's preserved-paths set,
+	 * built from a manifest entry's raw, un-normalised path field, has no reason
+	 * to share that same discipline. Comparing the two verbatim would let a
+	 * safety archive that happens to spell its own path differently — never
+	 * observed from {@see \Pontifex\Rollback\SafetyArchiver}'s own scan-derived
+	 * paths today, but nothing here depends on that holding forever — miss the
+	 * ledger's normalised entry and have that path deleted anyway, which is
+	 * exactly the outcome rule 2 in {@see self::remove_created_paths()} exists to
+	 * rule out. Running both sides through the same normalisation closes that
+	 * for good, in the one place that can never drift out of step with it.
+	 *
+	 * A path {@see self::normalise_entry_path()} refuses outright (empty, a null
+	 * byte, absolute, a ".." segment, or a path that collapses to empty) is
+	 * skipped rather than propagated: it is not a shape the ledger could ever
+	 * hold either, so it can never match a ledger entry, and this method — like
+	 * {@see self::remove_created_paths()} itself — must never throw.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive declares, un-normalised.
+	 * @return array<string, true> The normalised paths, as a set suitable for isset() lookups.
+	 */
+	private function normalised_preserve_set( array $preserved_paths ): array {
+		$preserve = array();
+		foreach ( $preserved_paths as $raw_path ) {
+			try {
+				$preserve[ $this->normalise_entry_path( $raw_path ) ] = true;
+			} catch ( InvalidArgumentException $unusable_path ) {
+				unset( $unusable_path );
+				continue;
+			}
+		}
+		return $preserve;
+	}
+
+	/**
+	 * Every directory that lies strictly above one of $preserve's own paths.
+	 *
+	 * B1 made {@see self::create_directory_recording_intermediates()} record
+	 * an entry's implicit intermediate directories, not only the entry's own
+	 * path — correctly, since those directories genuinely are something this
+	 * run created. But that exposed an incoherence in how rule 2 (below)
+	 * judged them: a directory that survives cleanup ONLY because something
+	 * deliberately preserved inside it is still there is not a FAILED
+	 * removal, it is the preservation working as intended one level up. Rule
+	 * 2 already never removes a path $preserve names outright; this extends
+	 * that same "leave it alone, and say nothing about it either way" verdict
+	 * to a directory that CONTAINS one, for exactly the same reason. Without
+	 * this, {@see self::remove_created_paths()} would call rmdir() on such a
+	 * directory anyway, watch it refuse (rule 3 — a non-empty directory is
+	 * never removed) because the preserved file is still inside it, and
+	 * report that refusal as a cleanup FAILURE — flipping
+	 * {@see CreationLedgerCleanupReport::is_precise_revert()} to false over a
+	 * directory that is exactly where the caller asked it to be.
+	 *
+	 * Built ONCE, up front, from the already-normalised $preserve set — never
+	 * per created-directory — so the later check in
+	 * {@see self::remove_created_paths()} stays a single isset() rather than a
+	 * scan repeated once per directory in the ledger. For a preserved path of
+	 * depth N this method does N constant-time inserts (one per ancestor
+	 * prefix), so building the whole set costs O(preserved paths × depth),
+	 * not O(preserved paths × directories in the ledger).
+	 *
+	 * @param array<string, true> $preserve The already-normalised preserved-path set {@see self::normalised_preserve_set()} returns.
+	 * @return array<string, true> Every strict ancestor directory of every path in $preserve, as a set suitable for isset() lookups.
+	 */
+	private static function preserved_ancestor_directories( array $preserve ): array {
+		$ancestors = array();
+		foreach ( array_keys( $preserve ) as $preserved_path ) {
+			$components = self::path_components( (string) $preserved_path );
+			// The preserved path's own last segment names the preserved entry
+			// itself, not one of its ancestors — rule 2's exact-match skip
+			// already covers that path; this method's job is only the
+			// directories strictly ABOVE it.
+			array_pop( $components );
+
+			$prefix = array();
+			foreach ( $components as $component ) {
+				$prefix[]                             = $component;
+				$ancestors[ implode( '/', $prefix ) ] = true;
+			}
+		}
+		return $ancestors;
+	}
+
+	/**
+	 * Remove every path this run newly created, except any $preserved_paths still declares.
+	 *
+	 * Called only by a FAILED import's recovery, after the pre-import safety
+	 * archive has already been replayed. A restore is purely additive — it
+	 * overwrites and creates, and never deletes a path absent from the archive
+	 * (see {@see self::write_entry()}'s own docblock) — so replaying the safety
+	 * archive alone leaves every file the failed import CREATED still on disk,
+	 * merged in alongside the recovered original content. This is the other
+	 * half of undoing that: delete exactly what THIS writer's own creation
+	 * ledger recorded, and nothing it did not.
+	 *
+	 * Three rules govern what gets removed, none of them negotiable:
+	 *
+	 *  1. ONLY a path this writer's own ledger recorded as newly created —
+	 *     never a set difference against the live filesystem. A set difference
+	 *     would delete legitimate work a live WordPress site did DURING the
+	 *     restore (an upload, a cache file, a session file, a log line
+	 *     written mid-request) merely for not being in the archive being
+	 *     replayed back.
+	 *  2. NEVER a path also present in $preserved_paths, AND NEVER a directory
+	 *     that CONTAINS one. The caller passes the safety archive's own
+	 *     declared paths: anything the safety archive carries belongs to the
+	 *     site's prior state, restoring it there was already correct, and
+	 *     this method's job is only to remove what neither the original site
+	 *     nor the safety archive ever had. Each incoming preserved path is
+	 *     run through {@see self::normalise_entry_path()} — the same
+	 *     normalisation the ledger's own paths already went through in
+	 *     {@see self::write_entry()} — before comparison, so
+	 *     "wp-content/foo.php" and "./wp-content/foo.php" are recognised as
+	 *     the same path rather than missing each other as two different
+	 *     strings. A preserved path that normalisation refuses outright is
+	 *     skipped rather than thrown: it cannot match a ledger entry anyway,
+	 *     and this method must never throw. The "contains one" half — see
+	 *     {@see self::preserved_ancestor_directories()} — exists because B1
+	 *     now records a directory this run created even when nothing but an
+	 *     implicit intermediate step ever pointed at it directly: a directory
+	 *     that survives only because a path deliberately preserved inside it
+	 *     is still there is not a failed removal, it is the SAME preservation
+	 *     one level up, and must be treated identically — counted in neither
+	 *     {@see CreationLedgerCleanupReport::removed_paths()} nor
+	 *     {@see CreationLedgerCleanupReport::failed_paths()}.
+	 *  3. A directory is removed only once it is genuinely EMPTY. rmdir()
+	 *     enforces that on its own, so directories are processed
+	 *     deepest-path-first — the same strlen-descending heuristic
+	 *     {@see self::finalise_directory_modes()} already uses for the same
+	 *     "children before parents" reason — and a directory a live site put
+	 *     something new into during the restore simply survives, silently,
+	 *     because rmdir() refuses a non-empty directory outright.
+	 *
+	 * Every removal is best-effort: a path that will not delete (a permissions
+	 * problem, something else now holding it open) is reported in the
+	 * returned {@see CreationLedgerCleanupReport}, never thrown. The import has
+	 * already failed by the time this runs; turning a partial cleanup into a
+	 * second exception would bury the original cause from the operator who
+	 * most needs to see it. For the same reason this method never throws at
+	 * all — an unexpected failure resolving one ledger path is counted as a
+	 * failure for that path and the rest of the cleanup continues.
+	 *
+	 * Each ledger path is turned back into an absolute path via
+	 * {@see self::resolve_safe_path()} and then re-checked with
+	 * {@see self::assert_no_symlinked_ancestor()} — see
+	 * {@see self::remove_one_created_path()}'s own docblock for why re-running
+	 * that SPECIFIC guard (and not the others {@see self::write_entry()} also
+	 * runs) is what confinement here actually needs.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this writer's own ledger created them.
+	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation — so the caller can tell a precise revert from a capped merge.
+	 */
+	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
+		$preserve            = $this->normalised_preserve_set( $preserved_paths );
+		$preserved_ancestors = self::preserved_ancestor_directories( $preserve );
+
+		$non_directory_paths = array();
+		$directory_paths     = array();
+		foreach ( $this->created_paths as $created ) {
+			[ $path, $kind ] = $created;
+			if ( isset( $preserve[ $path ] ) ) {
+				continue;
+			}
+			if ( self::LEDGER_KIND_DIRECTORY === $kind ) {
+				if ( isset( $preserved_ancestors[ $path ] ) ) {
+					continue;
+				}
+				$directory_paths[] = $path;
+			} else {
+				$non_directory_paths[] = $path;
+			}
+		}
+
+		$removed = array();
+		$failed  = array();
+
+		foreach ( $non_directory_paths as $path ) {
+			if ( $this->remove_one_created_path( $path, false ) ) {
+				$removed[] = $path;
+			} else {
+				$failed[] = $path;
+			}
+		}
+
+		// Deepest path first, mirroring finalise_directory_modes(), so a child
+		// directory is removed (or found non-empty) before its parent is ever
+		// attempted — see rule 3 above.
+		usort( $directory_paths, static fn ( string $a, string $b ): int => strlen( $b ) <=> strlen( $a ) );
+
+		foreach ( $directory_paths as $path ) {
+			if ( $this->remove_one_created_path( $path, true ) ) {
+				$removed[] = $path;
+			} else {
+				$failed[] = $path;
+			}
+		}
+
+		return new CreationLedgerCleanupReport( $removed, $failed, ! $this->creation_ledger_incomplete );
+	}
+
+	/**
+	 * Remove one ledger path, best-effort, never throwing.
+	 *
+	 * A missing path (already gone, somehow) counts as removed: the outcome
+	 * this method exists to guarantee — nothing this writer created remains —
+	 * already holds. The whole body, INCLUDING resolving the relative path back
+	 * to an absolute one via {@see self::resolve_safe_path()} and the
+	 * symlinked-ancestor check that follows it, sits inside the try/catch —
+	 * not only the filesystem calls — so that this method really does never
+	 * throw, exactly as {@see self::remove_created_paths()} promises its own
+	 * caller; an unexpected failure (a filesystem race, a permissions check
+	 * that itself errors) is reported as a failure for this one path rather
+	 * than escaping and aborting the rest of that cleanup.
+	 *
+	 * WHY THE SYMLINKED-ANCESTOR CHECK IS RE-RUN HERE, and not merely inherited
+	 * from write_entry(). Every path this method is ever asked to remove
+	 * already passed EVERY guard write_entry() runs, once, at the moment
+	 * {@see self::record_created_path()} put it in the ledger — including
+	 * assert_within_required_prefix() and assert_not_pontifex_working_path().
+	 * Those two test the PATH STRING alone, so a path that passed them at
+	 * record time still passes them now; re-running them here would answer a
+	 * question that cannot have changed. {@see self::assert_no_symlinked_ancestor()}
+	 * is different in kind: it tests the LIVE FILESYSTEM, which can change
+	 * between the write that recorded a path and the recovery that later
+	 * removes it — the whole ledger's reason to exist is that time passes, and
+	 * potentially other entries are written, between those two moments. An
+	 * earlier version of this method ran only {@see self::resolve_safe_path()},
+	 * a purely textual join, and its own docblock claimed that was "confined by
+	 * exactly the guard writing already trusted" — which was false: writing
+	 * runs FOUR guards before it ever touches disk, and cleanup ran one of
+	 * them. The gap was demonstrated as a real mechanism: with
+	 * "wp-content/languages" made a symlink by the time cleanup ran, this
+	 * method deleted the REAL file the link pointed at and reported the
+	 * removal as a success. It could not, however, be reached through the
+	 * shipped write path when this was found — {@see self::write_symlink()}'s
+	 * own `@unlink()` cannot replace a non-empty directory, so replaying an
+	 * archive that tries to turn an existing populated directory into a
+	 * symlink throws before recovery is ever reached — so this closes a real
+	 * gap that was not, at the time it was found, reachable end to end. That a
+	 * gap is not reachable today is not a reason to leave it open: the
+	 * unreachability depends on write_symlink()'s current implementation, not
+	 * on anything this method itself guarantees.
+	 *
+	 * @param string $relative_path The ledger's own normalised relative path.
+	 * @param bool   $is_directory  True to rmdir() (fails on a non-empty directory, by design); false to unlink().
+	 * @return bool True if the path is gone (removed now, or already absent).
+	 */
+	private function remove_one_created_path( string $relative_path, bool $is_directory ): bool {
+		try {
+			$absolute_path = $this->resolve_safe_path( $relative_path );
+			$this->assert_no_symlinked_ancestor( $relative_path );
+
+			if ( $is_directory ) {
+				if ( ! is_dir( $absolute_path ) ) {
+					return true;
+				}
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort recovery cleanup of a directory this run created; rmdir() itself refuses a non-empty directory, which is exactly rule 3 in remove_created_paths()'s docblock.
+				return @rmdir( $absolute_path );
+			}
+
+			if ( ! is_link( $absolute_path ) && ! file_exists( $absolute_path ) ) {
+				return true;
+			}
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort recovery cleanup of a file or symlink this run created.
+			return @unlink( $absolute_path );
+		} catch ( Throwable $error ) {
+			unset( $error );
+			return false;
+		}
+	}
+
+	/**
 	 * Create a symlink at $target_path pointing at $link_target.
 	 *
 	 * Overwrites an existing symlink, file, or directory at the link path. Unless
@@ -2036,11 +3045,20 @@ final class FileWriter {
 	 * preflight none the wiser. This guard is what keeps that shape a clean,
 	 * documented refusal rather than a raw PHP Error.
 	 *
-	 * @param string $target_path Absolute path where the link should be created.
-	 * @param string $link_target The string the link should point at.
+	 * Whether the link path already held something is captured BEFORE the
+	 * pre-existing-entry removal a few lines below, so a path this restore
+	 * merely REPLACED (a file or symlink the site already had there) is never
+	 * mistaken for one it created — see {@see self::record_created_path()}.
+	 * The creation ledger is updated only once symlink() itself has succeeded.
+	 *
+	 * @param string $target_path   Absolute path where the link should be created.
+	 * @param string $link_target   The string the link should point at.
+	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
 	 * @throws RuntimeException If the target escapes the root (and is not allowed), symlink() is unavailable on this host, or the link cannot be created.
 	 */
-	private function write_symlink( string $target_path, string $link_target ): void {
+	private function write_symlink( string $target_path, string $link_target, string $relative_path ): void {
+		$existed_before = self::path_exists_before_write( $target_path );
+
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
@@ -2066,6 +3084,10 @@ final class FileWriter {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not create symlink "%s" -> "%s".', $target_path, $link_target )
 			);
+		}
+
+		if ( ! $existed_before ) {
+			$this->record_created_path( $relative_path, self::LEDGER_KIND_SYMLINK );
 		}
 	}
 

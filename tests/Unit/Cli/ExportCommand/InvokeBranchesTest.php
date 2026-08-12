@@ -19,6 +19,10 @@ use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Cli\ExportCommand;
 use Pontifex\Cli\NullProgressBar;
+use Pontifex\Destination\DestinationAdapter;
+use Pontifex\Destination\DestinationException;
+use Pontifex\Destination\DestinationSpec;
+use Pontifex\Destination\DestinationStore;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\HostCannotComply;
@@ -34,7 +38,7 @@ use Psr\Log\NullLogger;
 use RuntimeException;
 
 /**
- * Behavioural coverage of two specific __invoke branches.
+ * Behavioural coverage of specific __invoke branches.
  *
  * The bulk of ExportCommand is intentionally not covered by
  * behavioural __invoke tests at the unit level. The structural
@@ -47,7 +51,7 @@ use RuntimeException;
  * coverage theatre — mocking out every collaborator only to verify
  * "the code I wrote calls the methods I made it call."
  *
- * Two branches genuinely escape that layering and earn surgical
+ * Three branches genuinely escape that layering and earn surgical
  * unit tests:
  *
  *  1. The --yes short-circuit. ExportCommand reads --yes from its
@@ -63,12 +67,19 @@ use RuntimeException;
  *     was (ADR 0022) before the command halts non-zero. Helper
  *     tests cannot exercise this; integration tests would catch a
  *     hung file handle eventually but not pinpoint the cause.
+ *  3. The upload guard. __invoke offers the finished archive to the
+ *     destination adapter only when the run's own $failure is still
+ *     null — the one line standing between a failed export and a
+ *     put() call against a path where no archive was ever written.
+ *     The guard lives entirely in __invoke's control flow, so no
+ *     helper test can see it, and mutating it to an unconditional
+ *     upload left the rest of the suite green.
  *
  * The logging assertions (info on success, error on failure) live
  * here for the same reason: they are __invoke control-flow facts
  * that the helper and structural layers cannot see.
  *
- * A third candidate branch — confirming that build_default_manifest_builder()
+ * A further candidate branch — confirming that build_default_manifest_builder()
  * wires up the right collaborators when no ManifestBuilder is
  * injected — is deliberately not unit-tested because the production
  * code directly news up FileScanner, WpdbAdapter, DatabaseScanner,
@@ -503,6 +514,71 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * Build a WordPressContext mock with a stored destination available to resolve.
+	 *
+	 * Mirrors {@see self::build_wordpress_context_mock()}, except option_value()
+	 * answers the destinations option (DestinationStore::OPTION) with the given
+	 * stored records instead of the empty default, so resolve_destination_spec()
+	 * finds a real spec rather than erroring. Every other option read (the export
+	 * stats, the transfer history) still answers empty, matching the base mock —
+	 * the two expectations are told apart by the option name itself, so there is
+	 * no ambiguity for Mockery to resolve.
+	 *
+	 * @param array<string, array<string, mixed>> $stored_destinations Records keyed by destination name, in DestinationSpec::to_array() shape (see DestinationStore).
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function build_wordpress_context_mock_with_destination( array $stored_destinations ) {
+		$mock = Mockery::mock( WordPressContext::class );
+		$mock->shouldReceive( 'wp_version' )->andReturn( '6.6.1' );
+		$mock->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$mock->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$mock->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$mock->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
+		$mock->shouldReceive( 'option_value' )
+			->with( DestinationStore::OPTION, Mockery::any() )
+			->andReturn( $stored_destinations );
+		$mock->shouldReceive( 'option_value' )
+			->with( Mockery::not( DestinationStore::OPTION ), Mockery::any() )
+			->andReturn( array() );
+		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		return $mock;
+	}
+
+	/**
+	 * A stored record for one SFTP destination, in the shape DestinationStore persists.
+	 *
+	 * The setting names are the ones DestinationFactory::build_sftp() actually reads,
+	 * even though nothing reads them here — the tests that use this record inject
+	 * their own DestinationAdapter, so the factory is never reached. A fixture that
+	 * quietly misnames the real keys would teach the next reader the wrong shape.
+	 *
+	 * @param string $name The destination name.
+	 * @return array<string, array<string, mixed>> Keyed by name, ready for option_value('pontifex_destinations').
+	 */
+	private function stored_sftp_destination( string $name ): array {
+		return array(
+			$name => array(
+				'type'      => DestinationSpec::TYPE_SFTP,
+				'settings'  => array(
+					'host'       => 'backup.example.test',
+					'username'   => 'pontifex',
+					'path'       => '/backups',
+					'auth'       => 'password',
+					'secret_env' => 'PONTIFEX_SFTP_PASSWORD',
+				),
+				// Below DestinationRetention::MIN_RETENTION: neither test below exercises pruning.
+				'retention' => 0,
+			),
+		);
+	}
+
+	/**
 	 * Build a ManifestBuilderInterface mock that returns an empty entry-plan list.
 	 *
 	 * Empty plans produce a valid empty archive. ArchiveWriter
@@ -816,6 +892,141 @@ final class InvokeBranchesTest extends TestCase {
 		);
 
 		$this->assertFalse( $held_at_halt, 'The lock must already be released by the time the command halts.' );
+	}
+
+	/**
+	 * A failed export must never reach the destination adapter's put().
+	 *
+	 * __invoke offers the finished archive to the destination only when its own
+	 * $failure is still null (see the guard just above upload_archive() in
+	 * __invoke). That single line is all that stops a failed run calling put()
+	 * against a path where no archive was ever written — mutating it to an
+	 * unconditional upload left the rest of this suite green, so this is the one
+	 * test that has to catch it.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_does_not_upload_when_the_export_failed(): void {
+		$destination_name = 'offsite';
+
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock_with_destination( $this->stored_sftp_destination( $destination_name ) );
+
+		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder
+			->shouldReceive( 'build' )
+			->once()
+			->andThrow( new RuntimeException( 'simulated manifest-builder failure' ) );
+
+		// Recorded rather than asserted through shouldNotReceive(), so that a broken
+		// guard fails on the sentence below and not on whatever the upload path
+		// happens to touch next. A zero-count Mockery expectation is only checked at
+		// close(), by which time an unstubbed call further down the upload path has
+		// already thrown and buried the real cause.
+		$uploaded            = false;
+		$destination_adapter = Mockery::mock( DestinationAdapter::class );
+		$destination_adapter->shouldReceive( 'put' )->andReturnUsing(
+			static function () use ( &$uploaded ): void {
+				$uploaded = true;
+			}
+		);
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+		$wp_cli->shouldReceive( 'success' )->zeroOrMoreTimes();
+
+		$command = new ExportCommand(
+			$environment,
+			$wordpress_context,
+			$manifest_builder,
+			new NullLogger(),
+			new NullProgressBar(),
+			null,
+			null,
+			$destination_adapter
+		);
+
+		$command(
+			array(),
+			array(
+				'output'      => $this->temp_output_path,
+				'yes'         => true,
+				'destination' => $destination_name,
+			)
+		);
+
+		$this->assertFalse(
+			$uploaded,
+			'A failed export must never offer the archive to the destination — there is no archive at the output path to offer.'
+		);
+		$this->assertStringContainsString(
+			'simulated manifest-builder failure',
+			implode( "\n", $printed ),
+			'The run still reports its real failure.'
+		);
+	}
+
+	/**
+	 * A failed upload's error message is redacted like every other operator-facing path.
+	 *
+	 * The docs (docs/when-pontifex-refuses.md) promise that server paths never
+	 * reach the terminal unredacted. The upload-failure message is built from the
+	 * destination exception plus the local archive path — both routinely name an
+	 * absolute path — so both must reach WP_CLI::error() already redacted.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_redacts_the_upload_failure_message(): void {
+		$destination_name = 'offsite';
+		$temp_dir         = rtrim( sys_get_temp_dir(), '/' );
+
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock_with_destination( $this->stored_sftp_destination( $destination_name ) );
+		$manifest_builder  = $this->build_manifest_builder_mock_returning_empty();
+
+		$destination_adapter = Mockery::mock( DestinationAdapter::class );
+		$destination_adapter
+			->shouldReceive( 'put' )
+			->once()
+			->andThrow( new DestinationException( sprintf( 'Could not read the private key at %s/pontifex-sftp.key.', $temp_dir ) ) );
+
+		$captured_error = null;
+		$wp_cli         = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'success' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )
+			->once()
+			->andReturnUsing(
+				static function ( string $message ) use ( &$captured_error ): void {
+					$captured_error = $message;
+				}
+			);
+
+		$command = new ExportCommand(
+			$environment,
+			$wordpress_context,
+			$manifest_builder,
+			new NullLogger(),
+			new NullProgressBar(),
+			null,
+			null,
+			$destination_adapter
+		);
+
+		$command(
+			array(),
+			array(
+				'output'      => $this->temp_output_path,
+				'yes'         => true,
+				'destination' => $destination_name,
+			)
+		);
+
+		$this->assertNotNull( $captured_error, 'The upload failure must be reported through WP_CLI::error.' );
+		$this->assertStringContainsString( '{TMP}', $captured_error, 'The redacted message still names the file, just not where it lives.' );
+		$this->assertStringNotContainsString( $temp_dir, $captured_error, 'Neither the failure reason nor the local archive path may leak the system temp directory.' );
 	}
 
 	/**

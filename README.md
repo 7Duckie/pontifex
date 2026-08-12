@@ -87,7 +87,7 @@ wp pontifex import /path/to/site.wpmig --dry-run
 wp pontifex import /path/to/site.wpmig
 
 # Move a site to a new address (serialised-data-safe)
-wp pontifex import /path/to/site.wpmig --url=https://new-site.example
+wp pontifex import /path/to/site.wpmig --new-url=https://new-site.example
 
 # Undo the most recent import
 wp pontifex rollback
@@ -108,7 +108,7 @@ A full walkthrough, including the admin screens, is in
 | Command | What it does |
 |---|---|
 | `export` | Pack the site into a `.wpmig`. Content-only by default; `--whole-site`, `--files-only`, `--db-only` change the scope; `--exclude` / `--exclude-table` / `--exclude-file` narrow it. `--encrypt` (AES-256-GCM, Argon2id), `--sign`, `--resumable`, `--destination`. |
-| `import` | Restore an archive, taking a safety archive first. `--url` migrates to a new address; `--dry-run` writes nothing; `--public-key` makes the signature mandatory. |
+| `import` | Restore an archive, taking a safety archive first. `--new-url` migrates to a new address; `--dry-run` writes nothing; `--public-key` makes the signature mandatory. |
 | `verify` | Check an archive's integrity without restoring. `--list` prints its contents. |
 | `rollback` | Undo the most recent import from its safety archive. |
 | `doctor` | Read-only environment audit — memory, execution time, symbolic-link support, disk space, database version. |
@@ -158,7 +158,8 @@ That gives you WordPress on `http://localhost:8910` with Pontifex active.
 The integration suite runs against a second wp-env configuration
 (`.wp-env.tests.json`, port 8911) —
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) has the exact commands,
-the commit conventions, and the quality gates.
+the commit conventions, and the quality gates. `composer check:plugin` runs
+Plugin Check — the wordpress.org listing gate — against the built package.
 
 Security reports: [`.github/SECURITY.md`](.github/SECURITY.md), via GitHub's
 private vulnerability reporting.

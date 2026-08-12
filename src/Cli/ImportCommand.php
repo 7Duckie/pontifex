@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
@@ -35,6 +36,7 @@ use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -51,7 +53,7 @@ use Pontifex\WordPress\WordPressRoot;
  * database, and refuses an archive that would overwrite WordPress core or
  * wp-config.php; pass --whole-site to restore an entire-site archive onto a
  * fresh destination (ADR 0008). By default the restore is also to the
- * **same site URL**; passing --url=<new-url> additionally runs a
+ * **same site URL**; passing --new-url=<new-url> additionally runs a
  * serialised-safe cross-URL migration over the restored database (ADR 0006),
  * with the pre-import safety archive as its undo.
  *
@@ -74,7 +76,7 @@ use Pontifex\WordPress\WordPressRoot;
  * <archive>
  * : Absolute filesystem path to the .wpmig archive to restore.
  *
- * [--url=<new-url>]
+ * [--new-url=<new-url>]
  * : Migrate the site to a new URL after restoring. Runs a serialised-safe
  *   search-replace over the restored database, rewriting the archive's source
  *   URL to <new-url>. Omit for a same-URL restore.
@@ -123,7 +125,7 @@ use Pontifex\WordPress\WordPressRoot;
  *
  *     wp pontifex import /tmp/site.wpmig
  *     wp pontifex import /tmp/site.wpmig --whole-site --yes
- *     wp pontifex import /tmp/site.wpmig --url=https://new-site.example
+ *     wp pontifex import /tmp/site.wpmig --new-url=https://new-site.example
  *     wp pontifex import /tmp/site.wpmig --dry-run
  *     wp pontifex import /tmp/site.wpmig --yes
  *     wp pontifex import /tmp/site.wpmig --no-rollback-archive
@@ -143,6 +145,34 @@ final class ImportCommand {
 	 * off — written occasionally, read almost never.
 	 */
 	private const STATS_OPTION = 'pontifex_import_stats';
+
+	/**
+	 * Recovery outcome: every path the failed import created was accounted for and undone.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_PRECISE = 'precise';
+
+	/**
+	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
+	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: recovery was attempted and did not complete at all.
+	 *
+	 * Only ever produced from inside {@see self::recover_from_safety_archive()},
+	 * which is called only once the safety archive has actually been taken, so —
+	 * unlike RestoreController's equivalent — this class has no separate "recovery
+	 * was never attempted" state to keep apart from this one; the calling `if` at
+	 * this class's one call site already gates that.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_FAILED = 'failed';
 
 	/**
 	 * The Environment abstraction this command queries.
@@ -222,9 +252,9 @@ final class ImportCommand {
 	private ?SafetyArchiverInterface $safety_archiver;
 
 	/**
-	 * The cross-URL migrator used when --url is supplied.
+	 * The cross-URL migrator used when --new-url is supplied.
 	 *
-	 * Optional in the constructor: when null and --url is given, the command
+	 * Optional in the constructor: when null and --new-url is given, the command
 	 * wires a UrlMigrator over the real $wpdb. Tests inject a fake fulfilling
 	 * UrlMigratorInterface — the seam that exists for exactly that.
 	 *
@@ -269,7 +299,7 @@ final class ImportCommand {
 	 * @param LoggerInterface|null         $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 * @param ProgressReporter|null        $progress          Optional. When null, a WpCliProgressBar driving WP-CLI's native progress bar is used.
 	 * @param SafetyArchiverInterface|null $safety_archiver   Optional. When null, a SafetyArchiver rooted at WP_CONTENT_DIR is built.
-	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and --url is given, a UrlMigrator over the real $wpdb is built.
+	 * @param UrlMigratorInterface|null    $url_migrator      Optional. When null and --new-url is given, a UrlMigrator over the real $wpdb is built.
 	 * @param PassphraseSource|null        $passphrase_source Optional. When null, a CliPassphraseSource (hidden prompt + STDIN) is used.
 	 * @param OperationLock|null           $lock              Optional. When null, a default OperationLock is built lazily at run time.
 	 */
@@ -334,10 +364,11 @@ final class ImportCommand {
 	 * The WP-CLI command entry point.
 	 *
 	 * `__invoke` is the magic method WP-CLI dispatches to for a single-
-	 * command class. Orchestrates: read the archive path, validate it,
-	 * announce the same-URL scope, confirm (unless --yes/--dry-run),
-	 * open the archive, then restore it — or, under --dry-run, verify it
-	 * without writing.
+	 * command class. Orchestrates: refuse a bare --url before anything else
+	 * (WP-CLI reserves it for itself, so it never reaches $associative_args),
+	 * read the archive path, validate it, announce the same-URL scope,
+	 * confirm (unless --yes/--dry-run), open the archive, then restore it —
+	 * or, under --dry-run, verify it without writing.
 	 *
 	 * A failure is not re-thrown. It is logged, reported as a readable verdict
 	 * naming which kind of refusal it was, and the command halts non-zero — so
@@ -349,6 +380,11 @@ final class ImportCommand {
 	 * @return void
 	 */
 	public function __invoke( array $positional_args, array $associative_args ): void {
+
+		// 0. Refuse a bare --url before anything else runs — including before
+		// the archive path is validated, so a --dry-run refuses just as loudly
+		// as a real import. See refuse_bare_url_flag() for why.
+		$this->refuse_bare_url_flag();
 
 		// 1. Read and validate the archive path and flags.
 		$archive_path = $this->require_archive_path( $positional_args );
@@ -378,7 +414,7 @@ final class ImportCommand {
 			);
 		}
 
-		// 2. Announce the restore (and, with --url, the migration) scope, always.
+		// 2. Announce the restore (and, with --new-url, the migration) scope, always.
 		$this->print_scope( $target_url );
 
 		// 3. Open the source archive for reading. Opened (and validated) before the
@@ -401,7 +437,7 @@ final class ImportCommand {
 			WP_CLI::confirm( sprintf( /* translators: %s: the archive path */ __( 'Restore %s over the current site?', 'pontifex' ), $archive_path ), $associative_args );
 		}
 
-		// 5. Wire up the URL migrator when --url was given. The restore engine is wired
+		// 5. Wire up the URL migrator when --new-url was given. The restore engine is wired
 		// inside the try below, where opening the archive (to detect encryption and
 		// collect the passphrase) is covered by the failure logging.
 		$url_migrator = '' !== $target_url ? ( $this->url_migrator ?? $this->build_default_url_migrator() ) : null;
@@ -420,6 +456,14 @@ final class ImportCommand {
 		// The safety archive's path, once taken — the undo the failure handler replays to
 		// recover the site if the restore then fails part-written. Null until it is taken.
 		$safety_path = null;
+
+		// The restore engine actually used for the forward restore, once wired inside the
+		// try below. The failure handler needs THIS instance, not a freshly-built one, to
+		// consult the creation ledger its own FileWriter kept — a second instance would
+		// have an empty ledger and nothing to undo. Null only if an exception strikes before
+		// it is wired (e.g. collecting an encrypted archive's passphrase), in which case the
+		// restore itself never started and there is nothing this run could have created.
+		$restore_runner = null;
 
 		// The failure the run ended on, or null when it succeeded. Recorded rather than
 		// re-thrown, and acted on only after the finally below: WP_CLI::halt() calls
@@ -455,7 +499,7 @@ final class ImportCommand {
 			$required_prefix = $whole_site ? null : 'wp-content';
 			$restore_runner  = $this->restore_runner ?? $this->build_default_restore_runner( $source, $passphrase_stdin, $allow_unsafe, $required_prefix );
 
-			// With --url, read the source URL from the archive's provenance and
+			// With --new-url, read the source URL from the archive's provenance and
 			// announce the migration before anything is written. Reading the
 			// provenance also validates the archive up front.
 			$source_url = '';
@@ -502,7 +546,7 @@ final class ImportCommand {
 				$restore_runner->restore( $source, $on_entry );
 				$this->progress->finish();
 
-				// 6. With --url, migrate the restored database to the new URL.
+				// 6. With --new-url, migrate the restored database to the new URL.
 				if ( null !== $url_migrator ) {
 					$this->run_migration( $url_migrator, $source_url, $target_url );
 				}
@@ -549,8 +593,11 @@ final class ImportCommand {
 			// database, so replay it to return the site to its pre-import state before the
 			// command exits with the failure. When it was not taken the site was not changed.
 			if ( null !== $safety_path ) {
-				if ( $this->recover_from_safety_archive( $safety_path, $allow_unsafe ) ) {
+				$recovery = $this->recover_from_safety_archive( $safety_path, $allow_unsafe, $restore_runner );
+				if ( self::RECOVERY_PRECISE === $recovery ) {
 					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
+				} elseif ( self::RECOVERY_MERGE === $recovery ) {
+					WP_CLI::warning( __( 'The import failed. Your site\'s database was rolled back to its state before the import, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed import created may still be present alongside the recovered content.', 'pontifex' ) );
 				} else {
 					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
 				}
@@ -593,23 +640,62 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Extract and validate the optional --url migration target.
+	 * Extract and validate the optional --new-url migration target.
 	 *
-	 * Returns an empty string when --url is absent (a same-URL restore). When
-	 * present, it must carry a non-empty value; a bare --url is rejected via
-	 * WP_CLI::error, which halts the command.
+	 * Returns an empty string when --new-url is absent (a same-URL restore).
+	 * When present, it must carry a non-empty value; a bare --new-url is
+	 * rejected via WP_CLI::error, which halts the command.
 	 *
 	 * @param array<string, string|bool> $associative_args The CLI's associative args.
-	 * @return string The target URL, or '' when --url was not supplied.
+	 * @return string The target URL, or '' when --new-url was not supplied.
 	 */
 	private function require_target_url( array $associative_args ): string {
-		if ( ! isset( $associative_args['url'] ) ) {
+		if ( ! isset( $associative_args['new-url'] ) ) {
 			return '';
 		}
-		if ( ! is_string( $associative_args['url'] ) || '' === $associative_args['url'] ) {
-			WP_CLI::error( __( '--url requires a new site URL, e.g. --url=https://new-site.example.', 'pontifex' ) );
+		if ( ! is_string( $associative_args['new-url'] ) || '' === $associative_args['new-url'] ) {
+			WP_CLI::error( __( '--new-url requires a new site URL, e.g. --new-url=https://new-site.example.', 'pontifex' ) );
 		}
-		return (string) $associative_args['url'];
+		return (string) $associative_args['new-url'];
+	}
+
+	/**
+	 * Refuse a bare --url on the command line, before anything else runs.
+	 *
+	 * WP-CLI reserves --url as one of its own global parameters (confirmed
+	 * against `wp cli param-dump`) and consumes it before dispatching to any
+	 * command, so $associative_args never carries it: an operator who types
+	 * --url gets today's silent same-URL restore instead of the migration
+	 * they asked for, which is worse than an error, because nothing tells
+	 * them it did not happen. --new-url is not in WP-CLI's reserved list and
+	 * reaches the command normally, so that is what this points them to.
+	 *
+	 * Read directly from $_SERVER['argv'] rather than
+	 * WP_CLI::get_runner()->config['url']: that config merges wp-cli.yml, so
+	 * an operator whose config file merely sets an unrelated url: line would
+	 * be refused on every single import. Only the raw command line shows what
+	 * was actually typed.
+	 *
+	 * An argument counts as the reserved flag when it is exactly "--url" or
+	 * starts with "--url=", so "--url-something" is left alone. This fires
+	 * whenever --url appears at all — even alongside --new-url — because
+	 * supplying both is far more likely a mistake than an intention.
+	 *
+	 * @return void
+	 */
+	private function refuse_bare_url_flag(): void {
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.MissingUnslash,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Read-only comparison against fixed ASCII strings, never output or stored; wp_unslash()/sanitisation exist for values WordPress will later echo or query with, not for a CLI argv string this method only compares with ===/substr().
+		$argv = isset( $_SERVER['argv'] ) && is_array( $_SERVER['argv'] ) ? $_SERVER['argv'] : array();
+		foreach ( $argv as $argument ) {
+			if ( ! is_string( $argument ) ) {
+				continue;
+			}
+			if ( '--url' === $argument || '--url=' === substr( $argument, 0, 6 ) ) {
+				WP_CLI::error(
+					__( 'WP-CLI reserves --url for itself, so Pontifex never receives it and no URL rewriting would happen. Use --new-url instead, for example: wp pontifex import <archive> --new-url=https://new-site.example', 'pontifex' )
+				);
+			}
+		}
 	}
 
 	/**
@@ -665,7 +751,12 @@ final class ImportCommand {
 	 * Then wires a FileWriter rooted at the WordPress installation (ABSPATH) and
 	 * a DatabaseWriter backed by a WpdbAdapter wrapping the real $wpdb. On a
 	 * content-only restore the FileWriter is additionally restricted to the
-	 * wp-content tree.
+	 * wp-content tree. This command's own $this->logger is passed through as the
+	 * runner's optional sixth argument, so the few things RestoreRunner itself
+	 * still only mentions in passing — a directory mode that could not be
+	 * restored, temp artefacts an interrupted earlier restore left behind and
+	 * this run swept up — reach the real per-transfer log file instead of the
+	 * NullLogger a caller that passes nothing would silently get.
 	 *
 	 * @param resource    $source                The open archive stream, read for its header and footer.
 	 * @param bool        $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
@@ -687,14 +778,21 @@ final class ImportCommand {
 			}
 		}
 
-		// Read the source table prefix from the archive's provenance (format v1.1).
-		// When it differs from the destination site's prefix, the DatabaseWriter
-		// rewrites table identifiers and the options/usermeta key columns so the
-		// restored database adopts the destination's prefix (ADR 0008). Both prefixes
-		// are validated to a sane identifier shape; the source prefix is from the
-		// archive, so an invalid one is dropped (treated as no rewrite) rather than
-		// reaching the SQL.
-		$source_prefix = self::valid_table_prefix( $archive_reader->provenance()->table_prefix() );
+		// The source table prefix, for the cross-prefix rewrite: when it differs
+		// from the destination site's prefix, the DatabaseWriter rewrites table
+		// identifiers and the options/usermeta key columns so the restored
+		// database adopts the destination's prefix (ADR 0008). Preferably the
+		// value recorded in the archive's own provenance (format v1.1) — but that
+		// field is optional, so an archive written before it existed carries none,
+		// and SourceTablePrefix::resolve() then derives the same fact from the
+		// database chunks' own table names instead, cheaply (headers only, one
+		// per table) and safely (see that class's docblock for why a wrong or
+		// hostile derived SOURCE prefix cannot make a rewritten name escape this
+		// site — DatabaseWriter's cross-site guard is the backstop either way).
+		// Both the recorded and the derived value are validated to a sane
+		// identifier shape before use. The destination prefix is this site's own
+		// and is validated the same way, purely as defence in depth.
+		$source_prefix = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
 		$dest_prefix   = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
 
 		// ArchiveReader sought through the stream; rewind so the RestoreRunner's own
@@ -709,18 +807,21 @@ final class ImportCommand {
 			$file_writer,
 			$database_writer,
 			null,
-			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) ),
+			$this->logger
 		);
 	}
 
 	/**
-	 * Validate a table prefix to a sane identifier shape, or drop it.
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
 	 *
-	 * Returns the prefix only when it is a non-empty run of ASCII letters, digits, and
-	 * underscores — the shape a WordPress table prefix always takes. Anything else
-	 * (null, empty, or a value carrying SQL metacharacters from a crafted archive)
-	 * yields '', which the DatabaseWriter reads as "no rewrite", so an untrusted prefix
-	 * can never reach a rewrite statement. Pure function.
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see \Pontifex\Restore\SourceTablePrefix::resolve()} instead.
+	 * Returns the prefix only when it is a non-empty run of ASCII letters, digits,
+	 * and underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
 	 *
 	 * @param string|null $prefix The candidate prefix.
 	 * @return string The prefix when valid, otherwise ''.
@@ -733,9 +834,9 @@ final class ImportCommand {
 	}
 
 	/**
-	 * Build a UrlMigrator over the real $wpdb for the --url migration.
+	 * Build a UrlMigrator over the real $wpdb for the --new-url migration.
 	 *
-	 * Used when --url is given and no migrator was injected. The migrator walks
+	 * Used when --new-url is given and no migrator was injected. The migrator walks
 	 * every prefixed table (the wp search-replace default) with the class
 	 * allowlist resolved from the pontifex_serialized_classes filter.
 	 *
@@ -786,20 +887,27 @@ final class ImportCommand {
 	 * Called only from the import failure handler, once the safety archive has been taken
 	 * and the restore has then failed — so the database may be part-written. It opens the
 	 * safety archive (a plain archive of the site's prior state), verifies it, and replays
-	 * it unrestricted, returning the site to its pre-import state. Wrapped so it can never
-	 * throw out of the failure handler: a recovery that itself fails is reported by
-	 * returning false, not escalated over the original import error.
+	 * it unrestricted, returning the site's DATABASE to its pre-import state. A restore is
+	 * purely additive, though (see {@see \Pontifex\Restore\FileWriter::write_entry()}'s own
+	 * docblock), so that replay alone leaves every FILE the failed import created still on
+	 * disk. When $forward_restore_runner is the real engine that ran the failed forward
+	 * import, this also undoes exactly what that run's own FileWriter created — see
+	 * {@see RestoreRunner::remove_created_paths()} — so a file the failed import introduced
+	 * does not survive alongside the recovered content. Wrapped so it can never throw out of
+	 * the failure handler: a recovery that itself fails is reported as such, not escalated
+	 * over the original import error.
 	 *
-	 * @param string $safety_path           The absolute path of the safety archive to replay.
-	 * @param bool   $allow_unsafe_symlinks Whether to allow escaping symlink targets (mirrors the import).
-	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 * @param string                      $safety_path             The absolute path of the safety archive to replay.
+	 * @param bool                        $allow_unsafe_symlinks   Whether to allow escaping symlink targets (mirrors the import).
+	 * @param RestoreRunnerInterface|null $forward_restore_runner  The engine that ran the failed forward import, or null if the import never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
+	 * @return string One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks ): bool {
+	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks, ?RestoreRunnerInterface $forward_restore_runner ): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the plugin-owned safety archive for recovery; an unopenable file is reported below, not raised as a WP-CLI halt.
 		$recovery_source = @fopen( $safety_path, 'rb' );
 		if ( false === $recovery_source ) {
 			$this->logger->error( 'Import auto-recovery failed: could not open the safety archive.', array( 'safety_archive' => $safety_path ) );
-			return false;
+			return self::RECOVERY_FAILED;
 		}
 
 		try {
@@ -815,16 +923,58 @@ final class ImportCommand {
 			rewind( $recovery_source );
 			$runner->restore( $recovery_source );
 
-			return true;
+			if ( ! $forward_restore_runner instanceof RestoreRunner ) {
+				return self::RECOVERY_MERGE;
+			}
+
+			// The safety archive's own declared paths are what "belongs to the site's
+			// prior state" means.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream to read its manifest for the preserved-paths set; not a WP_Filesystem operation.
+			rewind( $recovery_source );
+			$preserved_paths = self::declared_content_paths( ( new ArchiveReader( $recovery_source ) )->manifest() );
+
+			$cleanup = $forward_restore_runner->remove_created_paths( $preserved_paths );
+			if ( array() !== $cleanup->failed_paths() ) {
+				$this->logger->warning(
+					'Import auto-recovery: could not remove every path the failed import created.',
+					array( 'failed_paths' => $cleanup->failed_paths() )
+				);
+			}
+
+			return $cleanup->is_precise_revert() ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Import auto-recovery failed.', array( 'exception' => $recovery_error ) );
-			return false;
+			return self::RECOVERY_FAILED;
 		} finally {
 			if ( is_resource( $recovery_source ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the recovery stream opened above; not a WP_Filesystem operation.
 				fclose( $recovery_source );
 			}
 		}
+	}
+
+	/**
+	 * Every file/directory/symlink path an already-decoded manifest declares.
+	 *
+	 * Used to build the preserved-paths set {@see RestoreRunner::remove_created_paths()}
+	 * must never delete from, even when the failed import's own ledger recorded them:
+	 * anything the safety archive carries belongs to the site's prior state.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return array<int, string>
+	 */
+	private static function declared_content_paths( ArchiveManifest $manifest ): array {
+		$paths = array();
+		foreach ( $manifest->entries() as $entry ) {
+			if ( ! $entry->is_file() && ! $entry->is_directory() && ! $entry->is_symlink() ) {
+				continue;
+			}
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$paths[] = $path;
+			}
+		}
+		return $paths;
 	}
 
 	/**
@@ -1275,6 +1425,13 @@ final class ImportCommand {
 		$preflight->assert_scope_consistent_with_manifest( $scope, $manifest );
 		$declared_links = $preflight->assert_host_can_write( $archive_source, $manifest );
 		$preflight->assert_symlink_targets_confined( $declared_links );
+
+		// Deliberately stricter than the restore it rehearses: RestoreRunner::restore()
+		// now sweeps a crashed earlier attempt's leftover temp file before this same
+		// check, so it can pass on space the sweep would have freed, while this dry
+		// run — which must delete nothing — cannot. Accepted: it errs toward warning
+		// rather than false reassurance. The proper fix is the wider dry-run parity
+		// work, already a planned job; do not "fix" this by making a dry run sweep.
 		$preflight->assert_free_space_for( $manifest );
 
 		$this->logger->info( 'Import dry-run: every restore preflight passed.', array( 'archive' => $archive_path ) );
@@ -1285,7 +1442,7 @@ final class ImportCommand {
 	 *
 	 * @param string $archive_path The archive that was verified.
 	 * @param int    $entry_count  How many entries were verified.
-	 * @param string $target_url   The migration target, or '' when --url was not given.
+	 * @param string $target_url   The migration target, or '' when --new-url was not given.
 	 * @return void
 	 */
 	private function print_dry_run_summary( string $archive_path, int $entry_count, string $target_url ): void {

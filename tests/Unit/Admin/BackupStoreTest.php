@@ -11,8 +11,10 @@ namespace Pontifex\Tests\Unit\Admin;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Patchwork\CodeManipulation\Stream as PatchworkStream;
 use PHPUnit\Framework\TestCase;
 use Pontifex\Admin\BackupStore;
+use ReflectionMethod;
 use RuntimeException;
 
 /**
@@ -82,22 +84,182 @@ final class BackupStoreTest extends TestCase {
 	}
 
 	/**
-	 * Lists matching files sorted oldest-first, ignoring foreign names.
+	 * Lists matching files sorted oldest-first by MODIFICATION TIME, ignoring
+	 * foreign names.
+	 *
+	 * Modification times are set explicitly with touch() so the order does
+	 * not depend on how fast the test runs relative to the wall clock.
 	 *
 	 * @return void
 	 */
 	public function test_backups_lists_matching_files_sorted(): void {
 		$store = new BackupStore( $this->base );
 		$store->ensure_directory();
-		$this->seed( $store, 'pontifex-backup-20260301T093000Z.wpmig' );
-		$this->seed( $store, 'pontifex-backup-20260101T120000Z.wpmig' );
+		$now = time();
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260301T093000Z.wpmig', $now - 100 );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T120000Z.wpmig', $now - 200 );
 		$this->seed( $store, 'not-a-backup.txt' );
 
 		$backups = $store->backups();
 
 		$this->assertCount( 2, $backups, 'Only the two correctly-named backups should be listed.' );
-		$this->assertStringEndsWith( '20260101T120000Z.wpmig', $backups[0], 'Oldest backup should sort first.' );
+		$this->assertStringEndsWith( '20260101T120000Z.wpmig', $backups[0], 'The OLDER modification time sorts first.' );
 		$this->assertStringEndsWith( '20260301T093000Z.wpmig', $backups[1] );
+	}
+
+	/**
+	 * Ordering follows modification time even when a file's NAME disagrees
+	 * with it — proving the sort is not secretly still keyed on the name.
+	 *
+	 * @return void
+	 */
+	public function test_backups_sort_by_modification_time_even_when_name_disagrees(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$now = time();
+		// Name-wise this looks OLDER (an earlier encoded date) than the other,
+		// but its real modification time is the NEWER of the two.
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T000000Z.wpmig', $now - 50 );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260601T000000Z.wpmig', $now - 500 );
+
+		$backups = $store->backups();
+
+		$this->assertStringEndsWith(
+			'20260601T000000Z.wpmig',
+			$backups[0],
+			'The file with the OLDER modification time sorts first, even though its name looks newer.'
+		);
+		$this->assertStringEndsWith(
+			'20260101T000000Z.wpmig',
+			$backups[1],
+			'The file with the NEWER modification time sorts last, even though its name looks older.'
+		);
+	}
+
+	/**
+	 * The measured production defect: a future-dated NAME whose real
+	 * modification time is genuinely the oldest of the set sorts first, so a
+	 * retention prune removes it — not the genuinely current backups it used
+	 * to survive at the expense of.
+	 *
+	 * @return void
+	 */
+	public function test_a_future_named_file_with_a_genuinely_old_modification_time_sorts_first(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$now = time();
+		$this->seed_with_mtime( $store, 'pontifex-backup-20991231T235959Z.wpmig', $now - 10000 );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T000000Z.wpmig', $now - 500 );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260102T000000Z.wpmig', $now - 100 );
+
+		$backups = $store->backups();
+
+		$this->assertStringEndsWith(
+			'20991231T235959Z.wpmig',
+			$backups[0],
+			'A future-dated NAME with a genuinely old modification time must sort FIRST, not last, so it is the one a prune removes.'
+		);
+		$this->assertStringEndsWith( '20260101T000000Z.wpmig', $backups[1] );
+		$this->assertStringEndsWith( '20260102T000000Z.wpmig', $backups[2] );
+	}
+
+	/**
+	 * A modification time genuinely in the future is untrustworthy about that
+	 * one file, so it sorts FIRST — as the oldest, ahead of every trustworthy
+	 * entry — rather than being clamped to "now" and left to tie with a
+	 * backup that is actually current. This is the PRIMARY rule from
+	 * {@see \Pontifex\Admin\BackupStore::compare_by_age()}, not a tie-break:
+	 * the two entries here land on the same clamped instant (one genuinely
+	 * future, one genuinely now) precisely to prove the future-dated one
+	 * still sorts first even though clamping alone would make them tie.
+	 * Proving that against a live clock from outside the class would mean
+	 * racing backups()'s own internal `time()` call, which is exactly the
+	 * kind of wall-clock dependency these tests must not have — so this one
+	 * instead invokes the private comparator directly, via Reflection (the
+	 * same technique used elsewhere in this suite, e.g. StatsCommandTest),
+	 * with an explicit, fixed "now" that has no relation to the real clock at
+	 * all.
+	 *
+	 * Goes through {@see self::compare_by_age_without_patchwork_stream_wrapper()}
+	 * rather than invoking the reflection call directly: once any brain/monkey
+	 * test has run earlier in the suite's shared process, Patchwork's global
+	 * `file://` stream-wrapper registration reads a touch()-set modification
+	 * time back one second high — invisible to every other test in this suite,
+	 * which only ever compares modification times against each other or
+	 * against a wide real-clock margin, but fatal to this one, which pins an
+	 * exact "now" against an exact one-second-future boundary.
+	 *
+	 * @return void
+	 */
+	public function test_a_future_modification_time_does_not_outrank_a_genuinely_fresh_backup(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+
+		// An arbitrary fixed reference instant; any value works, since neither
+		// the comparator nor this test consults the real clock at all.
+		$now = 2000000000;
+		$this->seed_with_mtime( $store, 'pontifex-backup-20990101T000000Z.wpmig', $now + 1000000 );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T000000Z.wpmig', $now );
+
+		$forged = $store->directory() . '/pontifex-backup-20990101T000000Z.wpmig';
+		$fresh  = $store->directory() . '/pontifex-backup-20260101T000000Z.wpmig';
+
+		$result = $this->compare_by_age_without_patchwork_stream_wrapper( $forged, $fresh, $now );
+
+		$this->assertLessThan(
+			0,
+			$result,
+			'A clamped (untrusted, future) modification time must sort before an unclamped (trusted) one — it must never survive at the fresh backup\'s expense.'
+		);
+	}
+
+	/**
+	 * Two backups sharing the exact same modification time still resolve to
+	 * a stable, deterministic order — by name, ascending.
+	 *
+	 * @return void
+	 */
+	public function test_ties_at_the_same_modification_time_break_by_name(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$tied = time() - 500;
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260301T000000Z.wpmig', $tied );
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T000000Z.wpmig', $tied );
+
+		$backups = $store->backups();
+
+		$this->assertStringEndsWith( '20260101T000000Z.wpmig', $backups[0], 'Equal modification times must resolve by name, ascending.' );
+		$this->assertStringEndsWith( '20260301T000000Z.wpmig', $backups[1] );
+	}
+
+	/**
+	 * A backup whose modification time cannot be read sorts as CURRENT time,
+	 * never as the oldest — because "oldest" is what a prune removes.
+	 *
+	 * A dangling symlink is how this is produced deterministically: filemtime()
+	 * follows the link, the target does not exist, and the read fails — the
+	 * same failure shape as the function being entirely removed via
+	 * disable_functions, without needing to alter the host's configuration.
+	 *
+	 * @return void
+	 */
+	public function test_an_unreadable_modification_time_sorts_as_current_not_oldest(): void {
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$this->seed_with_mtime( $store, 'pontifex-backup-20260101T000000Z.wpmig', time() - 100000 );
+
+		$broken = $store->directory() . '/pontifex-backup-20260601T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; a dangling symlink is how an unreadable modification time is produced without touching host configuration.
+		symlink( 'this-target-does-not-exist.wpmig', $broken );
+
+		$backups = $store->backups();
+
+		$this->assertCount( 2, $backups );
+		$this->assertStringEndsWith(
+			'20260601T000000Z.wpmig',
+			$backups[1],
+			'An unreadable modification time must be treated as CURRENT time — never as the oldest, which is what a prune removes first.'
+		);
 	}
 
 	/**
@@ -248,6 +410,65 @@ final class BackupStoreTest extends TestCase {
 	private function seed( BackupStore $store, string $filename ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a fixture backup in a temp directory.
 		file_put_contents( $store->directory() . '/' . $filename, 'x' );
+	}
+
+	/**
+	 * Create an empty file with the given name and an explicit modification
+	 * time inside the store directory, so ordering tests do not depend on
+	 * wall-clock timing.
+	 *
+	 * @param BackupStore $store    The store whose directory to seed.
+	 * @param string      $filename The filename to create.
+	 * @param int         $mtime    The Unix modification time to stamp the file with.
+	 * @return void
+	 */
+	private function seed_with_mtime( BackupStore $store, string $filename, int $mtime ): void {
+		$this->seed( $store, $filename );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Backdating or forward-dating a fixture backup's mtime so ordering tests are deterministic.
+		touch( $store->directory() . '/' . $filename, $mtime );
+	}
+
+	/**
+	 * Invoke {@see BackupStore::compare_by_age()} with Brain Monkey's Patchwork
+	 * stream-wrapper override briefly disabled, when it is active.
+	 *
+	 * This class does not itself use Brain Monkey, but PHPUnit runs every test
+	 * class in one shared process, and once ANY earlier test elsewhere in the
+	 * suite has called `Monkey\setUp()`, Patchwork's `file://` stream wrapper
+	 * stays registered for the rest of that process — it is not undone by that
+	 * other test's own tearDown(). While it is active, `filemtime()` on a file
+	 * that was `touch()`-ed to an explicit timestamp reads back one second
+	 * high, which is invisible to every other ordering test in this suite
+	 * (they only ever compare modification times against each other or against
+	 * a wide real-clock margin) but corrupts a comparison pinned to an exact
+	 * one-second boundary, as this one is. Unwrapping only around the read —
+	 * not the earlier `touch()` writes, which land on disk correctly regardless
+	 * — is enough: {@see \Pontifex\Tests\Unit\Cli\DiagnosticsCommand\InvokeTest}
+	 * uses the same `Stream::wrap()`/`unwrap()` toggle for an unrelated
+	 * Patchwork collision. The `class_exists()` guard is needed here (unlike
+	 * that test, which extends the Brain-Monkey-enabled base class and so is
+	 * always guaranteed Patchwork is loaded): this class extends plain
+	 * PHPUnit\Framework\TestCase, so running this file alone never loads
+	 * Patchwork at all, and referencing `PatchworkStream::unwrap()` when the
+	 * class has never been loaded would itself fatal.
+	 *
+	 * @param string $a   One absolute backup path.
+	 * @param string $b   Another absolute backup path.
+	 * @param int    $now The reference "now" to compare against.
+	 * @return int The comparator's result.
+	 */
+	private function compare_by_age_without_patchwork_stream_wrapper( string $a, string $b, int $now ): int {
+		$patchwork_loaded = class_exists( PatchworkStream::class );
+		if ( $patchwork_loaded ) {
+			PatchworkStream::unwrap();
+		}
+		try {
+			return ( new ReflectionMethod( BackupStore::class, 'compare_by_age' ) )->invoke( null, $a, $b, $now );
+		} finally {
+			if ( $patchwork_loaded ) {
+				PatchworkStream::wrap();
+			}
+		}
 	}
 
 	/**

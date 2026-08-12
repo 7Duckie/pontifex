@@ -13,6 +13,7 @@ use InvalidArgumentException;
 use JsonException;
 use RuntimeException;
 use Pontifex\Filesystem\ProtectedDirectory;
+use Pontifex\Filesystem\TempArtefact;
 
 /**
  * Filesystem-backed persistence for {@see Job} records.
@@ -146,7 +147,7 @@ final class JobStore {
 		}
 
 		$path = $this->job_path( $job->id() );
-		$temp = $path . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+		$temp = $path . TempArtefact::suffix();
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Job persistence in the plugin's protected working directory; WP_Filesystem is unavailable in CLI/cron contexts where this runs.
 		if ( false === @file_put_contents( $temp, $json ) ) {
 			throw new RuntimeException(

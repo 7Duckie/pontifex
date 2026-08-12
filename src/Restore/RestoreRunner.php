@@ -192,7 +192,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param DatabaseWriter       $database_writer   Replays db_chunk entries into the database.
 	 * @param ArchiveLimits|null   $limits            Defensive limits to enforce; null applies the conservative defaults.
 	 * @param int|null             $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
-	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded. Defaults to discarding them; trailing and optional, so no existing caller changes.
+	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded, or a count of leftover temp artefacts an earlier, interrupted restore left behind and this one swept away. Defaults to discarding them; trailing and optional, so no existing caller changes.
 	 */
 	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null, ?LoggerInterface $logger = null ) {
 		$this->logger              = $logger ?? new NullLogger();
@@ -234,6 +234,30 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 */
 	public function preflight(): RestorePreflight {
 		return $this->preflight;
+	}
+
+	/**
+	 * Remove every path this run's FileWriter newly created, except any $preserved_paths still declares.
+	 *
+	 * Exposed so a caller that already has a wired runner — a failed import's own
+	 * recovery handler, in ImportCommand and RestoreController — can undo exactly
+	 * what THIS run created after replaying the pre-import safety archive, without
+	 * rebuilding the FileWriter and risking a mismatch with the one that actually
+	 * did the writing. Deliberately NOT on {@see RestoreRunnerInterface}: that
+	 * contract is part of the public API frozen at v1.0.0, and adding a method to
+	 * an interface breaks every implementer. A caller holding only the interface
+	 * (a test fake, most obviously) has no ledger to consult and no cleanup to run
+	 * — see each call site's own `instanceof RestoreRunner` guard.
+	 *
+	 * See {@see FileWriter::remove_created_paths()} for what "newly created" means,
+	 * the three rules deletion obeys, and why a directory only ever disappears once
+	 * it is genuinely empty.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this run's writer created them.
+	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation.
+	 */
+	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
+		return $this->file_writer->remove_created_paths( $preserved_paths );
 	}
 
 	/**
@@ -310,6 +334,33 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// resolution rule. This check changes nothing, so verify() now runs it too
 		// and refuses the same archive rather than calling it sound.
 		$this->preflight->assert_symlink_targets_confined( $declared_symlink_targets );
+
+		// Sweep leftover temp artefacts a crashed earlier restore abandoned on
+		// the filesystem — the file-side twin of the leftover-table sweep
+		// DatabaseWriter::begin_staging() performs a little further below
+		// (ADR 0009). Runs after every OTHER preflight above has already had
+		// its chance to refuse — this one is not itself among them, and it is
+		// not side-effect-free: it writes a one-off case-sensitivity probe
+		// file of its own, removed again before it reasons about an orphan.
+		// See FileWriter::sweep_orphaned_temp_files() for why this is
+		// best-effort and can never itself gate a restore.
+		//
+		// It runs BEFORE the free-space preflight immediately below,
+		// deliberately: a leftover from a crashed earlier restore can be as
+		// large as however much of that attempt had been written before it
+		// died, and removing it is exactly what can let the free-space
+		// preflight pass on the retry it would otherwise wrongly refuse.
+		// SafetyArchiver::create() reached the same conclusion for the same
+		// reason ahead of its own free-space preflight — see the comment
+		// there, next to {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}
+		// — so the two now agree.
+		$swept = $this->file_writer->sweep_orphaned_temp_files();
+		if ( $swept > 0 ) {
+			$this->logger->info(
+				'Removed temporary files an interrupted earlier restore left behind.',
+				array( 'count' => $swept )
+			);
+		}
 
 		// Refuse before anything is touched — filesystem or database — when the
 		// destination cannot hold this restore. FileWriter owns the destination

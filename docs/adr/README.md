@@ -138,6 +138,11 @@ What follows from this choice — positive, negative, and neutral?
   refuses; a dry run answers for the restore and runs all of them, including
   the one that writes. Refused, cannot-restore-here and could-not-tell are
   three separate outcomes, because each calls for a different response.
+- [ADR 0024](./0024-recovery-reverts-by-ledger.md) —
+  Recovery after a failed import removes what the restore added, by a ledger
+  of what it created rather than by differencing against the safety archive —
+  a difference would delete the uploads, caches and logs a live site writes
+  during the restore. Makes an existing promise true instead of downgrading it.
 
 ## Further reading
 

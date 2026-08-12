@@ -33,7 +33,12 @@ short, generic sentence instead:
 > The backup could not be completed. Check the Pontifex log for details.
 
 > The restore failed, so your site was automatically rolled back to its state
-> before the restore.
+> before the restore. Check the Pontifex log for details.
+
+That one is worth reading closely, because there are three versions of it and
+they do not mean the same thing: the site was put back exactly, the site was put
+back but Pontifex could not account for every file it had added, or recovery
+itself failed. See [section 3](#3-your-database-is-protected-on-a-failed-restore-your-files-are-not).
 
 The real message went to the log. **If you are working in the browser and hit
 a failure, the log is not optional — it is the only place the answer exists:**
@@ -107,17 +112,32 @@ name first, and only when all of them are ready does it swap them into place
 in a single atomic step. If a restore fails at any point before that swap,
 your live tables are exactly as they were. Nothing is half-written.
 
-**The file half has no equivalent.** Restoring files means writing them over
-your site as it goes. There is no undo for that. If a restore fails part-way
-through the files, the ones already written stay written.
+**The file half is not transactional in the same way.** Restoring files means
+writing them over your site as it goes. If a restore fails part-way through the
+files, the ones already written stay written.
 
-And a restore is a **merge**, not a replacement. Pontifex writes what the
-archive contains and removes nothing else. So if a restore fails after writing
-a plugin your site never had, that plugin is still there afterwards — even
-after an automatic recovery. The recovery puts back what the safety archive
-captured; it does not sweep away files that were never yours.
+**What the automatic recovery does now.** Pontifex keeps track of every file a
+restore *creates* — as opposed to overwrites — and when the automatic recovery
+runs after a failure it puts back what the safety archive captured **and removes
+what the failed restore added**. So a plugin file your site never had, written
+moments before the failure, is taken away again rather than left behind. It only
+ever removes what that run itself created; anything your site wrote in the
+meantime, and anything the safety archive contains, is left alone.
 
-**After any failed restore, look at your site before assuming it is back to
+When Pontifex can account for every file it added, it tells you the site is back
+to how it was. When it cannot — on a very large restore, or if a file would not
+delete — it says so instead of claiming a clean revert. **Read which of the two
+you were given.**
+
+**There are still cases with no automatic recovery at all:**
+
+- You passed `--no-rollback-archive`, so there is no safety archive to replay.
+- The recovery itself failed — Pontifex says so plainly when this happens.
+- The restore ended on a fatal error (out of memory, an exceeded time limit),
+  which stops PHP outright before any recovery can run. The log says the site
+  may be partially restored.
+
+**In any of those three, look at your site before assuming it is back to
 normal.** Check your plugins list for anything you do not recognise.
 
 ---
@@ -126,7 +146,7 @@ normal.** Check your plugins list for anything you do not recognise.
 
 ### "there is not enough free disk space"
 
-> FileWriter: the restore was stopped before changing anything, because there
+> The restore was stopped before changing anything, because there
 > is not enough free disk space at "…". It needs about N MB free, and only N MB
 > is available. Free up some space and try again.
 
@@ -135,10 +155,14 @@ normal.** Check your plugins list for anything you do not recognise.
 **What happened.** Your server does not have room. Pontifex works out how much
 the restore would *add* rather than the archive's total size, so restoring a
 site over itself costs almost nothing while restoring a larger site onto a
-small disk is caught. The estimate deliberately leans low, so if it fires you
-are genuinely short.
+small disk is caught. Before checking, it also clears away any temp files an
+earlier, interrupted restore left behind, so a previous failed attempt's own
+debris is never what is holding up the retry. The estimate deliberately leans
+low, so if it still fires you are genuinely short.
 
-**Nothing has been changed.** This runs before the first byte is written.
+**Nothing has been changed** beyond clearing away another restore's own
+leftover debris, as described above. This still runs before the first byte of
+your site is written.
 
 **What to do.** Free up space and try again. Old archives elsewhere on the
 server, other sites' logs, and your host's own temp directories are usually
@@ -154,7 +178,7 @@ Check the log.
 
 ### "this host could not create a test symlink"
 
-> FileWriter: this archive contains N symbolic link(s), but this host could not
+> This backup contains N symbolic link(s), but this host could not
 > create a test symlink in "…", so restoring it would overwrite files and then
 > fail partway through, leaving neither the old site nor the archive's…
 
@@ -179,6 +203,39 @@ support as a warning before you need it.
 the answer and is not. That flag controls *where links are allowed to point*,
 not *whether your host can create them at all*. It will not help here, and you
 will have switched off a genuine security protection for nothing.
+
+### "resolving its target … reaches an existing link on disk, but readlink() is not available"
+
+> Cannot check the symbolic link "…": resolving its target "…" reaches an
+> existing link on disk, but readlink() is not available on this host, commonly
+> because it is listed in disable_functions. Where that link points cannot be
+> established, so the restore is refused rather than risk writing outside your
+> site.
+
+**Uncommon, and specific to hosts that have disabled `readlink`. An environment
+problem, not a fault in your backup.**
+
+**What happened.** Deciding whether a symbolic link in your backup is safe
+sometimes means reading the target of a link that is *already* on disk at the
+destination — for instance, from an earlier, partial restore. Reading a link's
+target needs PHP's `readlink()` function, and some hosts switch it off,
+commonly through `disable_functions`. Without an answer, Pontifex cannot tell
+whether the link is safe, so it fails closed rather than guess.
+
+**Your backup is not the problem, and should not be deleted.** The archive can
+be entirely sound; it is this host that cannot answer the question. Restoring
+the very same file on a host where `readlink` is enabled will succeed.
+
+**What to do.** Ask your host to remove `readlink` from `disable_functions`,
+the same way you would for `symlink` (see the entry above). You can check for
+this in advance with `wp pontifex doctor`.
+
+**What not to do.** Do not assume the backup is corrupt and make a fresh one to
+replace it. A new backup taken *on this same host* will run into the identical
+problem the moment it tries to record a symbolic link — see
+["a site that contains symbolic links cannot be backed up" below](#a-site-that-contains-symbolic-links-cannot-be-backed-up-until-it-is-enabled)
+— because the cause is the host's configuration, not anything about this
+particular archive.
 
 ### "refusing symlink … Re-run with --allow-unsafe-symlinks only if you trust this archive"
 
@@ -234,6 +291,71 @@ it is your own and this happens, the file is damaged — use an older backup.
 **What not to do.** Do not extract the SQL and run it by hand with
 `wp db query`. That is precisely the outcome the check prevents, performed
 manually.
+
+### "it is not part of this site, whose tables begin with…"
+
+> Refusing to restore table "wpb_options": it is not part of this site, whose
+> tables begin with "wpa_". A backup can only replace the site it belongs to.
+> Nothing has been changed.
+
+**Rare, and one of the more serious refusals on this page.**
+
+**What happened.** Some hosting plans put several WordPress sites in one
+database, keeping them apart only by giving each site's tables a different
+name prefix (`wpa_options`, `wpb_options`). Before staging any table from the
+archive, Pontifex works out the archive's own source prefix and checks that
+every table it stages begins with the live database's prefix — rewriting the
+table names to match first, when the two genuinely differ (see below). This
+table did not belong under either.
+
+**Refusing is the last resort, not the first answer.** Pontifex tries two
+things before it ever reaches this refusal. First, the prefix recorded in the
+archive's own provenance — every archive written by a current Pontifex
+carries one. Failing that, a prefix worked out from the archive's own table
+names: `wp_options`, `wp_posts` and the rest of a normal WordPress install all
+share one leading run, and that shared run is taken as the prefix, provided
+it genuinely is shared by every table the archive holds — so a plugin table
+such as `wp_myplugin_options` cannot narrow it down to `wp_myplugin_`, because
+that narrower run is not shared by the archive's own `wp_posts`. Either route
+lets a genuinely different, but legitimate, prefix be rewritten onto this
+site automatically, with nothing for you to do. **This message only appears
+once both have been tried and neither could account for the table.**
+
+**Pontifex never produces an archive like this** in the ordinary case. A
+backup Pontifex writes always carries this site's own table names sharing one
+prefix, so once both recovery routes above have failed, this file either
+genuinely belongs to a different WordPress installation or has been altered
+to claim one it does not own. **Keep it, and do not delete it** — the same
+advice as the [symlink refusal above](#refusing-symlink--re-run-with---allow-unsafe-symlinks-only-if-you-trust-this-archive):
+a refused archive is undamaged, and its existence is information. Find out
+where the file actually came from before doing anything else with it.
+
+**Nothing has been changed.** This is checked before the table is staged and
+before any SQL runs.
+
+**The legitimate case this can still catch.** One narrow case remains, and it
+needs an old archive: one written before Pontifex recorded a source prefix at
+all (a field the archive format added in v1.1; every archive from a current
+Pontifex has it), **and** whose own table names cannot establish one shared
+prefix either — for instance, a database-only backup that deliberately
+excluded every recognisable WordPress core table with `--exclude-table`,
+leaving only custom tables Pontifex has no core table name to anchor a prefix
+to. Restoring that archive onto a site with a genuinely different prefix hits
+this refusal on a backup that is genuinely yours.
+
+**What to do.** In almost every case, nothing — Pontifex now recovers the
+right prefix on its own, from the recorded value or the table names, so a
+restore that would once have needed a fresh export usually just works. If you
+do still hit this message, and you are confident the archive is your own, the
+fix is to re-export the source site with a current version of Pontifex — the
+new archive will record its own prefix directly, which is not affected by
+which tables the backup includes. There is no supported way to force a
+rewrite onto an old archive that carries neither the recorded field nor
+table names a prefix can be derived from.
+
+**What not to do.** Do not edit the SQL inside the archive to relabel the
+tables. That reintroduces exactly the risk this check exists to close, by
+hand, on your own live site.
 
 ### "the archive records a files-only scope but carries database chunks"
 
@@ -402,6 +524,28 @@ automatic updates paused.
 **What not to do.** Running `--resume` again will not help; the fresh scan
 disagrees the same way each time.
 
+### "a site that contains symbolic links cannot be backed up until it is enabled"
+
+> Could not read the symbolic link "…": readlink() is not available on this
+> host, commonly because it is listed in disable_functions. A site that
+> contains symbolic links cannot be backed up until it is enabled.
+
+**Uncommon. An environment problem.**
+
+**What happened.** Your site contains a symbolic link, and recording it in a
+backup means reading where it points with PHP's `readlink()` function. Some
+hosts disable it, commonly through `disable_functions`. Without this check,
+the backup would either drop the link silently or record it wrongly.
+
+**Nothing has been written.** The backup stops before anything is created.
+
+**What to do.** Ask your host to remove `readlink` from `disable_functions`.
+You can check for this in advance with `wp pontifex doctor`.
+
+**What not to do.** Do not just retry — the same check runs every time your
+site still contains the link. If you do not need that link included, `--exclude`
+it and the rest of the backup will proceed.
+
 ---
 
 ## "Another Pontifex operation is already running"
@@ -458,6 +602,48 @@ permanently, for every future upload of your entire database.
 
 Read the second half. **The backup succeeded; only the copy failed.** Do not
 delete the local file. Fix the connection and upload it again.
+
+### "could not be verified: the destination holds … bytes, but the local archive is … bytes"
+
+**Protecting you.** An upload goes to a temporary name first and is only
+renamed into place once its size is checked against the local archive. This
+message means the destination reported a different size than the file that
+was sent — a connection that dropped partway through, without the transfer
+itself reporting failure. Without this check, that partial file would have
+been renamed into the archive's real name, listed as a backup, and — being
+the newest thing at the destination — could evict a genuinely sound backup
+from retention to make room for it.
+
+The partial upload under the temporary name is removed automatically as part
+of this refusal; nothing is left behind for retention to trip over.
+
+**What to do.** Check the connection to the destination, then retry the
+upload. The local archive this backup produced is unaffected either way —
+this is the same situation as "The local archive is still at …" above, just
+caught one step later.
+
+### "finished and was verified, but the SFTP destination refused to move it into place"
+
+**Not something a retry fixes — read it fully before doing anything.** The
+upload itself succeeded and was checked byte-for-byte against the local
+archive; it is sitting safely on the destination under the temporary name the
+message gives you. What failed is the final step, moving it from that
+temporary name to its real one, and that step fails for a reason that is
+still true the next time you try: almost always, the account Pontifex
+connects as does not have permission to rename (or delete) files in that
+directory, even though it was able to write the temporary file in the first
+place.
+
+**What to do.** Check the destination account's permissions on the remote
+directory — it needs to be able to rename and delete there, not just create
+files. Once that is fixed, either re-run the export (a fresh temporary file
+will be uploaded and renamed normally) or, if you would rather not upload the
+archive again, rename the temporary file yourself over SFTP.
+
+**What not to do.** Do not keep retrying the export hoping it will go through
+— a permissions problem does not resolve itself between attempts, and each
+retry uploads the whole archive again for no reason. And do not delete the
+temporary file: it is a complete, verified copy of your backup.
 
 ---
 

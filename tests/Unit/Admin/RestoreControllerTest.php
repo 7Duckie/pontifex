@@ -428,6 +428,15 @@ final class RestoreControllerTest extends TestCase {
 	 * that safety archive to recover the site — reported as an automatic rollback rather
 	 * than a bare failure.
 	 *
+	 * The injected engine is a {@see RestoreRunnerInterface} mock, not a real
+	 * {@see \Pontifex\Restore\RestoreRunner} — so it has no creation ledger to consult,
+	 * and recovery honestly reports a MERGE rather than a precise revert (see
+	 * {@see \Pontifex\Restore\FileWriter::remove_created_paths()} and
+	 * RestoreController's own RECOVERY_* constants). Both outcomes share the phrase
+	 * "rolled back to its state before the restore", asserted below; the PRECISE
+	 * wording needs the real engine, exercised at the RestoreRunner/FileWriter level in
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}.
+	 *
 	 * @return void
 	 */
 	public function test_restore_auto_rolls_back_after_a_failed_replay(): void {
@@ -475,7 +484,7 @@ final class RestoreControllerTest extends TestCase {
 
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 500, $this->json['status'] );
-		$this->assertStringContainsString( 'automatically rolled back', $this->json['data']['message'] );
+		$this->assertStringContainsString( 'rolled back to its state before the restore', $this->json['data']['message'] );
 	}
 
 	/**
