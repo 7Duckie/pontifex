@@ -599,6 +599,48 @@ permanently, for every future upload of your entire database.
 Read the second half. **The backup succeeded; only the copy failed.** Do not
 delete the local file. Fix the connection and upload it again.
 
+### "could not be verified: the destination holds … bytes, but the local archive is … bytes"
+
+**Protecting you.** An upload goes to a temporary name first and is only
+renamed into place once its size is checked against the local archive. This
+message means the destination reported a different size than the file that
+was sent — a connection that dropped partway through, without the transfer
+itself reporting failure. Without this check, that partial file would have
+been renamed into the archive's real name, listed as a backup, and — being
+the newest thing at the destination — could evict a genuinely sound backup
+from retention to make room for it.
+
+The partial upload under the temporary name is removed automatically as part
+of this refusal; nothing is left behind for retention to trip over.
+
+**What to do.** Check the connection to the destination, then retry the
+upload. The local archive this backup produced is unaffected either way —
+this is the same situation as "The local archive is still at …" above, just
+caught one step later.
+
+### "finished and was verified, but the SFTP destination refused to move it into place"
+
+**Not something a retry fixes — read it fully before doing anything.** The
+upload itself succeeded and was checked byte-for-byte against the local
+archive; it is sitting safely on the destination under the temporary name the
+message gives you. What failed is the final step, moving it from that
+temporary name to its real one, and that step fails for a reason that is
+still true the next time you try: almost always, the account Pontifex
+connects as does not have permission to rename (or delete) files in that
+directory, even though it was able to write the temporary file in the first
+place.
+
+**What to do.** Check the destination account's permissions on the remote
+directory — it needs to be able to rename and delete there, not just create
+files. Once that is fixed, either re-run the export (a fresh temporary file
+will be uploaded and renamed normally) or, if you would rather not upload the
+archive again, rename the temporary file yourself over SFTP.
+
+**What not to do.** Do not keep retrying the export hoping it will go through
+— a permissions problem does not resolve itself between attempts, and each
+retry uploads the whole archive again for no reason. And do not delete the
+temporary file: it is a complete, verified copy of your backup.
+
 ---
 
 ## Two things that will not tell you they went wrong
