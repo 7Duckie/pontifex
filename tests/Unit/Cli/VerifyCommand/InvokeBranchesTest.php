@@ -29,6 +29,7 @@ use Pontifex\Cli\SigningKeys;
 use Pontifex\Cli\VerifyCommand;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
@@ -422,6 +423,67 @@ final class InvokeBranchesTest extends TestCase {
 		foreach ( $captured_logs as $line ) {
 			$this->assertStringNotContainsStringIgnoringCase( 'broken', $line, 'A could-not-check outcome must never use the word "broken".' );
 		}
+	}
+
+	/**
+	 * A BuildCannotComply from the verify walk is reported REFUSED and halts 1.
+	 *
+	 * The archive is sound and this host is fine; a ceiling compiled into
+	 * every build of Pontifex is what stopped the walk on an entry too large
+	 * to process. That is the same REFUSED verdict the preflight route
+	 * reaches by inspecting a PreflightReport, so it must halt 1 like every
+	 * other refused or broken outcome — never 2, which this command reserves
+	 * for "nothing was learned" — and the printed verdict must neither call
+	 * the archive broken nor tell the operator to fetch a fresh copy, since a
+	 * fresh copy of the same archive would be refused identically.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_build_cannot_comply_halts_1_and_reports_refused(): void {
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner
+			->shouldReceive( 'verify' )
+			->once()
+			->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+
+		$captured_message = null;
+		$logger           = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'warning' )->never();
+		$logger->shouldReceive( 'error' )->once()->andReturnUsing(
+			function ( string $message, array $context ) use ( &$captured_message ): void {
+				$captured_message = $context['exception']->getMessage();
+			}
+		);
+
+		$captured_logs = array();
+		$wp_cli        = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing(
+			function ( string $message ) use ( &$captured_logs ): void {
+				$captured_logs[] = $message;
+			}
+		);
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new VerifyCommand( $environment, $wordpress_context, $restore_runner, $logger, new NullProgressBar() );
+
+		// No expectException: the command must NOT re-throw. It returns after
+		// halting, and Mockery verifies halt(1) and error() were called.
+		$command(
+			array( $this->temp_archive_path ),
+			array()
+		);
+
+		$this->assertNotNull( $captured_message, 'The BuildCannotComply must have been logged with the real exception.' );
+		$this->assertStringContainsString( 'wp-content/uploads/2024/huge-video.mov', $captured_message );
+		$printed = implode( "\n", $captured_logs );
+		$this->assertStringContainsString( 'REFUSED', $printed, 'The printed verdict must say REFUSED.' );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $printed, 'A refused outcome must never use the word "broken".' );
+		$this->assertStringNotContainsStringIgnoringCase( 'fetch a fresh copy', $printed, 'A build limit is not fixed by a fresh copy of the same archive.' );
 	}
 
 	/**

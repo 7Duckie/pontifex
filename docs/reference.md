@@ -136,7 +136,7 @@ exit code and wording:
 | Outcome | Exit | Meaning |
 |---|---|---|
 | Sound | 0 | Undamaged, and a restore would accept it. |
-| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, or contents contradicting the recorded scope. |
+| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, contents contradicting the recorded scope, or an entry larger than this build of Pontifex will restore. |
 | Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
 | Could not check | 2 | This host stopped the check before it reached a verdict — commonly too little memory. Not a statement about the archive either way. |
 
@@ -291,8 +291,9 @@ open archive (header, footer, manifest, provenance, signature)
 assert scope consistent with manifest
 resolve every declared symlink target
 assert host can create symlinks where they will land
+sweep temp files left by a crashed earlier restore
 assert sufficient free disk space
-──────────────────────────── nothing written above this line ────────────────
+──────── nothing belonging to the archive has been applied above this line ────────
 begin database staging
 walk entries:  files → FileWriter (LIVE)   db chunks → staging tables
 finalise prefix rewrite

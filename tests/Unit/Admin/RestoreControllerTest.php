@@ -26,6 +26,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
@@ -499,6 +500,85 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertFalse( $this->json['data']['refused'] );
 		$this->assertTrue( $this->json['data']['could_not_check'] );
 		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A could-not-check outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * A BuildCannotComply from the verify gate is reported as "refused", never
+	 * as broken or could-not-check, and the safety archive is never taken.
+	 *
+	 * The archive is sound and this host is fine; a ceiling compiled into
+	 * every build of Pontifex is what stopped the walk on an entry too large
+	 * to process. That is GATE_REFUSED's own meaning — intact, but a restore
+	 * will not accept it — so this must not fall into GATE_BROKEN (which
+	 * would send the operator to fetch a fresh copy no build would accept
+	 * either) or GATE_COULD_NOT_CHECK (which implies a server fix exists).
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_refused_for_a_build_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		// The safety archive must never be taken for a refused backup.
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A refused outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['restored'] );
+		$this->assertTrue( $this->json['data']['refused'] );
+		$this->assertFalse( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A refused outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * The same BuildCannotComply outcome, reported through rollback()'s own gate.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_reports_refused_for_a_build_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->controller( $runner, null, $rollback )->rollback();
+
+		$this->assertTrue( $this->json['success'], 'A refused outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['rolled_back'] );
+		$this->assertTrue( $this->json['data']['refused'] );
+		$this->assertFalse( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A refused outcome must never use the word "broken".' );
 	}
 
 	/**

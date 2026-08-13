@@ -3054,7 +3054,8 @@ final class FileWriter {
 	 * @param string $target_path   Absolute path where the link should be created.
 	 * @param string $link_target   The string the link should point at.
 	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
-	 * @throws RuntimeException If the target escapes the root (and is not allowed), symlink() is unavailable on this host, or the link cannot be created.
+	 * @throws RuntimeException If the target escapes the root (and is not allowed) or the link cannot be created.
+	 * @throws HostCannotComply If symlink() is not available on this host.
 	 */
 	private function write_symlink( string $target_path, string $link_target, string $relative_path ): void {
 		$existed_before = self::path_exists_before_write( $target_path );
@@ -3067,7 +3068,7 @@ final class FileWriter {
 		}
 
 		if ( ! function_exists( 'symlink' ) ) {
-			throw new RuntimeException(
+			throw new HostCannotComply(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Could not create symlink "%s" -> "%s": symlink() is not available on this host, commonly because it is listed in disable_functions.', $target_path, $link_target )
 			);

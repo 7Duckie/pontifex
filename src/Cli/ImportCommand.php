@@ -21,6 +21,7 @@ use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Exception\PontifexException;
@@ -1464,14 +1465,17 @@ final class ImportCommand {
 	/**
 	 * Print why the import stopped, in terms an operator can act on.
 	 *
-	 * Three situations demand three different responses, and the exception's
+	 * Four situations demand four different responses, and the exception's
 	 * type is what tells them apart (ADR 0022): an archive that cannot be
 	 * trusted means do not restore this file; a host that cannot comply means
-	 * the archive may be fine and the server is the fixable problem; a wrong
-	 * request means correct the invocation. A failure carrying none of those
-	 * types is reported plainly rather than guessed at — most of the safety
-	 * core still throws untyped exceptions, and inventing a kind for one would
-	 * be worse than admitting we do not know.
+	 * the archive may be fine and the server is the fixable problem; this
+	 * build cannot comply means the archive AND the host are fine and no
+	 * server setting helps — a ceiling compiled into every build of Pontifex
+	 * stopped this one entry; a wrong request means correct the invocation. A
+	 * failure carrying none of those types is reported plainly rather than
+	 * guessed at — most of the safety core still throws untyped exceptions,
+	 * and inventing a kind for one would be worse than admitting we do not
+	 * know.
 	 *
 	 * Both the message and the path go through the redactor, because an engine
 	 * message routinely names an absolute path and this output is exactly what
@@ -1512,6 +1516,19 @@ final class ImportCommand {
 				)
 			);
 			WP_CLI::log( __( 'The archive may be perfectly good — the problem is this server, and it is usually fixable.', 'pontifex' ) );
+			return;
+		}
+
+		if ( $error instanceof BuildCannotComply ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: which entry was too large and by how much, 2: the archive path */
+					__( 'This build will not restore the archive: %1$s (%2$s)', 'pontifex' ),
+					$message,
+					$path
+				)
+			);
+			WP_CLI::log( __( 'The backup is not damaged and does not need replacing — this build simply will not restore a single entry over 2 GB, on any host. No server setting changes that.', 'pontifex' ) );
 			return;
 		}
 

@@ -29,6 +29,7 @@ use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 
 /**
@@ -966,6 +967,153 @@ final class EntryReaderTest extends TestCase {
 				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
 				$error->getMessage(),
 				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * An entry over the archive's own decompression-bomb ceiling is
+	 * BuildCannotComply, not HostCannotComply or ArchiveNotTrustworthy — and
+	 * the refusal names the entry.
+	 *
+	 * $max_decoded_bytes (mirrored by {@see \Pontifex\Archive\Reader\ArchiveLimits::DEFAULT_MAX_ENTRY_BYTES})
+	 * is compiled into every build and identical on every host, so an entry
+	 * declaring more decoded bytes than it permits is a fact about neither the
+	 * archive nor this host — this build simply will not process an entry that
+	 * large ({@see BuildCannotComply}). It is not HostCannotComply, because no
+	 * server setting moves this number the way a bigger memory_limit moves the
+	 * memory-derived budget in
+	 * {@see self::test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget()}
+	 * below. And it is not ArchiveNotTrustworthy: unlike a genuine
+	 * decompression bomb ({@see self::test_read_entry_refuses_a_genuine_decompression_bomb_as_archive_not_trustworthy()}),
+	 * this entry is not lying about anything — its header honestly declares
+	 * its own size, which happens to be larger than the ceiling. Before this
+	 * fix the refusal was HostCannotComply regardless of which budget fired,
+	 * which sent an operator to fix a server that was never broken, over a
+	 * limit no server setting can change — and the message never said which
+	 * entry was the problem, so there was nothing to act on even once the
+	 * wrong advice was set aside.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_as_build_cannot_comply_when_over_the_fixed_decoded_byte_ceiling(): void {
+		$fixture = self::write_file_entry_to_fixture( 'wp-content/uploads/2024/huge-video.mov', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		try {
+			self::make_reader()->read_entry( $fixture[0], $fixture[1], 10 );
+			$this->fail( 'read_entry() should have raised BuildCannotComply.' );
+		} catch ( BuildCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp-content/uploads/2024/huge-video.mov',
+				$error->getMessage(),
+				'The refusal must name the entry an operator can act on.'
+			);
+			$this->assertStringContainsString( '100 decoded bytes', $error->getMessage() );
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * An entry over THIS HOST's own memory-derived budget still refuses as
+	 * HostCannotComply.
+	 *
+	 * The regression guard the type split above needs: telling the
+	 * archive's compiled-in ceiling apart from a host's memory budget must
+	 * not silently reclassify a genuine host failure as an archive problem
+	 * too. $memory_budget only ever reaches this guard for a shape the
+	 * reader must buffer whole (a db_chunk here; ADR 0010) — a plain file
+	 * entry streams and so is never judged against it, which is why this
+	 * uses a db_chunk fixture rather than the file fixture the sibling test
+	 * above uses.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		try {
+			self::make_reader()->read_entry( $dest, $manifest_entry, EntryReader::DEFAULT_MAX_DECODED_BYTES, null, 10 );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp_options',
+				$error->getMessage(),
+				'A db_chunk has no path; the table name must still name the entry.'
+			);
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * Hand-compose a file entry whose header lies small but whose gzip payload decodes huge.
+	 *
+	 * The genuine decompression-bomb shape, distinct from a forged declared-size
+	 * mismatch ({@see self::forge_lying_file_entry()}): a real writer never
+	 * produces this, because {@see \Pontifex\Archive\Writer\EntryWriter} always
+	 * records the byte count it actually captured. Composing it by hand is the
+	 * only way to exercise the codec's own runaway-output guard rather than the
+	 * header check that runs before any decode starts.
+	 *
+	 * @param string $plaintext Highly compressible content to compress and bury inside the record.
+	 * @return array{0: resource, 1: ManifestEntry} The archive stream and matching manifest entry.
+	 */
+	private static function forge_gzip_bomb_entry( string $plaintext ): array {
+		$plain_source = self::memory_stream( $plaintext );
+		$compressed   = self::memory_stream();
+		( new GzipCodec() )->encode( $plain_source, $compressed );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $compressed );
+		$compressed_bytes = self::read_all( $compressed );
+
+		// The header's declared size is a deliberate lie — small enough to sail
+		// past the pre-decode budget check — while the gzip payload it sits
+		// beside actually decompresses to strlen( $plaintext ) bytes.
+		$header_bytes = EntryHeader::for_file( 'bomb.txt', 10, 0644, 1690000000, 'application/octet-stream', strlen( $compressed_bytes ) )->to_bytes();
+		$record       = $header_bytes . ByteOrder::pack_uint16( GzipCodec::ID ) . self::zero_nonce() . $compressed_bytes;
+		$hash         = hash( 'sha256', $record, true );
+		$record      .= $hash;
+
+		$manifest_entry = ManifestEntry::for_file( 0, 0, strlen( $record ), 'bomb.txt', GzipCodec::ID, $hash );
+
+		return array( self::memory_stream( $record ), $manifest_entry );
+	}
+
+	/**
+	 * A genuine decompression bomb — an honest-looking small header hiding a
+	 * payload that decodes far past the budget — still refuses as
+	 * ArchiveNotTrustworthy, not BuildCannotComply.
+	 *
+	 * The second regression guard the type split needs, the counterpart to
+	 * {@see self::test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget()}
+	 * above. A bomb is a hostile payload whose decoded size runs away DURING
+	 * decode, discoverable only by attempting it — genuinely a fact about the
+	 * archive's bytes, caught by the codec's own runaway-output guard
+	 * ({@see \Pontifex\Archive\Codec\GzipCodec::decode()}) rather than by
+	 * {@see \Pontifex\Archive\Reader\EntryReader}'s pre-decode header check,
+	 * which this bomb sails straight past on a declared size of 10 bytes.
+	 * Confusing this with the fixed decoded-byte ceiling — an honest file
+	 * simply larger than a number compiled into the plugin — is exactly the
+	 * mistake that went wrong last round.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_a_genuine_decompression_bomb_as_archive_not_trustworthy(): void {
+		$fixture = self::forge_gzip_bomb_entry( str_repeat( 'A', 200000 ) );
+
+		try {
+			self::make_reader()->read_entry( $fixture[0], $fixture[1], 100 );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'Decoded output exceeded the maximum of 100 bytes',
+				$error->getMessage(),
+				'The codec-level runaway-output guard must be what caught this, not the header check.'
 			);
 		}
 	}

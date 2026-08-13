@@ -31,6 +31,7 @@ use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Job\JobStore;
@@ -1181,6 +1182,37 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * A build that cannot comply is distinguished from both a bad archive and a
+	 * host problem.
+	 *
+	 * The archive is sound and the host is fine; a ceiling compiled into every
+	 * build of Pontifex is what stopped this one entry. Telling the operator
+	 * to fetch a fresh copy would send them nowhere — the same ceiling
+	 * refuses the identical entry in the fresh copy too — and telling them to
+	 * fix their server would be equally useless, since no server setting
+	 * moves this number.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_a_build_that_cannot_comply_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore would be refused. Your site was not changed.', $output );
+		$this->assertStringContainsString( 'wp-content/uploads/2024/huge-video.mov', $output, 'The verdict must name the entry that was too large.' );
+		$this->assertStringContainsString( '2 GB', $output, 'The verdict must give the limit as a human figure, not a raw byte count.' );
+		$this->assertStringContainsString( 'not damaged', $output );
+		$this->assertStringContainsString( 'does not need replacing', $output );
+		$this->assertStringNotContainsString( 'fetch a fresh copy', $output, 'A fresh copy of the same archive would be refused identically.' );
+		$this->assertStringNotContainsString( 'cannot be trusted', $output );
+		$this->assertStringNotContainsString( 'this server', $output, 'No server setting fixes a limit compiled into the build.' );
+	}
+
+	/**
 	 * A wrong request is reported without blaming the archive or the host.
 	 *
 	 * Nothing is wrong with anything; the invocation needs correcting, so the
@@ -1193,10 +1225,10 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
 		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
-		$this->run_failing_dry_run( new InvalidRequest( '--url requires a new site URL' ) );
+		$this->run_failing_dry_run( new InvalidRequest( '--new-url requires a new site URL' ) );
 
 		$output = implode( "\n", $printed );
-		$this->assertStringContainsString( 'The request needs correcting: --url requires a new site URL', $output );
+		$this->assertStringContainsString( 'The request needs correcting: --new-url requires a new site URL', $output );
 		$this->assertStringNotContainsString( 'cannot be trusted', $output );
 		$this->assertStringNotContainsString( 'Full details are in the Pontifex log', $output );
 	}

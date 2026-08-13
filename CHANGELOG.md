@@ -211,6 +211,29 @@ v0.0.x decision log for the reasoning.
   the generic "Codec failed to decode entry payload." that used to discard it
   either way.
 
+- **A sound backup with one very large file was told it "cannot be trusted",
+  and to fetch a fresh copy that would fail the identical way.** `wp pontifex
+  import` and `wp pontifex verify` (also reachable from the admin Restore and
+  Verify screens) check every entry against a fixed decoded-size ceiling — 2
+  GB, compiled into every build of Pontifex, the same on every host it runs on
+  — and treated a breach exactly like a genuine decompression bomb: "This
+  archive cannot be trusted… Do not restore this archive — fetch a fresh copy
+  of the backup." A fresh copy holds the identical file and would be refused
+  the identical way; the advice could never help. An honest file larger than a
+  number compiled into the plugin is a fact about neither the archive nor the
+  host it is running on, so it is now its own outcome. The operator is told
+  the backup is not damaged and does not need replacing, given the limit in
+  plain terms (2 GB, not a raw byte count), and pointed at nothing to change
+  on the server, because nothing there would help. `wp pontifex verify`'s
+  REFUSED verdict, and the admin Verify and Restore screens' Refused outcome,
+  now cover this case too, alongside the existing symbolic-link-escape and
+  scope-contradiction causes — still exit code `1`, unchanged. This is
+  unrelated to the memory-derived budget a low-memory host already hits on a
+  large entry, which is unaffected and still reports as a host problem, as
+  before; and to a genuine decompression bomb — a payload whose decoded size
+  runs away during decode — which still reports as an untrustworthy archive,
+  as before.
+
 ## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
 
 A minor release rather than a patch: no public API moved — not an interface, a

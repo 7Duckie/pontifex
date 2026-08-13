@@ -208,3 +208,68 @@ enough at the *source* either: when one exception class actually covers two
 different kinds of fact — a host limitation and a genuine corruption, in this
 case — the distinction may need to be built into the layer that throws it,
 not guessed at by the layer that catches it.
+
+## Amendment — 2026-08-13: a fourth kind, because three could not express a build limit
+
+**New information:** `EntryReader::refuse_if_over_budget()` guards two
+different budgets against the same declared-size check. One is derived from
+this host's own `memory_limit` — genuinely `HostCannotComply`, since a bigger
+or better-configured host lets the identical archive through. The other is
+`EntryReader::DEFAULT_MAX_DECODED_BYTES` (2 GiB), a per-entry ceiling compiled
+into every build of Pontifex and identical on every host it runs on. Before
+this amendment, both budgets threw the same type — first `HostCannotComply`
+by default, later reclassified to `ArchiveNotTrustworthy` by analogy with the
+codec layer's own decompression-bomb refusal (`Codec::decode()`'s
+`$max_output_bytes` guard, a genuinely archive-side fact caught mid-decode).
+Neither type fits. `HostCannotComply` sent an operator to free memory or disk
+that was never the problem, on a limit no server setting moves. And the
+analogy to the codec's own guard does not hold either: a decompression bomb
+is a hostile payload whose *decoded* size runs away during decode, discoverable
+only by attempting it — a genuine fact about the archive's bytes. The fixed
+ceiling is checked off the header's own declared size, before any decode
+starts, against an entry that is not lying about anything — an honest file,
+larger than a number compiled into the plugin. Reporting that as
+`ArchiveNotTrustworthy` told an operator their sound backup "cannot be
+trusted" and to "fetch a fresh copy" — advice that cannot help, because the
+fresh copy holds the identical file and is refused the identical way.
+
+**This is the tie-break rule's blind spot, not a case it covers.** The rule
+above reads "when a refusal could plausibly be read as either [archive or
+host], prefer `ArchiveNotTrustworthy`" — but a build limit is not plausibly
+either. It is not a fact about the archive (nothing is malformed, tampered
+with, or lying about its size) and it is not a fact about this host (no
+server setting changes a number compiled into every build). Stretching the
+tie-break to cover a third kind of fact would have repeated this ADR's own
+mistake one level up, the same way the codec-layer follow-up above found the
+mistake recurring one level down for a missing extension.
+
+**Amended decision:** a fourth kind, sibling to the other three under the same
+`PontifexException` marker rather than a subtype of either:
+
+```
+Pontifex\Exception\PontifexException          (interface — marker)
+├── ArchiveNotTrustworthy   extends RuntimeException        implements PontifexException
+├── BuildCannotComply       extends RuntimeException        implements PontifexException
+├── HostCannotComply        extends RuntimeException        implements PontifexException
+└── InvalidRequest          extends InvalidArgumentException implements PontifexException
+```
+
+`EntryReader::refuse_if_over_budget()` already took a `$host_derived` flag
+distinguishing its two call sites — the fixed ceiling and the memory-derived
+budget shared one method precisely because the check itself is identical; only
+the meaning of a breach differs. The fixed-ceiling branch now throws
+`BuildCannotComply`; the memory-derived branch is unchanged and still throws
+`HostCannotComply`. The codec-level decompression-bomb guard is also
+unchanged and still throws `ArchiveNotTrustworthy` — the two checks were
+already reaching the two exception types this amendment needed; splitting the
+fixed ceiling out was the one piece missing.
+
+Adopted the same day at every consumer that branches on the taxonomy for this
+walk: `Cli\VerifyCommand`, `Cli\ImportCommand`,
+`Admin\RestoreController::verify_gate()` and `Admin\VerifyController` each
+catch `BuildCannotComply` ahead of their generic handling and route it to the
+same REFUSED outcome [ADR 0023](./0023-verify-and-restorability.md) defined
+for an archive that is intact but a restore will not accept — the closest
+existing fit, since a build limit shares REFUSED's central fact (sound bytes,
+still not restorable) while sharing none of the reasoning `ArchiveNotTrustworthy`'s
+own REFUSED-adjacent wording carries about where the archive came from.

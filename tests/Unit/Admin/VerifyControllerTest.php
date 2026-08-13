@@ -23,6 +23,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Tests\TestCase;
@@ -373,6 +374,58 @@ final class VerifyControllerTest extends TestCase {
 			'broken',
 			$this->json['data']['message'],
 			'A could-not-check outcome must never use the word "broken".'
+		);
+	}
+
+	/**
+	 * A BuildCannotComply from the walk is reported as "refused", never as
+	 * broken or could-not-check.
+	 *
+	 * The archive is sound and this host is fine; a ceiling compiled into
+	 * every build of Pontifex is what stopped the walk on an entry too large
+	 * to process. That fits the same REFUSED outcome the preflight route
+	 * reaches by inspecting a PreflightReport, so this must be reported the
+	 * same way — never as broken, which would send the operator to fetch a
+	 * fresh copy no build would accept either, and never as could-not-check,
+	 * which would wrongly imply a server-side fix exists.
+	 *
+	 * @return void
+	 */
+	public function test_verify_reports_refused_for_a_build_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'warning' )->once();
+		$logger->shouldReceive( 'error' )->never();
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+
+		try {
+			$this->controller( $runner, $logger )->verify();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A refused outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['sound'] );
+		$this->assertTrue( $this->json['data']['refused'] );
+		$this->assertArrayNotHasKey( 'could_not_check', $this->json['data'] );
+		$this->assertArrayNotHasKey( 'proof', $this->json['data'], 'A refused outcome has nothing sound to prove.' );
+		$this->assertStringNotContainsStringIgnoringCase(
+			'broken',
+			$this->json['data']['message'],
+			'A refused outcome must never use the word "broken".'
 		);
 	}
 

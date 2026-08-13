@@ -20,6 +20,7 @@ use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
@@ -305,6 +306,25 @@ final class VerifyCommand {
 
 			$this->print_could_not_check( $archive_path, $error );
 			WP_CLI::halt( 2 );
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and the host is fine; this build's own
+			// compiled-in per-entry ceiling stopped the walk on an entry too
+			// large to process. That is the same REFUSED verdict the preflight
+			// route below reaches by inspecting a PreflightReport once the walk
+			// finishes — reached here directly from a throw instead, because
+			// this walk never got that far. Must not fall into the broken path
+			// below: "broken" sends somebody to fetch a fresh copy, and the
+			// fresh copy would be refused the identical way.
+			$this->logger->error(
+				'Verify complete: the archive is intact but this build will not process one of its entries.',
+				array(
+					'archive'   => $archive_path,
+					'exception' => $error,
+				)
+			);
+
+			$this->print_refused_for_build_limit( $archive_path, $error );
+			WP_CLI::halt( 1 );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Verify failed: archive is not sound.',
@@ -828,6 +848,39 @@ final class VerifyCommand {
 		);
 		WP_CLI::log(
 			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly.', 'pontifex' )
+		);
+	}
+
+	/**
+	 * Print the refused verdict for a build limit: intact bytes, one entry too large for this build to process.
+	 *
+	 * A second route to REFUSED, alongside {@see self::print_refused()}'s
+	 * preflight findings — this one is printed straight from a thrown
+	 * {@see BuildCannotComply}, because the walk stopped before a
+	 * PreflightReport could even be built. It must read nothing like
+	 * {@see self::print_could_not_check()}: that verdict names a problem THIS
+	 * HOST can fix by freeing memory or disk. This one names a ceiling
+	 * compiled into every build of Pontifex, identical on every host — no
+	 * server setting moves it, and a fresh copy of the same backup would be
+	 * refused the identical way. The archive is exactly what it says it is,
+	 * only larger than this build will process.
+	 *
+	 * @param string            $archive_path The archive that was verified.
+	 * @param BuildCannotComply $error        The build limit that stopped the walk; its message names the entry.
+	 * @return void
+	 */
+	private function print_refused_for_build_limit( string $archive_path, BuildCannotComply $error ): void {
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: which entry was too large and by how much, 2: the archive path */
+				__( 'Archive is REFUSED: every hash matched, so the file is not damaged — but %1$s (%2$s)', 'pontifex' ),
+				$redactor->redact( $error->getMessage() ),
+				$redactor->redact( $archive_path )
+			)
+		);
+		WP_CLI::log(
+			__( 'This build of Pontifex will not restore a single entry over 2 GB, on any host — no server setting changes that. The backup is not damaged and does not need replacing.', 'pontifex' )
 		);
 	}
 }
