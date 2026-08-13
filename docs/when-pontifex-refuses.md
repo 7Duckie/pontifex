@@ -82,14 +82,20 @@ the fingerprint taken when it was written, and a restore would accept it.
 **Broken** means something inside is damaged or unreadable. Find another copy.
 
 **Refused** means the archive is *not* damaged — every fingerprint matched —
-but a restore will not accept it: it would place a symbolic link outside your
-site, or its contents contradict what its own header says it holds.
+but a restore will not accept it, for one of two different reasons. Most
+often it is structural: it would place a symbolic link outside your site, or
+its contents contradict what its own header says it holds. Occasionally it is
+not about the archive at all: one of its entries is larger than this build of
+Pontifex will restore — a limit that is the same on every host and moves with
+no server setting.
 
 That third answer calls for the opposite of what "broken" calls for. Broken
 sends you to delete the file and reach for another copy. **A refused archive
-should be kept and not restored.** Pontifex never produces one, so its
-existence is information: find out where the file came from. If you made it
-yourself with Pontifex and see this, please report it.
+should be kept and not restored** either way — but only some of the causes
+are suspicious. A structural refusal is information Pontifex never produces
+on its own: find out where the file came from, and report it if you made the
+archive yourself. A refusal over the size limit is not suspicious at all: it
+is an honest backup, and the file needs no explanation and no replacing.
 
 **Could not check** is the fourth, and it is not a "no" to any of the
 questions above — it is Pontifex being unable to ask them. It means this host
@@ -492,6 +498,43 @@ are scripting against `wp pontifex verify`, note the exit code: this outcome
 now exits `2`, not `1` — a script that only checks for a non-zero exit will
 lump this in with a genuinely broken or refused archive unless it is updated
 to look at the actual code.
+
+### "Archive is REFUSED: … but this build will not restore a single entry over 2 GB"
+
+> Archive is REFUSED: every hash matched, so the file is not damaged — but
+> Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded
+> bytes, exceeding the 2147483648-byte budget for this restore. (…)
+>
+> This build of Pontifex will not restore a single entry over 2 GB, on any
+> host — no server setting changes that. The backup is not damaged and does
+> not need replacing.
+
+**Not a fault, and not a damaged backup — a ceiling built into this copy of
+Pontifex, not a fact about your archive or your server.**
+
+**What happened.** One entry in the archive is larger than the fixed limit
+Pontifex checks every entry against before it will decode it — 2 GB, compiled
+into the plugin and identical on every host it runs on. The archive is not
+lying about its size and nothing in it is corrupt; it genuinely holds a file
+that large.
+
+**Your backup is fine, and does not need replacing.** A fresh copy of the
+same archive holds the identical file and is refused the identical way — a
+re-download or a fresh export changes nothing.
+
+**What to do.** There is currently no way to restore an entry over this
+ceiling with this build. If you can, remove or shrink the file outside
+Pontifex — WordPress does not usually need a single upload this large — before
+your next backup, then restore the rest and add that file back by hand.
+Report this if it surprises you: an entry this size in `wp-content` is
+unusual.
+
+**What not to do.** Do not look for a `memory_limit` or free-disk-space
+setting to raise — this is not a host problem, and nothing on the server
+changes it. Do not treat the backup as damaged; every hash matched.
+
+**In the browser:** the Verify and Restore screens report the same Refused
+outcome, worded for the screen rather than the terminal.
 
 ### "this archive is format version X.Y, but this reader supports…"
 
