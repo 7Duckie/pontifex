@@ -18,6 +18,7 @@ use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
@@ -697,6 +698,46 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertTrue( is_link( $link ) );
 		$this->assertSame( 'new-target', readlink( $link ) );
+	}
+
+	/**
+	 * The disabled-symlink() refusal is HostCannotComply, not a bare
+	 * RuntimeException.
+	 *
+	 * The refusal branch is only reachable on a host where symlink() has
+	 * genuinely been removed (e.g. via disable_functions) — function_exists()
+	 * cannot be faked in-process, so this shells out to a real child process
+	 * the same way {@see \Pontifex\Tests\Unit\Archive\Reader\ArchiveReaderTest::test_manifest_decode_refused_when_the_host_forbids_raising_the_limit()}
+	 * does for ini_set. This is the regression guard for the disabled-symlink()
+	 * refusal disagreeing with its sibling guards
+	 * ({@see FileWriter::assert_symlinks_creatable()} and the readlink()
+	 * guard inside {@see FileWriter::declared_or_on_disk_target()}), which both
+	 * already throw HostCannotComply for the identical "this host removed the
+	 * function I need" condition.
+	 *
+	 * @return void
+	 */
+	public function test_write_symlink_refuses_as_host_cannot_comply_when_symlink_is_unavailable(): void {
+		$snippet = 'require getenv( "PONTIFEX_AUTOLOAD" );'
+			. ' $writer = new Pontifex\\Restore\\FileWriter( getenv( "PONTIFEX_FIXTURE_ROOT" ) );'
+			. ' $header = Pontifex\\Archive\\Format\\EntryHeader::for_symlink( "link", "target.txt", 0 );'
+			. ' $result = new Pontifex\\Archive\\Reader\\EntryReadResult( $header, "" );'
+			. ' try { $writer->write_entry( $result ); echo "NO-REFUSAL"; }'
+			. ' catch ( Throwable $e ) { echo get_class( $e ) . "|" . $e->getMessage(); }';
+
+		$command = sprintf(
+			'PONTIFEX_AUTOLOAD=%s PONTIFEX_FIXTURE_ROOT=%s php -d disable_functions=symlink -r %s 2>&1',
+			escapeshellarg( dirname( __DIR__, 3 ) . '/vendor/autoload.php' ),
+			escapeshellarg( $this->fixture_root ),
+			escapeshellarg( $snippet )
+		);
+
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec -- Test-only: the refusal branch is reachable only where symlink() is genuinely unavailable, which cannot be simulated in-process; a real child process is the only honest way to exercise it.
+		$output = (string) shell_exec( $command );
+
+		$this->assertStringStartsWith( HostCannotComply::class . '|', $output, 'symlink() unavailable must refuse as HostCannotComply, matching its sibling guards.' );
+		$this->assertStringContainsString( 'symlink() is not available on this host', $output );
+		$this->assertStringNotContainsString( 'NO-REFUSAL', $output );
 	}
 
 	// -------------------------------------------------------------------

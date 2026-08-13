@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Archive\Reader;
 
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 
 use InvalidArgumentException;
@@ -171,20 +172,26 @@ final class EntryReader {
 	 *
 	 * @param resource      $source            A seekable, readable stream containing the archive.
 	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record to read.
-	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce (the decompression-bomb ceiling; applies to every entry). Defaults to DEFAULT_MAX_DECODED_BYTES; pass null for no limit.
+	 * @param int|null      $max_decoded_bytes Maximum bytes the decoded payload may produce — this build's compiled-in per-entry ceiling, which also backstops the codec's own decompression-bomb defence, since decode is asked to honour the same number. Defaults to DEFAULT_MAX_DECODED_BYTES; pass null for no limit.
 	 * @param callable|null $on_bytes          Optional byte-progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record is read, so a caller can report progress within a large entry.
 	 * @param int|null      $memory_budget     Optional memory-derived per-entry budget. Applies only to entries the reader must buffer whole (encrypted entries and db_chunks); a plain file entry streams through chunk-sized memory, so no memory refusal applies to it. Null enforces no memory budget.
 	 * @return EntryReadResult The parsed header and decoded payload (string- or stream-shaped).
-	 * A HostCannotComply may also surface from the budget check this calls: the
-	 * ceiling is derived from the runtime's memory limit, so the same archive
-	 * reads fine on a larger host. That one is not the tag below either — the
-	 * throw is in the callee, not here — but a second source of HostCannotComply
-	 * genuinely is thrown directly in this method's own body: a codec that
-	 * cannot run because this host lacks the extension it needs (ext-zstd,
-	 * today) is likewise a fact about this host, not the archive.
+	 * Two different budget checks this calls can also surface, and they carry
+	 * different verdicts. An entry over $max_decoded_bytes is
+	 * BuildCannotComply: that ceiling is compiled into every build and
+	 * identical on every host, so exceeding it is neither a fact about the
+	 * archive (it is not malformed or lying about its size) nor about this
+	 * host (no server setting moves the number) — this build simply will not
+	 * process an entry that large. An entry over $memory_budget genuinely is
+	 * HostCannotComply: that ceiling is derived from the runtime's memory
+	 * limit, so the same archive reads fine on a larger host. Neither throw
+	 * is in this method's own body — both are in the callee — but a third
+	 * source of HostCannotComply genuinely is thrown directly here: a codec
+	 * that cannot run because this host lacks the extension it needs
+	 * (ext-zstd, today) is likewise a fact about this host, not the archive.
 	 *
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
-	 * @throws HostCannotComply         If the codec cannot decode the payload because this host lacks the extension it needs.
+	 * @throws HostCannotComply         If the decoded size exceeds $memory_budget, or the codec cannot decode the payload because this host lacks the extension it needs.
 	 * @throws ArchiveNotTrustworthy    If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, the codec fails to decode the payload for any other reason, or a file entry's decoded byte count differs from its declared size.
 	 */
 	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES, ?callable $on_bytes = null, ?int $memory_budget = null ): EntryReadResult {
@@ -273,9 +280,9 @@ final class EntryReader {
 		// header's declared size is trusted only to refuse, never to allocate; the
 		// decode still enforces the same ceiling as it runs.
 		$streams_out = $this->streams_decoded_payload( $header, $codec_id );
-		$this->refuse_if_over_budget( $header, $max_decoded_bytes );
+		$this->refuse_if_over_budget( $header, $max_decoded_bytes, host_derived: false );
 		if ( ! $streams_out ) {
-			$this->refuse_if_over_budget( $header, $memory_budget );
+			$this->refuse_if_over_budget( $header, $memory_budget, host_derived: true );
 		}
 
 		// --- The stored payload: spooled to php://temp while the hash runs.
@@ -496,7 +503,7 @@ final class EntryReader {
 		// whole (encrypted entries and db_chunks) — a plain file entry streams, so no
 		// memory refusal applies to it (ADR 0010).
 		if ( null !== $max_decoded_bytes && ! $this->streams_decoded_payload( $header, $manifest_entry->codec_id() ) ) {
-			$this->refuse_if_over_budget( $header, $max_decoded_bytes );
+			$this->refuse_if_over_budget( $header, $max_decoded_bytes, host_derived: true );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -555,24 +562,63 @@ final class EntryReader {
 	 * means no limit. The declared size is trusted only to fail closed, never to size
 	 * an allocation, and the decode still enforces the same ceiling as it runs.
 	 *
-	 * @param EntryHeader $header            The parsed entry header.
+	 * $max_decoded_bytes carries two different facts through this one parameter,
+	 * and $host_derived is what tells them apart at the point of the throw.
+	 * {@see self::read_entry()}'s first call, and
+	 * {@see \Pontifex\Restore\RestorePreflight::declared_symlink_targets()} via
+	 * it, pass this build's own compiled-in per-entry ceiling —
+	 * {@see ArchiveLimits::max_entry_bytes()} or the archive-total budget derived
+	 * from it — identical on every host, so an entry over it is a fact about
+	 * neither the archive nor this host: BuildCannotComply.
+	 *
+	 * This used to be thrown as ArchiveNotTrustworthy, by analogy with
+	 * {@see \Pontifex\Archive\Codec\Codec::decode()}'s own decompression-bomb
+	 * refusal (a plain `CodecException`, caught in {@see self::read_entry()}
+	 * and mapped to ArchiveNotTrustworthy there). The analogy does not hold: a
+	 * decompression bomb is a hostile payload whose *decoded* size runs away
+	 * during decode, discoverable only by attempting it, so it genuinely is a
+	 * fact about the archive's bytes. This check runs before any decode,
+	 * entirely off the header's own declared size, against an entry that is
+	 * not lying about anything — an honest file simply larger than a number
+	 * compiled into the plugin. Reporting that as ArchiveNotTrustworthy told
+	 * the operator to fetch a fresh copy of a backup that was never damaged
+	 * and would be refused the identical way again.
+	 *
+	 * {@see self::read_entry()}'s second call, and {@see self::verify_entry()}'s
+	 * only call, pass a budget derived from THIS host's own memory_limit
+	 * ({@see \Pontifex\Restore\RestoreRunner::$entry_memory_budget}), so an
+	 * entry over that budget genuinely is this host's problem — the same
+	 * archive opens cleanly on a host with more memory.
+	 *
+	 * @param EntryHeader $header            The parsed entry header, whose path (or, for a db_chunk, table name) names the entry in the refusal message.
 	 * @param int|null    $max_decoded_bytes The maximum decoded bytes permitted, or null for no limit.
+	 * @param bool        $host_derived      True when $max_decoded_bytes is this host's memory-derived budget (HostCannotComply on refusal); false when it is this build's compiled-in per-entry ceiling (BuildCannotComply on refusal).
 	 * @return void
-	 * @throws HostCannotComply If the entry's declared decoded size exceeds this restore's host-derived budget.
+	 * @throws HostCannotComply If $host_derived is true and the entry's declared decoded size exceeds the budget.
+	 * @throws BuildCannotComply If $host_derived is false and the entry's declared decoded size exceeds the budget.
 	 */
-	private function refuse_if_over_budget( EntryHeader $header, ?int $max_decoded_bytes ): void {
+	private function refuse_if_over_budget( EntryHeader $header, ?int $max_decoded_bytes, bool $host_derived ): void {
 		if ( null === $max_decoded_bytes ) {
 			return;
 		}
 		$declared = $header->estimated_bytes();
 		if ( $declared > $max_decoded_bytes ) {
-			throw new HostCannotComply(
-				sprintf(
-					'Entry declares %d decoded bytes, exceeding the %d-byte budget for this restore.',
-					(int) $declared,
-					(int) $max_decoded_bytes
-				)
+			// A file, directory, or symlink entry names itself by path; a
+			// db_chunk has no path, only a table name — so the message can
+			// still name the entry for every kind, not file entries alone.
+			$name    = $header->path() ?? $header->table_name() ?? 'entry';
+			$message = sprintf(
+				'Entry "%s" declares %d decoded bytes, exceeding the %d-byte budget for this restore.',
+				$name,
+				(int) $declared,
+				(int) $max_decoded_bytes
 			);
+			if ( $host_derived ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the entry's own path for diagnostic context; exception path, not HTML output.
+				throw new HostCannotComply( $message );
+			}
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the entry's own path for diagnostic context; exception path, not HTML output.
+			throw new BuildCannotComply( $message );
 		}
 	}
 

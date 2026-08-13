@@ -18,6 +18,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
@@ -897,6 +898,16 @@ final class RestoreController {
 			// host's, not the backup's.
 			$this->logger->warning( 'Admin restore: this host could not finish verifying the archive; nothing was written.', array( 'exception' => $error ) );
 			return self::GATE_COULD_NOT_CHECK;
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and this host is fine; a ceiling compiled
+			// into every build of Pontifex is what stopped the walk on an
+			// entry too large to process. That fits GATE_REFUSED's own
+			// meaning exactly — intact, but a restore will not accept it —
+			// so it must not fall into the generic Throwable catch below and
+			// be reported BROKEN, which would send the operator to fetch a
+			// fresh copy of a backup a fresh copy could never fix.
+			$this->logger->warning( 'Admin restore: the archive is intact but this build will not process one of its entries; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_REFUSED;
 		} catch ( Throwable $error ) {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
 			return self::GATE_BROKEN;
@@ -933,17 +944,22 @@ final class RestoreController {
 	 * single "it failed": BROKEN means an integrity check ran to completion
 	 * and found a problem — reach for another copy. REFUSED means every check
 	 * ran to completion and passed, but the archive should not be restored —
-	 * keep it, but do not trust it. COULD_NOT_CHECK means no check ran to
-	 * completion at all, so nothing whatsoever is known about the backup;
-	 * folding it into BROKEN is exactly the mistake this outcome exists to
-	 * stop — a host low on memory reporting a perfectly good file as damaged.
+	 * keep it either way, though not always for the same reason: a symbolic
+	 * link escaping the site or contents contradicting what the archive says
+	 * it holds means do not trust it and find out where it came from, while
+	 * an entry larger than this build of Pontifex will process means the
+	 * backup itself is fine and no server setting changes the ceiling.
+	 * COULD_NOT_CHECK means no check ran to completion at all, so nothing
+	 * whatsoever is known about the backup; folding it into BROKEN is exactly
+	 * the mistake this outcome exists to stop — a host low on memory
+	 * reporting a perfectly good file as damaged.
 	 *
 	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
 	 * @return string The message to show the operator.
 	 */
 	private function restore_gate_failure_message( string $gate ): string {
 		if ( self::GATE_REFUSED === $gate ) {
-			return __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' );
+			return __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: a symbolic link inside it may point outside your site, its contents may contradict what it says it holds, or one of its entries is larger than this build of Pontifex will restore. Nothing was restored. Keep the file: if the cause is an oversized entry, the backup is fine and no server setting changes that; otherwise, find out where the archive came from before trusting another copy. The Pontifex log has the details.', 'pontifex' );
 		}
 		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
 			return __( 'Could not check — this host stopped part-way through verifying this backup, so nothing was restored. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );

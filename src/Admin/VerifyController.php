@@ -17,6 +17,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Lock\BackupProgress;
 use Pontifex\Manifest\WpdbAdapter;
@@ -351,6 +352,26 @@ final class VerifyController {
 					'sound'           => false,
 					'could_not_check' => true,
 					'message'         => __( 'Could not check — this host stopped part-way through verifying this backup. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' ),
+				)
+			);
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and this host is fine; a ceiling compiled
+			// into every build of Pontifex is what stopped the walk on an
+			// entry too large to process. That fits the same REFUSED outcome
+			// the preflight route above reaches by inspecting a
+			// PreflightReport, reached here directly from a throw instead
+			// because the walk never got that far. Must not fall into the
+			// generic catch below and be reported broken — that message
+			// could talk somebody out of a backup that was never damaged,
+			// over a limit no server setting can change.
+			$this->logger->warning( 'Admin verify: the archive is intact but this build will not process one of its entries.', array( 'exception' => $error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+
+			wp_send_json_success(
+				array(
+					'sound'   => false,
+					'refused' => true,
+					'message' => __( 'Refused — this backup is not damaged; every hash matched, but one of its entries is larger than this build of Pontifex will restore. The backup does not need replacing — no server setting changes this build\'s limit. The Pontifex log has the details of which entry.', 'pontifex' ),
 				)
 			);
 		} catch ( Throwable $error ) {
