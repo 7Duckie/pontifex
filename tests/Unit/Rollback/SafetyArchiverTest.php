@@ -11,13 +11,13 @@ namespace Pontifex\Tests\Unit\Rollback;
 
 use Mockery;
 use ReflectionMethod;
-use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Rollback\RollbackStore;
@@ -123,8 +123,10 @@ final class SafetyArchiverTest extends TestCase {
 	 * not. Proven with the same deliberately-oversized single entry
 	 * {@see \Pontifex\Tests\Unit\Export\ExportRunnerTest} uses to prove the
 	 * refusal fires for an ordinary export — this test asserts create() turns
-	 * that refusal into a restore-stopping RuntimeException, not that a file
-	 * merely appeared on disk.
+	 * that refusal into a restore-stopping HostCannotComply, not that a file
+	 * merely appeared on disk. HostCannotComply, not a bare RuntimeException:
+	 * this installation's own reader is what cannot hold a manifest this
+	 * large, not evidence against the site being backed up.
 	 *
 	 * @return void
 	 */
@@ -139,7 +141,7 @@ final class SafetyArchiverTest extends TestCase {
 			$this->manifest_builder_returning( $plans )
 		);
 
-		$this->expectException( RuntimeException::class );
+		$this->expectException( HostCannotComply::class );
 		$this->expectExceptionMessage( 'A safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
 
 		$archiver->create( '/var/www/html' );
@@ -295,6 +297,9 @@ final class SafetyArchiverTest extends TestCase {
 	/**
 	 * The preflight refuses, and writes nothing, when free space is too low.
 	 *
+	 * Refuses as HostCannotComply, not a bare RuntimeException: the site being
+	 * backed up is not at fault, this host's free space is.
+	 *
 	 * @return void
 	 */
 	public function test_create_refuses_when_free_space_is_below_the_estimate(): void {
@@ -314,7 +319,7 @@ final class SafetyArchiverTest extends TestCase {
 		try {
 			$archiver->create( '/var/www/html' );
 			$this->fail( 'create() should have refused: free space is below the estimate.' );
-		} catch ( RuntimeException $error ) {
+		} catch ( HostCannotComply $error ) {
 			$this->assertStringContainsString( 'Not enough free disk space', $error->getMessage() );
 		}
 
@@ -495,7 +500,7 @@ final class SafetyArchiverTest extends TestCase {
 	 * {@see SafetyArchiver::preflight_disk_space()} refuses, and create() is
 	 * called end-to-end (not the private sweep method directly). If the
 	 * sweep ran after the preflight — or not at all ahead of it — the thrown
-	 * RuntimeException would leave the orphan in place; because it survives
+	 * HostCannotComply would leave the orphan in place; because it survives
 	 * neither, this proves the sweep already ran by the time the preflight
 	 * had its chance to refuse.
 	 *
@@ -521,7 +526,7 @@ final class SafetyArchiverTest extends TestCase {
 		try {
 			$archiver->create( '/var/www/html' );
 			$this->fail( 'create() should have refused: free space is below the estimate.' );
-		} catch ( RuntimeException $error ) {
+		} catch ( HostCannotComply $error ) {
 			$this->assertStringContainsString( 'Not enough free disk space', $error->getMessage() );
 		}
 

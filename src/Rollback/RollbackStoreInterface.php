@@ -10,7 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
-use RuntimeException;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Contract for the directory that holds pre-import safety archives.
@@ -47,7 +47,7 @@ interface RollbackStoreInterface {
 	 * directory already exists.
 	 *
 	 * @return void
-	 * @throws RuntimeException If the directory cannot be created.
+	 * @throws HostCannotComply If the directory cannot be created.
 	 */
 	public function ensure_directory(): void;
 

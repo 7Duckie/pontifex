@@ -20,6 +20,7 @@ use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
@@ -40,9 +41,14 @@ use Pontifex\WordPress\WordPressRoot;
  * `import --dry-run`, exposed as a standalone command so a backup can be
  * checked against cold storage with no destination site involved.
  *
- * It exits 0 when the archive is sound and non-zero when it is broken or
- * refused (a failed hash, a malformed structure, or a defensive-limit
- * breach), so it can gate scripts and scheduled jobs.
+ * Three exit codes, not two, because "the check could not run" is not the
+ * same fact as "the check ran and failed": exit 0 means the archive is
+ * sound, exit 1 means it is broken or refused (a failed hash, a malformed
+ * structure, or a defensive-limit breach), and exit 2 means this host
+ * stopped the check before it reached either answer — commonly too little
+ * memory — which says nothing about the archive at all. A script gating on
+ * this command should treat 2 as "unknown", not fold it into the "bad"
+ * bucket exit 1 already means.
  *
  * ## OPTIONS
  *
@@ -282,6 +288,23 @@ final class VerifyCommand {
 
 			$this->print_sound( $archive_path, $entry_total, $this->describe_archive_scope( $source ) );
 			$this->print_restorability( $report );
+		} catch ( HostCannotComply $error ) {
+			// This host, not the archive, is what stopped the walk short — a
+			// low memory_limit unable to hold a db_chunk it must buffer whole
+			// is the case that keeps happening in practice, and WordPress's
+			// own default is 40 MB. Nothing was learned about the archive
+			// either way, so it must not join the broken path below and be
+			// reported as damaged over a problem that belongs to this host.
+			$this->logger->warning(
+				'Verify could not run to completion: this host could not comply.',
+				array(
+					'archive'   => $archive_path,
+					'exception' => $error,
+				)
+			);
+
+			$this->print_could_not_check( $archive_path, $error );
+			WP_CLI::halt( 2 );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Verify failed: archive is not sound.',
@@ -764,6 +787,47 @@ final class VerifyCommand {
 				$redactor->redact( $error->getMessage() ),
 				$redactor->redact( $archive_path )
 			)
+		);
+	}
+
+	/**
+	 * Print the "could not check" verdict: this host stopped the walk before it finished.
+	 *
+	 * Kept apart from BROKEN for the same reason REFUSED is kept apart from it:
+	 * the two exist because "broken" is the one word capable of talking somebody
+	 * out of a backup that is very probably fine, and every verdict that is not
+	 * genuinely that must say something else. BROKEN means the hash walk ran to
+	 * completion and an entry failed it — reach for another copy. REFUSED means
+	 * the walk ran to completion, every hash matched, and the archive should
+	 * still not be restored. This verdict means the walk never reached either
+	 * answer: this host — commonly too little memory, WordPress's own 40 MB
+	 * default among them — stopped it first, so nothing whatsoever was learned
+	 * about the archive. Calling that BROKEN would condemn a file for a fact
+	 * about this server, not about it. The archive should be kept exactly as
+	 * it is; the fix is here, on this host, and is usually as simple as raising
+	 * memory_limit or freeing disk space, then trying again.
+	 *
+	 * Halts 2, not 1: `wp pontifex verify` has always used a plain 0-or-1
+	 * gate, and a script keyed on that convention deserves a value that means
+	 * "unknown", not one it would read as "bad" alongside a genuinely broken or
+	 * refused archive — the two outcomes this verdict is deliberately not.
+	 *
+	 * @param string           $archive_path The archive verification could not complete for.
+	 * @param HostCannotComply $error        The host problem that stopped the walk.
+	 * @return void
+	 */
+	private function print_could_not_check( string $archive_path, HostCannotComply $error ): void {
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: the host problem that stopped the check, 2: the archive path */
+				__( 'Could not check: %1$s (%2$s)', 'pontifex' ),
+				$redactor->redact( $error->getMessage() ),
+				$redactor->redact( $archive_path )
+			)
+		);
+		WP_CLI::log(
+			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly.', 'pontifex' )
 		);
 	}
 }

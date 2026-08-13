@@ -18,6 +18,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\WpdbAdapter;
@@ -127,6 +128,26 @@ final class RestoreController {
 	 * @var string
 	 */
 	private const GATE_REFUSED = 'refused';
+
+	/**
+	 * Gate outcome: this host stopped verification before it could reach a verdict at all.
+	 *
+	 * Kept apart from {@see self::GATE_BROKEN} for the same reason
+	 * {@see self::GATE_REFUSED} is — the three outcomes call for three different
+	 * responses from whoever reads them. BROKEN means the verify walk ran to
+	 * completion and an entry failed it; REFUSED means the walk ran to
+	 * completion, every hash matched, and the archive should still not be
+	 * restored. This outcome means the walk never reached either answer: this
+	 * host — commonly too little memory, WordPress's own 40 MB default among
+	 * them — stopped it first, so nothing whatsoever was learned about the
+	 * archive. Reporting that as BROKEN is exactly the message capable of
+	 * talking somebody out of a backup that has never actually failed
+	 * anything; the archive should be kept as it is, and the fix belongs to
+	 * this host, not to a fresh export.
+	 *
+	 * @var string
+	 */
+	private const GATE_COULD_NOT_CHECK = 'could_not_check';
 
 	/**
 	 * Recovery outcome: every path the failed restore created was accounted for and undone.
@@ -419,11 +440,10 @@ final class RestoreController {
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'restored' => false,
-						'refused'  => self::GATE_REFUSED === $gate,
-						'message'  => self::GATE_REFUSED === $gate
-							? __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' ),
+						'restored'        => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->restore_gate_failure_message( $gate ),
 					)
 				);
 			} else {
@@ -660,11 +680,10 @@ final class RestoreController {
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'rolled_back' => false,
-						'refused'     => self::GATE_REFUSED === $gate,
-						'message'     => self::GATE_REFUSED === $gate
-							? __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' ),
+						'rolled_back'     => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->rollback_gate_failure_message( $gate ),
 					)
 				);
 			} else {
@@ -863,12 +882,21 @@ final class RestoreController {
 	 * @param RestoreRunnerInterface $runner The engine to verify with.
 	 * @param resource               $source The open archive stream.
 	 * @param int                    $size   The archive size, the progress denominator.
-	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED} or {@see self::GATE_BROKEN}.
+	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
 	 */
 	private function verify_gate( RestoreRunnerInterface $runner, $source, int $size ): string {
 		$this->set_progress( self::PHASE_VERIFYING, 0, $size );
 		try {
 			$runner->verify( $source, null, $this->byte_callback( self::PHASE_VERIFYING, $size ) );
+		} catch ( HostCannotComply $error ) {
+			// This host, not the archive, is what stopped the walk short — a low
+			// memory_limit unable to hold a db_chunk it must buffer whole is the
+			// case that keeps happening in practice. Nothing was learned about
+			// the archive either way, so it must not fall into the broken branch
+			// below and be reported as damaged over a problem that is this
+			// host's, not the backup's.
+			$this->logger->warning( 'Admin restore: this host could not finish verifying the archive; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_COULD_NOT_CHECK;
 		} catch ( Throwable $error ) {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
 			return self::GATE_BROKEN;
@@ -895,6 +923,52 @@ final class RestoreController {
 		}
 
 		return self::GATE_OK;
+	}
+
+	/**
+	 * The message shown when a forward restore's gate does not pass.
+	 *
+	 * Three outcomes call for three different responses, so the message must
+	 * name which one actually happened rather than collapsing them into a
+	 * single "it failed": BROKEN means an integrity check ran to completion
+	 * and found a problem — reach for another copy. REFUSED means every check
+	 * ran to completion and passed, but the archive should not be restored —
+	 * keep it, but do not trust it. COULD_NOT_CHECK means no check ran to
+	 * completion at all, so nothing whatsoever is known about the backup;
+	 * folding it into BROKEN is exactly the mistake this outcome exists to
+	 * stop — a host low on memory reporting a perfectly good file as damaged.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function restore_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying this backup, so nothing was restored. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' );
+	}
+
+	/**
+	 * The message shown when a rollback's gate does not pass.
+	 *
+	 * The rollback counterpart of {@see self::restore_gate_failure_message()};
+	 * see that method's docblock for why the three outcomes need three
+	 * different messages rather than one.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function rollback_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying the safety archive, so nothing was rolled back. That is not a verdict on the safety archive: no check reached a conclusion about it, only about this server right now. Check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	/**

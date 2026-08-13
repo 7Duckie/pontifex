@@ -177,6 +177,40 @@ v0.0.x decision log for the reasoning.
   against the retry — the same order `SafetyArchiver` already used ahead of
   its own free-space check, for the same reason.
 
+- **A server too low on memory to finish checking a perfectly good backup said
+  the backup itself was broken.** `wp pontifex verify` and the admin Verify and
+  Restore screens caught every failure the read-only integrity walk could
+  raise the same way: whatever stopped the walk was reported as a broken
+  archive, because only two of the three outcomes ADR 0023 promised were ever
+  reachable from an exception — a caught failure landed on "broken" by
+  construction, whatever actually caused it. Measured with a `memory_limit` of
+  40 MB — WordPress's own default — against an archive that verified sound
+  moments later from the command line on the same machine with no such limit.
+  `verify` now has a fourth outcome, **could not check**, and a **new exit
+  code, `2`**: any automation keyed on `wp pontifex verify`'s exit status
+  should treat `2` as "unknown", not fold it in with the `1` that already
+  means "broken or refused". The admin Verify and Restore screens report the
+  same outcome without the word "broken", and Restore never takes a safety
+  archive against a backup that could not be checked in the first place. Two
+  siblings of the same mistake are fixed alongside it: an archive newer than
+  this Pontifex can read is now reported as exactly that — upgrade Pontifex —
+  rather than as damaged, and a rollback stopped by a host condition (no disk
+  space, a directory that will not accept a write) is reported the same way
+  instead of as a plain, unclassified failure. The sharpest sibling touches
+  `wp pontifex import` and `wp pontifex rollback` rather than `verify` — those
+  two decode every entry as they restore it, which `verify` deliberately never
+  does — and is the ordinary shape of moving to a new server: a backup made on
+  a host with the optional zstd compression extension, restored on a host
+  without it, was reported as an untrustworthy archive ("This archive cannot
+  be trusted…", pointing you at a fresh copy of a backup that was never the
+  problem), when the bytes are entirely fine and the same archive restores
+  cleanly wherever the extension is present. A missing extension now reports
+  correctly as a host problem ("This host cannot complete the restore…"),
+  while a genuinely malformed payload still reports as an untrustworthy
+  archive, as before — both now naming the real underlying reason instead of
+  the generic "Codec failed to decode entry payload." that used to discard it
+  either way.
+
 ## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
 
 A minor release rather than a patch: no public API moved — not an interface, a

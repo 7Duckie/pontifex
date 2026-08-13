@@ -11,8 +11,8 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Filesystem\ProtectedDirectory;
-use RuntimeException;
 
 /**
  * Manages `wp-content/pontifex/rollback/` and the safety archives within it.
@@ -93,15 +93,17 @@ final class RollbackStore implements RollbackStoreInterface {
 	 * Create the rollback directory (mode 0700) if it does not already exist.
 	 *
 	 * @return void
-	 * @throws RuntimeException If the directory cannot be created.
+	 * @throws HostCannotComply If the directory cannot be created.
 	 */
 	public function ensure_directory(): void {
 		// Create the not-world-readable directory and lock it against direct web
 		// access (a safety archive is a full site backup). ProtectedDirectory is
 		// best-effort, so the hard guarantee — the directory exists — is asserted
-		// here, where the caller expects an exception on failure.
+		// here, where the caller expects an exception on failure. A directory
+		// that will not accept creation is HostCannotComply's own headline
+		// example: nothing about the site being backed up made this fail.
 		if ( ! ProtectedDirectory::ensure( $this->directory, self::DIRECTORY_MODE ) ) {
-			throw new RuntimeException(
+			throw new HostCannotComply(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message only; the path is plugin-derived, not web output.
 				sprintf( 'Could not create the rollback directory: %s', $this->directory )
 			);

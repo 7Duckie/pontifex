@@ -26,6 +26,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
@@ -419,6 +420,85 @@ final class RestoreControllerTest extends TestCase {
 
 		$this->assertTrue( $this->json['success'], 'A broken verdict is reported as a JSON success.' );
 		$this->assertFalse( $this->json['data']['restored'] );
+	}
+
+	/**
+	 * A HostCannotComply from the verify gate is reported as "could not
+	 * check", never as broken, and the safety archive is never taken.
+	 *
+	 * This host, not the backup, is what stopped verification — a low
+	 * memory_limit unable to buffer a db_chunk it must decode whole is the
+	 * case that keeps happening in practice, and WordPress's own default is
+	 * 40 MB. Nothing was learned about the backup either way, so the message
+	 * must not say "broken", and must not imply the operator should discard
+	 * the file.
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_could_not_check_for_a_host_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new HostCannotComply( 'Entry declares 41943040 decoded bytes, exceeding the 10485760-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		// The safety archive must never be taken when the backup could not be checked.
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A could-not-check outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['restored'] );
+		$this->assertFalse( $this->json['data']['refused'] );
+		$this->assertTrue( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A could-not-check outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * The same HostCannotComply outcome, reported through rollback()'s own gate.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_reports_could_not_check_for_a_host_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new HostCannotComply( 'Not enough free disk space for a safety archive.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->controller( $runner, null, $rollback )->rollback();
+
+		$this->assertTrue( $this->json['success'], 'A could-not-check outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['rolled_back'] );
+		$this->assertFalse( $this->json['data']['refused'] );
+		$this->assertTrue( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A could-not-check outcome must never use the word "broken".' );
 	}
 
 	/**

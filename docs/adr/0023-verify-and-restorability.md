@@ -1,7 +1,9 @@
 # 0023 — verify answers for the archive, a dry run answers for the restore
 
-- **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.1.0.
-- **Deciders:** 7Duckie (raised by the hardening arc; the last of its open findings).
+- **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.1.0. Amended
+  2026-08-12 (the third outcome had no exception route — see Amendment).
+- **Deciders:** 7Duckie (raised by the hardening arc; the last of its open
+  findings. Amendment: raised by the 2026-08-09 audit and stress campaign).
 
 ## Context
 
@@ -127,3 +129,62 @@ verify collecting a passphrase it currently never needs. The preflight report is
 advice, never the guard: `restore()` runs every one of these checks again and
 still fails closed, which is what makes it safe for the reporting path to stay
 quiet when a check cannot be evaluated.
+
+## Amendment — 2026-08-12: the third outcome was written down, not built
+
+This ADR called itself "the last of" the hardening arc's open findings. It was
+not, and this amendment says so plainly rather than letting the record imply
+otherwise.
+
+**New information:** "Three outcomes, not two" above describes a bucket for
+"the check reached no decision", reported as neither sound, refused, nor
+broken — and states that "sorting reads the exception's type". Both sentences
+were aspirations this decision recorded, not a route this decision's own
+implementation actually built. `RestoreController::verify_gate()` had exactly
+two ways to leave "OK": a caught `Throwable` returned `GATE_BROKEN`
+unconditionally, and `GATE_REFUSED` was reached only by inspecting the
+preflight report afterwards — never by any exception, of any type. A
+`HostCannotComply` thrown mid-walk is a `Throwable`, so it landed on
+`GATE_BROKEN` by the same construction as a genuinely corrupt archive.
+`Cli\VerifyCommand`'s verify path and `Admin\VerifyController`'s verify action
+had the identical shape. The third bucket this ADR describes in prose was
+therefore unreachable by any code path that existed: nothing had been built
+for an exception to route to, so "sorting reads the exception's type" was
+true only for the two-way REFUSED/BROKEN split this ADR did implement, never
+for the three-way split its own prose promised.
+
+This was found, not reasoned to: a real host with a `memory_limit` of 40 MB
+— WordPress's own default — reported a perfectly sound archive as "Not
+verified — this backup is broken." The identical file, checked from the
+command line on the same machine with no such limit, verified sound. That is
+exactly the failure this ADR's "This host cannot restore it right now" bucket
+was written to prevent, on the operation the whole hardening arc was cut to
+make trustworthy.
+
+**Amended decision:** the missing route now exists. `RestoreController::verify_gate()`,
+`Admin\VerifyController` and `Cli\VerifyCommand` each catch `HostCannotComply`
+ahead of their generic `Throwable` catch and report a fourth outcome, **could
+not check** — a
+deliberately different name from this ADR's own "the check reached no
+decision", because a *caught* `HostCannotComply` is a stronger, narrower claim
+than any unclassified failure: this is a check that specifically hit a host
+condition, not merely a check that failed to reach one of the other three
+verdicts. `Cli\VerifyCommand` halts **2**, a new exit code distinct from the
+`0`/`1` this ADR shipped, so a script gating on it can tell "unknown" apart
+from "bad" rather than folding a host problem into the same bucket as a
+genuinely broken or refused archive. `Admin\VerifyController` reports the
+equivalent outcome on the Verify screen, and `Admin\RestoreController` reports
+it on the Restore screen for both a forward restore and a rollback — all three
+worded so as never to say "broken" and never to imply the backup should be
+discarded. `RestoreController::restore()` also never takes a safety archive
+against a backup that could not be checked in the first place, matching the
+ordinary preflight-refusal behaviour this ADR already established (rollback
+never takes one regardless of gate outcome, so this is specific to a forward
+restore). Everything else in this ADR stands, including the two-way
+REFUSED/BROKEN split it did build and the reasoning behind it.
+
+**The lesson this amendment exists to record:** a decision document that
+describes an outcome in prose is not evidence the outcome is reachable. The
+next claim that a divergence is "closed" should be checked against the actual
+catch sites and their fall-through default, not against what this document
+says they do.

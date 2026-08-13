@@ -12,8 +12,11 @@ namespace Pontifex\Tests\Unit\Archive\Reader;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Pontifex\Archive\Codec\Codec;
+use Pontifex\Archive\Codec\CodecException;
 use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\CodecUnavailableException;
 use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\Cipher;
@@ -25,6 +28,8 @@ use Pontifex\Archive\Integrity\Sha256;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Tests for {@see EntryReader}.
@@ -711,5 +716,257 @@ final class EntryReaderTest extends TestCase {
 		$read_result = self::make_reader()->read_entry( $dest, $manifest_entry );
 
 		$this->assertSame( $sql, $read_result->payload() );
+	}
+
+	/**
+	 * A Codec stub that always fails to decode with a caller-chosen exception class and message.
+	 *
+	 * Registered in place of a real codec so a fixture written successfully
+	 * (with a working codec) can be read back through a registry that fails
+	 * at decode time — the only way to reach the decode catch without a real
+	 * missing extension. Parameterised by exception class so the same stub
+	 * drives both branches EntryReader now distinguishes: a plain
+	 * `CodecException` (a genuinely corrupt payload) and the narrower
+	 * `CodecUnavailableException` (this host lacks the extension the codec
+	 * needs) — the only two classes {@see ZstdCodec} itself ever throws.
+	 *
+	 * @param int    $id             The codec ID this stub reports, matching the ID the fixture was written with.
+	 * @param string $message        The message the stub's decode() throws with.
+	 * @param string $exception_class The exception class to throw — CodecException::class or CodecUnavailableException::class.
+	 * @return Codec A codec that fails every decode() with $exception_class carrying $message.
+	 */
+	private static function failing_codec( int $id, string $message, string $exception_class = CodecException::class ): Codec {
+		return new class( $id, $message, $exception_class ) implements Codec {
+			/**
+			 * The codec ID this stub reports.
+			 *
+			 * @var int
+			 */
+			private int $stub_id;
+
+			/**
+			 * The message decode() throws with.
+			 *
+			 * @var string
+			 */
+			private string $message;
+
+			/**
+			 * The exception class decode() throws.
+			 *
+			 * @var class-string<CodecException>
+			 */
+			private string $exception_class;
+
+			/**
+			 * Construct a stub codec reporting the given ID and decode failure.
+			 *
+			 * @param int    $id              The codec ID to report.
+			 * @param string $message         The message decode() throws with.
+			 * @param string $exception_class The exception class decode() throws (CodecException::class or CodecUnavailableException::class).
+			 */
+			public function __construct( int $id, string $message, string $exception_class ) {
+				$this->stub_id         = $id;
+				$this->message         = $message;
+				$this->exception_class = $exception_class;
+			}
+
+			/**
+			 * Return the stub's codec ID.
+			 *
+			 * @return int The configured stub ID.
+			 */
+			public function id(): int {
+				return $this->stub_id;
+			}
+
+			/**
+			 * No-op encode for stub purposes.
+			 *
+			 * @param resource      $input   A readable stream resource.
+			 * @param resource      $output  A writable stream resource.
+			 * @param callable|null $on_read Ignored by this stub.
+			 * @return int Always zero.
+			 */
+			public function encode( $input, $output, ?callable $on_read = null ): int {
+				return 0;
+			}
+
+			/**
+			 * Always fail, as a missing extension or a genuinely corrupt payload would.
+			 *
+			 * Declared `never`, not `int`: this stub never returns, only
+			 * throws. PHP allows `never` as a covariant override of any
+			 * parent return type, so this still satisfies {@see Codec::decode()}'s
+			 * `int` signature. Branches on the configured class with two
+			 * literal `throw` statements, rather than `throw new $class(...)`,
+			 * so both are ordinary, statically-visible throws.
+			 *
+			 * @param resource $input            A readable stream resource.
+			 * @param resource $output           A writable stream resource.
+			 * @param int|null $max_output_bytes Ignored by this stub.
+			 * @throws CodecUnavailableException If this stub was configured with that class.
+			 * @throws CodecException            Otherwise, carrying this stub's configured message.
+			 */
+			public function decode( $input, $output, ?int $max_output_bytes = null ): never {
+				if ( CodecUnavailableException::class === $this->exception_class ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->message is this test double's own configured fixture message, not HTML output.
+					throw new CodecUnavailableException( $this->message );
+				}
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->message is this test double's own configured fixture message, not HTML output.
+				throw new CodecException( $this->message );
+			}
+		};
+	}
+
+	/**
+	 * A genuinely corrupt payload decoding a streamed file entry surfaces the
+	 * underlying message and stays ArchiveNotTrustworthy.
+	 *
+	 * A plain file entry decodes stream-to-stream through
+	 * {@see EntryReader::read_entry()}'s own catch of `CodecException` — the
+	 * site the audit found discarding the one sentence that actually explains
+	 * a decode failure behind a generic "Codec failed to decode entry
+	 * payload." This pins that the underlying message now survives, AND —
+	 * the regression guard the taxonomy split needs — that a genuinely
+	 * corrupt payload (any `CodecException` that is not the narrower
+	 * `CodecUnavailableException`) still raises `ArchiveNotTrustworthy`, not
+	 * `HostCannotComply`: real corruption must never be reported as this
+	 * host's fault.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_surfaces_the_underlying_codec_message_for_a_streamed_file(): void {
+		$fixture = self::write_file_entry_to_fixture( 'big.txt', str_repeat( 'A', 1000 ), RawCodec::ID );
+
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( RawCodec::ID, 'zstd_uncompress_add() failed; input may be malformed or truncated.' ) );
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $fixture[0], $fixture[1] );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'zstd_uncompress_add() failed; input may be malformed or truncated.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A genuinely corrupt payload decoding a buffered db_chunk entry surfaces
+	 * the underlying message and stays ArchiveNotTrustworthy.
+	 *
+	 * The buffered counterpart of the streamed-file test above:
+	 * {@see EntryReader::decode_spool_to_string()} used to throw a bare
+	 * RuntimeException carrying none of the CodecException's own message.
+	 * This pins that it now surfaces that message too, and — the two sites
+	 * agreeing — raises the same ArchiveNotTrustworthy type as the streamed
+	 * path for a genuinely corrupt payload.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_surfaces_the_underlying_codec_message_for_a_buffered_db_chunk(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( RawCodec::ID, 'zstd_uncompress_add() failed; input may be malformed or truncated.' ) );
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $dest, $manifest_entry );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'zstd_uncompress_add() failed; input may be malformed or truncated.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A missing extension decoding a streamed file entry is HostCannotComply, not ArchiveNotTrustworthy.
+	 *
+	 * The case the audit called the sharpest, because it is the real
+	 * migrate-to-a-new-server story: a backup made on a host with ext-zstd,
+	 * restored on a host without it. The bytes are fine — this host simply
+	 * cannot decode them — so this must be reported as a host problem
+	 * (routed onward by the CLI/admin surfaces to the "could not check"
+	 * outcome, exit 2), never as an untrustworthy archive.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_maps_a_missing_extension_to_host_cannot_comply_for_a_streamed_file(): void {
+		$fixture = self::write_file_entry_to_fixture( 'big.txt', str_repeat( 'A', 1000 ), RawCodec::ID );
+
+		$registry = new CodecRegistry();
+		$registry->register(
+			self::failing_codec(
+				RawCodec::ID,
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				CodecUnavailableException::class
+			)
+		);
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $fixture[0], $fixture[1] );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A missing extension decoding a buffered db_chunk entry is HostCannotComply, not ArchiveNotTrustworthy.
+	 *
+	 * The buffered counterpart of the streamed-file test above, proving
+	 * {@see EntryReader::decode_spool_to_string()} makes the identical
+	 * distinction as {@see EntryReader::read_entry()}'s own decode catch.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_maps_a_missing_extension_to_host_cannot_comply_for_a_buffered_db_chunk(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		$registry = new CodecRegistry();
+		$registry->register(
+			self::failing_codec(
+				RawCodec::ID,
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				CodecUnavailableException::class
+			)
+		);
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $dest, $manifest_entry );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
 	}
 }

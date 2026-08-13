@@ -72,9 +72,9 @@ the part-written file it stranded, if it stranded one. A failed rollback says
 how many entries it had already restored, because a replay that stops partway
 leaves the site half undone and nothing puts that right on its own.
 
-### 2. "Refused" is not "broken", and the difference matters
+### 2. "Refused" is not "broken", "could not check" is neither, and the difference matters
 
-`verify` has three answers, not two.
+`verify` has four answers, not two.
 
 **Sound** means the archive's structure is intact, every entry still matches
 the fingerprint taken when it was written, and a restore would accept it.
@@ -90,6 +90,15 @@ sends you to delete the file and reach for another copy. **A refused archive
 should be kept and not restored.** Pontifex never produces one, so its
 existence is information: find out where the file came from. If you made it
 yourself with Pontifex and see this, please report it.
+
+**Could not check** is the fourth, and it is not a "no" to any of the
+questions above — it is Pontifex being unable to ask them. It means this host
+stopped the check before it could reach sound, broken or refused, most often
+because it ran out of memory partway through. Nothing was learned about the
+archive either way: it is not a refusal, because Pontifex has not spotted
+anything wrong with it, and it is not broken, because no integrity check
+actually failed — the check simply never finished. **Keep the file exactly
+as it is.** See ["Could not check: …" below](#could-not-check-).
 
 Two checks verify still cannot make:
 
@@ -447,6 +456,42 @@ not enough.
 WP-CLI, where far more memory is usually available than in a browser request.
 This is a genuine case where the admin screens can fail at something the
 command line manages easily.
+
+### "Could not check: …"
+
+> Could not check: Entry declares 41943040 decoded bytes, exceeding the
+> 10485760-byte budget for this restore. (…)
+>
+> This is not a verdict on the backup — no check ran to completion, so
+> nothing is known about it either way. Keep the file; the problem named
+> above is this host's, and is usually fixable (more memory, more disk
+> space), after which the same archive should check cleanly.
+
+**Common on shared hosting with large sites. An environment problem, and —
+importantly — not a verdict of any kind.**
+
+**What happened.** Checking a backup's integrity sometimes needs to hold one
+piece of it — most often a database chunk — in memory while it is decoded,
+and this host ran out before the check could finish. WordPress's own default
+`memory_limit`, 40 MB, is commonly too little for anything but a small site.
+This is different from ["this archive's manifest needs about N MB to open"
+above](#this-archives-manifest-needs-about-n-mb-to-open): that one stops
+before the check has even started; this one stops partway through it.
+
+**Your backup is not broken, and is not refused.** Neither of those words has
+been earned, because the check that would have earned either one never
+finished. The identical file checked with more memory available — raising
+`memory_limit`, or running from WP-CLI, where far more memory is usually
+available than in a browser request — very often verifies sound.
+
+**What to do.** Raise `memory_limit`, or run `wp pontifex verify` from the
+command line rather than the browser.
+
+**What not to do.** Do not delete the backup or treat it as damaged. If you
+are scripting against `wp pontifex verify`, note the exit code: this outcome
+now exits `2`, not `1` — a script that only checks for a non-zero exit will
+lump this in with a genuinely broken or refused archive unless it is updated
+to look at the actual code.
 
 ### "this archive is format version X.Y, but this reader supports…"
 

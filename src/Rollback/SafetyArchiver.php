@@ -10,10 +10,10 @@ declare(strict_types=1);
 namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
-use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ManifestTooLargeException;
@@ -158,7 +158,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void` with each chunk's raw source byte count.
 	 * @param callable|null $on_total       Optional callback, called once before copying with the estimated total source bytes, as `( int $estimated_bytes ): void`, so the caller can show a determinate bar.
 	 * @return string The absolute path of the safety archive written.
-	 * @throws RuntimeException If the preflight refuses, the safety archive's file listing is too large for this installation to read back (a caught ManifestTooLargeException is converted to this, so the restore stops rather than proceed without a usable undo), or the archive cannot be written.
+	 * @throws HostCannotComply If the preflight refuses for lack of free disk space, the safety archive's file listing is too large for this installation to read back (a caught ManifestTooLargeException is converted to this, so the restore stops rather than proceed without a usable undo), or the written archive could not be secured to owner-only — none of these are evidence against the archive this run is protecting, only against this host, right now. HostCannotComply extends RuntimeException, so a caller catching RuntimeException already catches every failure this method can raise, including an unrelated write failure propagating unconverted from {@see ExportRunner::export()}.
 	 */
 	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null, ?callable $on_total = null ): string {
 		$this->store->ensure_directory();
@@ -210,7 +210,12 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		try {
 			$export_runner->export( $options, $entry_plans, $on_entry, $on_bytes );
 		} catch ( ManifestTooLargeException $e ) {
-			throw new RuntimeException(
+			// This installation's own reader is what cannot hold a manifest this
+			// large — HostCannotComply's own docblock names "too little memory to
+			// hold the manifest" as the canonical example. The site being backed
+			// up is not at fault; a host with more headroom would take the same
+			// safety archive without complaint.
+			throw new HostCannotComply(
 				sprintf(
 					'A safety archive could not be taken for this site because its file listing (%d entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.',
 					count( $entry_plans )
@@ -231,7 +236,10 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		if ( ! chmod( $path, self::ARCHIVE_MODE ) && '/' === DIRECTORY_SEPARATOR ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Removing the unsecurable backup; best-effort, failure must not mask the error below.
 			@unlink( $path );
-			throw new RuntimeException(
+			// This host's filesystem is what refused to apply the permission, not
+			// a fact about the bytes just written; a host that can chmod would
+			// take the same safety archive without complaint.
+			throw new HostCannotComply(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception message naming the path for diagnostics; surfaced on the CLI, not HTML output.
 				sprintf( 'Could not restrict the safety archive %s to owner-only; refusing to proceed with an insecure database backup.', $path )
 			);
@@ -256,7 +264,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 *
 	 * @param ManifestStream $entry_plans The stream of entries about to be written.
 	 * @return void
-	 * @throws RuntimeException If the free space is known and smaller than the estimate.
+	 * @throws HostCannotComply If the free space is known and smaller than the estimate.
 	 */
 	private function preflight_disk_space( ManifestStream $entry_plans ): void {
 		$estimate = $entry_plans->estimated_bytes();
@@ -267,7 +275,10 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 		}
 
 		if ( $free < $estimate ) {
-			throw new RuntimeException(
+			// Not enough free disk space is HostCannotComply's own headline
+			// example: the site being backed up is not at fault, and freeing
+			// space (or restoring elsewhere) is the whole fix.
+			throw new HostCannotComply(
 				sprintf(
 					'Not enough free disk space for a safety archive (need about %d bytes, %d available at %s). Free space, or pass --no-rollback-archive to skip the safety archive.',
 					(int) $estimate,
