@@ -297,6 +297,35 @@
 	}
 
 	/**
+	 * Render the panel for a verify this host could not complete — not a verdict
+	 * on the backup at all.
+	 *
+	 * Its own outcome rather than a variant of broken: no check ran to
+	 * completion, so nothing is known about the backup either way, and the fix
+	 * belongs to this server, not to a fresh export.
+	 *
+	 * @param {string} message The could-not-check outcome's message from the server.
+	 */
+	function renderCouldNotCheck( message ) {
+		var panel = proofEl();
+		if ( ! panel ) {
+			return;
+		}
+		clearProof();
+
+		panel.appendChild( verdictLine( cfg.strings.verdictCouldNotCheck ) );
+
+		if ( message ) {
+			var detail = document.createElement( 'p' );
+			detail.className = 'pontifex-proof-assurance';
+			detail.textContent = message;
+			panel.appendChild( detail );
+		}
+
+		panel.hidden = false;
+	}
+
+	/**
 	 * The filename of the selected backup, or null when none is selected.
 	 *
 	 * @return {?string} The selected backup filename, or null.
@@ -481,6 +510,16 @@
 		if ( res && res.success && data && false === data.sound && true === data.refused ) {
 			setText( 'pontifex-verify-result', '' );
 			renderRefused( data.message );
+			return;
+		}
+
+		// Could-not-check is not broken, and must not be shown as broken. No check
+		// ran to completion, so nothing was actually learned about the backup —
+		// only that this host (commonly too little memory) stopped the check
+		// before it could reach a verdict either way.
+		if ( res && res.success && data && false === data.sound && true === data.could_not_check ) {
+			setText( 'pontifex-verify-result', '' );
+			renderCouldNotCheck( data.message );
 			return;
 		}
 

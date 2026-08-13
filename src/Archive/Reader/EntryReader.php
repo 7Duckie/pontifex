@@ -17,6 +17,7 @@ use RuntimeException;
 use Pontifex\Archive\Codec\CodecException;
 use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\CodecUnavailableException;
 use Pontifex\Archive\Crypto\Cipher;
 use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\ByteOrder;
@@ -176,11 +177,15 @@ final class EntryReader {
 	 * @return EntryReadResult The parsed header and decoded payload (string- or stream-shaped).
 	 * A HostCannotComply may also surface from the budget check this calls: the
 	 * ceiling is derived from the runtime's memory limit, so the same archive
-	 * reads fine on a larger host. It is not tagged below because the throw is
-	 * in the callee, not here.
+	 * reads fine on a larger host. That one is not the tag below either — the
+	 * throw is in the callee, not here — but a second source of HostCannotComply
+	 * genuinely is thrown directly in this method's own body: a codec that
+	 * cannot run because this host lacks the extension it needs (ext-zstd,
+	 * today) is likewise a fact about this host, not the archive.
 	 *
 	 * @throws InvalidArgumentException If $source is not a valid stream resource or is not seekable.
-	 * @throws ArchiveNotTrustworthy    If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, or a file entry's decoded byte count differs from its declared size.
+	 * @throws HostCannotComply         If the codec cannot decode the payload because this host lacks the extension it needs.
+	 * @throws ArchiveNotTrustworthy    If reading fails, the bytes are malformed, hash verification fails, the codec is not registered, the codec fails to decode the payload for any other reason, or a file entry's decoded byte count differs from its declared size.
 	 */
 	public function read_entry( $source, ManifestEntry $manifest_entry, ?int $max_decoded_bytes = self::DEFAULT_MAX_DECODED_BYTES, ?callable $on_bytes = null, ?int $memory_budget = null ): EntryReadResult {
 		if ( ! is_resource( $source ) ) {
@@ -342,13 +347,44 @@ final class EntryReader {
 		$output = $this->open_spool();
 		try {
 			$decoded_bytes = $this->codec_registry->get( $compression_codec_id )->decode( $spool, $output, $max_decoded_bytes );
+		} catch ( CodecUnavailableException $e ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
+			fclose( $spool );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
+			fclose( $output );
+			// This host, not the archive, is what stopped the decode — an optional
+			// extension the codec needs (ext-zstd, today) is not loaded here. The
+			// same bytes decode cleanly on a host that has it, so this is
+			// HostCannotComply, not a statement about the archive's trustworthiness.
+			// $e->getMessage() carries the one sentence that actually explains this —
+			// the missing-extension case being the one that matters, because that is
+			// the migrate-to-a-new-server scenario — and it used to survive only as
+			// $previous, which nothing downstream ever rendered.
+			throw new HostCannotComply(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception; its message is diagnostic context surfaced on the CLI/admin log, not HTML output.
+				sprintf( 'Codec failed to decode entry payload: %s', $e->getMessage() ),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+				$e
+			);
 		} catch ( CodecException $e ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 			fclose( $spool );
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 			fclose( $output );
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new ArchiveNotTrustworthy( 'Codec failed to decode entry payload.', 0, $e );
+			// Every other codec failure is a genuine problem with the bytes
+			// themselves (malformed input, a decompression-bomb refusal) or the
+			// stream carrying them — never this host's fault — so it stays
+			// ArchiveNotTrustworthy. $e->getMessage() carries the one sentence
+			// that actually explains this, which used to survive only as
+			// $previous, which nothing downstream ever rendered.
+			throw new ArchiveNotTrustworthy(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception; its message is diagnostic context surfaced on the CLI/admin log, not HTML output.
+				sprintf( 'Codec failed to decode entry payload: %s', $e->getMessage() ),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+				$e
+			);
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp spool; not a filesystem path.
 		fclose( $spool );
@@ -824,18 +860,49 @@ final class EntryReader {
 	 * @param resource $spool                The spooled stored payload, positioned at its start.
 	 * @param int|null $max_decoded_bytes    Maximum decoded bytes to allow, or null for no limit.
 	 * @return string The decoded bytes.
-	 * @throws RuntimeException If a stream cannot be opened or the codec fails.
+	 * @throws RuntimeException      If a stream cannot be opened, or the decoded bytes cannot be read back from the buffer.
+	 * @throws HostCannotComply      If the codec cannot decode the payload because this host lacks the extension it needs.
+	 * @throws ArchiveNotTrustworthy If the codec fails to decode the payload for any other reason.
 	 */
 	private function decode_spool_to_string( int $compression_codec_id, $spool, ?int $max_decoded_bytes ): string {
 		$output = $this->open_spool();
 
 		try {
 			$this->codec_registry->get( $compression_codec_id )->decode( $spool, $output, $max_decoded_bytes );
+		} catch ( CodecUnavailableException $e ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of php://temp buffer; not a filesystem path.
+			fclose( $output );
+			// This host, not the archive, is what stopped the decode — the same
+			// missing-extension case read_entry() catches above this method's own
+			// docblock in this same class. $e->getMessage() carries the one
+			// sentence that actually explains this, which used to survive only as
+			// $previous, which nothing downstream ever rendered.
+			throw new HostCannotComply(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception; its message is diagnostic context surfaced on the CLI/admin log, not HTML output.
+				sprintf( 'Codec failed to decode entry payload: %s', $e->getMessage() ),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+				$e
+			);
 		} catch ( CodecException $e ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of php://temp buffer; not a filesystem path.
 			fclose( $output );
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
-			throw new RuntimeException( 'Codec failed to decode entry payload.', 0, $e );
+			// Every other codec failure is a genuine problem with the bytes
+			// themselves, never this host's fault, so it stays
+			// ArchiveNotTrustworthy — the exception type agrees with
+			// read_entry()'s own catch of the same failure (below this method's
+			// docblock in this same class) rather than the plain RuntimeException
+			// this used to throw, so the two sites no longer disagree about what
+			// kind of failure this is. $e->getMessage() carries the one sentence
+			// that actually explains this, which used to survive only as
+			// $previous, which nothing downstream ever rendered.
+			throw new ArchiveNotTrustworthy(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception; its message is diagnostic context surfaced on the CLI/admin log, not HTML output.
+				sprintf( 'Codec failed to decode entry payload: %s', $e->getMessage() ),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying codec exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+				$e
+			);
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a php://temp buffer, not a filesystem path.

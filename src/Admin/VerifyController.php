@@ -17,6 +17,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Lock\BackupProgress;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
@@ -38,8 +39,10 @@ use Psr\Log\LoggerInterface;
  * page load:
  *
  *  - {@see self::verify()} runs one verification to completion, writing live
- *    progress to a transient the browser polls, and reports a sound or broken
- *    verdict as JSON.
+ *    progress to a transient the browser polls, and reports the outcome as
+ *    JSON — sound, broken, or (when this host stops the check before it can
+ *    reach either answer) a distinct "could not check" outcome that is
+ *    deliberately not reported as broken.
  *  - {@see self::progress()} returns that transient so the page can fill a bar.
  *
  * Both actions are deny-by-default: the {@see Menu::CAPABILITY} capability and a
@@ -200,7 +203,11 @@ final class VerifyController {
 	 * nonce, resolves the requested filename to a real backup, refuses an
 	 * encrypted archive (CLI-only), then reads and hash-checks every entry. A
 	 * sound archive reports the verified entry count; a broken one reports the
-	 * failure (the detail goes to the log). Writes nothing to the site.
+	 * failure (the detail goes to the log); a host that stops the walk before
+	 * it can reach either answer — most commonly too little memory — reports
+	 * its own distinct outcome rather than being folded into "broken", because
+	 * nothing was actually learned about the backup either way. Writes nothing
+	 * to the site.
 	 *
 	 * @return void
 	 */
@@ -327,6 +334,23 @@ final class VerifyController {
 						'format'        => $format_version,
 						'restorability' => $this->restorability_line( $report ),
 					),
+				)
+			);
+		} catch ( HostCannotComply $error ) {
+			// This host, not the backup, is what stopped the walk short — a low
+			// memory_limit unable to hold a db_chunk it must buffer whole is the
+			// case that keeps happening in practice, and WordPress's own default
+			// is 40 MB. Nothing was learned about the backup either way, so this
+			// must not fall into the generic catch below and be reported as
+			// damaged over a problem that belongs to this server, not the file.
+			$this->logger->warning( 'Admin verify could not run to completion: this host could not comply.', array( 'exception' => $error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+
+			wp_send_json_success(
+				array(
+					'sound'           => false,
+					'could_not_check' => true,
+					'message'         => __( 'Could not check — this host stopped part-way through verifying this backup. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' ),
 				)
 			);
 		} catch ( Throwable $error ) {

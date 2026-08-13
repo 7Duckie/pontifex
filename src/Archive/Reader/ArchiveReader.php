@@ -381,7 +381,8 @@ final class ArchiveReader {
 	 * Read and parse the Header from offset 0 of the source stream.
 	 *
 	 * @return Header The parsed Header.
-	 * @throws RuntimeException If the stream is too short or the bytes do not parse as a valid Header.
+	 * @throws RuntimeException   If the stream is too short or the bytes do not parse as a valid Header.
+	 * @throws HostCannotComply   If the archive's format major version is newer than this reader supports.
 	 */
 	private function read_header(): Header {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -410,9 +411,12 @@ final class ArchiveReader {
 		// The format's compatibility contract (archive-format.md section 13): a
 		// higher MAJOR version means structural changes this reader cannot
 		// interpret, so it must refuse rather than misread — a minor bump stays
-		// readable.
+		// readable. This is this installation's Pontifex that cannot comply,
+		// not evidence the archive is damaged: it was very probably written by
+		// a newer Pontifex and would open cleanly there, which is exactly what
+		// HostCannotComply exists to say — the message already names the fix.
 		if ( $header->major() > Header::FORMAT_MAJOR_V1 ) {
-			throw new RuntimeException(
+			throw new HostCannotComply(
 				sprintf(
 					'This archive is format version %d.%d, but this reader supports major version %d at most. Update Pontifex to restore it.',
 					(int) $header->major(),
