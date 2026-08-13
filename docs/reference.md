@@ -130,7 +130,7 @@ refusal, because claiming a refusal would assert an intent that was not there.
 
 Verify checks structure, the entry-count ceiling, and per-entry hashes, then
 runs every restore preflight that writes nothing: scope-versus-manifest,
-symlink target confinement, and free space. Three outcomes, distinguished by
+symlink target confinement, and free space. Four outcomes, distinguished by
 exit code and wording:
 
 | Outcome | Exit | Meaning |
@@ -138,13 +138,22 @@ exit code and wording:
 | Sound | 0 | Undamaged, and a restore would accept it. |
 | Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, or contents contradicting the recorded scope. |
 | Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
+| Could not check | 2 | This host stopped the check before it reached a verdict — commonly too little memory. Not a statement about the archive either way. |
 
 A finding against the **host** — no free space — is reported as a warning
 alongside a sound verdict, never as the verdict: a full disk is not a damaged
-backup. The host symlink-capability probe is not run, because establishing it
-requires creating a link; use `doctor`, or `import --dry-run` for a specific
-archive. Verify does not decode payloads, so it still does not test a
-passphrase.
+backup. That is the shape for a host problem discovered *after* verification
+has already reached a sound conclusion. A host problem that instead stops the
+check before it reaches any conclusion — too little memory to hold a `db_chunk`
+it must decode whole is the case seen in practice, and WordPress's own default
+`memory_limit` is 40 MB — is not folded into that warning, and it is not
+reported as broken either: nothing was learned about the archive one way or
+the other, so it is its own outcome, **could not check**, exit code 2. A
+script gating on this command should treat 2 as "unknown", not as "bad"
+alongside exit 1. The host symlink-capability probe is not run, because
+establishing it requires creating a link; use `doctor`, or `import --dry-run`
+for a specific archive. Verify does not decode payloads, so it still does not
+test a passphrase.
 
 Because confinement is resolved against this site's own root, a verification is
 a statement about an archive **and** a destination. See
