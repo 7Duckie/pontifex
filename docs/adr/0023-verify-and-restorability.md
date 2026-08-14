@@ -1,9 +1,12 @@
 # 0023 — verify answers for the archive, a dry run answers for the restore
 
 - **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.1.0. Amended
-  2026-08-12 (the third outcome had no exception route — see Amendment).
+  2026-08-12 (the third outcome had no exception route) and 2026-08-13 (the
+  check was handed the wrong budget, and skipped four structural checks) — see
+  the Amendments.
 - **Deciders:** 7Duckie (raised by the hardening arc; the last of its open
-  findings. Amendment: raised by the 2026-08-09 audit and stress campaign).
+  findings. Both amendments: raised by the 2026-08-09 audit and stress
+  campaign).
 
 ## Context
 
@@ -188,3 +191,74 @@ describes an outcome in prose is not evidence the outcome is reachable. The
 next claim that a divergence is "closed" should be checked against the actual
 catch sites and their fall-through default, not against what this document
 says they do.
+
+## Amendment — 2026-08-13: the budget the check was handed was never the one the restore enforces
+
+The lesson recorded immediately above applied a second time, to a second half of
+the same claim. This ADR set out to close the verify/restore divergence; a
+whole further family of it survived, and this amendment records it rather than
+leaving the "closed" status to imply otherwise.
+
+**New information:** `EntryReader` has two entry points that are supposed to ask
+the same structural questions — `read_entry()`, which decodes, and
+`verify_entry()`, which only hashes. They did not, because one parameter name
+meant two different things. In `read_entry()`, `$max_decoded_bytes` is this
+build's compiled-in per-entry ceiling, applied to **every** entry, with the
+memory-derived budget passed separately and applied only to shapes that must be
+buffered whole. In `verify_entry()`, the parameter *of that same name* received
+the **memory** budget from `RestoreRunner::verify()`, and was then gated on
+`! streams_decoded_payload( … )` — the condition `read_entry()` uses for the
+memory budget, not for the ceiling. The two were exact inverses, and the comment
+above the check claimed it mirrored `read_entry()`.
+
+Because `streams_decoded_payload()` is true for every plain unencrypted file
+entry, that gate was never satisfied in the common case: **no verification could
+ever refuse an oversized file.** `RestoreRunner::verify()` also computed no
+archive-total budget at all, where `walk()` computes one and enforces it as it
+goes. Four structural checks `read_entry()` performs — the tighter record
+framing, the codec-id cross-check between manifest and record, the
+encryption-family check, and the registered-codec check — had no counterpart on
+the verify path either, so an archive contradicting itself in any of those four
+ways verified sound and was refused by the restore.
+
+**Amended decision:** `verify_entry()` now takes the same two budgets
+`read_entry()` takes and applies each on the same condition — the ceiling to
+every entry, the memory budget only to shapes buffered whole — and performs the
+four structural checks alongside the kind cross-check it already made. It
+returns the header's declared decoded size so a caller can keep a running total
+without decoding. `RestoreRunner::verify()` computes the per-entry limit and the
+archive-total budget exactly as `walk()` does. `assert_kind_agrees()`, until now
+the only structural check in this reader outside ADR 0022's taxonomy, raises
+`ArchiveNotTrustworthy` rather than a bare `RuntimeException`; the verdict it
+produces is unchanged.
+
+**One asymmetry is deliberate, and it is the opposite of a gap.** `walk()`
+accumulates each entry's *actual* decoded size; a verification never decodes, so
+it has only the *declared* size. For a file entry that declared size is
+trustworthy — the writer corrects it at write time and the reader enforces
+declared equals actual on both decode paths. For a `db_chunk` it is not: it is a
+prediction, `DatabaseScanner` sizing a chunk as rows-per-chunk times MySQL's own
+`Avg_row_length`, and the last chunk of every table under-fills it. Measured on
+a stock WordPress database-only archive, the declared total ran **3.8× the
+actual**, with individual chunks as far out as **58×**. Accumulating those
+predictions would have made the check *stricter* than the restore it vouches
+for — able to refuse an archive a restore would accept, which is this ADR's own
+failure mode with the sign flipped. Only file entries are therefore accumulated,
+making the running total a lower bound: the check can under-refuse relative to a
+restore, never over-refuse. A `db_chunk` declaring an enormous size is still
+caught by the per-entry ceiling, which applies to every entry regardless of
+kind, and one that inflates only at decode time is still caught by `walk()`,
+which sums real sizes.
+
+**What a verification still does not prove**, stated here so it is not
+rediscovered as a finding a third time: a header that *understates* its true
+decoded size passes verification and is caught only when a restore decodes it.
+That is inherent in never decoding, not an oversight.
+
+**The lesson this amendment exists to record:** the first amendment was found by
+running a real host; this one was found by reading two methods side by side and
+noticing that one parameter carried two meanings. Neither was caught by the
+three quality gates, and the corrected implementation passed all three while
+still containing the `db_chunk` over-refusal — which was found only by measuring
+declared against actual on a real archive. A shared parameter name is not a
+shared contract.
