@@ -430,10 +430,45 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * decode payloads: a verification only needs the stored bytes to be intact, and
 	 * skipping the decode keeps memory flat and lets a large entry report progress.
 	 *
+	 * The defensive budgets are computed exactly as {@see self::walk()} computes
+	 * them, so a hostile or oversized archive is refused here on terms at least
+	 * as strict as restore()'s — but the running archive-total accumulation is
+	 * deliberately NOT symmetric with walk(), and that asymmetry is the point,
+	 * not a gap. walk() accumulates each entry's ACTUAL decoded size
+	 * ({@see \Pontifex\Archive\Reader\EntryReadResult::decoded_size()}), because
+	 * restore() decodes every entry as it writes it. This method never decodes
+	 * anything (ADR 0010), so the only size it has for an entry is the header's
+	 * DECLARED size ({@see \Pontifex\Archive\Format\EntryHeader::estimated_bytes()})
+	 * — and for a file entry that declared size IS trustworthy, because
+	 * {@see \Pontifex\Archive\Writer\EntryWriter} corrects it at write time and
+	 * {@see \Pontifex\Archive\Reader\EntryReader} enforces declared == actual on
+	 * both decode paths. A db_chunk's declared size is not: it is a PREDICTION
+	 * — {@see \Pontifex\Manifest\DatabaseScanner} sizes a chunk as
+	 * `( $limit * $row_bytes ) + …`, rows-per-chunk times MySQL's own
+	 * `Avg_row_length` — and the last chunk of every table under-fills that
+	 * estimate, sometimes by several times over. Only file entries' declared
+	 * sizes are therefore accumulated into the running total below; a
+	 * db_chunk's declared size is still checked against the per-entry ceiling
+	 * (every entry is, regardless of kind), just never added to the running
+	 * archive-total. Counting it would have made verify() STRICTER than the
+	 * restore it is meant to vouch for — a real stock-WordPress database-only
+	 * archive measured declared db_chunk totals up to 3.8x the actual decoded
+	 * total — so verify() could refuse an archive restore() would accept, the
+	 * opposite of what it exists to guard against. Excluding db_chunks makes
+	 * the running total a LOWER bound on the true total: verify() can now only
+	 * under-refuse relative to restore(), never over-refuse, which is the safe
+	 * direction. A hostile db_chunk declaring an enormous size is still caught
+	 * by the per-entry ceiling; one that inflates only at decode time is still
+	 * caught by restore()'s own walk(), which sums real sizes. Separately, a
+	 * FILE header that understates its true decoded size still passes
+	 * verification and is only caught when restore() actually decodes it —
+	 * that narrower gap is accepted, because verify's job is to catch what can
+	 * be known without decoding, not to close it by making verification decode.
+	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
-	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
+	 * @throws RuntimeException If the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
@@ -458,14 +493,48 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			);
 		}
 
+		$total_budget   = $this->limits->max_total_for_archive( $this->stream_size( $archive_source ) );
+		$decoded_so_far = 0;
+
 		$done = 0;
 		foreach ( $entries as $manifest_entry ) {
-			$this->entry_reader->verify_entry(
+			// The bomb ceiling (per-entry and archive-total decoded bytes) applies to
+			// every entry; the memory-derived budget is passed separately, because it
+			// applies only to entries the reader must buffer whole — a plain file
+			// entry streams through chunk-sized memory to a spool (ADR 0010). Mirrors
+			// walk()'s own per-entry limit exactly.
+			$remaining   = $total_budget - $decoded_so_far;
+			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
+
+			$declared_size = $this->entry_reader->verify_entry(
 				$archive_source,
 				$manifest_entry,
 				$on_bytes,
+				$entry_limit,
 				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
 			);
+
+			// A db_chunk's declared size is a prediction (DatabaseScanner's
+			// rows-per-chunk * average-row-length estimate), not a measurement, and
+			// routinely overstates the real total by several times over — see this
+			// method's own docblock. Only a file entry's declared size (corrected at
+			// write time, and enforced against its actual decoded size on every read
+			// path) is trustworthy enough to accumulate here; a db_chunk still meets
+			// the per-entry ceiling check above, it just never inflates this running
+			// total, so verify() can only under-refuse relative to restore(), never
+			// over-refuse it.
+			if ( ! $manifest_entry->is_db_chunk() ) {
+				$decoded_so_far += $declared_size;
+			}
+			if ( $decoded_so_far > $total_budget ) {
+				throw new RuntimeException(
+					sprintf(
+						'Restored data exceeds the maximum of %d bytes permitted for this archive.',
+						(int) $total_budget
+					)
+				);
+			}
+
 			++$done;
 			if ( null !== $on_entry_verified ) {
 				$on_entry_verified( $done, $total );

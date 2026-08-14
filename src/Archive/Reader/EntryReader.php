@@ -459,51 +459,71 @@ final class EntryReader {
 	 * reports progress mid-entry through the optional callback, so a single large
 	 * entry no longer blocks the walk.
 	 *
+	 * Before v1.1.1 the two budget parameters below could not both be honoured
+	 * correctly: this method took a single $max_decoded_bytes that the caller
+	 * ({@see \Pontifex\Restore\RestoreRunner::verify()}) filled with the
+	 * MEMORY-derived budget, gated on `! streams_decoded_payload(...)` — the
+	 * condition {@see self::read_entry()} uses for that same memory budget. The
+	 * comment above the check even claimed it mirrored read_entry(); it was that
+	 * method's inverse. `streams_decoded_payload()` is true for every plain
+	 * unencrypted file entry, so the gate was never satisfied for the common
+	 * case, and no verify could ever refuse an oversized plain file — an archive
+	 * that would be refused mid-restore was reported SOUND. The parameter now
+	 * carries the same meaning it carries in read_entry(): this build's
+	 * compiled-in per-entry ceiling, applied to every entry regardless of shape.
+	 * The memory-derived budget moved to its own trailing parameter, applied only
+	 * where read_entry() applies it.
+	 *
 	 * @param resource      $source            A seekable, readable stream containing the archive.
 	 * @param ManifestEntry $manifest_entry    The manifest entry pointing at the on-disk record.
 	 * @param callable|null $on_bytes          Optional progress callback, called as `( int $bytes ): void` with each chunk's byte count as the record streams.
-	 * @param int|null      $max_decoded_bytes Optional decoded-size budget; when given, an entry whose header declares more decoded bytes than this is refused before the walk continues. Null enforces no such budget.
-	 * @return void
+	 * @param int|null      $max_decoded_bytes This build's compiled-in per-entry decoded-byte ceiling, applied to every entry regardless of shape — the same meaning it carries in {@see self::read_entry()}. Null enforces no such budget.
+	 * @param int|null      $memory_budget     Optional memory-derived per-entry budget, applied only to entries a restore must buffer whole (encrypted entries and db_chunks) — a plain file entry streams, so no memory refusal applies to it (ADR 0010). Null enforces no memory budget.
+	 * @return int The header's declared decoded byte count ({@see EntryHeader::estimated_bytes()}), so a caller walking the whole archive can keep a running total without decoding anything.
 	 * @throws InvalidArgumentException If $source is not a valid stream resource.
-	 * @throws ArchiveNotTrustworthy If the record is truncated, malformed, or its hash does not match.
+	 * @throws ArchiveNotTrustworthy If the record is truncated, malformed, self-contradictory, or its hash does not match. {@see self::read_and_check_structural_header()} and {@see self::refuse_if_over_budget()}, both called from here, also raise {@see HostCannotComply} and {@see BuildCannotComply} on a budget refusal — omitted above because they are not thrown directly in this method's own body (the project's @throws convention documents only literal throws, matching {@see self::read_entry()}'s own docblock).
 	 */
-	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null, ?int $max_decoded_bytes = null ): void {
+	public function verify_entry( $source, ManifestEntry $manifest_entry, ?callable $on_bytes = null, ?int $max_decoded_bytes = null, ?int $memory_budget = null ): int {
 		if ( ! is_resource( $source ) ) {
 			throw new InvalidArgumentException( '$source must be a valid stream resource.' );
 		}
 
 		$length = $manifest_entry->length();
-		if ( $length < Sha256::DIGEST_SIZE ) {
+
+		// Minimum record size, identical to read_entry(): 4-byte header_length +
+		// at least 1 byte of header + 2-byte codec_id + 12-byte nonce + 32-byte
+		// hash. The previous `$length < Sha256::DIGEST_SIZE` check was weaker —
+		// it could pass a record too short to hold a header or codec_id at all.
+		$min_record_size = EntryHeader::LENGTH_PREFIX_SIZE + 1 + 2 + EntryWriter::NONCE_SIZE + Sha256::DIGEST_SIZE;
+		if ( $length < $min_record_size ) {
 			throw new ArchiveNotTrustworthy(
 				sprintf( 'Entry record at offset %d is too short (%d bytes).', (int) $manifest_entry->offset(), (int) $length )
 			);
 		}
 
-		// When a decoded-byte budget is given, refuse an over-budget entry here — before
-		// any restore begins — so the browser's pre-write verify gate rejects a backup the
-		// real restore would refuse mid-way, rather than starting and failing part-written.
-		// Mirrors read_entry(): the budget applies only to shapes a restore must buffer
-		// whole (encrypted entries and db_chunks) — a plain file entry streams, so no
-		// memory refusal applies to it (ADR 0010).
-		// The header is read unconditionally, not only when a budget applies:
-		// peek_header() is where the record's kind is checked against the
-		// manifest's, and skipping it left verify() reporting SOUND for an
-		// archive whose manifest contradicted its own entries — the shape that
-		// slips a symlink past the confinement preflight by calling it a file.
-		// A verdict an operator uses to decide whether to trust an archive must
-		// not depend on whether a caller happened to pass a byte budget. The
-		// cost is a few dozen header bytes per entry, on a path that already
-		// streams every record in full to hash it.
-		$header = $this->peek_header( $source, $manifest_entry );
+		// The header (and the structural checks alongside it) is read
+		// unconditionally, not only when a budget applies: this is where the
+		// record's kind is checked against the manifest's, and skipping it left
+		// verify() reporting SOUND for an archive whose manifest contradicted its
+		// own entries — the shape that slips a symlink past the confinement
+		// preflight by calling it a file. A verdict an operator uses to decide
+		// whether to trust an archive must not depend on whether a caller
+		// happened to pass a byte budget. The cost is a few dozen header bytes
+		// per entry, on a path that already streams every record in full to hash
+		// it. Deliberately NOT peek_header(): that method has an external caller
+		// ({@see \Pontifex\Restore\SourceTablePrefix::resolve()}) that wants only
+		// a table name and must not start refusing archives on codec grounds.
+		list( $header, $codec_id ) = $this->read_and_check_structural_header( $source, $manifest_entry );
 
-		// When a decoded-byte budget is given, refuse an over-budget entry here — before
-		// any restore begins — so the browser's pre-write verify gate rejects a backup the
-		// real restore would refuse mid-way, rather than starting and failing part-written.
-		// Mirrors read_entry(): the budget applies only to shapes a restore must buffer
-		// whole (encrypted entries and db_chunks) — a plain file entry streams, so no
-		// memory refusal applies to it (ADR 0010).
-		if ( null !== $max_decoded_bytes && ! $this->streams_decoded_payload( $header, $manifest_entry->codec_id() ) ) {
-			$this->refuse_if_over_budget( $header, $max_decoded_bytes, host_derived: true );
+		// Budget refusals, in the same order and under the same conditions as
+		// read_entry() (lines 282-286): the decoded-byte ceiling (the
+		// decompression-bomb defence) applies to every entry; the memory-derived
+		// budget applies only to shapes the reader must buffer whole — a plain
+		// file entry streams through chunk-sized memory (ADR 0010).
+		$streams_out = $this->streams_decoded_payload( $header, $codec_id );
+		$this->refuse_if_over_budget( $header, $max_decoded_bytes, host_derived: false );
+		if ( ! $streams_out ) {
+			$this->refuse_if_over_budget( $header, $memory_budget, host_derived: true );
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
@@ -551,6 +571,8 @@ final class EntryReader {
 		if ( ! hash_equals( $manifest_entry->entry_hash(), $computed_hash ) ) {
 			throw new ArchiveNotTrustworthy( 'On-disk entry hash does not match the manifest entry_hash.' );
 		}
+
+		return $header->estimated_bytes();
 	}
 
 	/**
@@ -694,6 +716,115 @@ final class EntryReader {
 	}
 
 	/**
+	 * Read one entry's header and codec id, applying every structural check
+	 * {@see self::read_entry()} performs before it ever attempts to decode a
+	 * payload.
+	 *
+	 * The verify path's counterpart to read_entry()'s own structural checks,
+	 * copied in behaviour so the two paths refuse the same archives for the
+	 * same reasons: the tighter record-framing check (the header must leave
+	 * room for the codec id, nonce, AND the trailing hash that follow it — not
+	 * merely fit itself inside the record, which is all {@see self::peek_header()}
+	 * checks), the codec_id manifest-versus-record cross-check, the
+	 * encryption-family check, and the registered-codec check. Deliberately
+	 * NOT folded into peek_header(): that method has an external caller
+	 * ({@see \Pontifex\Restore\SourceTablePrefix::resolve()}) that wants only a
+	 * db_chunk's table name and must not start refusing archives on codec
+	 * grounds. Reads no further than the codec id — the nonce and payload stay
+	 * read_entry()'s concern; verify_entry() decodes nothing.
+	 *
+	 * @param resource      $source         A seekable, readable stream containing the archive.
+	 * @param ManifestEntry $manifest_entry The manifest entry pointing at the on-disk record.
+	 * @return array{0: EntryHeader, 1: int} The parsed header, then the codec id read from the record.
+	 * @throws ArchiveNotTrustworthy If the seek or read fails, the header is malformed, the record's kind contradicts the manifest, the header does not leave room for the codec id/nonce/hash that follow it, the codec id disagrees with the manifest, the encryption family is unrecognised, or the compression codec is not registered.
+	 */
+	private function read_and_check_structural_header( $source, ManifestEntry $manifest_entry ): array {
+		$record_len = $manifest_entry->length();
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fseek -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		if ( -1 === fseek( $source, $manifest_entry->offset() ) ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Could not seek to entry offset %d.', (int) $manifest_entry->offset() )
+			);
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$prefix = fread( $source, EntryHeader::LENGTH_PREFIX_SIZE );
+		if ( false === $prefix || strlen( $prefix ) !== EntryHeader::LENGTH_PREFIX_SIZE ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Could not read the entry header length at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+			);
+		}
+
+		// The tighter framing check read_entry() applies (its $header_end + 2 +
+		// NONCE_SIZE + DIGEST_SIZE guard): the header must leave room for the
+		// codec id, nonce, AND the trailing hash that follow it, not merely fit
+		// itself inside the record — which is all peek_header() checks.
+		$header_length = ByteOrder::unpack_uint32( $prefix );
+		$header_end    = EntryHeader::LENGTH_PREFIX_SIZE + $header_length;
+		if ( $header_end + 2 + EntryWriter::NONCE_SIZE + Sha256::DIGEST_SIZE > $record_len ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Declared header length %d does not fit inside entry record of %d bytes.', (int) $header_length, (int) $record_len )
+			);
+		}
+
+		$header_bytes = '';
+		$remaining    = $header_length;
+		while ( $remaining > 0 ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+			$chunk = fread( $source, (int) min( self::READ_CHUNK_SIZE, $remaining ) );
+			if ( false === $chunk || '' === $chunk ) {
+				throw new ArchiveNotTrustworthy(
+					sprintf( 'Could not read the entry header at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+				);
+			}
+			$header_bytes .= $chunk;
+			$remaining    -= strlen( $chunk );
+		}
+
+		try {
+			$header = EntryHeader::from_bytes( $prefix . $header_bytes );
+		} catch ( InvalidArgumentException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying parse exception, passed as the previous-exception argument for diagnostic chaining; not HTML output.
+			throw new ArchiveNotTrustworthy( 'Entry header is malformed.', 0, $e );
+		}
+
+		self::assert_kind_agrees( $header, $manifest_entry );
+
+		// codec_id: read_entry()'s manifest-versus-record cross-check, copied
+		// verbatim, so a tampered codec id is refused identically on both paths.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Reading from an open stream resource; WP_Filesystem has no equivalent.
+		$codec_prefix = fread( $source, ByteOrder::UINT16_SIZE );
+		if ( false === $codec_prefix || strlen( $codec_prefix ) !== ByteOrder::UINT16_SIZE ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Could not read the entry codec id at offset %d; stream may be truncated.', (int) $manifest_entry->offset() )
+			);
+		}
+		$codec_id = ByteOrder::unpack_uint16( $codec_prefix );
+		if ( $codec_id !== $manifest_entry->codec_id() ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'codec_id mismatch — on-disk %d, manifest %d.', (int) $codec_id, (int) $manifest_entry->codec_id() )
+			);
+		}
+
+		// The codec id's low byte selects the compression codec; its high byte
+		// selects encryption (0x0100 = AES-256-GCM) — identical to read_entry().
+		$compression_codec_id = CodecId::compression( $codec_id );
+		if ( CodecId::is_encrypted( $codec_id ) && CodecId::ENCRYPTION_AES_GCM !== CodecId::encryption_family( $codec_id ) ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
+			);
+		}
+		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
+			);
+		}
+
+		return array( $header, $codec_id );
+	}
+
+	/**
 	 * Refuse an entry whose record and manifest disagree about what it is.
 	 *
 	 * The manifest and the record each carry the entry's kind, and different
@@ -712,10 +843,16 @@ final class EntryReader {
 	 * one to prefer the record: after this, the two copies cannot disagree, so
 	 * it no longer matters which a caller reads.
 	 *
+	 * Raised as {@see ArchiveNotTrustworthy} rather than a bare RuntimeException
+	 * — this was, until v1.1.1, the only structural check in this reader
+	 * outside the project's exception taxonomy (ADR 0022), so nothing could
+	 * branch on it specifically. The verdict this produces stays "broken",
+	 * which is correct for a tampered archive; only the throw's type changed.
+	 *
 	 * @param EntryHeader   $header         The kind recorded in the entry record itself.
 	 * @param ManifestEntry $manifest_entry The kind recorded in the manifest.
 	 * @return void
-	 * @throws RuntimeException If the two disagree.
+	 * @throws ArchiveNotTrustworthy If the two disagree.
 	 */
 	private static function assert_kind_agrees( EntryHeader $header, ManifestEntry $manifest_entry ): void {
 		if ( $header->kind() === $manifest_entry->kind() ) {
@@ -729,7 +866,7 @@ final class EntryReader {
 		);
 
 		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Archive-supplied kind strings reported verbatim for diagnostic context; exception path, not HTML output.
-		throw new RuntimeException( $message );
+		throw new ArchiveNotTrustworthy( $message );
 	}
 
 	/**
