@@ -306,7 +306,12 @@ final class EntryReaderTest extends TestCase {
 	 *
 	 * Verifying is what an operator runs to decide whether to trust an archive.
 	 * If it passed a forged archive that restore would then act on, the check
-	 * would be reporting soundness it had not established.
+	 * would be reporting soundness it had not established. Pinned to the
+	 * specific {@see ArchiveNotTrustworthy} type (not merely its RuntimeException
+	 * parent): {@see \Pontifex\Archive\Reader\EntryReader::assert_kind_agrees()}
+	 * used to throw a bare RuntimeException, the only structural check in the
+	 * reader outside the project's exception taxonomy, so nothing could branch
+	 * on it specifically.
 	 *
 	 * @return void
 	 */
@@ -325,7 +330,7 @@ final class EntryReaderTest extends TestCase {
 			$result->entry_hash()
 		);
 
-		$this->expectException( RuntimeException::class );
+		$this->expectException( ArchiveNotTrustworthy::class );
 		$this->expectExceptionMessage( 'Entry kind mismatch' );
 
 		self::make_reader()->verify_entry( $dest, $lying_entry );
@@ -415,6 +420,116 @@ final class EntryReaderTest extends TestCase {
 		$this->expectExceptionMessage( 'On-disk entry hash does not match the manifest entry_hash' );
 
 		self::make_reader()->verify_entry( $stream, $forged_entry );
+	}
+
+	/**
+	 * The verify_entry method must reject an entry whose codec_id disagrees with the manifest entry.
+	 *
+	 * The verify-path counterpart of {@see self::test_read_entry_rejects_codec_id_mismatch()}.
+	 * Before this job, verify_entry() never performed this cross-check at
+	 * all — it only hashed the record's bytes, so a tampered codec id was
+	 * invisible until read_entry() eventually tried to decode it.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_codec_id_mismatch(): void {
+		$fixture             = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		$stream              = $fixture[0];
+		$real_manifest_entry = $fixture[1];
+
+		// Construct a manifest entry claiming GzipCodec for the same on-disk bytes (which used RawCodec).
+		$tampered_entry = ManifestEntry::for_file(
+			$real_manifest_entry->index(),
+			$real_manifest_entry->offset(),
+			$real_manifest_entry->length(),
+			'a.txt',
+			GzipCodec::ID,
+			$real_manifest_entry->entry_hash()
+		);
+
+		$this->expectException( ArchiveNotTrustworthy::class );
+		$this->expectExceptionMessage( 'codec_id mismatch' );
+
+		self::make_reader()->verify_entry( $stream, $tampered_entry );
+	}
+
+	/**
+	 * The verify_entry method must reject an entry that uses a codec id not in the registry.
+	 *
+	 * The verify-path counterpart of {@see self::test_read_entry_rejects_unknown_codec()}.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_unknown_codec(): void {
+		$empty_registry = new CodecRegistry();
+		$reader         = new EntryReader( $empty_registry );
+
+		$fixture        = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		$stream         = $fixture[0];
+		$manifest_entry = $fixture[1];
+
+		$this->expectException( ArchiveNotTrustworthy::class );
+		$this->expectExceptionMessage( 'is not registered' );
+
+		$reader->verify_entry( $stream, $manifest_entry );
+	}
+
+	/**
+	 * The verify_entry method must refuse a plain unencrypted file entry over
+	 * the fixed decoded-byte ceiling — the headline regression this job closes.
+	 *
+	 * Before this fix, verify_entry()'s only budget parameter carried the
+	 * MEMORY-derived budget, gated on `! streams_decoded_payload(...)` — the
+	 * condition {@see \Pontifex\Archive\Reader\EntryReader::read_entry()} uses
+	 * for THAT budget, not this one. `streams_decoded_payload()` is true for
+	 * every plain unencrypted file entry, so the gate was never satisfied for
+	 * the common case and this exact refusal could never fire: an oversized
+	 * plain file was reported SOUND by verify() and only then refused by
+	 * read_entry() once a restore actually tried to decode it.
+	 * $max_decoded_bytes now carries the same meaning it carries in
+	 * read_entry() — this build's compiled-in ceiling, applied to every entry
+	 * regardless of shape — so this mirrors
+	 * {@see self::test_read_entry_refuses_as_build_cannot_comply_when_over_the_fixed_decoded_byte_ceiling()}
+	 * exactly, on the verify path.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_refuses_a_plain_file_entry_over_the_fixed_decoded_byte_ceiling(): void {
+		$fixture = self::write_file_entry_to_fixture( 'wp-content/uploads/2024/huge-video.mov', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		try {
+			self::make_reader()->verify_entry( $fixture[0], $fixture[1], null, 10 );
+			$this->fail( 'verify_entry() should have raised BuildCannotComply.' );
+		} catch ( BuildCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp-content/uploads/2024/huge-video.mov',
+				$error->getMessage(),
+				'The refusal must name the entry an operator can act on.'
+			);
+			$this->assertStringContainsString( '100 decoded bytes', $error->getMessage() );
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * The verify_entry method must NOT refuse a plain file entry over the
+	 * memory-derived budget alone — it streams on restore (ADR 0010), so no
+	 * memory refusal applies to it, exactly as read_entry() treats it.
+	 *
+	 * The regression guard the test above needs: telling the two budgets apart
+	 * must not turn into refusing a plain file under a small memory budget it
+	 * was never meant to be judged against.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_permits_a_plain_file_entry_over_the_memory_budget(): void {
+		$fixture = self::write_file_entry_to_fixture( 'note.txt', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		// A generous decoded-byte ceiling (this build's own), but a tiny
+		// memory budget the file's 100 declared bytes comfortably exceed.
+		self::make_reader()->verify_entry( $fixture[0], $fixture[1], null, 1000, 10 );
+
+		$this->addToAssertionCount( 1 );
 	}
 
 	/**

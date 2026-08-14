@@ -130,8 +130,16 @@ refusal, because claiming a refusal would assert an intent that was not there.
 
 Verify checks structure, the entry-count ceiling, and per-entry hashes, then
 runs every restore preflight that writes nothing: scope-versus-manifest,
-symlink target confinement, and free space. Four outcomes, distinguished by
-exit code and wording:
+symlink target confinement, and free space.
+
+It applies the same structural checks and the same size budgets a restore
+applies, on the same terms: the record must leave room for the fields that
+follow its header; the codec id in the manifest must match the one in the
+record; the encryption family must be one this build knows; the compression
+codec must be registered; no single entry may declare more than
+`max_entry_bytes`; and the running total may not exceed the archive's own
+`max_total_for_archive` budget. Four outcomes, distinguished by exit code and
+wording:
 
 | Outcome | Exit | Meaning |
 |---|---|---|
@@ -154,6 +162,22 @@ alongside exit 1. The host symlink-capability probe is not run, because
 establishing it requires creating a link; use `doctor`, or `import --dry-run`
 for a specific archive. Verify does not decode payloads, so it still does not
 test a passphrase.
+
+**What the size budgets can and cannot establish here.** A restore counts each
+entry's actual decoded size as it decodes it. Verify decodes nothing, so it
+counts the size each entry's header *declares*. For a file entry that declared
+size is dependable — `EntryWriter` corrects it to the bytes actually captured,
+and `EntryReader` refuses any file whose decoded size contradicts its header.
+For a `db_chunk` it is a prediction (`DatabaseScanner` sizes a chunk as
+rows-per-chunk × the server's own `Avg_row_length`), and it overstates: measured
+on a stock WordPress database, the declared total ran 3.8× the actual. Counting
+those predictions would let verify refuse archives a restore accepts, so
+`db_chunk` entries are excluded from the running archive total — they are still
+measured against the per-entry ceiling, and a restore still totals them for
+real. Two consequences follow, and both are deliberate. A database-only archive
+gets no archive-total check from verify, only from the restore. And an entry
+whose header *understates* its true decoded size passes verification and is
+caught only when a restore decodes it.
 
 Because confinement is resolved against this site's own root, a verification is
 a statement about an archive **and** a destination. See

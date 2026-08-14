@@ -16,6 +16,41 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **Checking a backup said "sound" for backups a restore then refused, and no
+  check could ever notice an oversized file.** The check and the restore are
+  meant to ask the same structural questions. They did not, because one
+  parameter name carried two different meanings: the restore path passed the
+  size ceiling compiled into every build of Pontifex, while the checking path
+  passed the memory-derived budget through a parameter of the same name — and
+  then tested it on the opposite condition. That condition is true for every
+  ordinary uncompressed-in-place file, so the test was skipped exactly where it
+  mattered and **no check could refuse an oversized file at all**. The checking
+  path also computed no whole-archive size budget, where a restore computes one
+  and enforces it as it goes, and skipped four structural checks a restore
+  performs: whether the record leaves room for the fields that follow it,
+  whether the compression method recorded in the index matches the one in the
+  entry itself, whether the encryption family is one Pontifex knows, and
+  whether the compression method is registered at all. An archive contradicting
+  itself in any of those ways was called sound and then refused. All of it is
+  now checked on both paths, on the same terms.
+
+  **You will notice this**, and it is the point: a backup with a single entry
+  over 2 GB, or whose total contents exceed a hundred times the size of the
+  backup file itself, is now reported as **refused** rather than sound. Every
+  such backup was already refused by a restore — the change is that you hear
+  about it when you check, instead of part-way through restoring.
+
+  One difference between the two paths is deliberate. A restore counts each
+  entry's real unpacked size as it goes; a check never unpacks anything, so it
+  can only read the size each entry declares. For a file that declared size is
+  reliable — it is corrected when the backup is written and enforced when it is
+  read. For a block of database rows it is a prediction, and a measurement on a
+  stock WordPress database found the prediction running **3.8 times** the real
+  total. Counting those predictions would have let the check refuse backups a
+  restore accepts, so database blocks are excluded from that running total.
+  They are still checked individually against the per-entry ceiling, and a
+  restore still measures them for real.
+
 - **A URL migration could run for seven minutes, print the single word
   `Killed`, and leave the site half-moved.** A serialised value crafted (or
   corrupted) to reference itself — fourteen bytes, `a:1:{i:0;R:1;}` — sent
