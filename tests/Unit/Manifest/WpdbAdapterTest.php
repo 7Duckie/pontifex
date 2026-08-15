@@ -192,16 +192,21 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
-	 * The dump_table_rows method must return an empty string when no rows match.
+	 * The dump_table_rows method must return an empty string when $limit is 0.
+	 *
+	 * A window explicitly asked to contain no rows is the one legitimate case
+	 * left for an empty-string return; a $limit > 0 window that comes back
+	 * empty is now treated as a failed read (see the two tests below) rather
+	 * than as the end of the table.
 	 *
 	 * @return void
 	 */
-	public function test_dump_table_rows_returns_empty_string_for_no_rows(): void {
+	public function test_dump_table_rows_returns_empty_string_when_limit_is_zero(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'prepare' )->willReturn( '' );
 		$wpdb->method( 'get_results' )->willReturn( array() );
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 100000, 10 );
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 100000, 0 );
 
 		$this->assertSame( '', $sql );
 	}
@@ -209,15 +214,44 @@ final class WpdbAdapterTest extends TestCase {
 	/**
 	 * The dump_table_rows method must throw when $wpdb signals an error.
 	 *
+	 * A failed $wpdb->get_results() returns an empty array, never null, so
+	 * the mock reflects that real shape rather than the null a stale guard
+	 * here once checked for and which never actually fired.
+	 *
 	 * @return void
 	 */
 	public function test_dump_table_rows_throws_on_error(): void {
 		$wpdb             = $this->mock_wpdb();
 		$wpdb->last_error = 'Lost connection mid-query';
 		$wpdb->method( 'prepare' )->willReturn( '' );
-		$wpdb->method( 'get_results' )->willReturn( null );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 
 		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+	}
+
+	/**
+	 * The dump_table_rows method must throw when a planned window returns no rows.
+	 *
+	 * Every window this method is asked for lies within a previously-read
+	 * row_count(), so a $limit > 0 window with no last_error signalled and an
+	 * empty result is a failed read, not the end of the table — the defect
+	 * this job closes. The former `null === $rows` guard never fired here,
+	 * because a failed get_results() returns an empty array, not null, and
+	 * the read fell straight through to a silent empty-string return that
+	 * DatabaseScanner::build_chunk() read as "this table is finished".
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_throws_when_a_planned_window_returns_no_rows(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturn( '' );
+		$wpdb->method( 'get_results' )->willReturn( array() );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
 	}
@@ -524,7 +558,10 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array( array( 'ID' => 1 ) );
 			}
 		);
 
@@ -566,7 +603,15 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array(
+					array(
+						'object_id'        => 1,
+						'term_taxonomy_id' => 2,
+					),
+				);
 			}
 		);
 
@@ -591,7 +636,22 @@ final class WpdbAdapterTest extends TestCase {
 				return $query;
 			}
 		);
-		$wpdb->method( 'get_results' )->willReturn( array() );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(); // No primary key: falls back to SHOW COLUMNS.
+				}
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array(
+					array(
+						'colour' => 'red',
+						'shape'  => 'circle',
+					),
+				);
+			}
+		);
 		$wpdb->method( 'get_col' )->willReturn( array( 'colour', 'shape' ) );
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_keyless', 0, 10 );
@@ -626,7 +686,10 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since every call
+				// below uses $limit = 10 and an empty result for a planned
+				// window now throws (this test is about SHOW KEYS caching).
+				return array( array( 'ID' => 1 ) );
 			}
 		);
 

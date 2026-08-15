@@ -148,13 +148,22 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 *
 	 * Issues SELECT * FROM `table` LIMIT $limit OFFSET $offset and
 	 * emits one INSERT INTO ... VALUES (...), (...), ... per call.
-	 * Returns an empty string if the range yields no rows.
+	 * Returns an empty string only when $limit is 0 — a window explicitly
+	 * asked to contain no rows. Any other empty result is treated as a
+	 * failed read, not as the end of the table: every window this method is
+	 * asked for is planned by DatabaseScanner from a previously-read
+	 * row_count(), so a $limit > 0 window that comes back empty can only
+	 * mean the read failed. (A former `null === $rows` guard here never
+	 * fired — a real $wpdb->get_results() returns an empty array, not null,
+	 * on failure — so a failed read fell straight through to an empty-string
+	 * return, which the caller read as "this table is finished" and rows
+	 * went missing from the backup silently.)
 	 *
 	 * @param string $table_name Fully-prefixed table name.
 	 * @param int    $offset     0-based starting row.
 	 * @param int    $limit      Maximum number of rows.
 	 * @return string SQL bytes (possibly empty) ending with a newline if any rows were emitted.
-	 * @throws RuntimeException If the SELECT fails.
+	 * @throws RuntimeException If the query signals an error, or a $limit > 0 window returns no rows.
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
 		$this->assert_prefixed_table( $table_name );
@@ -169,10 +178,26 @@ final class WpdbAdapter implements DatabaseAdapter {
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped ORDER BY identifiers) across the assignment.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
 
-		if ( null === $rows ) {
+		// A failed get_results() returns an empty array, never null — the same
+		// failure shape execute() and HardenedTableListing::list_prefixed_tables()
+		// already guard against. last_error is checked first: it is reliably
+		// populated on a query error, including one interrupted mid-flight.
+		if ( '' !== $this->wpdb->last_error ) {
 			$last_error = (string) $this->wpdb->last_error;
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
 			throw new RuntimeException( sprintf( 'Row dump failed for "%s" offset=%d limit=%d: %s', $table_name, (int) $offset, (int) $limit, $last_error ) );
+		}
+
+		// A window planned to contain rows (every caller-supplied window lies
+		// within a previously-read row_count()) that comes back empty, with no
+		// last_error signalled, is still a failed read: a failed get_results()
+		// is all-or-nothing, so it is never a partial result, and this window
+		// was never legitimately going to be empty. Treat it as failure rather
+		// than as the end of the table. Unconditional — no gate on the offset
+		// or on whether a consistent snapshot is open.
+		if ( $limit > 0 && array() === $rows ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'Row dump for "%s" offset=%d limit=%d was expected to contain rows and returned none; treating the read as failed rather than as the end of the table.', $table_name, (int) $offset, (int) $limit ) );
 		}
 
 		if ( empty( $rows ) ) {

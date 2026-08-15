@@ -16,6 +16,21 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A database stutter during a backup could drop rows and still report
+  success.** A shared host under load, or a brief network blip, is enough. The
+  check meant to catch a failed read asked whether the database had returned
+  *nothing at all* — but a failed read hands back an *empty list*, never the
+  particular kind of nothing being tested for, so the check could never fire.
+  A failed read was therefore treated as "this table has no more rows", and the
+  backup moved on to the next one. Measured on a 120,000-row table with its
+  reads interrupted mid-backup: the backup **reported success** and wrote
+  *"Exported 42 entries"*, and the file held **103,616 of the 120,000 rows** —
+  four whole batches missing, including the first. Checking that backup
+  afterwards called it sound, correctly: every byte present was intact, and
+  nothing was looking for the rows that were absent. A failed read is now
+  reported as a failure, the backup stops, and no file is written. An ordinary
+  backup is unaffected — it still writes every row.
+
 - **Checking a backup said "sound" for backups a restore then refused, and no
   check could ever notice an oversized file.** The check and the restore are
   meant to ask the same structural questions. They did not, because one
