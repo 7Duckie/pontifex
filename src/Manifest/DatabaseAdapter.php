@@ -69,15 +69,22 @@ interface DatabaseAdapter {
 	 * Dump a slice of rows from the given table as INSERT statements.
 	 *
 	 * Returns the SQL for rows in the range [$offset, $offset + $limit).
-	 * If $offset is past the end of the table, returns an empty string.
 	 * The returned SQL ends with a trailing newline; concatenation
 	 * with subsequent dumps produces a valid script.
 	 *
+	 * An empty string is returned only when $limit is 0 — a window explicitly
+	 * asked to contain no rows. Any other empty result must be raised as a
+	 * failure rather than returned: every window an implementation is asked
+	 * for is planned from a row count read beforehand, so a $limit > 0 window
+	 * that comes back empty means the read failed, and returning an empty
+	 * string for it tells the caller the table is finished. That is how rows
+	 * went missing from backups silently while the export reported success.
+	 *
 	 * @param string $table_name Fully prefixed table name.
 	 * @param int    $offset     0-based starting row index; must be non-negative.
-	 * @param int    $limit      Maximum number of rows to dump; must be positive.
-	 * @return string SQL bytes encoding the rows; empty if no rows match.
-	 * @throws RuntimeException If the rows cannot be retrieved.
+	 * @param int    $limit      Maximum number of rows to dump; 0 requests no rows, any greater value must yield at least one.
+	 * @return string SQL bytes encoding the rows; empty only when $limit is 0.
+	 * @throws RuntimeException If the rows cannot be retrieved, or a $limit > 0 window returns none.
 	 */
 	public function dump_table_rows( string $table_name, int $offset, int $limit ): string;
 
