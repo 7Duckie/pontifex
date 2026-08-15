@@ -337,8 +337,16 @@ final class RoundTripTest extends TestCase {
 
 		try {
 			$adapter = new WpdbAdapter( $wpdb );
-			$sql     = $adapter->dump_table_schema( $table ) . $adapter->dump_table_rows( $table, 0, 100 );
-			$plans   = array( self::db_chunk_plan( $table, self::count_statements( $sql ), $sql ) );
+			// A limit of 0, because that is what DatabaseScanner asks for on an
+			// empty table: it sizes every window as
+			// min( rows_per_chunk, max( 0, row_count - offset ) ), which is 0 when
+			// the table holds no rows, and gives such a table a single chunk
+			// carrying schema only. Asking for a positive window here instead
+			// would be a call the real export never makes, and dump_table_rows()
+			// now refuses one: an empty result for a window planned to contain
+			// rows is a failed read, not the end of the table.
+			$sql   = $adapter->dump_table_schema( $table ) . $adapter->dump_table_rows( $table, 0, 0 );
+			$plans = array( self::db_chunk_plan( $table, self::count_statements( $sql ), $sql ) );
 
 			$runner = new RestoreRunner(
 				new EntryReader( CodecRegistry::with_defaults() ),
