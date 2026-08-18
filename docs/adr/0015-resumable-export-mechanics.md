@@ -1,6 +1,8 @@
 # 0015 — resumable exports: the progress log is the truth, and drift is refused
 
-- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.6.0.
+- **Status:** Accepted, 2026-07-13. Implemented and shipped in v0.6.0. Amended
+  2026-08-18 (row windows are keyset bookmarks now, and the database phase no
+  longer resumes once begun — see the Amendment).
 - **Deciders:** 7Duckie (v0.6.0).
 
 ## Context
@@ -84,3 +86,63 @@ never persisted anywhere.
 - **A format-level "continued" marker** (idea-bank 006's largest option) —
   unnecessary: manifest-last already makes partial archives appendable with
   no format change.
+
+## Amendment — 2026-08-18: row windows are bookmarks now, and a bookmark does not yet outlive its process
+
+**New information.** This decision was written when a database chunk's row
+window was a counted position: "skip the first 40,000 rows, give me the next
+4,096". Two problems came from that. It is quadratic — an ordered `OFFSET` scan
+cannot skip, so the server reads and discards every row before the window on
+every call, measured at roughly 2.45 billion row reads to dump 4.48 million rows
+and 42 minutes to export a 1.1 GB database, against 119 seconds to restore that
+same archive. And a counted position is not stable across a resume: the rows per
+chunk are derived from the table's own average row width, so a resumed export
+that re-measures a changed table gets a different chunk size, and windows
+computed from it no longer line up with what was already written. Measured:
+**166,608 rows written for a 150,000-row table**, with contiguous duplicates,
+exit 0, and "Archive is sound".
+
+**Amended decision.** A table with a primary key is now windowed by keyset —
+`WHERE (key) > (last key seen) ORDER BY (key) LIMIT n` — so a window is defined
+by data rather than by a count, and a changed chunk size cannot misalign it. A
+table with **no** primary key keeps `LIMIT/OFFSET` unchanged, because no column
+set on such a table is guaranteed unique and a keyset predicate could skip or
+loop on exact duplicate rows; the quadratic cost knowingly remains there.
+
+**What this does to the resume contract, stated plainly because it is a
+reduction.** A bookmark is only useful if it outlives the process that made it.
+Today it does not. The bookmark is produced inside the scanner's own chunk
+provider and consumed by the next chunk in the same run; by the time an entry
+reaches the resumable runner it is a plain `EntryPlan`, which carries no channel
+back to it. So a resumed export cannot pick up a bookmark left by an earlier
+process.
+
+Rather than let that corrupt an archive, the scanner **refuses**: a chunk beyond
+the first that finds no bookmark on a keyset-paginated table stops the export and
+tells the operator to start again. Without that refusal the resumed run would
+re-read the table's first window under a later chunk's identity — duplicating
+some rows and dropping others, which is a worse failure than the one this
+amendment set out to fix.
+
+**Two things bound the cost, and both were verified rather than assumed.** The
+database phase **runs to completion once it begins** — the tick budget is
+consulted only while file entries are being written — so an ordinary pause
+between ticks never lands mid-database. Only an external kill, host timeout or
+crash during the database phase reaches this refusal. And the export the
+operator is asked to redo is the one this amendment just made dramatically
+faster.
+
+So "a killed export resumes from its last verified entry instead of zero", above,
+now holds for the file phase in full and for the database phase only when it had
+not yet begun. Completing it — giving the bookmark a route to the progress log
+and back — is scheduled as its own job, because that route crosses
+`ManifestBuilder`, `EntryPlan`, `ManifestStream` and `ExportRunner`, and possibly
+`ManifestBuilderInterface`, which this project documents as open to other
+implementations.
+
+**The lesson worth recording:** a fix that makes one half of a guarantee stronger
+can quietly weaken another half. Keyset made every window correct under a
+changing table and, in the same stroke, made windows depend on state that the
+resume path had never had to carry. The question to ask of any change to a
+resumable operation is not only "is each step right?" but "does every input a
+step needs survive a process boundary?"

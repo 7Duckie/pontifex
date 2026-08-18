@@ -14,7 +14,43 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
+### Changed
+
+- **A backup interrupted part-way through its database half now asks you to
+  start again, rather than continuing.** The new bookmark that makes row
+  reading fast does not yet survive the process that created it, so a backup
+  resumed at that exact point cannot know where it had got to. Rather than
+  guess — which would re-read a table's first rows under a later batch's name,
+  duplicating some and dropping others — Pontifex stops and says so.
+
+  Two things limit when you would meet this. The database half **runs to
+  completion once it starts**, so an ordinary pause between stages never lands
+  inside it; only an outright kill, a host timeout or a crash does. And the
+  backup you are asked to redo is the one that just became dramatically
+  faster.
+
 ### Fixed
+
+- **Backing up a large database took hours, and a resumed backup could
+  duplicate rows.** Pontifex asked the database for rows a page at a time by
+  counting from the start — "skip the first 40,000, give me the next 4,096".
+  A database cannot actually skip: it reads and discards every row before the
+  starting point, every single time. Measured on a 1.1 GB database: **42
+  minutes to back up, against 119 seconds to restore the same file**, because
+  restoring never paginates. Backing up 4.48 million rows meant reading about
+  **2.45 billion**. The bigger the table, the worse it got, and it got worse
+  faster than the table grew. Pontifex now asks for "the rows after this one",
+  which the database can jump straight to. Tables without a primary key keep
+  the old method, because they have no column guaranteed unique to bookmark
+  on.
+
+  The same counting was also why an interrupted backup could come back wrong.
+  How many rows fit in a batch is worked out from the table's own average row
+  size, so a resumed backup that re-measured a changed table got a different
+  batch size, and batches counted from the start no longer lined up with what
+  had already been written. Measured: **166,608 rows written for a 150,000-row
+  table**, with exit code 0 and "Archive is sound". A bookmark is tied to
+  actual data, so a changed batch size can no longer misalign anything.
 
 - **A database stutter during a backup could drop rows and still report
   success.** A shared host under load, or a brief network blip, is enough. The
