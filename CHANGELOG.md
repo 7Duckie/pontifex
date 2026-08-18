@@ -31,6 +31,20 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **An interrupted download left a fragment under the backup's name, and then
+  blocked its own retry.** Fetching a backup from your own server wrote
+  straight to the path you asked for, so a download cut short partway left a
+  truncated file there — measured on a real server at 163,610,624 bytes.
+  Pontifex then refuses to fetch over an existing file, so retrying to the same
+  place was refused *by the wreckage of the attempt before it*. The only way
+  out was to spot the problem and delete a file most people would reasonably
+  take for a backup. Downloads now go to a temporary name and are renamed into
+  place only once the transfer has finished and its size matches what your
+  server reports, so an interrupted one never occupies the path you asked for
+  and retrying simply works. Verified on a real server: a download killed
+  part-way left nothing at the requested path, and the very next attempt
+  succeeded.
+
 - **The "is there room to restore?" check measured the wrong thing, and could
   pass without measuring anything at all.** Before restoring, Pontifex checks
   your server has space. It was adding up how much room your files take *inside

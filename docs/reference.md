@@ -234,6 +234,14 @@ Credentials are never passed as a flag value — only the environment variable's
 name is. `test`, `archives`, `pull` and `prune` open a connection; `list` and
 `doctor` do not.
 
+`pull` downloads to `<output>.part` and renames it into place only once the
+transfer has finished and its size matches what the destination reports. An
+interrupted download therefore never occupies the requested output path, so
+retrying to the same `--output` works rather than being refused by the previous
+attempt's own fragment. The `.part` name is fixed rather than unique, so a retry
+overwrites the leftover instead of accumulating them; a `.part` file beside a
+backup is a download that did not finish, and is safe to delete.
+
 `prune` orders archives oldest-first by their real modification time at the
 destination, never by name — a name is self-reported data (a killed upload can
 leave a partial file under the canonical name; a hand-set clock can mint a

@@ -51,6 +51,26 @@ final class SftpDestination implements DestinationAdapter {
 	private const TEMP_UPLOAD_SUFFIX = '.part';
 
 	/**
+	 * Suffix appended to the local path while a download is in progress.
+	 *
+	 * {@see self::get()} downloads to this temporary local name first and
+	 * renames it into the final path only once the transfer is complete and
+	 * its size has been verified against the remote archive — the download
+	 * side of the same temp-then-rename shape {@see self::TEMP_UPLOAD_SUFFIX}
+	 * already gives the upload path.
+	 *
+	 * The suffix is deliberately a fixed string rather than a per-attempt
+	 * unique one (contrast {@see \Pontifex\Filesystem\TempArtefact}): a
+	 * retry downloads over the same temporary path, so a previous failed
+	 * attempt's fragment is simply overwritten rather than left behind
+	 * alongside a new one. Nothing here ever needs a sweep, because nothing
+	 * ever accumulates.
+	 *
+	 * @var string
+	 */
+	private const TEMP_DOWNLOAD_SUFFIX = '.part';
+
+	/**
 	 * The server hostname.
 	 *
 	 * @var string
@@ -398,25 +418,124 @@ final class SftpDestination implements DestinationAdapter {
 	/**
 	 * Download one archive to a local path.
 	 *
+	 * Writes to a temporary local name first ({@see self::TEMP_DOWNLOAD_SUFFIX})
+	 * and renames it into the final path only once the transfer has completed
+	 * and its size has been verified against the remote archive. Without
+	 * this, an interrupted download leaves a truncated file under the FINAL
+	 * name — measured on a real server at 163,610,624 bytes of a larger
+	 * archive — and {@see \Pontifex\Cli\DestinationCommand::pull()} refuses
+	 * to start when its output path already exists, so the failed attempt's
+	 * own debris blocks its own retry: the only way past it is deleting a
+	 * file the operator may reasonably believe is a backup. Two failure
+	 * modes are covered separately, mirroring {@see self::put()}:
+	 * {@see self::assert_download_size_matches()} catches a get() that
+	 * returns success on an incomplete transfer, and this method's own
+	 * rename catches a hard kill that never returns at all — in either case
+	 * the archive never appears under its real local name until it is known
+	 * good. On any failure the temporary file is removed, so nothing is left
+	 * for the operator to find and mistake for a usable partial download.
+	 *
+	 * Unlike the upload's remote rename, a local POSIX rename replaces an
+	 * existing target without complaint, so — unlike {@see self::put()} —
+	 * nothing needs to be cleared out of the way first; `pull()` already
+	 * refuses to start when the final path exists, so ordinarily nothing
+	 * occupies it. On Windows, though, a rename onto an existing target
+	 * fails outright, so a failed rename here is reported rather than left
+	 * to a raw filesystem warning.
+	 *
 	 * @param string $remote_name The remote basename.
 	 * @param string $local_path  Absolute path to write the archive to.
 	 * @return void
-	 * @throws DestinationException If the archive is absent, or the download fails.
+	 * @throws DestinationException If the archive is absent, or the download,
+	 *                              size verification, or the final rename fails.
 	 */
 	public function get( string $remote_name, string $local_path ): void {
-		$sftp   = $this->connect();
-		$remote = $this->remote_path . '/' . basename( $remote_name );
+		$sftp       = $this->connect();
+		$final_name = basename( $remote_name );
+		$remote     = $this->remote_path . '/' . $final_name;
+		$temp_local = $local_path . self::TEMP_DOWNLOAD_SUFFIX;
 
 		try {
-			$ok = $sftp->get( $remote, $local_path );
+			$ok = $sftp->get( $remote, $temp_local );
 		} catch ( Throwable $e ) {
+			$this->discard_local_file( $temp_local );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Underlying error reported for diagnostic context; exception path, not HTML output.
-			throw new DestinationException( sprintf( 'The download from the SFTP destination failed: %s', $e->getMessage() ) );
+			throw new DestinationException( sprintf( 'The download from the SFTP destination failed: %s. Any partial download has been removed; retry it.', $e->getMessage() ) );
 		}
 
 		if ( false === $ok ) {
+			$this->discard_local_file( $temp_local );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Archive basename reported for diagnostic context; exception path, not HTML output.
-			throw new DestinationException( sprintf( 'The SFTP destination has no archive named "%s".', basename( $remote_name ) ) );
+			throw new DestinationException( sprintf( 'The SFTP destination has no archive named "%s".', $final_name ) );
+		}
+
+		$this->assert_download_size_matches( $sftp, $remote, $temp_local, $final_name );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Moving the verified download into place (a same-directory move); WP_Filesystem is unavailable in this CLI-only path.
+		$renamed = @rename( $temp_local, $local_path );
+		if ( true !== $renamed ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local paths reported for diagnostic context; exception path, not HTML output.
+			throw new DestinationException( sprintf( 'The download of "%1$s" finished and was verified, but moving it into place at "%2$s" failed. The verified download has not been lost — it is stored at "%3$s". Rename it to "%2$s" yourself once whatever is blocking the move is dealt with: a POSIX filesystem replaces an existing file at "%2$s" automatically, but Windows refuses when one is already there.', $final_name, $local_path, $temp_local ) );
+		}
+	}
+
+	/**
+	 * Refuse to treat a download as complete unless the local copy just
+	 * written is exactly the size the destination reports for the archive.
+	 *
+	 * Catches the failure mode {@see self::get()}'s rename cannot: a get()
+	 * call that returns success while the transfer was, in fact, incomplete
+	 * (a dropped connection partway through that phpseclib does not itself
+	 * surface as a failed return). On a mismatch — or when either size
+	 * cannot even be read — the temporary file is discarded and the
+	 * download is refused, rather than left for a later rename to promote
+	 * into the requested local path.
+	 *
+	 * @param SFTP   $sftp       The live, authenticated connection.
+	 * @param string $remote     The remote path the archive was downloaded from.
+	 * @param string $temp_local The temporary local path the download was just written to.
+	 * @param string $final_name The archive's basename, for the error message.
+	 * @return void
+	 * @throws DestinationException If either size cannot be read, or they do not match.
+	 */
+	private function assert_download_size_matches( SFTP $sftp, string $remote, string $temp_local, string $final_name ): void {
+		$remote_size = $sftp->filesize( $remote );
+		if ( ! is_int( $remote_size ) ) {
+			$this->discard_local_file( $temp_local );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Archive basename reported for diagnostic context; exception path, not HTML output.
+			throw new DestinationException( sprintf( 'The download of "%s" from the SFTP destination could not be verified, because the archive\'s size on the destination could not be read. The partial download has been removed; retry it.', $final_name ) );
+		}
+
+		$local_size = filesize( $temp_local );
+		if ( false === $local_size || $local_size !== $remote_size ) {
+			$this->discard_local_file( $temp_local );
+			$reported = false !== $local_size ? sprintf( '%d bytes', $local_size ) : 'an unreadable size';
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Archive basename and byte counts reported for diagnostic context; exception path, not HTML output.
+			throw new DestinationException( sprintf( 'The download of "%1$s" from the SFTP destination could not be verified: the destination reports %2$d bytes, but the downloaded file is %3$s. The partial download has been removed; retry it.', $final_name, $remote_size, $reported ) );
+		}
+	}
+
+	/**
+	 * Best-effort removal of one local temporary download file.
+	 *
+	 * Every call site in {@see self::get()} and
+	 * {@see self::assert_download_size_matches()} is already on its way to
+	 * throwing a more specific {@see DestinationException} (or, on the
+	 * missing-archive path, one that never had a temporary file to begin
+	 * with) — a cleanup failure here must not mask that. The suppressed
+	 * warning mirrors {@see self::discard_remote_file()}'s own reasoning,
+	 * moved to the local filesystem: nothing else in Pontifex lists or acts
+	 * on this directory, so a file left behind by a failed unlink() is
+	 * merely untidy, never mistaken for a backup while it carries this
+	 * suffix.
+	 *
+	 * @param string $local_path The temporary local path to remove.
+	 * @return void
+	 */
+	private function discard_local_file( string $local_path ): void {
+		if ( file_exists( $local_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Best-effort removal of Pontifex's own temporary download file; WP_Filesystem is unavailable in this CLI-only path.
+			@unlink( $local_path );
 		}
 	}
 
