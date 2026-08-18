@@ -172,8 +172,12 @@ the restore would *add* rather than the archive's total size, so restoring a
 site over itself costs almost nothing while restoring a larger site onto a
 small disk is caught. Before checking, it also clears away any temp files an
 earlier, interrupted restore left behind, so a previous failed attempt's own
-debris is never what is holding up the retry. The estimate deliberately leans
-low, so if it still fires you are genuinely short.
+debris is never what is holding up the retry. The figure it works with is the
+size your files will actually occupy once unpacked, not the smaller size they
+take up inside the backup file — those two can differ by a factor of ninety on
+a database-heavy backup. It still leaves your database out of the sum, because
+that goes to the database server rather than to this folder, so if this refusal
+fires you are genuinely short.
 
 **Nothing has been changed** beyond clearing away another restore's own
 leftover debris, as described above. This still runs before the first byte of
