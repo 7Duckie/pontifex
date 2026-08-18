@@ -150,10 +150,11 @@ final class DatabaseScanner {
 	 * Returned chunks are sorted alphabetically by table name, then
 	 * by chunk_index within each table.
 	 *
+	 * @param array<string, array<string, int|string|float|bool>> $resume_cursors Optional per-table keyset seed, table_name => the end key to resume after (see {@see self::build_table_chunks()}); a table absent here starts its first window fresh. Ignored for a table with no primary key.
 	 * @return ScannedDbChunk[] All chunks the scanner produced.
 	 * @throws RuntimeException If the database adapter signals a failure.
 	 */
-	public function scan(): array {
+	public function scan( array $resume_cursors = array() ): array {
 		$tables = $this->db->list_tables();
 		sort( $tables, SORT_STRING );
 
@@ -164,21 +165,53 @@ final class DatabaseScanner {
 				continue;
 			}
 
-			$row_count      = $this->db->row_count( $table_name );
-			$row_bytes      = $this->estimated_statement_bytes( $table_name );
-			$rows_per_chunk = $this->compute_rows_per_chunk( $row_bytes );
-			$is_empty_table = 0 === $row_count;
+			$seed   = $resume_cursors[ $table_name ] ?? null;
+			$chunks = array_merge( $chunks, $this->build_table_chunks( $table_name, $seed ) );
+		}
 
-			// Empty tables get a single schema-only chunk.
-			// Non-empty tables get one chunk per rows_per_chunk batch, with the schema in chunk 0.
-			$chunk_count = $is_empty_table ? 1 : (int) ceil( $row_count / $rows_per_chunk );
+		return $chunks;
+	}
 
-			for ( $i = 0; $i < $chunk_count; $i++ ) {
-				$offset = $i * $rows_per_chunk;
-				$limit  = min( $rows_per_chunk, max( 0, $row_count - $offset ) );
+	/**
+	 * Plan every chunk for one table, chaining the keyset cursor between them.
+	 *
+	 * Chunk count and each chunk's row limit still come from row_count() and
+	 * rows_per_chunk exactly as before; only the window predicate a chunk's
+	 * provider asks the adapter for has changed. $cursor lives in THIS
+	 * method's own call frame — a fresh local variable on every call, so one
+	 * table's chunk closures (which chain it by reference, see
+	 * {@see self::build_chunk()}) can never alias another table's — and is
+	 * seeded from $seed for the first chunk this call builds. That matters
+	 * across a resumed export: {@see \Pontifex\Export\ResumableExportRunner}
+	 * re-scans on every tick and SKIPS chunks it already completed rather
+	 * than re-reading them, so a fresh scan's chunk 0 closure for a
+	 * partially-completed table is never invoked and cannot hand chunk 1's
+	 * closure a chained cursor from memory — $seed (the last completed
+	 * chunk's persisted end key) is what lets the first chunk this call
+	 * actually realises pick up where the archive already left off, without
+	 * re-reading or duplicating the rows the earlier ticks already captured.
+	 *
+	 * @param string                                    $table_name The table being planned.
+	 * @param array<string, int|string|float|bool>|null $seed       The end key to resume this table's cursor from, or null to start its first window fresh.
+	 * @return ScannedDbChunk[] This table's chunks, in chunk_index order.
+	 */
+	private function build_table_chunks( string $table_name, ?array $seed ): array {
+		$row_count      = $this->db->row_count( $table_name );
+		$row_bytes      = $this->estimated_statement_bytes( $table_name );
+		$rows_per_chunk = $this->compute_rows_per_chunk( $row_bytes );
+		$is_empty_table = 0 === $row_count;
 
-				$chunks[] = $this->build_chunk( $table_name, $i, $offset, $limit, $row_bytes );
-			}
+		// Empty tables get a single schema-only chunk.
+		// Non-empty tables get one chunk per rows_per_chunk batch, with the schema in chunk 0.
+		$chunk_count = $is_empty_table ? 1 : (int) ceil( $row_count / $rows_per_chunk );
+
+		$cursor = $seed;
+		$chunks = array();
+		for ( $i = 0; $i < $chunk_count; $i++ ) {
+			$offset = $i * $rows_per_chunk;
+			$limit  = min( $rows_per_chunk, max( 0, $row_count - $offset ) );
+
+			$chunks[] = $this->build_chunk( $table_name, $i, $offset, $limit, $row_bytes, $cursor );
 		}
 
 		return $chunks;
@@ -223,19 +256,59 @@ final class DatabaseScanner {
 	 * the closure stored in the returned ScannedDbChunk; this method
 	 * only constructs the metadata.
 	 *
-	 * @param string $table_name  The table being chunked.
-	 * @param int    $chunk_index The 0-based ordinal of this chunk.
-	 * @param int    $offset      The first row offset this chunk covers.
-	 * @param int    $limit       The maximum row count this chunk covers.
-	 * @param int    $row_bytes   The per-row byte estimate used to size this table's chunks.
+	 * $cursor is taken by reference and shared, via the closure's own
+	 * `use ( &$cursor )`, by every chunk this table's
+	 * {@see self::build_table_chunks()} call builds: when this chunk's
+	 * provider runs (at archive-write time, once ArchiveWriter realises the
+	 * chunk), it reads whichever end key the PREVIOUS chunk's provider left
+	 * there — the seed, if no earlier provider in this call has run yet — and
+	 * overwrites it with its own result's end key, so the NEXT chunk's
+	 * provider chains off it in turn. A table with no primary key never
+	 * populates $cursor (its dumps return a null end key), so its providers
+	 * always pass null, matching today's plain offset/limit windowing.
+	 *
+	 * A chunk beyond the first whose provider runs while $cursor is still
+	 * null is refused rather than silently dumped: the only way that can
+	 * legitimately happen for a keyset table is a caller invoking chunks out
+	 * of order within one process, which nothing in this codebase does today
+	 * — the archive writer always realises chunks in index order — so in
+	 * practice it means this table's earlier chunk(s) were captured in a
+	 * PRIOR process (an interrupted resumable export resuming mid-table) and
+	 * this scan has no persisted cursor to resume from. Continuing would
+	 * silently re-read the table's first window under a later chunk's
+	 * identity, duplicating rows and dropping the rows actually meant for
+	 * this position. There is currently no producer of a non-empty
+	 * $resume_cursors entry for {@see self::scan()} to seed this from (see
+	 * that method's own docblock), so today every such resume hits this
+	 * refusal rather than a silent corruption — the fail-closed half of a fix
+	 * this class alone cannot complete.
+	 *
+	 * @param string                                    $table_name  The table being chunked.
+	 * @param int                                       $chunk_index The 0-based ordinal of this chunk.
+	 * @param int                                       $offset      The first row offset this chunk covers.
+	 * @param int                                       $limit       The maximum row count this chunk covers.
+	 * @param int                                       $row_bytes   The per-row byte estimate used to size this table's chunks.
+	 * @param array<string, int|string|float|bool>|null &$cursor      The table's shared keyset cursor cell, chained across this table's chunks.
 	 * @return ScannedDbChunk A fully-populated chunk metadata object.
 	 */
-	private function build_chunk( string $table_name, int $chunk_index, int $offset, int $limit, int $row_bytes ): ScannedDbChunk {
+	private function build_chunk( string $table_name, int $chunk_index, int $offset, int $limit, int $row_bytes, ?array &$cursor ): ScannedDbChunk {
 		$db       = $this->db;
 		$is_first = 0 === $chunk_index;
 
-		$sql_provider = static function () use ( $db, $table_name, $offset, $limit, $is_first ) {
-			$rows_sql   = $limit > 0 ? $db->dump_table_rows( $table_name, $offset, $limit ) : '';
+		$sql_provider = static function () use ( $db, $table_name, $chunk_index, $offset, $limit, $is_first, &$cursor ) {
+			$rows_sql = '';
+			if ( $limit > 0 ) {
+				$cursor_before_call = $cursor;
+				$result             = $db->dump_table_rows( $table_name, $offset, $limit, $cursor );
+
+				if ( ! $is_first && null === $cursor_before_call && null !== $result->end_key() ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $chunk_index reported verbatim for diagnostic context; exception path, not HTML output.
+					throw new RuntimeException( sprintf( 'Cannot continue "%s" at chunk %d: its keyset cursor did not carry over from an earlier session, so continuing would silently re-read this table\'s first rows instead of its true continuation. This export cannot be resumed as configured — delete the partial archive and start again.', $table_name, (int) $chunk_index ) );
+				}
+
+				$rows_sql = $result->sql();
+				$cursor   = $result->end_key();
+			}
 			$schema_sql = $is_first ? $db->dump_table_schema( $table_name ) : '';
 
 			return self::open_memory_stream_with_sql( $schema_sql . $rows_sql );

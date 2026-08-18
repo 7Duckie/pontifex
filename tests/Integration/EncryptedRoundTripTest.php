@@ -135,8 +135,8 @@ final class EncryptedRoundTripTest extends TestCase {
 
 		$adapter = new WpdbAdapter( $wpdb );
 
-		$db_sql      = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
-		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$db_sql      = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
+		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		// Pack into an encrypted archive, using the context the CLI derives from a passphrase.
 		$context       = Encryption::context( self::PASSPHRASE );
@@ -155,7 +155,7 @@ final class EncryptedRoundTripTest extends TestCase {
 
 		// Database came back: same row count, identical row dump (multibyte intact).
 		$this->assertSame( 2, $adapter->row_count( $this->scratch_table ), 'Scratch table row count should survive the encrypted round trip.' );
-		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Scratch table rows should be byte-identical after the encrypted round trip.' );
+		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql(), 'Scratch table rows should be byte-identical after the encrypted round trip.' );
 	}
 
 	/**
@@ -172,7 +172,7 @@ final class EncryptedRoundTripTest extends TestCase {
 		global $wpdb;
 
 		$adapter = new WpdbAdapter( $wpdb );
-		$db_sql  = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$db_sql  = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		$context       = Encryption::context( self::PASSPHRASE );
 		$archive_bytes = self::build_encrypted_archive_bytes( $this->build_site_plans( $db_sql ), $context );

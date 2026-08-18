@@ -330,6 +330,123 @@ final class DatabaseScannerTest extends TestCase {
 	}
 
 	/**
+	 * A keyed table's chunks must chain: each chunk's after_key must be the
+	 * previous chunk's end key, realised in order within one process.
+	 *
+	 * @return void
+	 */
+	public function test_keyset_cursor_chains_between_chunks_of_a_keyed_table(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'keyed', 30, "CREATE TABLE `keyed` (...);\n" );
+		$db->make_keyed( 'keyed' );
+
+		// 10 rows per chunk (1 KiB fixed estimate, 10 KiB budget) → 3 chunks.
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		$chunks  = $scanner->scan();
+		$this->assertCount( 3, $chunks );
+
+		// Realising chunks out of the writer's actual order would defeat the
+		// point of this test — the archive writer always realises entries in
+		// index order, so this mirrors that.
+		self::stream_contents( $chunks[0]->open_sql_stream() );
+		self::stream_contents( $chunks[1]->open_sql_stream() );
+		self::stream_contents( $chunks[2]->open_sql_stream() );
+
+		$calls = $db->dump_calls();
+		$this->assertCount( 3, $calls );
+		$this->assertNull( $calls[0]['after_key'], 'The first chunk must ask for the first window (no cursor).' );
+		$this->assertSame( array( 'id' => 9 ), $calls[1]['after_key'], "The second chunk must chain off the first chunk's end key." );
+		$this->assertSame( array( 'id' => 19 ), $calls[2]['after_key'], "The third chunk must chain off the second chunk's end key." );
+	}
+
+	/**
+	 * A chunk beyond the first realised WITHOUT its predecessor having run in
+	 * this process must be refused, never silently dumped.
+	 *
+	 * This is the resume-mid-table hazard {@see DatabaseScanner::build_chunk()}
+	 * refuses rather than risk: without a persisted cursor to seed it, a later
+	 * chunk realised alone would otherwise silently re-read the table's first
+	 * rows under its own identity.
+	 *
+	 * @return void
+	 */
+	public function test_a_later_chunk_realised_without_its_predecessor_is_refused(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'keyed', 30, "CREATE TABLE `keyed` (...);\n" );
+		$db->make_keyed( 'keyed' );
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		$chunks  = $scanner->scan();
+		$this->assertCount( 3, $chunks );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'did not carry over' );
+
+		// Chunk 0 is deliberately never realised.
+		$chunks[1]->open_sql_stream();
+	}
+
+	/**
+	 * A resume seed passed to scan() must reach the first chunk actually
+	 * realised for that table — and realising that chunk alone, with no
+	 * predecessor run in this process, must NOT trip the fail-closed guard,
+	 * because a real seed is exactly what makes it legitimate.
+	 *
+	 * This is the shape a genuine mid-table resume would take: chunk 0 was
+	 * captured and completed in an earlier process, this scan's chunk 0
+	 * closure is therefore never realised, and chunk 1 is the first one
+	 * actually run — it must pick up from the seed, not from null. Nothing in
+	 * production supplies a real seed yet (see scan()'s own docblock), but
+	 * the scanner must thread one correctly when it is given one.
+	 *
+	 * @return void
+	 */
+	public function test_resume_cursor_seeds_the_first_chunk_actually_realised(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'keyed', 30, "CREATE TABLE `keyed` (...);\n" );
+		$db->make_keyed( 'keyed' );
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		// The seed matches what chunk 0 (row_count 30, 10 rows per chunk)
+		// would itself have produced as its end key — the value a persisted
+		// cursor from an earlier process would carry.
+		$chunks = $scanner->scan( array( 'keyed' => array( 'id' => 9 ) ) );
+		$this->assertCount( 3, $chunks );
+
+		// Chunk 0 is deliberately never realised, simulating a resume; this
+		// must not throw, unlike test_a_later_chunk_realised_without_its_predecessor_is_refused().
+		self::stream_contents( $chunks[1]->open_sql_stream() );
+
+		$calls = $db->dump_calls();
+		$this->assertSame( array( 'id' => 9 ), $calls[0]['after_key'], "Chunk 1's provider must receive the resume seed as its after_key." );
+	}
+
+	/**
+	 * A table with no primary key must never carry a keyset cursor: every
+	 * dump_table_rows() call must pass a null after_key, chunk after chunk.
+	 *
+	 * @return void
+	 */
+	public function test_an_unkeyed_table_never_carries_a_cursor(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'plain', 30, "CREATE TABLE `plain` (...);\n" );
+		// Deliberately not marked keyed: FakeDbAdapter mirrors a real
+		// no-primary-key table by always returning a null end key.
+
+		$scanner = new DatabaseScanner( $db, ExclusionRules::none(), 10 * 1024 );
+		$chunks  = $scanner->scan();
+		$this->assertCount( 3, $chunks );
+
+		foreach ( $chunks as $chunk ) {
+			self::stream_contents( $chunk->open_sql_stream() );
+		}
+
+		foreach ( $db->dump_calls() as $call ) {
+			$this->assertNull( $call['after_key'], 'An unkeyed table must never pass a cursor.' );
+		}
+	}
+
+	/**
 	 * A wide-row table must get proportionally fewer rows per chunk.
 	 *
 	 * With a 10 KiB budget and a reported 2 KiB average row (doubled to 4 KiB

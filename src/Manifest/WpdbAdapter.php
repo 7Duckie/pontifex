@@ -70,6 +70,21 @@ final class WpdbAdapter implements DatabaseAdapter {
 	private array $order_columns = array();
 
 	/**
+	 * Whether each table's cached {@see self::$order_columns} are its primary
+	 * key, resolved once and cached alongside it.
+	 *
+	 * True means {@see self::$order_columns} holds the table's real primary
+	 * key, so row dumps for that table may use keyset pagination. False means
+	 * the columns are the no-primary-key fallback (every column, in table
+	 * order) — not unique, so a table with an entry of false here keeps
+	 * LIMIT/OFFSET pagination rather than a keyset predicate that could skip
+	 * or loop on duplicate rows.
+	 *
+	 * @var array<string, bool>
+	 */
+	private array $order_columns_are_primary_key = array();
+
+	/**
 	 * Construct a WpdbAdapter around an existing wpdb instance.
 	 *
 	 * @param wpdb $wpdb The WordPress database object, typically the global $wpdb.
@@ -146,66 +161,216 @@ final class WpdbAdapter implements DatabaseAdapter {
 	/**
 	 * Dump a row range from the given table as a multi-VALUE INSERT statement.
 	 *
-	 * Issues SELECT * FROM `table` LIMIT $limit OFFSET $offset and
-	 * emits one INSERT INTO ... VALUES (...), (...), ... per call.
-	 * Returns an empty string only when $limit is 0 — a window explicitly
-	 * asked to contain no rows. Any other empty result is treated as a
-	 * failed read, not as the end of the table: every window this method is
-	 * asked for is planned by DatabaseScanner from a previously-read
-	 * row_count(), so a $limit > 0 window that comes back empty can only
-	 * mean the read failed. (A former `null === $rows` guard here never
-	 * fired — a real $wpdb->get_results() returns an empty array, not null,
-	 * on failure — so a failed read fell straight through to an empty-string
-	 * return, which the caller read as "this table is finished" and rows
-	 * went missing from the backup silently.)
+	 * A table with a primary key is windowed by keyset (see
+	 * {@see self::dump_table_rows_by_keyset()}): a pure index seek that never
+	 * scans and discards rows before the window, and whose cursor ($after_key)
+	 * survives a changed $limit between calls without duplicating or skipping
+	 * rows — unlike LIMIT/OFFSET, whose windows silently shift when the row
+	 * count per call changes between a resumed export's ticks. A table with no
+	 * primary key falls back to today's LIMIT/OFFSET windowing (see
+	 * {@see self::dump_table_rows_by_offset()}), because such a table can hold
+	 * exact duplicate rows and a keyset predicate over a non-unique column set
+	 * could skip or loop on them.
+	 *
+	 * Returns a {@see RowDumpResult} whose SQL is empty only when $limit is
+	 * 0 — a window explicitly asked to contain no rows. Any other empty
+	 * result is treated as a failed read, not as the end of the table: every
+	 * window this method is asked for is planned by DatabaseScanner from a
+	 * previously-read row_count(), so a $limit > 0 window that comes back
+	 * empty can only mean the read failed. (A former `null === $rows` guard
+	 * here never fired — a real $wpdb->get_results() returns an empty array,
+	 * not null, on failure — so a failed read fell straight through to an
+	 * empty-string return, which the caller read as "this table is finished"
+	 * and rows went missing from the backup silently.)
+	 *
+	 * @param string                                    $table_name Fully-prefixed table name.
+	 * @param int                                       $offset     0-based starting row. Used only when the table has no primary key.
+	 * @param int                                       $limit      Maximum number of rows.
+	 * @param array<string, int|string|float|bool>|null $after_key  The previous window's end key; null for the first window, or when the table has no primary key.
+	 * @return RowDumpResult SQL bytes (possibly empty) ending with a newline if any rows were emitted, plus the end key.
+	 * @throws RuntimeException If the query signals an error, or a $limit > 0 window returns no rows.
+	 */
+	public function dump_table_rows( string $table_name, int $offset, int $limit, ?array $after_key = null ): RowDumpResult {
+		$this->assert_prefixed_table( $table_name );
+
+		$key_columns = $this->primary_key_columns( $table_name );
+		if ( array() !== $key_columns ) {
+			return $this->dump_table_rows_by_keyset( $table_name, $key_columns, $limit, $after_key );
+		}
+
+		return $this->dump_table_rows_by_offset( $table_name, $offset, $limit );
+	}
+
+	/**
+	 * Dump a row window keyed off the table's primary key.
+	 *
+	 * Builds `WHERE (pk) > (after_key) ORDER BY (pk) LIMIT $limit` — a plain
+	 * `col > val` comparison for a single-column key, a row-constructor
+	 * comparison `(col_a, col_b) > (val_a, val_b)` for a composite one, so the
+	 * index is still used for the comparison — never $offset, and never a
+	 * WHERE at all when $after_key is null (the first window). Every
+	 * identifier is escaped via {@see self::escape_identifier()}; every value
+	 * is bound through $wpdb->prepare(), the same discipline every other
+	 * query in this class follows — never string-concatenated, which is
+	 * where an injection would hide.
+	 *
+	 * @param string                                    $table_name  Fully-prefixed table name.
+	 * @param string[]                                  $key_columns The table's primary-key columns, in key order; must be non-empty.
+	 * @param int                                       $limit       Maximum number of rows.
+	 * @param array<string, int|string|float|bool>|null $after_key   The previous window's end key, or null for the first window.
+	 * @return RowDumpResult SQL bytes (possibly empty) and the end key of the last row emitted.
+	 * @throws RuntimeException If the query signals an error, a $limit > 0 window returns no rows, or $after_key is missing one of the table's key columns.
+	 */
+	private function dump_table_rows_by_keyset( string $table_name, array $key_columns, int $limit, ?array $after_key ): RowDumpResult {
+		$order_clause = $this->order_by_clause( $table_name );
+		$where_clause = '';
+		$args         = array( $table_name );
+
+		if ( null !== $after_key ) {
+			$escaped_columns = array_map( array( self::class, 'escape_identifier' ), $key_columns );
+			$is_composite    = count( $escaped_columns ) > 1;
+			$left_side       = $is_composite
+				? '(`' . implode( '`, `', $escaped_columns ) . '`)'
+				: '`' . $escaped_columns[0] . '`';
+			$right_side      = $is_composite
+				? '(' . implode( ', ', array_fill( 0, count( $escaped_columns ), '%s' ) ) . ')'
+				: '%s';
+			$where_clause    = ' WHERE ' . $left_side . ' > ' . $right_side;
+			foreach ( $key_columns as $column ) {
+				if ( ! array_key_exists( $column, $after_key ) ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $column reported verbatim for diagnostic context; exception path, not HTML output.
+					throw new RuntimeException( sprintf( 'Keyset cursor for "%s" is missing required key column "%s".', $table_name, $column ) );
+				}
+				$args[] = $after_key[ $column ];
+			}
+		}
+
+		$args[] = $limit;
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $where_clause and $order_clause are built from resolve_order_columns()'s SHOW KEYS result via primary_key_columns(), with every identifier backtick-escaped by escape_identifier(); every value placeholder is still resolved by $wpdb->prepare() below. The sniff cannot count placeholders against a runtime-sized ...$args spread, so it always reports one fewer than the query actually needs.
+		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $where_clause . $order_clause . ' LIMIT %d', ...$args );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped identifiers) across the assignment.
+		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
+
+		$this->guard_row_dump_read( $table_name, self::describe_keyset_window( $after_key, $limit ), $limit, $rows );
+
+		if ( empty( $rows ) ) {
+			return new RowDumpResult( '', null );
+		}
+
+		$last_row = $rows[ count( $rows ) - 1 ];
+		$end_key  = array();
+		foreach ( $key_columns as $column ) {
+			$end_key[ $column ] = $last_row[ $column ];
+		}
+
+		return new RowDumpResult( $this->rows_to_insert_sql( $table_name, $rows ), $end_key );
+	}
+
+	/**
+	 * Dump a row window by today's LIMIT/OFFSET pagination.
+	 *
+	 * Used for a table with no primary key: no column set is guaranteed
+	 * unique on such a table, so a keyset predicate could skip or loop on
+	 * exact duplicate rows. $after_key plays no part here — the dispatcher
+	 * only reaches this method when the table has no primary key, so there is
+	 * never a cursor to seed a WHERE from — and the result's end key is
+	 * always null.
 	 *
 	 * @param string $table_name Fully-prefixed table name.
 	 * @param int    $offset     0-based starting row.
 	 * @param int    $limit      Maximum number of rows.
-	 * @return string SQL bytes (possibly empty) ending with a newline if any rows were emitted.
+	 * @return RowDumpResult SQL bytes (possibly empty) and a null end key.
 	 * @throws RuntimeException If the query signals an error, or a $limit > 0 window returns no rows.
 	 */
-	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
-		$this->assert_prefixed_table( $table_name );
+	private function dump_table_rows_by_offset( string $table_name, int $offset, int $limit ): RowDumpResult {
 		// Without an ORDER BY, MySQL guarantees no row order at all, so consecutive
 		// OFFSET windows can overlap or leave gaps — a silently corrupt backup, and
-		// the root of a real live-site incident. Ordering by the primary key (or
-		// every column when a table has none) makes the pagination a stable total
-		// order over the table.
+		// the root of a real live-site incident. Ordering by every column (the only
+		// deterministic sort available with no primary key) makes the pagination a
+		// stable total order over the table.
 		$order_clause = $this->order_by_clause( $table_name );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $order_clause is built by order_by_clause() from SHOW KEYS/SHOW COLUMNS results, with every identifier backtick-escaped; the table and value placeholders still go through prepare().
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $order_clause is built by order_by_clause() from SHOW COLUMNS results, with every identifier backtick-escaped; the table and value placeholders still go through prepare().
 		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $order_clause . ' LIMIT %d OFFSET %d', $table_name, $limit, $offset );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped ORDER BY identifiers) across the assignment.
 		$rows = $this->wpdb->get_results( $sql, ARRAY_A );
 
+		$this->guard_row_dump_read( $table_name, sprintf( 'offset=%d limit=%d', (int) $offset, (int) $limit ), $limit, $rows );
+
+		if ( empty( $rows ) ) {
+			return new RowDumpResult( '', null );
+		}
+
+		return new RowDumpResult( $this->rows_to_insert_sql( $table_name, $rows ), null );
+	}
+
+	/**
+	 * Refuse a failed row-read masquerading as an empty or finished table.
+	 *
+	 * The two guards job 10 added, shared by both windowing strategies so
+	 * neither can regress independently: a non-empty last_error always
+	 * throws, and a $limit > 0 window that comes back empty despite no
+	 * last_error is still treated as a failed read (a failed get_results() is
+	 * all-or-nothing, never partial, so this window was never legitimately
+	 * going to be empty) rather than as the end of the table.
+	 *
+	 * @param string $table_name  Fully-prefixed table name, for diagnostics.
+	 * @param string $window_desc Human-readable description of the requested window, for diagnostics.
+	 * @param int    $limit       The requested row limit.
+	 * @param mixed  $rows        The $wpdb->get_results() return value.
+	 * @return void
+	 * @throws RuntimeException If last_error is set, or a $limit > 0 window returned no rows.
+	 */
+	private function guard_row_dump_read( string $table_name, string $window_desc, int $limit, mixed $rows ): void {
 		// A failed get_results() returns an empty array, never null — the same
 		// failure shape execute() and HardenedTableListing::list_prefixed_tables()
 		// already guard against. last_error is checked first: it is reliably
 		// populated on a query error, including one interrupted mid-flight.
 		if ( '' !== $this->wpdb->last_error ) {
 			$last_error = (string) $this->wpdb->last_error;
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'Row dump failed for "%s" offset=%d limit=%d: %s', $table_name, (int) $offset, (int) $limit, $last_error ) );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name, $window_desc and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'Row dump failed for "%s" %s: %s', $table_name, $window_desc, $last_error ) );
 		}
 
 		// A window planned to contain rows (every caller-supplied window lies
 		// within a previously-read row_count()) that comes back empty, with no
-		// last_error signalled, is still a failed read: a failed get_results()
-		// is all-or-nothing, so it is never a partial result, and this window
-		// was never legitimately going to be empty. Treat it as failure rather
-		// than as the end of the table. Unconditional — no gate on the offset
-		// or on whether a consistent snapshot is open.
+		// last_error signalled, is still a failed read. Unconditional — no gate
+		// on the offset/cursor or on whether a consistent snapshot is open.
 		if ( $limit > 0 && array() === $rows ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name reported verbatim for diagnostic context; exception path, not HTML output.
-			throw new RuntimeException( sprintf( 'Row dump for "%s" offset=%d limit=%d was expected to contain rows and returned none; treating the read as failed rather than as the end of the table.', $table_name, (int) $offset, (int) $limit ) );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table_name and $window_desc reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'Row dump for "%s" %s was expected to contain rows and returned none; treating the read as failed rather than as the end of the table.', $table_name, $window_desc ) );
 		}
+	}
 
-		if ( empty( $rows ) ) {
-			return '';
+	/**
+	 * Describe a keyset window for a diagnostic message.
+	 *
+	 * @param array<string, int|string|float|bool>|null $after_key The window's cursor, or null for the first window.
+	 * @param int                                       $limit     The requested row limit.
+	 * @return string A short human-readable description, e.g. "after(ID=5) limit=10" or "first window limit=10".
+	 */
+	private static function describe_keyset_window( ?array $after_key, int $limit ): string {
+		if ( null === $after_key ) {
+			return sprintf( 'first window limit=%d', (int) $limit );
 		}
+		$pairs = array();
+		foreach ( $after_key as $column => $value ) {
+			$pairs[] = $column . '=' . $value;
+		}
+		return sprintf( 'after(%s) limit=%d', implode( ',', $pairs ), (int) $limit );
+	}
 
-		// Use the first row's keys for the column list.
-		// All rows from the same table have identical column order.
+	/**
+	 * Encode a batch of rows into one multi-VALUE INSERT statement.
+	 *
+	 * Uses the first row's keys for the column list — all rows from the
+	 * same table have identical column order.
+	 *
+	 * @param string                           $table_name Fully-prefixed table name.
+	 * @param array<int, array<string, mixed>> $rows       Non-empty row batch, as returned by $wpdb->get_results( ..., ARRAY_A ).
+	 * @return string The INSERT statement, ending with a newline.
+	 */
+	private function rows_to_insert_sql( string $table_name, array $rows ): string {
 		$columns            = array_keys( $rows[0] );
 		$escaped_columns    = array_map( array( self::class, 'escape_identifier' ), $columns );
 		$columns_sql        = '`' . implode( '`, `', $escaped_columns ) . '`';
@@ -718,7 +883,11 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 *
 	 * SHOW KEYS gives the primary key's columns with their position in the key
 	 * (Seq_in_index), so composite keys order correctly. A table with no
-	 * primary key falls back to SHOW COLUMNS — ordering by every column.
+	 * primary key falls back to SHOW COLUMNS — ordering by every column. Also
+	 * records, in {@see self::$order_columns_are_primary_key}, whether the
+	 * resolved columns are the real primary key or the no-primary-key
+	 * fallback — the fact {@see self::primary_key_columns()} reads to decide
+	 * whether a table's row dumps may use keyset pagination.
 	 *
 	 * @param string $table_name Fully-prefixed table name.
 	 * @return string[] Ordering column names; empty when none could be resolved.
@@ -738,6 +907,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 		}
 		if ( array() !== $columns ) {
 			ksort( $columns );
+			$this->order_columns_are_primary_key[ $table_name ] = true;
 			return array_values( $columns );
 		}
 
@@ -751,7 +921,33 @@ final class WpdbAdapter implements DatabaseAdapter {
 				$names[] = $field;
 			}
 		}
+		$this->order_columns_are_primary_key[ $table_name ] = false;
 		return $names;
+	}
+
+	/**
+	 * The table's primary-key columns, in key order, or an empty array when it has none.
+	 *
+	 * Shares {@see self::$order_columns}'s cache (populated by
+	 * {@see self::resolve_order_columns()} via the same SHOW KEYS lookup
+	 * {@see self::order_by_clause()} uses for its ORDER BY), so a table's
+	 * keyset eligibility and its dump ordering are always the same answer,
+	 * resolved once. Empty deliberately covers both "no primary key" and the
+	 * no-primary-key fallback (every column) — that fallback is not unique,
+	 * so {@see self::dump_table_rows()} must not build a keyset predicate
+	 * from it (a table with exact duplicate rows could skip or loop on them).
+	 *
+	 * @param string $table_name Fully-prefixed table name.
+	 * @return string[] The primary-key columns, in key order; empty when the table has none.
+	 */
+	private function primary_key_columns( string $table_name ): array {
+		if ( ! isset( $this->order_columns[ $table_name ] ) ) {
+			$this->order_columns[ $table_name ] = $this->resolve_order_columns( $table_name );
+		}
+		if ( true !== ( $this->order_columns_are_primary_key[ $table_name ] ?? false ) ) {
+			return array();
+		}
+		return $this->order_columns[ $table_name ];
 	}
 
 	/**

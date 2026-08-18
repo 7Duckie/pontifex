@@ -171,8 +171,8 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 	/**
 	 * Row windows must be ordered by the primary key, resolved once per table.
 	 *
-	 * Without an ORDER BY, consecutive OFFSET windows can overlap or leave
-	 * gaps — a row that silently never gets its URLs rewritten.
+	 * Without an ORDER BY, consecutive windows can overlap or leave gaps — a
+	 * row that silently never gets its URLs rewritten.
 	 *
 	 * @return void
 	 */
@@ -195,7 +195,10 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The first window's row read (this test is about the ORDER
+				// BY/keyset clause, so returning one row is enough to seed a
+				// cursor for the second call to chain off).
+				return array( array( 'ID' => 5 ) );
 			}
 		);
 
@@ -203,8 +206,126 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 		$db->read_rows( 'wp_posts', 0, 10 );
 		$db->read_rows( 'wp_posts', 10, 10 );
 
-		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d OFFSET %d', $prepared, 'Row windows must be ordered by the primary key so pagination is stable.' );
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d', $prepared, 'The first window must be ordered by the primary key, with no WHERE.' );
+		$this->assertContains( 'SELECT * FROM %i WHERE `ID` > %s ORDER BY `ID` LIMIT %d', $prepared, 'A later window must carry the keyset cursor.' );
 		$this->assertSame( 1, count( array_filter( $prepared, static fn ( string $q ): bool => str_contains( $q, 'SHOW KEYS' ) ) ), 'The ordering key must be resolved once per table, not once per window.' );
+	}
+
+	/**
+	 * A single-column-keyed table's windows chain: the full row set comes
+	 * back exactly once, and a changed batch size between calls does not
+	 * duplicate or skip rows — the correctness case keyset pagination exists
+	 * for.
+	 *
+	 * @return void
+	 */
+	public function test_read_rows_keyset_windows_chain_across_a_changed_batch_size(): void {
+		$wpdb  = $this->mock_wpdb();
+		$table = array();
+		for ( $id = 1; $id <= 7; ++$id ) {
+			$table[] = array(
+				'id'   => $id,
+				'note' => "row-{$id}",
+			);
+		}
+
+		// prepare() must return a string (it really does), so the query/args
+		// pair is recorded here under a unique marker and looked back up by
+		// get_results() below — the only way to carry the bound args through
+		// a real prepare()-shaped seam into a fake filtering implementation.
+		$calls = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query, ...$args ) use ( &$calls ): string {
+				$marker           = 'q' . count( $calls );
+				$calls[ $marker ] = array(
+					'query' => $query,
+					'args'  => $args,
+				);
+				return $marker;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $marker ) use ( &$calls, $table ) {
+				$call  = $calls[ $marker ];
+				$query = $call['query'];
+				$args  = $call['args'];
+
+				if ( str_contains( $query, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'id',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+
+				$limit = (int) end( $args );
+
+				if ( str_contains( $query, 'WHERE' ) ) {
+					$after = (int) $args[1];
+					$rows  = array_values( array_filter( $table, static fn ( array $r ): bool => $r['id'] > $after ) );
+				} else {
+					$rows = $table;
+				}
+
+				return array_slice( $rows, 0, $limit );
+			}
+		);
+
+		$db = new WpdbMigrationDatabase( $wpdb );
+
+		// First call at a batch size of 3; a resumed second call at a
+		// DIFFERENT batch size of 2 — the shape a changed
+		// average_row_bytes() reading between separate walks would produce.
+		$first  = $db->read_rows( 'wp_posts', 0, 3 );
+		$second = $db->read_rows( 'wp_posts', 3, 2 );
+		$third  = $db->read_rows( 'wp_posts', 5, 10 );
+
+		$seen = array_merge(
+			array_column( $first, 'id' ),
+			array_column( $second, 'id' ),
+			array_column( $third, 'id' )
+		);
+
+		$this->assertSame( array( 1, 2, 3, 4, 5, 6, 7 ), $seen, 'The full row set must come back exactly once, in order, despite the batch size changing between calls.' );
+	}
+
+	/**
+	 * A table with no usable primary key (absent or composite) must keep
+	 * today's LIMIT/OFFSET windowing unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_read_rows_without_a_usable_key_keeps_offset_windowing(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					// A composite key: two rows, neither alone usable.
+					return array(
+						array( 'Column_name' => 'object_id' ),
+						array( 'Column_name' => 'term_taxonomy_id' ),
+					);
+				}
+				return array( array( 'object_id' => 1 ) );
+			}
+		);
+
+		$db = new WpdbMigrationDatabase( $wpdb );
+		$db->read_rows( 'wp_term_relationships', 0, 10 );
+		$db->read_rows( 'wp_term_relationships', 10, 10 );
+
+		$this->assertContains( 'SELECT * FROM %i LIMIT %d OFFSET %d', $prepared, 'A table with no usable key must fall back to plain LIMIT/OFFSET, unchanged from before keyset pagination.' );
+		$row_reads       = array_filter( $prepared, static fn ( string $q ): bool => str_starts_with( $q, 'SELECT' ) );
+		$row_reads_where = array_filter( $row_reads, static fn ( string $q ): bool => str_contains( $q, 'WHERE' ) );
+		$this->assertSame( array(), $row_reads_where, 'A table with no usable key must never build a keyset WHERE clause on its row reads.' );
 	}
 
 	/**
