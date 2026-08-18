@@ -365,9 +365,12 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// Refuse before anything is touched — filesystem or database — when the
 		// destination cannot hold this restore. FileWriter owns the destination
 		// directory, so it owns this estimate; see its own docblock for why the
-		// figure leans low rather than risk refusing a restore that would have
-		// succeeded.
-		$this->preflight->assert_free_space_for( $manifest );
+		// figure is the DECODED size a restore will actually write, read from
+		// each file entry's own header, rather than the entry's stored/compressed
+		// size — the two can differ by orders of magnitude for compressible
+		// content, which is why this check now needs the archive stream as well
+		// as the manifest.
+		$this->preflight->assert_free_space_for( $archive_source, $manifest );
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 

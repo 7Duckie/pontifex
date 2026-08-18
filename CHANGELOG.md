@@ -31,6 +31,26 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **The "is there room to restore?" check measured the wrong thing, and could
+  pass without measuring anything at all.** Before restoring, Pontifex checks
+  your server has space. It was adding up how much room your files take *inside
+  the backup file* — where they are compressed — rather than how much they will
+  take once unpacked, which is what actually gets written. Measured on real
+  backups: a database-heavy one budgeted 1.4 MB and would have written 123 MB,
+  an **87-fold** understatement; a single highly compressible file understated
+  by around two thousand fold. A server with almost nothing free passed the
+  check and then filled its disk part-way through, leaving a site half-old and
+  half-new. It now measures the unpacked size.
+
+  Separately, when a server would not tell Pontifex how much space was free —
+  some hosts switch that off — the check quietly counted as passed, and the
+  Verify screen turned that silence into *"This server has the room to restore
+  it."* A reading that could not be taken is now reported as exactly that:
+  **"Whether this server has room to restore it could not be established."**
+  The restore still goes ahead, because a server that will not answer this
+  question can usually still restore perfectly well — but it no longer claims
+  an answer it never got.
+
 - **Backing up a large database took hours, and a resumed backup could
   duplicate rows.** Pontifex asked the database for rows a page at a time by
   counting from the start — "skip the first 40,000, give me the next 4,096".

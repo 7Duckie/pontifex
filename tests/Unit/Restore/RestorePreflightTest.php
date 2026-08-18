@@ -178,6 +178,41 @@ final class RestorePreflightTest extends TestCase {
 	}
 
 	/**
+	 * A free-space reading that could not be taken at all is INCONCLUSIVE, not a pass and not a refusal.
+	 *
+	 * {@see FileWriter::assert_free_space_for()} returns false (rather than
+	 * throwing) when its injected disk_free_space reader itself answers false
+	 * — e.g. disk_free_space() restricted or disabled on this host, the same
+	 * shape {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()}
+	 * already treats as an unknown. The report must not read that silence as
+	 * "no host finding, so the destination has room" — that would be exactly
+	 * the false promise this job exists to remove — nor may it be read as a
+	 * refusal of any kind, because nothing was actually established either
+	 * way.
+	 *
+	 * @return void
+	 */
+	public function test_an_unmeasurable_free_space_reading_is_inconclusive_not_a_refusal(): void {
+		$source    = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+		$preflight = new RestorePreflight(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter(
+				$this->fixture_root,
+				false,
+				null,
+				static fn (): bool => false
+			)
+		);
+
+		$report = $preflight->read_only_report( $source, self::manifest_of( $source ), null );
+
+		$this->assertFalse( $report->archive_is_refused(), 'An unmeasurable reading must never condemn the archive.' );
+		$this->assertFalse( $report->host_cannot_restore(), 'Nor may it be blamed on the host — nothing was established about this host either.' );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_FREE_SPACE, $report->inconclusive() );
+		$this->assertFalse( $report->is_clear(), 'A report holding an unmeasurable check is not clear.' );
+	}
+
+	/**
 	 * A sound, restorable archive produces a clear report.
 	 *
 	 * @return void
