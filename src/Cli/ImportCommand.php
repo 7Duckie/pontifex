@@ -1433,7 +1433,7 @@ final class ImportCommand {
 		// run — which must delete nothing — cannot. Accepted: it errs toward warning
 		// rather than false reassurance. The proper fix is the wider dry-run parity
 		// work, already a planned job; do not "fix" this by making a dry run sweep.
-		$preflight->assert_free_space_for( $manifest );
+		$preflight->assert_free_space_for( $archive_source, $manifest );
 
 		$this->logger->info( 'Import dry-run: every restore preflight passed.', array( 'archive' => $archive_path ) );
 	}

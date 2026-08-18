@@ -24,6 +24,7 @@ use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\PreflightReport;
+use Pontifex\Restore\RestorePreflight;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\WordPress\WordPressContext;
@@ -458,6 +459,22 @@ final class VerifyController {
 	 * telling somebody to throw away a file that is very probably their only
 	 * copy.
 	 *
+	 * Four states, not two. A host finding says this server could not restore
+	 * it right now; nothing at all — no host finding and no inconclusive check
+	 * of any kind — says it has the room. An inconclusive free-space check
+	 * (the reading could not be taken at all, e.g. disk_free_space() restricted
+	 * or disabled on this host) gets its own specific sentence, checked first
+	 * because it is the more useful one. But free space is not the only check
+	 * that can go unanswered, and any OTHER unanswered check must be caught
+	 * too: falling through to "has the room" for a check this method simply
+	 * did not name by name would be the exact same positive claim built from
+	 * an absent observation that this method exists to refuse — only reached
+	 * from one line lower. That case has no observation to report, so it says
+	 * only that some checks about this server went unanswered, never that the
+	 * server does or does not have room. Both inconclusive cases are checked
+	 * BEFORE the "has the room" fallback, because neither is a clean report
+	 * even though neither produced a host finding either.
+	 *
 	 * The host's symbolic-link capability is deliberately absent: establishing it
 	 * means creating a link, and this screen writes nothing.
 	 *
@@ -465,15 +482,23 @@ final class VerifyController {
 	 * @return string The line to display.
 	 */
 	private function restorability_line( PreflightReport $report ): string {
-		if ( ! $report->host_cannot_restore() ) {
-			return __( 'This server has the room to restore it.', 'pontifex' );
+		if ( $report->host_cannot_restore() ) {
+			return sprintf(
+				/* translators: %s: the reason this server cannot restore right now */
+				__( 'The backup is fine, but this server could not restore it right now: %s', 'pontifex' ),
+				implode( ' ', $report->host_findings() )
+			);
 		}
 
-		return sprintf(
-			/* translators: %s: the reason this server cannot restore right now */
-			__( 'The backup is fine, but this server could not restore it right now: %s', 'pontifex' ),
-			implode( ' ', $report->host_findings() )
-		);
+		if ( array_key_exists( RestorePreflight::CHECK_FREE_SPACE, $report->inconclusive() ) ) {
+			return __( 'Whether this server has room to restore it could not be established.', 'pontifex' );
+		}
+
+		if ( array() !== $report->inconclusive() ) {
+			return __( 'Some checks about whether this server could restore it could not be answered.', 'pontifex' );
+		}
+
+		return __( 'This server has the room to restore it.', 'pontifex' );
 	}
 
 	/**

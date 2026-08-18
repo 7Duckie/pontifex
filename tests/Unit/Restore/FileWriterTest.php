@@ -211,6 +211,32 @@ final class FileWriterTest extends TestCase {
 		return ManifestEntry::for_file( 0, 0, $length, $path, 0, str_repeat( "\0", 32 ) );
 	}
 
+	/**
+	 * Build a $decoded_sizes map — path => decoded byte size — matching each entry's own STORED length.
+	 *
+	 * A convenience for the tests exercising the growth/largest-entry
+	 * arithmetic itself, where the distinction between compressed and
+	 * decoded bytes is not what is under test: this keeps assert_free_space_for()'s
+	 * decoded-size figure identical to its stored length, so those tests keep
+	 * meaning exactly what they said before decoded-byte weighing existed. The
+	 * headline decoded-vs-compressed tests below deliberately do NOT use this
+	 * helper — they build a $decoded_sizes map that disagrees with length() on
+	 * purpose.
+	 *
+	 * @param array<int, ManifestEntry> $entries The entries to build a matching size map for.
+	 * @return array<string, int> Each entry's own path mapped to its own length().
+	 */
+	private static function decoded_sizes_matching_length( array $entries ): array {
+		$sizes = array();
+		foreach ( $entries as $entry ) {
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$sizes[ $path ] = $entry->length();
+			}
+		}
+		return $sizes;
+	}
+
 	// -------------------------------------------------------------------
 	// Constructor tests
 	// -------------------------------------------------------------------
@@ -2473,7 +2499,8 @@ final class FileWriterTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'needs about 10 MB free, and only 2 MB is available' );
 
-		$writer->assert_free_space_for( array( self::manifest_file_entry( 'big.iso', $ten_mb ) ) );
+		$entries = array( self::manifest_file_entry( 'big.iso', $ten_mb ) );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
@@ -2494,9 +2521,10 @@ final class FileWriterTest extends TestCase {
 			}
 		);
 
-		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'medium.bin', $five_mb ) ) );
+		$entries = array( self::manifest_file_entry( 'medium.bin', $five_mb ) );
+		$result  = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'Ample free space must not refuse the restore.' );
+		$this->assertTrue( $result, 'Ample free space must not refuse the restore, and a real reading was taken.' );
 	}
 
 	/**
@@ -2542,7 +2570,7 @@ final class FileWriterTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'stopped before changing anything' );
 
-		$writer->assert_free_space_for( $entries );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
@@ -2592,9 +2620,9 @@ final class FileWriterTest extends TestCase {
 			}
 		);
 
-		$result = $writer->assert_free_space_for( $entries );
+		$result = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'A rollback where every file already matches must be permitted despite the low free space.' );
+		$this->assertTrue( $result, 'A rollback where every file already matches must be permitted despite the low free space, and a real reading was taken.' );
 	}
 
 	/**
@@ -2633,14 +2661,18 @@ final class FileWriterTest extends TestCase {
 
 		$this->expectException( RuntimeException::class );
 
-		$writer->assert_free_space_for( $entries );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
-	 * An unknown free-space reading (false, e.g. under open_basedir) must never refuse the restore.
+	 * An unknown free-space reading (false, e.g. under open_basedir) must never refuse the restore, and reports that no reading was taken.
 	 *
 	 * Matches the posture {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()}
-	 * already takes: an unknown must never become a refusal.
+	 * already takes: an unknown must never become a refusal. The return value
+	 * is what this restore-time caller ignores (see RestoreRunner::restore()
+	 * and the import dry run) but {@see \Pontifex\Restore\RestorePreflight::read_only_report()}
+	 * reads, to tell an operator the check could not be answered rather than
+	 * silently calling the destination fine.
 	 *
 	 * @return void
 	 */
@@ -2657,9 +2689,10 @@ final class FileWriterTest extends TestCase {
 
 		// An enormous entry that would certainly be refused if any real free-space
 		// figure were compared against it.
-		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'huge.bin', 500 * 1024 * 1024 ) ) );
+		$entries = array( self::manifest_file_entry( 'huge.bin', 500 * 1024 * 1024 ) );
+		$result  = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'An unknown free-space reading must not refuse the restore.' );
+		$this->assertFalse( $result, 'An unknown free-space reading must not refuse the restore, and must report that no reading was taken.' );
 	}
 
 	/**
@@ -2694,14 +2727,112 @@ final class FileWriterTest extends TestCase {
 			self::manifest_file_entry( '../escape.bin', 500 * 1024 * 1024 ),
 		);
 
-		$result = $writer->assert_free_space_for( $entries );
-		$this->assertNull( $result, 'The hostile entry must be skipped, not treated as a disk-space shortfall.' );
+		$result = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
+		$this->assertTrue( $result, 'The hostile entry must be skipped, not treated as a disk-space shortfall, and a real reading was taken for the entry that remains.' );
 
 		// write_entry() must still be the one to refuse that same hostile entry,
 		// with its own path-safety message, once the walk actually reaches it.
 		$this->expectException( InvalidArgumentException::class );
 		$this->expectExceptionMessage( 'parent-directory segment' );
 		$writer->write_entry( self::file_result( '../escape.bin', 'forged' ) );
+	}
+
+	/**
+	 * The headline regression test: the preflight budgets the DECODED total, never the entry's stored/compressed length.
+	 *
+	 * A manifest entry's length() here is a tiny 1 KB — standing in for a
+	 * highly-compressible stored record — while the caller-supplied decoded
+	 * size for that same path is a full 50 MB, standing in for what the
+	 * restore will actually write once decoded. Only 2 MB is reported free:
+	 * comfortably more than the 1 KB stored figure, nowhere near the 50 MB
+	 * decoded one. If this method ever went back to weighing length()
+	 * instead of $decoded_sizes, "needed" would collapse to 1 KB, 2 MB would
+	 * easily cover it, and this test would fail to throw at all — which is
+	 * exactly the shape of the defect this method exists to fix (measured on
+	 * a real database-heavy archive: a 1.4 MB stored budget against 123 MB
+	 * actually written).
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_budgets_the_decoded_total_not_the_compressed_length(): void {
+		$stored_length = 1024;
+		$decoded_bytes = 50 * 1024 * 1024;
+		$two_mb        = 2 * 1024 * 1024;
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $two_mb ) {
+				return $two_mb;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'needs about 50 MB free, and only 2 MB is available' );
+
+		$writer->assert_free_space_for(
+			array( self::manifest_file_entry( 'db-heavy.dat.gz', $stored_length ) ),
+			array( 'db-heavy.dat.gz' => $decoded_bytes )
+		);
+	}
+
+	/**
+	 * The positive counterpart: a decoded total the free space DOES cover is permitted, even though the manifest's own compressed length disagrees wildly.
+	 *
+	 * Free space sits between the two figures — comfortably above the
+	 * decoded 3 MB this test cares about, and nowhere near what the stored
+	 * 200-byte length would suggest is needed if it (wrongly) governed the
+	 * comparison in the other direction. Proves the fix is not simply "always
+	 * weigh the bigger of the two numbers" — the stored length must play no
+	 * part in the arithmetic at all, only the decoded figure the caller supplies.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_permits_when_decoded_total_fits_despite_tiny_compressed_length(): void {
+		$stored_length = 200;
+		$decoded_bytes = 3 * 1024 * 1024;
+		$ten_mb        = 10 * 1024 * 1024;
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $ten_mb ) {
+				return $ten_mb;
+			}
+		);
+
+		$result = $writer->assert_free_space_for(
+			array( self::manifest_file_entry( 'options-table.dat.gz', $stored_length ) ),
+			array( 'options-table.dat.gz' => $decoded_bytes )
+		);
+
+		$this->assertTrue( $result, 'A decoded total the free space covers must be permitted, whatever the compressed length says.' );
+	}
+
+	/**
+	 * A file entry with no corresponding $decoded_sizes entry is a caller contract violation, refused loudly rather than silently under-measured.
+	 *
+	 * The caller ({@see \Pontifex\Restore\RestorePreflight::declared_file_sizes()})
+	 * always builds a decoded size for every file entry it hands to this
+	 * method, so this can only happen if a caller passes a $decoded_sizes map
+	 * that does not match $manifest_entries. Falling back to 0 or to length()
+	 * would silently reintroduce a fresh way to under-measure — precisely
+	 * what this method exists to stop doing — so a missing entry fails loudly
+	 * instead.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_refuses_a_file_entry_missing_from_decoded_sizes(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'No decoded size was supplied for file entry "note.txt"' );
+
+		$writer->assert_free_space_for( array( self::manifest_file_entry( 'note.txt', 1000 ) ), array() );
 	}
 
 	// -------------------------------------------------------------------

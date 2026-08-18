@@ -760,7 +760,22 @@ final class VerifyCommand {
 	 * Deliberately never fails the command. A full disk or a host that cannot
 	 * create symbolic links says nothing about the backup — and reporting it as a
 	 * verification failure would tell somebody their only copy was bad, which is
-	 * the one message capable of talking a person out of a good backup.
+	 * the one message capable of talking a person out of a good backup. The same
+	 * holds for a check that could not even be answered: an inconclusive
+	 * free-space reading (or any other preflight that never reached a decision)
+	 * is not a finding against the archive either, so it is reported the same
+	 * way — a warning about this server, never a change to the verdict.
+	 *
+	 * Not to be confused with {@see self::print_could_not_check()}. That verdict
+	 * means the whole verification walk stopped because this host could not
+	 * comply, and it DOES change the exit code (halts 2). This method only ever
+	 * runs after the walk has already finished and the archive is already known
+	 * sound; the checks it reports here are narrower, read-only restore
+	 * preflights, and one of them failing to reach a decision leaves the exit
+	 * code exactly where it was.
+	 *
+	 * A report can carry a host finding AND an inconclusive check at once, so
+	 * both blocks below are independent and can both print in the same run.
 	 *
 	 * The host's symbolic-link capability is not among these: establishing it
 	 * requires creating a link, and verify writes nothing. `wp pontifex doctor`
@@ -771,20 +786,35 @@ final class VerifyCommand {
 	 * @return void
 	 */
 	private function print_restorability( PreflightReport $report ): void {
-		if ( ! $report->host_cannot_restore() ) {
+		if ( ! $report->host_cannot_restore() && array() === $report->inconclusive() ) {
 			return;
 		}
 
 		$redactor = PathRedactor::from_environment();
-		WP_CLI::warning(
-			__( 'The backup is fine, but this host could not restore it right now:', 'pontifex' )
-		);
-		foreach ( $report->host_findings() as $message ) {
-			WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+
+		if ( $report->host_cannot_restore() ) {
+			WP_CLI::warning(
+				__( 'The backup is fine, but this host could not restore it right now:', 'pontifex' )
+			);
+			foreach ( $report->host_findings() as $message ) {
+				WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+			}
+			WP_CLI::log(
+				__( 'This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore.', 'pontifex' )
+			);
 		}
-		WP_CLI::log(
-			__( 'This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore.', 'pontifex' )
-		);
+
+		if ( array() !== $report->inconclusive() ) {
+			WP_CLI::warning(
+				__( 'Some checks about whether this host could restore it could not be answered:', 'pontifex' )
+			);
+			foreach ( $report->inconclusive() as $message ) {
+				WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+			}
+			WP_CLI::log(
+				__( 'This is about this server, not about the backup.', 'pontifex' )
+			);
+		}
 	}
 
 	/**

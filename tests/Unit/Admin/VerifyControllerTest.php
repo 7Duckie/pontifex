@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Admin;
 
+require_once __DIR__ . '/../Manifest/Fakes/FakeDbAdapter.php';
+
 use Brain\Monkey\Functions;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -16,17 +18,27 @@ use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\VerifyController;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
+use Pontifex\Restore\DatabaseWriter;
+use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PreflightReport;
+use Pontifex\Restore\RestorePreflight;
+use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Tests\TestCase;
+use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -220,6 +232,112 @@ final class VerifyControllerTest extends TestCase {
 
 			$this->assertStringContainsString( $expected, $this->json['data']['proof']['scope'], "Scope label for the {$label} fixture." );
 		}
+	}
+
+	/**
+	 * The proof panel's restorability line reports one of three states, never a positive claim built from an absent observation.
+	 *
+	 * Driven through a REAL RestoreRunner (not a mock) rooted at a fresh
+	 * fixture destination, because {@see \Pontifex\Admin\VerifyController::preflight_report()}
+	 * only runs the actual preflight for a real {@see \Pontifex\Restore\RestoreRunner}
+	 * instance — an injected {@see RestoreRunnerInterface} double short-circuits
+	 * to an empty report, which cannot exercise any of the three states. The
+	 * archive carries one real file entry so the free-space check has
+	 * something to measure at all; an empty manifest never even asks the disk.
+	 *
+	 * @return void
+	 */
+	public function test_restorability_line_reports_all_three_states(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+		Functions\when( 'wp_date' )->justReturn( '10:00 on 23-05-2026' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive(
+			$store->directory() . '/' . $name,
+			null,
+			array( self::file_plan( 'wp-content/note.txt', 'hello world' ) )
+		);
+
+		$cases = array(
+			'ample space'        => array(
+				static fn (): int => PHP_INT_MAX,
+				'This server has the room to restore it.',
+			),
+			'not enough space'   => array(
+				static fn (): int => 1,
+				'The backup is fine, but this server could not restore it right now:',
+			),
+			'unmeasurable space' => array(
+				static fn (): bool => false,
+				'could not be established',
+			),
+		);
+
+		foreach ( $cases as $label => $case ) {
+			[ $disk_free_space, $expected_fragment ] = $case;
+
+			$destination = sys_get_temp_dir() . '/pontifex-verify-restorability-' . uniqid( '', true );
+			$runner      = new RestoreRunner(
+				new EntryReader( CodecRegistry::with_defaults() ),
+				new FileWriter( $destination, false, null, $disk_free_space ),
+				new DatabaseWriter( new FakeDbAdapter() )
+			);
+
+			$_POST['file'] = $name;
+			try {
+				$this->controller( $runner )->verify();
+			} finally {
+				unset( $_POST['file'] );
+				self::rmtree( $destination );
+			}
+
+			$this->assertTrue( $this->json['data']['sound'], "Every case here is a hash-sound archive: {$label}." );
+			$this->assertStringContainsString(
+				$expected_fragment,
+				$this->json['data']['proof']['restorability'],
+				"Restorability line for the {$label} case."
+			);
+		}
+	}
+
+	/**
+	 * An unanswered check that is NOT the free-space check gets its own
+	 * wording — never the free-space sentence, and never the "has the room"
+	 * fallback that would be a positive claim built from an absent
+	 * observation.
+	 *
+	 * Free space is currently the only preflight check that can ever leave a
+	 * real report inconclusive (see {@see RestorePreflight::read_only_report()}),
+	 * so there is no fixture that drives a second inconclusive check through
+	 * a real verify() call. This drives
+	 * {@see \Pontifex\Admin\VerifyController::restorability_line()} directly,
+	 * over a hand-built {@see PreflightReport} whose only inconclusive entry
+	 * names a different check — closing the trap before a second check that
+	 * can go inconclusive is ever added.
+	 *
+	 * @return void
+	 */
+	public function test_restorability_line_reports_an_other_inconclusive_check(): void {
+		$report = new PreflightReport(
+			array( RestorePreflight::CHECK_SYMLINK_CONFINEMENT ),
+			array(),
+			array(),
+			array( RestorePreflight::CHECK_SYMLINK_CONFINEMENT => 'The symbolic-link confinement check could not be evaluated on this host.' )
+		);
+
+		$line = ( new \ReflectionMethod( VerifyController::class, 'restorability_line' ) )->invoke( $this->controller(), $report );
+
+		$this->assertSame(
+			'Some checks about whether this server could restore it could not be answered.',
+			$line
+		);
+		$this->assertStringNotContainsString( 'has the room', $line, 'Must not make the positive room claim over an unanswered check.' );
 	}
 
 	/**
@@ -907,25 +1025,47 @@ final class VerifyControllerTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Write a valid, empty, unencrypted archive to the given path.
+	 * Write a valid, unencrypted archive to the given path.
 	 *
 	 * Enough for the controller's encryption pre-check to read a plain header; the
-	 * injected engine stands in for the entry walk.
+	 * injected engine stands in for the entry walk. $entries defaults to empty —
+	 * every existing caller wants a header-only fixture — but the restorability
+	 * tests need at least one real file entry, since a preflight has nothing to
+	 * measure (and so never even asks the disk) over an empty manifest.
 	 *
-	 * @param string     $path  Absolute path to write the archive to.
-	 * @param Scope|null $scope Optional recorded scope; null for a legacy scope-less fixture.
+	 * @param string               $path    Absolute path to write the archive to.
+	 * @param Scope|null           $scope   Optional recorded scope; null for a legacy scope-less fixture.
+	 * @param array<int,EntryPlan> $entries Optional entries to include; empty for a header-only fixture.
 	 * @return void
 	 */
-	private function write_plain_archive( string $path, ?Scope $scope = null ): void {
+	private function write_plain_archive( string $path, ?Scope $scope = null, array $entries = array() ): void {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
 		$dest = fopen( $path, 'w+b' );
 		if ( false === $dest ) {
 			$this->fail( 'Could not open the fixture archive for writing.' );
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
-			->write_archive( $this->sample_provenance( $scope ), array(), $dest );
+			->write_archive( $this->sample_provenance( $scope ), $entries, $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
+	}
+
+	/**
+	 * Build an EntryPlan for a file entry, for the restorability fixtures.
+	 *
+	 * @param string $path     Relative path inside the archive.
+	 * @param string $contents File contents.
+	 * @return EntryPlan
+	 */
+	private static function file_plan( string $path, string $contents ): EntryPlan {
+		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- In-memory test stream, not a filesystem path.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing to an in-memory test stream, not a filesystem path.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Test stream resource, not a filesystem path.
+		rewind( $stream );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $stream );
 	}
 
 	/**

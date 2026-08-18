@@ -475,32 +475,51 @@ final class FileWriter {
 	 *     almost nothing for a same-site rollback, where nearly every file
 	 *     already exists at the same size.
 	 *
-	 * A {@see ManifestEntry::length()} is the entry's STORED size on disk —
-	 * the compressed payload plus its own record overhead — not the unpacked
-	 * file size. For compressible content that makes this estimate SMALLER
-	 * than the file once restored, so the whole method leans low by
-	 * construction. That is the correct direction to lean: an under-estimate
-	 * merely leaves today's behaviour in place (the write itself remains the
-	 * hard backstop against actually running out of room), whereas an
-	 * over-estimate would refuse a restore that would in fact have succeeded —
-	 * for a backup tool, wrongly locking someone out of their own recovery.
+	 * Both figures are now weighed in DECODED bytes — what write_file() will
+	 * actually put on disk — not {@see ManifestEntry::length()}, the entry's
+	 * STORED size (the compressed payload plus its own record overhead).
+	 * Those two can differ by orders of magnitude: measured on real archives,
+	 * a database-heavy backup budgeted 1.4 MB of stored bytes against 123 MB
+	 * actually written (87x), and a single highly-compressible file measured
+	 * roughly 2,000x. FileWriter has no archive stream of its own to read a
+	 * decoded size from, so the CALLER supplies one per file entry in
+	 * $decoded_sizes, keyed by the entry's own {@see ManifestEntry::path()} —
+	 * see {@see RestorePreflight::declared_file_sizes()}, which reads each
+	 * file entry's header via {@see \Pontifex\Archive\Reader\EntryReader::peek_header()}
+	 * and takes {@see \Pontifex\Archive\Format\EntryHeader::estimated_bytes()}.
+	 * This figure is therefore accurate, not an estimate that deliberately
+	 * leans low — the whole point of this method existing is to say, before
+	 * anything is touched, whether the write that is about to happen will fit.
 	 *
 	 * An entry whose path {@see self::normalise_entry_path()} cannot make
 	 * sense of (a hostile or malformed path) is skipped here rather than
-	 * refused: this method is a disk-space estimate, not the path-safety
-	 * guard, and {@see self::write_entry()} refuses that same entry properly,
-	 * with its own message, once the walk actually reaches it.
+	 * refused: this method is a disk-space check, not the path-safety guard,
+	 * and {@see self::write_entry()} refuses that same entry properly, with
+	 * its own message, once the walk actually reaches it. Skipped entries are
+	 * never looked up in $decoded_sizes, so a hostile entry need not have one.
 	 *
 	 * A free-space reading that cannot be taken (the injected reader returns
-	 * false, e.g. under open_basedir) is treated exactly as
-	 * {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()} treats
-	 * it: proceed rather than refuse. An unknown must never become a refusal.
+	 * false, e.g. under open_basedir) must never become a refusal — matching
+	 * {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()}'s own
+	 * posture — but it is also not nothing: unlike every other outcome here,
+	 * it means this check never actually looked at the disk. That is why this
+	 * method, unusually for an assert_*() method, returns a bool rather than
+	 * void: true says a reading was taken and the destination was judged able
+	 * to hold this restore (whether or not anything even needed judging);
+	 * false says no reading could be taken at all, so this check has nothing
+	 * to report either way. A restore ({@see \Pontifex\Restore\RestoreRunner::restore()})
+	 * and an import dry run act on the throw alone and ignore the return,
+	 * exactly as before this bool existed; {@see RestorePreflight::read_only_report()}
+	 * is the one caller that reads it, to tell an operator the destination's
+	 * free space could not be established rather than silently calling it fine.
 	 *
 	 * @param array<int, ManifestEntry> $manifest_entries Every entry the restore is about to write.
-	 * @return void
-	 * @throws HostCannotComply If the destination does not have room for this restore.
+	 * @param array<string, int>        $decoded_sizes    Each file entry's decoded byte size, keyed by the same string {@see ManifestEntry::path()} returns for it. Every file entry this method does not skip (see above) must have an entry here; the caller (see {@see RestorePreflight::declared_file_sizes()}) builds one for every file entry in the same manifest, so the two always agree in production.
+	 * @return bool True when a free-space reading was taken (whether or not this restore needed one at all); false when the reading could not be taken, so this check could not be answered.
+	 * @throws HostCannotComply If a free-space reading was taken and it shows the destination does not have room for this restore.
+	 * @throws \InvalidArgumentException If a file entry this method does not skip has no corresponding entry in $decoded_sizes — a caller/manifest mismatch, not a property of the archive itself.
 	 */
-	public function assert_free_space_for( array $manifest_entries ): void {
+	public function assert_free_space_for( array $manifest_entries, array $decoded_sizes ): bool {
 		$largest_entry_length = 0;
 		$total_growth         = 0;
 
@@ -527,7 +546,13 @@ final class FileWriter {
 				continue;
 			}
 
-			$entry_length = $manifest_entry->length();
+			if ( ! array_key_exists( $path, $decoded_sizes ) ) {
+				throw new InvalidArgumentException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'No decoded size was supplied for file entry "%s". The caller must compute one for every file entry it hands to this method.', $path )
+				);
+			}
+			$entry_length = $decoded_sizes[ $path ];
 			if ( $entry_length > $largest_entry_length ) {
 				$largest_entry_length = $entry_length;
 			}
@@ -539,12 +564,12 @@ final class FileWriter {
 
 		$needed = max( $largest_entry_length, $total_growth );
 		if ( 0 === $needed ) {
-			return;
+			return true;
 		}
 
 		$free = ( $this->disk_free_space )( $this->destination_root );
 		if ( false === $free ) {
-			return;
+			return false;
 		}
 
 		if ( $free < $needed ) {
@@ -558,6 +583,8 @@ final class FileWriter {
 				)
 			);
 		}
+
+		return true;
 	}
 
 	/**
