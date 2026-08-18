@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Integration\Fakes;
 
 use RuntimeException;
 use Pontifex\Manifest\DatabaseAdapter;
+use Pontifex\Manifest\RowDumpResult;
 
 /**
  * Delegates every call to a real adapter, but throws on one chosen execute.
@@ -86,13 +87,14 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	/**
 	 * Delegate to the real adapter.
 	 *
-	 * @param string $table_name Fully prefixed table name.
-	 * @param int    $offset     0-based starting row.
-	 * @param int    $limit      Maximum number of rows.
-	 * @return string Row SQL.
+	 * @param string                                    $table_name Fully prefixed table name.
+	 * @param int                                       $offset     0-based starting row.
+	 * @param int                                       $limit      Maximum number of rows.
+	 * @param array<string, int|string|float|bool>|null $after_key  The previous window's end key, or null.
+	 * @return RowDumpResult Row SQL and end key.
 	 */
-	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
-		return $this->inner->dump_table_rows( $table_name, $offset, $limit );
+	public function dump_table_rows( string $table_name, int $offset, int $limit, ?array $after_key = null ): RowDumpResult {
+		return $this->inner->dump_table_rows( $table_name, $offset, $limit, $after_key );
 	}
 
 	/**

@@ -140,8 +140,8 @@ final class RoundTripTest extends TestCase {
 		);
 
 		// Source database: the real dump of the seeded scratch table.
-		$db_sql      = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
-		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$db_sql      = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
+		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		// Assemble entry plans: directories, then files, then the db chunk.
 		$plans = array(
@@ -173,7 +173,7 @@ final class RoundTripTest extends TestCase {
 
 		// Database came back: same row count, identical row dump (multibyte intact).
 		$this->assertSame( 2, $adapter->row_count( $this->scratch_table ), 'Scratch table row count should survive the round trip.' );
-		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Scratch table rows should be byte-identical after the round trip.' );
+		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql(), 'Scratch table rows should be byte-identical after the round trip.' );
 	}
 
 	/**
@@ -201,7 +201,7 @@ final class RoundTripTest extends TestCase {
 		}
 
 		$adapter     = new WpdbAdapter( $wpdb );
-		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		// Build the chunk through the REAL scanner, so its predicted statement_count
 		// (not a hand-counted one) is what DatabaseWriter validates on restore.
@@ -230,7 +230,7 @@ final class RoundTripTest extends TestCase {
 		$runner->restore( self::build_archive_stream( $plans ) );
 
 		$this->assertSame( 10, $adapter->row_count( $this->scratch_table ), 'All rows must survive the scanner-built round trip.' );
-		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'Rows must be byte-identical after the scanner-built round trip.' );
+		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql(), 'Rows must be byte-identical after the scanner-built round trip.' );
 	}
 
 	/**
@@ -345,7 +345,7 @@ final class RoundTripTest extends TestCase {
 			// would be a call the real export never makes, and dump_table_rows()
 			// now refuses one: an empty result for a window planned to contain
 			// rows is a failed read, not the end of the table.
-			$sql   = $adapter->dump_table_schema( $table ) . $adapter->dump_table_rows( $table, 0, 0 );
+			$sql   = $adapter->dump_table_schema( $table ) . $adapter->dump_table_rows( $table, 0, 0 )->sql();
 			$plans = array( self::db_chunk_plan( $table, self::count_statements( $sql ), $sql ) );
 
 			$runner = new RestoreRunner(

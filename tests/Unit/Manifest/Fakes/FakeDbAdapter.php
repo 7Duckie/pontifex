@@ -11,6 +11,7 @@ namespace Pontifex\Tests\Unit\Manifest\Fakes;
 
 use RuntimeException;
 use Pontifex\Manifest\DatabaseAdapter;
+use Pontifex\Manifest\RowDumpResult;
 
 /**
  * In-memory implementation of {@see DatabaseAdapter} for tests.
@@ -79,31 +80,89 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Table names for which dump_table_rows() reports a non-null end key.
+	 *
+	 * Registering a table here mirrors a real primary-key table: calls are
+	 * recorded (see {@see self::dump_calls()}) and the result carries an end
+	 * key, so a scanner test can verify the cursor chains between chunks and
+	 * that the fail-closed guard fires when it does not. Unregistered tables
+	 * behave exactly as before this field existed — end key always null,
+	 * matching a real no-primary-key table — so every pre-existing test
+	 * keeps passing unmodified; only a test that opts in via
+	 * {@see self::make_keyed()} exercises keyset behaviour.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $keyed_tables = array();
+
+	/**
+	 * Register a table as having a primary key, for dump_table_rows()'s end key.
+	 *
+	 * @param string $table_name The table name, as passed to add_table().
+	 * @return void
+	 */
+	public function make_keyed( string $table_name ): void {
+		$this->keyed_tables[ $table_name ] = true;
+	}
+
+	/**
+	 * Every dump_table_rows() call, in order, as recorded arguments.
+	 *
+	 * @var array<int, array{table: string, offset: int, limit: int, after_key: array<string, int|string|float|bool>|null}>
+	 */
+	private array $dump_calls = array();
+
+	/**
+	 * Return the recorded dump_table_rows() calls, in order.
+	 *
+	 * @return array<int, array{table: string, offset: int, limit: int, after_key: array<string, int|string|float|bool>|null}>
+	 */
+	public function dump_calls(): array {
+		return $this->dump_calls;
+	}
+
+	/**
 	 * Return one batched multi-row INSERT for the requested range.
 	 *
 	 * Mirrors {@see \Pontifex\Manifest\WpdbAdapter::dump_table_rows()}, which
 	 * packs every row of a chunk into a single INSERT INTO ... VALUES (...),
 	 * (...), ...; statement — NOT one INSERT per row. Tests rely on this
 	 * fidelity so the scanner's predicted statement_count is checked against
-	 * the shape the real emitter produces.
+	 * the shape the real emitter produces. Row content is always synthesised
+	 * from $offset/$limit (this fake has no real row data to filter by a
+	 * key), so $after_key is recorded for assertions but does not change
+	 * which rows are returned — only whether an end key is reported (see
+	 * {@see self::make_keyed()}).
 	 *
-	 * @param string $table_name Registered table name.
-	 * @param int    $offset     Starting row offset.
-	 * @param int    $limit      Maximum number of rows.
-	 * @return string SQL bytes (empty when the range yields no rows).
+	 * @param string                                    $table_name Registered table name.
+	 * @param int                                       $offset     Starting row offset.
+	 * @param int                                       $limit      Maximum number of rows.
+	 * @param array<string, int|string|float|bool>|null $after_key  Recorded for assertions; does not affect which rows are synthesised.
+	 * @return RowDumpResult SQL bytes (empty when the range yields no rows), plus an end key for a table registered via make_keyed().
 	 */
-	public function dump_table_rows( string $table_name, int $offset, int $limit ): string {
+	public function dump_table_rows( string $table_name, int $offset, int $limit, ?array $after_key = null ): RowDumpResult {
 		$this->maybe_fail( __FUNCTION__ );
+		$this->dump_calls[] = array(
+			'table'     => $table_name,
+			'offset'    => $offset,
+			'limit'     => $limit,
+			'after_key' => $after_key,
+		);
+
 		$row_count = $this->row_count( $table_name );
 		$end       = min( $offset + $limit, $row_count );
 		if ( $offset >= $end ) {
-			return '';
+			return new RowDumpResult( '', null );
 		}
 		$tuples = array();
 		for ( $i = $offset; $i < $end; ++$i ) {
 			$tuples[] = "({$i})";
 		}
-		return "INSERT INTO `{$table_name}` VALUES " . implode( ', ', $tuples ) . ";\n";
+		$sql = "INSERT INTO `{$table_name}` VALUES " . implode( ', ', $tuples ) . ";\n";
+
+		$end_key = isset( $this->keyed_tables[ $table_name ] ) ? array( 'id' => $end - 1 ) : null;
+
+		return new RowDumpResult( $sql, $end_key );
 	}
 
 	/**
