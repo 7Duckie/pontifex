@@ -135,6 +135,118 @@ final class ScheduleTest extends TestCase {
 	}
 
 	/**
+	 * Table-exclusion patterns round-trip through to_array and from_stored, filtered.
+	 *
+	 * The table-scoped twin of {@see self::test_exclusions_round_trip_and_are_filtered()}.
+	 *
+	 * @return void
+	 */
+	public function test_table_exclusions_round_trip_and_are_filtered(): void {
+		$schedule = new Schedule( true, Schedule::FREQUENCY_DAILY, 3, 3, array(), array( 'wp_sessions', '', 'wp_actionscheduler_*' ) );
+
+		$this->assertSame( array( 'wp_sessions', 'wp_actionscheduler_*' ), $schedule->table_exclusions(), 'Blank patterns are dropped.' );
+
+		$restored = Schedule::from_stored( $schedule->to_array() );
+		$this->assertSame( $schedule->table_exclusions(), $restored->table_exclusions(), 'Table exclusions survive the option round trip.' );
+	}
+
+	/**
+	 * A stored schedule with no table_exclusions key degrades to an empty list, not a fatal.
+	 *
+	 * @return void
+	 */
+	public function test_absent_table_exclusions_default_to_empty(): void {
+		$restored = Schedule::from_stored(
+			array(
+				'enabled'   => true,
+				'frequency' => 'daily',
+				'hour'      => 3,
+				'retention' => 3,
+			)
+		);
+
+		$this->assertSame( array(), $restored->table_exclusions() );
+	}
+
+	/**
+	 * A schedule stored before the file/table distinction existed — one flat
+	 * `exclusions` list, no `table_exclusions` key at all — loads without
+	 * error and without losing data: its patterns become file-scoped
+	 * patterns (the safe direction, since a pattern that was silently
+	 * excluding a table stops doing so, and that table returns to the
+	 * backup), and its table list is empty rather than the load failing.
+	 *
+	 * @return void
+	 */
+	public function test_a_pre_tagging_stored_schedule_loads_and_becomes_file_patterns(): void {
+		$pre_tagging_option = array(
+			'enabled'    => true,
+			'frequency'  => Schedule::FREQUENCY_WEEKLY,
+			'hour'       => 2,
+			'retention'  => 5,
+			'exclusions' => array( 'wp-content/cache/**', 'wp_actionscheduler_*' ),
+			// Deliberately no 'table_exclusions' key: this is the exact shape a
+			// schedule saved by a build of Pontifex before this change has.
+		);
+
+		$restored = Schedule::from_stored( $pre_tagging_option );
+
+		$this->assertTrue( $restored->is_enabled(), 'Loading a pre-tagging schedule must not fail or degrade to disabled.' );
+		$this->assertSame(
+			array( 'wp-content/cache/**', 'wp_actionscheduler_*' ),
+			$restored->exclusions(),
+			'The one stored list becomes the file-scoped list — no pattern is lost.'
+		);
+		$this->assertSame( array(), $restored->table_exclusions(), 'A schedule with no stored table_exclusions key has none, not a fatal.' );
+	}
+
+	/**
+	 * A schedule with both a file list and a table list round-trips through
+	 * a real ScheduleStore save() and load(), with both lists intact.
+	 *
+	 * @return void
+	 */
+	public function test_schedule_round_trips_through_save_and_load_with_both_lists_intact(): void {
+		$stored_option = null;
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				ScheduleStore::OPTION,
+				Mockery::on(
+					function ( array $value ) use ( &$stored_option ): bool {
+						$stored_option = $value;
+						return true;
+					}
+				)
+			);
+		$context->shouldReceive( 'option_value' )
+			->with( ScheduleStore::OPTION, array() )
+			->andReturnUsing(
+				static function () use ( &$stored_option ) {
+					return $stored_option ?? array();
+				}
+			);
+
+		Functions\when( 'wp_clear_scheduled_hook' )->justReturn( null );
+		Functions\when( 'wp_schedule_event' )->justReturn( true );
+
+		$store    = new ScheduleStore( $context );
+		$schedule = new Schedule( true, Schedule::FREQUENCY_WEEKLY, 2, 4, array( 'wp-content/comments-export/**' ), array( 'wp_sessions' ) );
+
+		$store->save( $schedule, 1700000000 );
+		$restored = $store->load();
+
+		$this->assertSame( array( 'wp-content/comments-export/**' ), $restored->exclusions(), 'The file list must survive the round trip.' );
+		$this->assertSame( array( 'wp_sessions' ), $restored->table_exclusions(), 'The table list must survive the round trip.' );
+		$this->assertTrue( $restored->is_enabled() );
+		$this->assertSame( Schedule::FREQUENCY_WEEKLY, $restored->frequency() );
+		$this->assertSame( 2, $restored->hour() );
+		$this->assertSame( 4, $restored->retention() );
+	}
+
+	/**
 	 * An unknown frequency is refused.
 	 *
 	 * @return void
