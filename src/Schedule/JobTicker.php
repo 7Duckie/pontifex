@@ -378,6 +378,8 @@ final class JobTicker {
 		$bytes_written         = isset( $payload['bytes_written'] ) ? (int) $payload['bytes_written'] : 0;
 		$files_changed         = isset( $payload['files_changed'] ) ? (int) $payload['files_changed'] : 0;
 		$media_type_unresolved = isset( $payload['media_type_unresolved'] ) ? (int) $payload['media_type_unresolved'] : 0;
+		// Absent on a job started before this counter existed (back-compat).
+		$exclusion_matches = isset( $payload['exclusion_matches'] ) ? (array) $payload['exclusion_matches'] : array();
 		$this->job_store->delete( $job_id );
 		$this->release_holder_if_backup();
 
@@ -396,6 +398,7 @@ final class JobTicker {
 				'output'                => $output,
 				'bytes'                 => $bytes_written,
 				'media_type_unresolved' => $media_type_unresolved,
+				'exclusion_matches'     => $exclusion_matches,
 			)
 		);
 

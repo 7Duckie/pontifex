@@ -682,4 +682,63 @@ final class JobTickerTest extends TestCase {
 			'The single survivor must be the newest, not an arbitrary one.'
 		);
 	}
+
+	/**
+	 * The completion log line ("Cron-driven backup complete.") — the ONLY
+	 * thing an operator ever sees from an unattended scheduled run — carries
+	 * the exclusion match counts the finished job's payload holds.
+	 *
+	 * The job's payload is given one real exclusion pattern; the empty
+	 * manifest builder factory means nothing is ever actually scanned, so
+	 * the persisted count for it is 0 — this test is about the count
+	 * REACHING the log line at all, not about a genuine match, which
+	 * {@see \Pontifex\Tests\Unit\Export\ResumableExportRunnerTest} already
+	 * covers in depth.
+	 *
+	 * @return void
+	 */
+	public function test_finalise_logs_the_exclusion_match_counts(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $this->create_completable_job( $job_store, false );
+
+		$payload               = $job->payload();
+		$payload['exclusions'] = array(
+			array(
+				'pattern' => 'wp-content/cache/**',
+				'scope'   => 'any',
+			),
+		);
+		$job->set_payload( $payload );
+		$job_store->save( $job );
+
+		$this->stub_completion_wp_functions();
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once()->with(
+			'Cron-driven backup complete.',
+			Mockery::on(
+				static function ( array $context ): bool {
+					return array(
+						array(
+							'pattern' => 'wp-content/cache/**',
+							'count'   => 0,
+						),
+					) === ( $context['exclusion_matches'] ?? null );
+				}
+			)
+		);
+
+		$ticker = new JobTicker(
+			$this->environment_mock(),
+			$this->completion_context( 5 ),
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			$logger,
+			$this->empty_manifest_builder_factory()
+		);
+
+		$ticker->run();
+
+		$this->assertTrue( true, 'Reached without the logger expectation above failing — Mockery::close() in tearDown is the real assertion.' );
+	}
 }

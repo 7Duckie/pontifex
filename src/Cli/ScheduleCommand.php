@@ -55,15 +55,22 @@ use Pontifex\WordPress\WordPressContext;
  * success. Minimum 1. Defaults to the stored schedule's retention.
  *
  * [--exclude=<patterns>]
- * : Exclusion patterns the scheduled backup applies on top of the curated
- * defaults; comma-separated, same syntax as `export --exclude` (paths,
- * globs, or bare table names). Defaults to the stored schedule's patterns;
- * pass an empty value to clear them.
+ * : Extra file-exclusion patterns the scheduled backup applies on top of the
+ * curated defaults; comma-separated, same syntax as `export --exclude`
+ * (paths, globs, or regex) — never a bare table name; use --exclude-table
+ * for those. Defaults to the stored schedule's patterns; pass an empty
+ * value to clear them.
+ *
+ * [--exclude-table=<patterns>]
+ * : Extra table-exclusion patterns the scheduled backup applies on top of
+ * the curated defaults; comma-separated, same syntax as `export
+ * --exclude-table` (bare table names, exact or glob). Defaults to the
+ * stored schedule's patterns; pass an empty value to clear them.
  *
  * ## EXAMPLES
  *
  *     wp pontifex schedule set --frequency=daily --hour=3 --retention=3
- *     wp pontifex schedule set --frequency=weekly --hour=2 --exclude='wp-content/cache/**,wp_actionscheduler_*'
+ *     wp pontifex schedule set --frequency=weekly --hour=2 --exclude='wp-content/cache/**' --exclude-table='wp_actionscheduler_*'
  *     wp pontifex schedule show
  *     wp pontifex schedule off
  *
@@ -159,6 +166,9 @@ final class ScheduleCommand {
 
 		$exclusions = $stored->exclusions();
 		if ( array_key_exists( 'exclude', $associative_args ) ) {
+			if ( ! is_string( $associative_args['exclude'] ) ) {
+				WP_CLI::error( __( 'The --exclude flag needs a value: a comma-separated list of patterns, or --exclude= (empty) to clear the stored list.', 'pontifex' ) );
+			}
 			$exclusions = self::split_patterns( $associative_args['exclude'] );
 			$invalid    = self::first_uncompilable_pattern( $exclusions );
 			if ( null !== $invalid ) {
@@ -172,8 +182,26 @@ final class ScheduleCommand {
 			}
 		}
 
+		$table_exclusions = $stored->table_exclusions();
+		if ( array_key_exists( 'exclude-table', $associative_args ) ) {
+			if ( ! is_string( $associative_args['exclude-table'] ) ) {
+				WP_CLI::error( __( 'The --exclude-table flag needs a value: a comma-separated list of table-name patterns, or --exclude-table= (empty) to clear the stored list.', 'pontifex' ) );
+			}
+			$table_exclusions = self::split_patterns( $associative_args['exclude-table'] );
+			$invalid_table    = self::first_uncompilable_pattern( $table_exclusions );
+			if ( null !== $invalid_table ) {
+				WP_CLI::error(
+					sprintf(
+						/* translators: %s: the table exclusion pattern that could not be understood */
+						__( 'That table exclusion pattern is not valid: %s. A scheduled backup would fail on it every run.', 'pontifex' ),
+						$invalid_table
+					)
+				);
+			}
+		}
+
 		try {
-			$schedule = new Schedule( true, (string) $associative_args['frequency'], (int) $associative_args['hour'], $retention, $exclusions );
+			$schedule = new Schedule( true, (string) $associative_args['frequency'], (int) $associative_args['hour'], $retention, $exclusions, $table_exclusions );
 		} catch ( InvalidArgumentException $invalid ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
 			WP_CLI::error( $invalid->getMessage() );
@@ -235,6 +263,38 @@ final class ScheduleCommand {
 			)
 		);
 
+		// What an unattended backup leaves out is otherwise invisible: a
+		// pattern that silently ate a database table used to look exactly
+		// like one that matched nothing. File and table patterns are named
+		// separately here because, since the split, they are genuinely
+		// different things — a file pattern can never reach a table, and a
+		// table pattern can never reach a file.
+		$exclusions = $schedule->exclusions();
+		if ( array() === $exclusions ) {
+			WP_CLI::log( __( 'File exclusions: none — an unattended backup excludes no files beyond the curated defaults.', 'pontifex' ) );
+		} else {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: comma-separated list of file exclusion patterns */
+					__( 'File exclusions: %s.', 'pontifex' ),
+					implode( ', ', $exclusions )
+				)
+			);
+		}
+
+		$table_exclusions = $schedule->table_exclusions();
+		if ( array() === $table_exclusions ) {
+			WP_CLI::log( __( 'Table exclusions: none — an unattended backup excludes no database tables beyond the curated defaults.', 'pontifex' ) );
+		} else {
+			WP_CLI::log(
+				sprintf(
+					/* translators: %s: comma-separated list of table exclusion patterns */
+					__( 'Table exclusions: %s.', 'pontifex' ),
+					implode( ', ', $table_exclusions )
+				)
+			);
+		}
+
 		if ( false === $pending ) {
 			WP_CLI::warning( __( 'No pending WP-Cron event was found for the schedule. Run `wp pontifex schedule set` again to re-register it.', 'pontifex' ) );
 		} else {
@@ -260,7 +320,7 @@ final class ScheduleCommand {
 		$store  = $this->store();
 		$stored = $store->load();
 
-		$store->save( new Schedule( false, $stored->frequency(), $stored->hour(), $stored->retention(), $stored->exclusions() ), time() );
+		$store->save( new Schedule( false, $stored->frequency(), $stored->hour(), $stored->retention(), $stored->exclusions(), $stored->table_exclusions() ), time() );
 
 		WP_CLI::log( __( 'Scheduled backups turned off. The settings are kept; `wp pontifex schedule set` turns them back on.', 'pontifex' ) );
 	}

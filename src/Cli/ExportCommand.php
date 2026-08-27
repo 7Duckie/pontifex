@@ -36,6 +36,7 @@ use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Log\CompositeLogger;
 use Pontifex\Log\FileLogger;
+use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\WordPress\RealWordPressContext;
@@ -466,19 +467,22 @@ final class ExportCommand {
 			}
 
 			// 2. Build the exclusion rules. File patterns come from --exclude-file, then
-			// inline --exclude; table patterns from --exclude-table are appended to the
-			// same list — the pattern engine matches a bare table name the same way it
-			// matches a path, so one uniform list drives both scanners.
-			$user_patterns = '' !== $exclude_file_path
+			// inline --exclude, and stay scoped to files, directories, and symlinks;
+			// table patterns from --exclude-table stay in their own list, scoped to bare
+			// table names. The two lists are kept apart rather than merged into one, so a
+			// file pattern can never reach a database table it was never meant to touch
+			// (and a table pattern can never reach a file) — see build_exclusion_rules()
+			// and ExclusionPattern.
+			$file_patterns  = '' !== $exclude_file_path
 				? $this->load_exclude_file( $exclude_file_path )
 				: array();
-			$user_patterns = array_merge(
-				$user_patterns,
-				self::split_patterns( $associative_args['exclude'] ?? null ),
-				self::split_patterns( $associative_args['exclude-table'] ?? null )
+			$file_patterns  = array_merge(
+				$file_patterns,
+				self::split_patterns( $associative_args['exclude'] ?? null )
 			);
+			$table_patterns = self::split_patterns( $associative_args['exclude-table'] ?? null );
 
-			$exclusion_rules = self::build_exclusion_rules( $use_defaults, $user_patterns );
+			$exclusion_rules = self::build_exclusion_rules( $use_defaults, $file_patterns, $table_patterns );
 
 			// 2a. Resolve the offsite destination now (if one was named), so a mistyped
 			// name or a missing credential fails before the export does any work.
@@ -599,6 +603,7 @@ final class ExportCommand {
 
 				$this->print_changed_file_warnings( $result );
 				$this->print_media_type_warning( $result->media_type_unresolved_count() );
+				$this->print_exclusion_match_summary( $exclusion_rules->match_counts() );
 
 				$bytes_written = $result->bytes_written();
 
@@ -779,7 +784,9 @@ final class ExportCommand {
 			$bytes_written         = (int) ( $payload['bytes_written'] ?? 0 );
 			$files_changed         = (int) ( $payload['files_changed'] ?? 0 );
 			$media_type_unresolved = (int) ( $payload['media_type_unresolved'] ?? 0 );
-			$entry_count           = count( $store->progress_log( $job->id() )->read_all() );
+			// Absent on a job started before this counter existed (back-compat).
+			$exclusion_matches = (array) ( $payload['exclusion_matches'] ?? array() );
+			$entry_count       = count( $store->progress_log( $job->id() )->read_all() );
 
 			// The job served its purpose; remove the record and its sidecar so the
 			// single-active slot and the jobs directory stay clean.
@@ -793,6 +800,7 @@ final class ExportCommand {
 					'bytes'                 => $bytes_written,
 					'files_changed'         => $files_changed,
 					'media_type_unresolved' => $media_type_unresolved,
+					'exclusion_matches'     => $exclusion_matches,
 					'resumable'             => true,
 				)
 			);
@@ -821,6 +829,7 @@ final class ExportCommand {
 				);
 			}
 			$this->print_media_type_warning( $media_type_unresolved );
+			$this->print_exclusion_match_summary( $exclusion_matches );
 			$this->print_summary( $output_path, $entry_count, $bytes_written );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -1077,23 +1086,41 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Combine the curated default patterns and user-supplied patterns into a single ExclusionRules.
+	 * Combine the curated defaults, file patterns, and table patterns into one ExclusionRules.
 	 *
-	 * When $use_defaults is true, the v0.1.0 curated defaults
-	 * ({@see ExclusionRules::default_v010()}) come first, followed by
-	 * the user's patterns. When false, only the user's patterns are
-	 * used. Pure function: no I/O.
+	 * Each list keeps its own kind scope (see {@see ExclusionPattern}): when
+	 * $use_defaults is true, the v0.1.0 curated defaults
+	 * ({@see ExclusionRules::default_v010()}) come first, untagged — matched
+	 * against every entry kind, exactly as before, so Pontifex's own
+	 * `.git`-at-any-depth default is unaffected by anything below. Then
+	 * $file_patterns (from --exclude and --exclude-file), scoped to files,
+	 * directories, and symlinks. Then $table_patterns (from --exclude-table),
+	 * scoped to database chunks (bare table names). A regex-shaped pattern in
+	 * either of the latter two lists is anchored to the start of the name;
+	 * the curated defaults are not. Keeping the three lists separate, rather
+	 * than merging them into one untagged list, is what stops a file pattern
+	 * from reaching a database table it was never meant to touch. Pure
+	 * function: no I/O.
 	 *
-	 * @param bool     $use_defaults  True to include the curated defaults.
-	 * @param string[] $user_patterns Additional patterns from --exclude-file.
-	 * @return ExclusionRules A merged rule set.
+	 * @param bool     $use_defaults   True to include the curated defaults.
+	 * @param string[] $file_patterns  Patterns from --exclude and --exclude-file, matched only against files, directories, and symlinks.
+	 * @param string[] $table_patterns Patterns from --exclude-table, matched only against bare table names.
+	 * @return ExclusionRules A rule set combining all three, each with its own scope.
 	 */
-	private static function build_exclusion_rules( bool $use_defaults, array $user_patterns ): ExclusionRules {
-		$default_patterns = $use_defaults
-			? ExclusionRules::default_v010()->patterns()
-			: array();
-		$merged_patterns  = array_merge( $default_patterns, $user_patterns );
-		return ExclusionRules::from_array( $merged_patterns );
+	private static function build_exclusion_rules( bool $use_defaults, array $file_patterns, array $table_patterns ): ExclusionRules {
+		$entries = array();
+		if ( $use_defaults ) {
+			foreach ( ExclusionRules::default_v010()->patterns() as $pattern ) {
+				$entries[] = ExclusionPattern::untagged( $pattern );
+			}
+		}
+		foreach ( $file_patterns as $pattern ) {
+			$entries[] = ExclusionPattern::operator_file( $pattern );
+		}
+		foreach ( $table_patterns as $pattern ) {
+			$entries[] = ExclusionPattern::operator_table( $pattern );
+		}
+		return ExclusionRules::from_tagged_patterns( $entries );
 	}
 
 	/**
@@ -1312,6 +1339,54 @@ final class ExportCommand {
 		WP_CLI::log( sprintf( /* translators: %d: number of active exclusion patterns */ __( 'Active exclusion patterns (%d):', 'pontifex' ), count( $patterns ) ) );
 		foreach ( $patterns as $pattern ) {
 			WP_CLI::log( '  ' . $pattern );
+		}
+	}
+
+	/**
+	 * Print how many things each active exclusion pattern actually excluded.
+	 *
+	 * A pattern that matched nothing is exactly as visible here as one that
+	 * matched a great deal — this is the cheap defence against a pattern
+	 * silently catching something it was never meant to (a database table,
+	 * say, when it was written to skip a folder): the count says so, without
+	 * printing a list of every path or table the pattern caught. Nothing is
+	 * printed when no exclusion patterns are active.
+	 *
+	 * Takes the counts directly rather than an ExclusionRules instance so a
+	 * resumable export — whose ExclusionRules is rebuilt fresh inside every
+	 * tick and never itself survives past it — can supply the counts it
+	 * persisted onto the finished job's payload instead of the object the
+	 * ordinary one-shot path still has to hand. Because one caller now hands
+	 * this a value that has round-tripped through storage, every element is
+	 * checked before use: one that is not an array with a string 'pattern'
+	 * and a numeric 'count' is skipped rather than raising.
+	 *
+	 * @param array<int, mixed> $counts The exclusion match counts, in pattern order. Each element is expected to be shaped array{pattern: string, count: int} (see {@see \Pontifex\Manifest\ExclusionRules::match_counts()}), but is deliberately typed as mixed here — one caller supplies this from a persisted job payload, which is not guaranteed to hold that shape.
+	 * @return void
+	 */
+	private function print_exclusion_match_summary( array $counts ): void {
+		$valid = array_filter(
+			$counts,
+			static function ( $entry ): bool {
+				return is_array( $entry )
+					&& isset( $entry['pattern'], $entry['count'] )
+					&& is_string( $entry['pattern'] )
+					&& is_numeric( $entry['count'] );
+			}
+		);
+		if ( array() === $valid ) {
+			return;
+		}
+		WP_CLI::log( __( 'Exclusion pattern matches:', 'pontifex' ) );
+		foreach ( $valid as $entry ) {
+			WP_CLI::log(
+				sprintf(
+					/* translators: 1: exclusion pattern, 2: number of entries it excluded */
+					__( '  %1$s: %2$d', 'pontifex' ),
+					$entry['pattern'],
+					(int) $entry['count']
+				)
+			);
 		}
 	}
 

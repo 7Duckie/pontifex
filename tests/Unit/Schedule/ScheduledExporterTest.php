@@ -14,6 +14,7 @@ use Mockery;
 use Throwable;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Archive\ArchiveName;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
@@ -21,6 +22,7 @@ use Pontifex\Export\ExportCounters;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
+use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Schedule\JobTicker;
@@ -194,11 +196,12 @@ final class ScheduledExporterTest extends TestCase {
 	private function schedule_option( array $overrides = array() ): array {
 		return array_merge(
 			array(
-				'enabled'    => true,
-				'frequency'  => Schedule::FREQUENCY_DAILY,
-				'hour'       => 3,
-				'retention'  => 3,
-				'exclusions' => array(),
+				'enabled'          => true,
+				'frequency'        => Schedule::FREQUENCY_DAILY,
+				'hour'             => 3,
+				'retention'        => 3,
+				'exclusions'       => array(),
+				'table_exclusions' => array(),
 			),
 			$overrides
 		);
@@ -508,10 +511,34 @@ final class ScheduledExporterTest extends TestCase {
 		);
 
 		$expected_exclusions = array_merge( ExclusionRules::default_v010()->patterns(), $operator_patterns );
+
+		// The job payload carries the TAGGED shape (ResumableExportRunner
+		// persists pattern + scope, not raw text) so the round trip through a
+		// tick reconstructs each pattern with its original kind scope intact.
+		// The defaults come first, untagged ('any'); the operator's own
+		// patterns follow, scoped to files ('file') — proving an unattended
+		// run applies what the operator configured, in the same order, and
+		// with the same file-only scope ExportCommand gives --exclude.
+		$expected_tagged_exclusions = array_merge(
+			array_map(
+				static fn ( string $pattern ): array => array(
+					'pattern' => $pattern,
+					'scope'   => ExclusionPattern::SCOPE_ANY,
+				),
+				ExclusionRules::default_v010()->patterns()
+			),
+			array_map(
+				static fn ( string $pattern ): array => array(
+					'pattern' => $pattern,
+					'scope'   => ExclusionPattern::SCOPE_FILE,
+				),
+				$operator_patterns
+			)
+		);
 		$this->assertSame(
-			$expected_exclusions,
+			$expected_tagged_exclusions,
 			$payload['exclusions'],
-			'The defaults must come first and the operator\'s own patterns after, in that order — proving an unattended run applies what the operator actually configured, not just the curated defaults.'
+			'The defaults must come first, untagged, and the operator\'s own patterns after, scoped to files — proving an unattended run applies what the operator actually configured, not just the curated defaults, and cannot let a file pattern reach a database table.'
 		);
 
 		$scope = Scope::from_array( (array) $payload['scope'] );
@@ -529,6 +556,110 @@ final class ScheduledExporterTest extends TestCase {
 		$this->assertSame( 1, $captured_counters['attempted'] ?? null, 'The attempted export counter must be incremented by exactly one.' );
 
 		$this->assertArrayNotHasKey( OperationLock::LOCK_NAME, $this->transients, 'The shared lock must be released once the job is started, not held for the whole run.' );
+	}
+
+	/**
+	 * Headline case: a scheduled backup's file pattern never excludes a
+	 * database table, and its table pattern does exclude the table it names.
+	 *
+	 * Job 14 exists because a pattern meaning "skip the comments folder"
+	 * silently dropped the wp_comments database table from an unattended
+	 * run too — repeated every night, unwatched, which is what makes it
+	 * worse than the same mistake on a one-off manual export. This pins
+	 * that the schedule's two pattern lists ({@see Schedule::exclusions()}
+	 * and {@see Schedule::table_exclusions()}) keep their scope all the way
+	 * through to the persisted job payload, by reconstructing the tagged
+	 * entries the payload actually stores and checking real matching
+	 * behaviour against both kinds of entry.
+	 *
+	 * @return void
+	 */
+	public function test_scheduled_backup_file_pattern_does_not_exclude_a_table_and_table_pattern_does(): void {
+		$file_pattern  = 'wp_comments';
+		$table_pattern = 'wp_sessions';
+
+		$exporter_context = Mockery::mock( WordPressContext::class );
+		$exporter_context->shouldReceive( 'option_value' )
+			->once()
+			->with( ScheduleStore::OPTION, array() )
+			->andReturn(
+				$this->schedule_option(
+					array(
+						'exclusions'       => array( $file_pattern ),
+						'table_exclusions' => array( $table_pattern ),
+					)
+				)
+			);
+		$exporter_context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( true );
+		$exporter_context->shouldReceive( 'release_named_lock' )->once()->with( OperationLock::LOCK_NAME );
+		$exporter_context->shouldReceive( 'option_value' )->once()->with( ExportCounters::OPTION, array() )->andReturn( array() );
+		$exporter_context->shouldReceive( 'save_option' );
+
+		$ticker_context = Mockery::mock( WordPressContext::class );
+		$ticker_context->shouldReceive( 'acquire_named_lock' )->once()->with( OperationLock::LOCK_NAME )->andReturn( false );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once();
+		$logger->shouldReceive( 'error' )->never();
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\expect( 'wp_schedule_single_event' )->once()->with( Mockery::type( 'int' ), JobTicker::CRON_HOOK );
+
+		$exporter = $this->build_exporter( $exporter_context, $this->build_ticker( $ticker_context ), $logger );
+		$exporter->run();
+
+		$job = $this->job_store->active_job();
+		$this->assertNotNull( $job );
+		$payload = $job->payload();
+
+		$rules = ExclusionRules::from_tagged_patterns( self::reconstruct_tagged_entries( (array) $payload['exclusions'] ) );
+
+		$this->assertFalse(
+			$rules->matches( $file_pattern, EntryHeader::KIND_DB_CHUNK ),
+			'A file-scoped pattern must never exclude a database table, even one whose name it happens to match.'
+		);
+		$this->assertTrue(
+			$rules->matches( $file_pattern, EntryHeader::KIND_FILE ),
+			'The same pattern must still exclude a matching file.'
+		);
+		$this->assertTrue(
+			$rules->matches( $table_pattern, EntryHeader::KIND_DB_CHUNK ),
+			'A table-scoped pattern must exclude the table it names.'
+		);
+		$this->assertFalse(
+			$rules->matches( $table_pattern, EntryHeader::KIND_FILE ),
+			'A table-scoped pattern must never exclude a file, even one whose name it happens to match.'
+		);
+	}
+
+	/**
+	 * Rebuild ExclusionPattern entries from the tagged shape
+	 * ResumableExportRunner::start() persists onto a job payload — the same
+	 * {pattern, scope} arrays {@see \Pontifex\Export\ResumableExportRunner}
+	 * reconstructs on every tick. Kept local to this test file (that
+	 * reconstruction is a private implementation detail of the runner) so
+	 * this suite can assert on real matching behaviour rather than the raw
+	 * persisted shape alone.
+	 *
+	 * @param array<int, mixed> $stored The payload's 'exclusions' entries, as persisted.
+	 * @return ExclusionPattern[] The reconstructed tagged patterns.
+	 */
+	private static function reconstruct_tagged_entries( array $stored ): array {
+		$entries = array();
+		foreach ( $stored as $item ) {
+			if ( ! is_array( $item ) ) {
+				$entries[] = ExclusionPattern::untagged( (string) $item );
+				continue;
+			}
+			$pattern   = isset( $item['pattern'] ) ? (string) $item['pattern'] : '';
+			$scope     = isset( $item['scope'] ) ? (string) $item['scope'] : ExclusionPattern::SCOPE_ANY;
+			$entries[] = match ( $scope ) {
+				ExclusionPattern::SCOPE_FILE  => ExclusionPattern::operator_file( $pattern ),
+				ExclusionPattern::SCOPE_TABLE => ExclusionPattern::operator_table( $pattern ),
+				default                       => ExclusionPattern::untagged( $pattern ),
+			};
+		}
+		return $entries;
 	}
 
 	// -------------------------------------------------------------------------

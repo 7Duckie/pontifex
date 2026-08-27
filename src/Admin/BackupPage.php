@@ -135,14 +135,24 @@ final class BackupPage {
 
 		$this->render_scope_summary();
 
-		printf( '<label class="pontifex-action-label" for="pontifex-backup-exclusions">%s</label>', esc_html__( 'Also leave out (one pattern per line)', 'pontifex' ) );
+		printf( '<label class="pontifex-action-label" for="pontifex-backup-exclusions">%s</label>', esc_html__( 'Also leave out these files (one pattern per line)', 'pontifex' ) );
 		printf(
 			'<textarea id="pontifex-backup-exclusions" class="pontifex-action-input" rows="3" spellcheck="false" placeholder="%s"></textarea>',
-			esc_attr__( "wp-content/uploads/large-video.mp4\nwp-content/backups/**\nwp_actionscheduler_logs", 'pontifex' )
+			esc_attr__( "wp-content/uploads/large-video.mp4\nwp-content/backups/**\nwp-content/cache/**", 'pontifex' )
 		);
 		printf(
 			'<p class="pontifex-lead">%s</p>',
-			esc_html__( 'A file pattern (exact path, glob like *.log, or a folder tree like path/**) leaves out files; a bare table name (exact or glob like wp_actionscheduler_*) leaves out that table. Leaving out a table makes its restore partial, so only exclude tables the destination can rebuild.', 'pontifex' )
+			esc_html__( 'A pattern (exact path, glob like *.log, or a folder tree like path/**) leaves out matching files, directories, and symlinks.', 'pontifex' )
+		);
+
+		printf( '<label class="pontifex-action-label" for="pontifex-backup-table-exclusions">%s</label>', esc_html__( 'Also leave out these database tables (one pattern per line)', 'pontifex' ) );
+		printf(
+			'<textarea id="pontifex-backup-table-exclusions" class="pontifex-action-input" rows="3" spellcheck="false" placeholder="%s"></textarea>',
+			esc_attr__( "wp_actionscheduler_logs\nwp_actionscheduler_*", 'pontifex' )
+		);
+		printf(
+			'<p class="pontifex-lead">%s</p>',
+			esc_html__( 'A pattern (exact table name, or glob like wp_actionscheduler_*) leaves out that database table. Leaving out a table makes its restore partial, so only exclude tables the destination can rebuild.', 'pontifex' )
 		);
 
 		printf(
@@ -360,10 +370,16 @@ final class BackupPage {
 			(int) $schedule->retention()
 		);
 
-		printf( '<label class="pontifex-action-label" for="pontifex-schedule-exclusions">%s</label>', esc_html__( 'Also leave out (one pattern per line)', 'pontifex' ) );
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-exclusions">%s</label>', esc_html__( 'Also leave out these files (one pattern per line)', 'pontifex' ) );
 		printf(
 			'<textarea id="pontifex-schedule-exclusions" class="pontifex-action-input" rows="3" spellcheck="false">%s</textarea>',
 			esc_textarea( implode( "\n", $schedule->exclusions() ) )
+		);
+
+		printf( '<label class="pontifex-action-label" for="pontifex-schedule-table-exclusions">%s</label>', esc_html__( 'Also leave out these database tables (one pattern per line)', 'pontifex' ) );
+		printf(
+			'<textarea id="pontifex-schedule-table-exclusions" class="pontifex-action-input" rows="3" spellcheck="false">%s</textarea>',
+			esc_textarea( implode( "\n", $schedule->table_exclusions() ) )
 		);
 
 		printf(

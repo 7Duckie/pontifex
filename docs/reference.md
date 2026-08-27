@@ -57,9 +57,9 @@ Creates a backup.
 | `--whole-site` | Include WordPress core as well as `wp-content`. |
 | `--files-only` | Files only, no database. |
 | `--db-only` | Database only, no files. |
-| `--exclude=<patterns>` | Comma-separated glob patterns to omit. |
-| `--exclude-table=<patterns>` | Comma-separated table patterns to omit. |
-| `--exclude-file=<path>` | Read exclusion patterns from a file. |
+| `--exclude=<patterns>` | Comma-separated patterns matched against files, directories, and symlinks — never a database table. |
+| `--exclude-table=<patterns>` | Comma-separated patterns matched against bare database table names — never a file. |
+| `--exclude-file=<path>` | Read file-scoped exclusion patterns from a file (same matching as `--exclude`). |
 | `--no-defaults` | Drop the curated default exclusions. |
 | `--encrypt` | AES-256-GCM, prompting twice for a passphrase. |
 | `--passphrase-stdin` | Read the passphrase from stdin. Implies `--encrypt`. |
@@ -72,6 +72,24 @@ Creates a backup.
 `--whole-site`, `--files-only` and `--db-only` are mutually exclusive.
 `--resumable` and `--resume` cannot be combined, and neither works with
 encryption — the derived key exists for one run and is never stored.
+
+Of the four pattern shapes `ExclusionRules` recognises — exact path, glob
+(`*.log`), directory tree (`path/**`), and regex (`/…/`) — only a
+regex-shaped pattern given to `--exclude`, `--exclude-file`, or
+`--exclude-table` is anchored to the start of the name; the other three
+shapes are already anchored by their own semantics, so they are unaffected.
+A regex written to match a suffix — `/\.log$/`, say — now matches nothing,
+because its match no longer starts at position 0; replace it with the glob
+`*.log`. Pontifex's own curated defaults, including the `.git` regex, are
+untagged and keep matching at any depth, exactly as before. Every surface
+that runs a backup — this command's own summary, a resumable export, the
+Backup screen's completion notice, and the log line a cron-driven scheduled
+backup writes — reports how many entries each active pattern excluded,
+defaults included, so a pattern that matched nothing reports `0` rather
+than being silently absent from the list. A directory-tree pattern such as
+`wp-content/cache/**` counts as one match no matter how many files it
+removed, because the scanner never descends into a directory it has
+already pruned.
 
 A refused or failed export prints a verdict rather than propagating the
 exception: which of the three kinds of refusal it was (ADR 0022 — the archive
@@ -212,7 +230,8 @@ Generates an Ed25519 keypair. Flags: `--secret-key=<path>`,
 | `--frequency=<daily\|weekly>` | Required for `set`. |
 | `--hour=<0-23>` | Required for `set`. **UTC**, not site time. |
 | `--retention=<count>` | How many scheduled backups to keep. Refused below 1. |
-| `--exclude=<patterns>` | Exclusions the scheduled backup inherits. |
+| `--exclude=<patterns>` | File-scoped exclusions the scheduled backup inherits (files, directories, and symlinks — never a table). Passed with no value at all, `set` is refused rather than silently clearing the stored list; pass `--exclude=` (empty) to clear it deliberately. |
+| `--exclude-table=<patterns>` | Table-scoped exclusions the scheduled backup inherits (bare table names — never a file). Same no-value-refused, `--exclude-table=` (empty)-to-clear behaviour as `--exclude`. |
 
 ### `wp pontifex destination <add\|remove\|list\|test\|archives\|pull\|prune> [name]`
 

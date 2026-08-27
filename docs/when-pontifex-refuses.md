@@ -565,8 +565,8 @@ of generated image thumbnails.
 **Nothing has been written.** Any previous backup at that path is untouched.
 
 **What to do.** Exclude what you do not need — `--exclude` on the CLI, or the
-exclusions box on the Backup screen. Or take the database separately with
-`--db-only` and the files in a narrowed pass.
+file exclusions box on the Backup screen. Or take the database separately
+with `--db-only` and the files in a narrowed pass.
 
 **What not to do.** Raising `memory_limit` will not help; the limit is
 structural and is checked before memory is considered. Retrying with
@@ -584,7 +584,11 @@ Your exclusions matched everything, or the database could not be read. A backup
 that verifies as sound and restores nothing is among the worst things a backup
 tool can produce, so Pontifex refuses to make one.
 
-Check your exclusion patterns — note that `/**` on its own matches everything.
+Check your exclusion patterns — note that `/**` on its own matches
+everything. Both `wp pontifex export` and the Backup screen now report how
+many entries each active pattern excluded, including `0` for one that
+matched nothing, which is the fastest way to find the one that ate
+everything.
 
 ### "path is not readable; check filesystem permissions"
 
