@@ -17,6 +17,8 @@ use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
 
@@ -743,6 +745,39 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * Force a writer's cached case-sensitivity probe result via reflection.
+	 *
+	 * {@see FileWriter::$case_sensitive_destination} is a private, once-probed
+	 * cache: {@see FileWriter::confinement_fold()} and the preflight in
+	 * {@see FileWriter::assert_symlink_targets_confined()} both branch on it.
+	 * Leaving it to whatever the real filesystem backing $this->fixture_root
+	 * happens to be would make a fold test mean one thing on a case-folding
+	 * host (macOS, Windows) and something else entirely on a case-sensitive
+	 * one (Linux CI) — every fold test in this file forces the answer instead,
+	 * so it means the same thing wherever it runs.
+	 *
+	 * @param FileWriter $writer         The writer whose cache to set.
+	 * @param bool       $case_sensitive The value to force the cache to.
+	 * @return void
+	 */
+	private static function force_case_sensitivity( FileWriter $writer, bool $case_sensitive ): void {
+		$property = new ReflectionProperty( FileWriter::class, 'case_sensitive_destination' );
+		$property->setValue( $writer, $case_sensitive );
+	}
+
+	/**
+	 * Invoke the private confinement_fold() through reflection.
+	 *
+	 * @param FileWriter $writer The writer to call it on.
+	 * @param string     $value  An archive-relative path, already normalised.
+	 * @return string Whatever confinement_fold() returns.
+	 */
+	private static function confinement_fold_of( FileWriter $writer, string $value ): string {
+		$method = new ReflectionMethod( FileWriter::class, 'confinement_fold' );
+		return (string) $method->invoke( $writer, $value );
+	}
+
+	/**
 	 * The proven attack: an intermediate hop link makes a textual check permit a leak of wp-config.php.
 	 *
 	 * Entry 1 points at the parent directory; entry 2's target reads, as text,
@@ -802,10 +837,19 @@ final class FileWriterTest extends TestCase {
 	 * links at write time. This is node-tar's CVE-2021-37701 in miniature, and
 	 * the fold is the same fix.
 	 *
+	 * confinement_fold() is gated on the REAL destination
+	 * ({@see self::destination_is_case_sensitive()}), so it folds at all only
+	 * where the destination genuinely does — case-sensitivity is therefore
+	 * forced by reflection rather than left to whatever filesystem happens to
+	 * back this test's tempdir, or this test would mean "the fold works" on a
+	 * case-folding host (macOS) and "no attack was even attempted" on a
+	 * case-sensitive one (Linux CI).
+	 *
 	 * @return void
 	 */
 	public function test_preflight_refuses_a_hop_spelled_in_a_different_case(): void {
 		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( "this site's own wp-config.php" );
@@ -826,10 +870,15 @@ final class FileWriterTest extends TestCase {
 	 * kernel would eventually follow genuinely cannot be established here.
 	 * An unknown in a containment guard is refused, never guessed.
 	 *
+	 * Case-sensitivity forced by reflection for the same reason as the sibling
+	 * test above: this scenario only exists at all on a case-folding
+	 * destination, and the test must mean that on every host it runs on.
+	 *
 	 * @return void
 	 */
 	public function test_preflight_refuses_case_colliding_declarations_with_different_targets(): void {
 		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'differing only in letter case' );
@@ -1282,6 +1331,292 @@ final class FileWriterTest extends TestCase {
 		$this->expectExceptionMessage( 'Refusing the entry path' );
 
 		$writer->write_entry( self::symlink_result( 'wp-content/uploads/../hop', '..' ) );
+	}
+
+	// -------------------------------------------------------------------
+	// Unicode confinement fold (confinement_fold()) and its own preflight
+	//
+	// confinement_fold() replaced strtolower(), which folds ASCII only, with
+	// Unicode D145 canonical caseless matching (NFD, case-fold, NFD again) —
+	// but only on a destination that actually folds case at all
+	// ({@see self::destination_is_case_sensitive()}). Every test below forces
+	// that cached probe result by reflection rather than trusting whichever
+	// filesystem happens to back $this->fixture_root on the machine running
+	// it; see {@see self::force_case_sensitivity()}'s own docblock for why.
+	//
+	// The corpus in the first test below was measured against real
+	// ext-intl/mbstring behaviour, not assumed — two categories that look
+	// like plausible attack spellings do NOT collide under confinement_fold()
+	// (a literal Turkish DOTLESS "ı", and fullwidth Latin letters); the
+	// second test below documents why, with the measurement recorded
+	// alongside it rather than silently dropped.
+	// -------------------------------------------------------------------
+
+	/**
+	 * The Unicode case-folding attack corpus: real filesystem collisions strtolower() missed.
+	 *
+	 * Every pair below is two DIFFERENT byte strings that a real
+	 * case-insensitive filesystem (APFS, NTFS) treats as naming the same
+	 * file. Before this fix, {@see FileWriter::assert_symlink_targets_confined()}
+	 * indexed declared links under strtolower(), which is ASCII-only, so an
+	 * intermediate link named the "other" Unicode spelling of an already-
+	 * declared name was invisible to the fold lookup — exactly the CVE-2021-37701
+	 * hop-attack shape this class's own preflight defends against, just spelled
+	 * with a character strtolower() does not touch. confinement_fold() must
+	 * therefore fold every pair here to the same key.
+	 *
+	 * Each collision was verified against real ext-intl (Normalizer) and
+	 * mbstring (mb_convert_case) behaviour:
+	 *
+	 *  - Kelvin sign (U+212A) folds to Latin "k" (Unicode CaseFolding.txt).
+	 *  - German sharp s "ß" (U+00DF) folds to "ss" — only under FULL case
+	 *    folding, which is what mb_convert_case( ..., MB_CASE_FOLD, ... )
+	 *    turned out to apply here.
+	 *  - Greek final sigma "ς" (U+03C2) folds to medial sigma "σ" (U+03C3).
+	 *  - The Greek "prosgegrammeni" family: a capital vowel carrying an iota
+	 *    subscript as ONE precomposed character (e.g. U+1FBC, U+1FCC) folds to
+	 *    its lower-case DECOMPOSED form (base letter + combining
+	 *    ypogegrammeni, U+1FB3 / U+1FC3) — the exact family
+	 *    {@see FileWriter::confinement_fold()}'s own docblock names as
+	 *    sensitive to fold/decompose ORDER, which is why it decomposes,
+	 *    folds, then decomposes again rather than once.
+	 *  - Turkish capital "İ" (LATIN CAPITAL LETTER I WITH DOT ABOVE, U+0130)
+	 *    folds, under full folding, to "i" followed by an EXPLICIT combining
+	 *    dot above (U+0069 U+0307) — not to a bare "i". See the sibling
+	 *    "does not over-merge" test below for the dotless letter, which has
+	 *    no fold mapping at all.
+	 *  - Two spellings whose only difference is the ORDER two combining marks
+	 *    of different combining classes were written in. Unicode canonical
+	 *    reordering — applied by the SECOND Normalizer::normalize() call
+	 *    inside confinement_fold() — sorts them into the same sequence
+	 *    regardless of the order they arrived in.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_unifies_unicode_case_folding_attack_spellings(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$corpus = array(
+			'Kelvin sign vs Latin K'                    => array( "wp-content/uploads/30\u{212A}-report.pdf", 'wp-content/uploads/30K-report.pdf' ),
+			'German sharp s (ß) vs "ss"'                => array( 'wp-content/themes/straße/style.css', 'wp-content/themes/strasse/style.css' ),
+			'Greek final sigma (ς) vs medial sigma (σ)' => array( "wp-content/uploads/logo\u{03C2}.svg", "wp-content/uploads/logo\u{03C3}.svg" ),
+			'Greek ALPHA WITH PROSGEGRAMMENI vs alpha+ypogegrammeni' => array( "wp-content/uploads/\u{1FBC}-notes.txt", "wp-content/uploads/\u{1FB3}-notes.txt" ),
+			'Greek ETA WITH PROSGEGRAMMENI vs eta+ypogegrammeni' => array( "wp-content/uploads/\u{1FCC}-notes.txt", "wp-content/uploads/\u{1FC3}-notes.txt" ),
+			'Turkish İ (dotted capital) vs "i" + combining dot above' => array( "wp-content/uploads/\u{0130}stanbul", "wp-content/uploads/i\u{0307}stanbul" ),
+			'Combining marks in reversed order (diaeresis, cedilla)' => array( "wp-content/uploads/a\u{0308}\u{0327}-file", "wp-content/uploads/a\u{0327}\u{0308}-file" ),
+		);
+
+		foreach ( $corpus as $label => $pair ) {
+			list( $spelling_a, $spelling_b ) = $pair;
+
+			$this->assertNotSame( $spelling_a, $spelling_b, "fixture bug in \"$label\": the two spellings must be different byte strings to prove anything" );
+			$this->assertSame(
+				self::confinement_fold_of( $writer, $spelling_a ),
+				self::confinement_fold_of( $writer, $spelling_b ),
+				"\"$label\": a case-insensitive destination must fold both spellings to the same key"
+			);
+		}
+	}
+
+	/**
+	 * Two categories that resemble the attack corpus above must NOT be merged by confinement_fold().
+	 *
+	 * Measured, not assumed:
+	 *
+	 *  - Fullwidth Latin ("Ｋ", U+FF2B) resembles ASCII "K" but the
+	 *    relationship is a COMPATIBILITY equivalence (NFKC/NFKD), not a case
+	 *    one. {@see FileWriter::confinement_fold()}'s own docblock explains
+	 *    this is deliberately never applied: compatibility normalisation
+	 *    would merge pairs — the fullwidth Latin block against ordinary
+	 *    ASCII, for one — that the destination filesystem itself keeps
+	 *    apart, which would refuse legitimate archives no attacker had any
+	 *    part in. Measured directly here: Normalizer::FORM_D, what
+	 *    confinement_fold() actually calls, does not touch this pair.
+	 *  - The Turkish DOTLESS small "ı" (U+0131) has no case-fold mapping at
+	 *    all in the locale-independent Unicode tables PHP's Normalizer and
+	 *    mbstring apply here (only a Turkic-LOCALE-specific mapping exists,
+	 *    and it is not applied) — it folds to itself, so it never collides
+	 *    with a plain "i". This is why the corpus above uses the DOTTED
+	 *    capital "İ" for its Turkish entry instead.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_does_not_over_merge_fullwidth_or_turkish_dotless_i(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$pairs = array(
+			'Fullwidth Latin K (compatibility form) vs ASCII K' => array( "wp-content/uploads/\u{FF2B}-copy.txt", 'wp-content/uploads/K-copy.txt' ),
+			'Turkish dotless ı (no fold mapping) vs ASCII i'    => array( "wp-content/uploads/\u{0131}stanbul", 'wp-content/uploads/istanbul' ),
+		);
+
+		foreach ( $pairs as $label => $pair ) {
+			list( $spelling_a, $spelling_b ) = $pair;
+
+			$this->assertNotSame(
+				self::confinement_fold_of( $writer, $spelling_a ),
+				self::confinement_fold_of( $writer, $spelling_b ),
+				"\"$label\": confinement_fold() must not merge these — a real case-insensitive filesystem does not, so merging them would refuse a legitimate archive over nothing"
+			);
+		}
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, confinement_fold() is the identity for every spelling.
+	 *
+	 * This is what stops the fix from becoming a false-refusal outage on
+	 * Linux, the overwhelming majority of WordPress hosting. Includes
+	 * spellings drawn from the attack corpus above, to prove the SAME two
+	 * strings that collide on a case-insensitive destination stay genuinely
+	 * distinct on a case-sensitive one.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_is_the_identity_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, true );
+
+		$paths = array(
+			'wp-content/uploads/Straße/style.css',
+			'wp-content/uploads/30K-report.pdf',
+			"wp-content/uploads/logo\u{03C2}.svg",
+			'wp-content/Uploads',
+			'wp-content/uploads',
+		);
+
+		foreach ( $paths as $path ) {
+			$this->assertSame( $path, self::confinement_fold_of( $writer, $path ), 'On a case-sensitive destination, confinement_fold() must return the value completely unchanged.' );
+		}
+
+		$this->assertNotSame(
+			self::confinement_fold_of( $writer, 'wp-content/Uploads' ),
+			self::confinement_fold_of( $writer, 'wp-content/uploads' ),
+			'Two genuinely distinct spellings must not collide on a case-sensitive destination — a false refusal here is worse than the attack this fold defends against.'
+		);
+	}
+
+	/**
+	 * The proven hop attack, spelled with a non-ASCII Unicode case variant instead of an ASCII one.
+	 *
+	 * Sibling to {@see self::test_preflight_refuses_a_hop_spelled_in_a_different_case()},
+	 * which strtolower() ALSO would have caught — ASCII-only folding is
+	 * already enough for "HOP" vs "hop". This is the actual gap
+	 * confinement_fold() closes: the leak entry names the hop using Greek
+	 * final sigma "ς", where the hop itself was declared with medial sigma
+	 * "σ". The two are unrelated by ASCII case — strtolower() treats them as
+	 * two different names and would have let this straight through — on
+	 * exactly the filesystems (APFS, NTFS) that fold them to one, the ones
+	 * this whole preflight exists to defend.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_hop_spelled_with_a_non_ascii_case_variant(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				"wp-content/uploads/hop\u{03C3}" => '..',
+				'wp-content/uploads/leak.txt'    => "hop\u{03C2}/../wp-config.php",
+			)
+		);
+	}
+
+	/**
+	 * On a case-insensitive destination, a missing host fact refuses the whole restore, naming what is missing.
+	 *
+	 * This is {@see FileWriter::assert_symlink_targets_confined()}'s OWN
+	 * preflight, gated first on whether the destination folds case at all
+	 * (see that method's docblock) — forced true by reflection here, since
+	 * that is the only branch where a missing extension matters.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_when_destination_folds_case_and_the_host_cannot_fold_unicode(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "intl" extension, which provides the Normalizer class' );
+			}
+		);
+		self::force_case_sensitivity( $writer, false );
+
+		$this->expectException( HostCannotComply::class );
+		$this->expectExceptionMessage( 'the "intl" extension, which provides the Normalizer class' );
+
+		$writer->assert_symlink_targets_confined( array() );
+	}
+
+	/**
+	 * The extension refusal is HostCannotComply, never ArchiveNotTrustworthy.
+	 *
+	 * The host cannot check a perfectly sound archive, which is a host
+	 * limitation, not a verdict on the backup. Reporting a good backup as
+	 * broken is the one message capable of talking someone out of keeping
+	 * it.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_extension_refusal_is_host_cannot_comply_not_archive_not_trustworthy(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "mbstring" extension' );
+			}
+		);
+		self::force_case_sensitivity( $writer, false );
+
+		$thrown = null;
+		try {
+			$writer->assert_symlink_targets_confined( array() );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( HostCannotComply::class, $thrown );
+		$this->assertNotInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, the same missing-extension report must NOT refuse the restore.
+	 *
+	 * Confinement_fold() never touches either extension on a destination that
+	 * does not fold case, so this host was never exposed to the gap they
+	 * close. Refusing it anyway would turn a security fix into an outage for
+	 * a Linux site that was already safe — exactly the false-refusal risk the
+	 * gate in {@see FileWriter::assert_symlink_targets_confined()} exists to
+	 * avoid.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_for_a_missing_extension_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "intl" extension, which provides the Normalizer class', 'the "mbstring" extension' );
+			}
+		);
+		self::force_case_sensitivity( $writer, true );
+
+		$writer->assert_symlink_targets_confined( array() );
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally, without consulting the extension-availability closure at all, on a case-sensitive destination.' );
 	}
 
 	// -------------------------------------------------------------------

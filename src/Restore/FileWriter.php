@@ -14,6 +14,7 @@ use Pontifex\Exception\HostCannotComply;
 
 use Closure;
 use InvalidArgumentException;
+use Normalizer;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
@@ -237,33 +238,67 @@ final class FileWriter {
 	private Closure $symlink_probe;
 
 	/**
+	 * Guard reporting which of the host facts {@see self::confinement_fold()} needs are missing.
+	 *
+	 * The reading {@see self::assert_symlink_targets_confined()}'s own
+	 * preflight refuses the restore over — but only when the destination
+	 * filesystem folds case at all; see that method for the gate. Held
+	 * behind a seam (defaulting to a real class_exists()/function_exists()
+	 * check against ext-intl's Normalizer and mbstring's mb_convert_case(),
+	 * the two host facts {@see self::confinement_fold()} depends on) the
+	 * same way {@see self::$disk_free_space} and {@see self::$symlink_probe}
+	 * are, only so unit tests — which cannot uninstall a PHP extension to
+	 * make a real host lack one — can substitute a controlled outcome;
+	 * production always checks the real host. Returns the empty array when
+	 * both facts hold (the fold can be done properly); otherwise one
+	 * human-readable description of each missing one, so the preflight's
+	 * refusal message can name exactly what is absent rather than guessing.
+	 *
+	 * @var Closure(): array<int, string>
+	 */
+	private Closure $confinement_fold_availability;
+
+	/**
 	 * Construct a FileWriter rooted at the given destination directory.
 	 *
 	 * The destination is created (with mode 0755) if it does not yet
 	 * exist. Once created, the absolute, real path is stored so
 	 * subsequent path-traversal checks can use string comparison.
 	 *
-	 * @param string        $destination_root      Absolute filesystem path of the restore root.
-	 * @param bool          $allow_unsafe_symlinks Optional. Allow symlink targets that escape the root (default false).
-	 * @param string|null   $required_prefix       Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
-	 * @param callable|null $disk_free_space       Optional free-space reader used by {@see self::assert_free_space_for()}, called as `( string $path ): float|false`; defaults to disk_free_space().
-	 * @param callable|null $symlink_probe         Optional symlink-capability probe used by {@see self::assert_symlinks_creatable()}, called as `( string $directory ): bool` once per distinct directory a declared link would actually be created in; defaults to {@see self::probe_symlink_creation()}, a real create-then-remove attempt against that directory.
+	 * @param string        $destination_root             Absolute filesystem path of the restore root.
+	 * @param bool          $allow_unsafe_symlinks        Optional. Allow symlink targets that escape the root (default false).
+	 * @param string|null   $required_prefix              Optional. When set (e.g. "wp-content"), refuse any entry whose path is not the prefix itself or beneath it; null (default) allows any path. Any trailing slash is trimmed.
+	 * @param callable|null $disk_free_space              Optional free-space reader used by {@see self::assert_free_space_for()}, called as `( string $path ): float|false`; defaults to disk_free_space().
+	 * @param callable|null $symlink_probe                Optional symlink-capability probe used by {@see self::assert_symlinks_creatable()}, called as `( string $directory ): bool` once per distinct directory a declared link would actually be created in; defaults to {@see self::probe_symlink_creation()}, a real create-then-remove attempt against that directory.
+	 * @param callable|null $confinement_fold_availability Optional availability check used by {@see self::assert_symlink_targets_confined()}'s own preflight and by {@see self::confinement_fold()}, called as `(): array<int, string>`, returning one description per missing host fact (empty when the fold can be done properly); defaults to a real class_exists()/function_exists() check against Normalizer and mb_convert_case().
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null, ?callable $symlink_probe = null ) {
-		$this->allow_unsafe_symlinks = $allow_unsafe_symlinks;
-		$this->required_prefix       = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
-		$this->disk_free_space       = null !== $disk_free_space
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null, ?callable $symlink_probe = null, ?callable $confinement_fold_availability = null ) {
+		$this->allow_unsafe_symlinks         = $allow_unsafe_symlinks;
+		$this->required_prefix               = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
+		$this->disk_free_space               = null !== $disk_free_space
 			? Closure::fromCallable( $disk_free_space )
 			: static function ( string $path ) {
 				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled or restricted by the host (e.g. open_basedir); the guard is best-effort, matching UploadController::refuse_if_no_room(), and its failure must not block a restore that could otherwise succeed.
 				return @disk_free_space( $path );
 			};
-		$this->symlink_probe         = null !== $symlink_probe
+		$this->symlink_probe                 = null !== $symlink_probe
 			? Closure::fromCallable( $symlink_probe )
 			: static function ( string $probe_directory ): bool {
 				return self::probe_symlink_creation( $probe_directory );
+			};
+		$this->confinement_fold_availability = null !== $confinement_fold_availability
+			? Closure::fromCallable( $confinement_fold_availability )
+			: static function (): array {
+				$missing = array();
+				if ( ! class_exists( 'Normalizer' ) ) {
+					$missing[] = 'the "intl" extension, which provides the Normalizer class';
+				}
+				if ( ! function_exists( 'mb_convert_case' ) ) {
+					$missing[] = 'the "mbstring" extension';
+				}
+				return $missing;
 			};
 
 		if ( '' === $destination_root ) {
@@ -877,10 +912,43 @@ final class FileWriter {
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
 	 * @return void
 	 * @throws ArchiveNotTrustworthy If any declared link's target resolves somewhere this restore will not allow.
+	 * @throws HostCannotComply If the destination folds case and this host cannot fold Unicode case the way the destination does, so the check above cannot be answered safely.
+	 *
+	 * phpcs:ignore Squiz.Commenting.FunctionCommentThrowTag.WrongNumber -- ArchiveNotTrustworthy is genuinely raised, but propagated out of this method from the private helpers it calls, not thrown directly here; the tag stays because it is accurate and callers depend on it.
 	 */
 	public function assert_symlink_targets_confined( array $declared_links ): void {
 		if ( $this->allow_unsafe_symlinks ) {
 			return;
+		}
+
+		// This guard's own preflight: {@see self::confinement_fold()} is what
+		// makes the lookups below independent of which SPELLING of an
+		// intermediate link's name a target uses, and it can only do that
+		// properly with Normalizer (ext-intl) and mb_convert_case()
+		// (mbstring) both present. Gated FIRST on whether the destination
+		// even folds case at all — on a case-sensitive destination (Linux,
+		// the overwhelming majority of WordPress hosting) confinement_fold()
+		// is the identity and never touches either extension, so such a host
+		// must never be refused for lacking them; refusing unconditionally
+		// would turn this security fix into an outage for people who were
+		// never exposed to the gap it closes. Only when the destination DOES
+		// fold case does a missing extension actually leave a weaker fold
+		// (strtolower(), or no fold at all) that could let the attack this
+		// method exists to stop through — and a security guard that has
+		// quietly degraded is worse than one that says so, for a tool whose
+		// whole promise is that a restore cannot escape the site.
+		if ( ! $this->destination_is_case_sensitive() ) {
+			$missing_requirements = ( $this->confinement_fold_availability )();
+
+			if ( array() !== $missing_requirements ) {
+				$message = sprintf(
+					'The restore was stopped before anything was written. This destination filesystem treats filenames that differ only in letter case as the same file, and safely checking that every symbolic link this backup declares stays inside the site depends on comparing filenames the same way this filesystem does — but this host is missing %s, so that comparison cannot be done. This is not a problem with the backup, which may be perfectly sound: ask whoever manages this host to enable %s, then restore again.',
+					implode( ' and ', $missing_requirements ),
+					1 === count( $missing_requirements ) ? 'it' : 'them'
+				);
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message is a fixed, plugin-authored diagnostic string naming missing PHP extensions, not archive-derived content; exception path, not HTML output.
+				throw new HostCannotComply( $message );
+			}
 		}
 
 		// is_link() and lstat() results are cached by PHP for the rest of the
@@ -913,7 +981,7 @@ final class FileWriter {
 
 			$exact[ $link_path ] = $raw_target;
 
-			$folded_key = strtolower( $link_path );
+			$folded_key = $this->confinement_fold( $link_path );
 			if ( array_key_exists( $folded_key, $folded ) && $folded[ $folded_key ] !== $raw_target ) {
 				$folded[ $folded_key ] = null;
 				continue;
@@ -954,7 +1022,7 @@ final class FileWriter {
 	 * @param string                        $link_path   The link's own path, relative to the destination root, already normalised.
 	 * @param string                        $raw_target  The target string recorded in the archive, verbatim.
 	 * @param array<array-key, string>      $exact       Every declared link, keyed by its exact normalised path.
-	 * @param array<array-key, string|null> $folded      The same, keyed by lower-cased path; null marks a key whose spellings disagree.
+	 * @param array<array-key, string|null> $folded      The same, keyed by {@see self::confinement_fold()}'s output; null marks a key whose spellings disagree.
 	 * @return void
 	 * @throws ArchiveNotTrustworthy If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
 	 */
@@ -1028,21 +1096,22 @@ final class FileWriter {
 	 * see nothing and wave the target through, and the kernel would join the
 	 * links up afterwards anyway.
 	 *
-	 * The exact spelling is tried first, then the lower-cased one. Folding is
-	 * applied on every host rather than only where the destination folds case,
-	 * deliberately: it keeps this guard's verdict identical everywhere, so a
-	 * green run on a case-sensitive CI machine is evidence about the case-folding
-	 * laptop and shared host too. (The cost is the one node-tar's maintainers
-	 * accepted for the same fix — an occasional needless match on a
-	 * case-sensitive filesystem. The shape that could produce one is an archive
-	 * carrying two links whose paths differ only in case, which cannot exist on
-	 * a case-folding destination at all; when their targets disagree the
-	 * ambiguity is refused outright rather than guessed at.)
+	 * The exact spelling is tried first, then the one {@see self::confinement_fold()}
+	 * produces for the same value. That fold is gated on the REAL destination
+	 * rather than applied unconditionally: the identity on a case-sensitive
+	 * filesystem, where every distinct spelling really is a distinct file, and
+	 * Unicode canonical-caseless matching (Unicode D145 — decompose, case-fold,
+	 * decompose again) on a case-insensitive one, where macOS (APFS) and Windows
+	 * (NTFS) fold the whole of Unicode, not only ASCII letters. (An archive
+	 * carrying two links whose paths differ only in case cannot exist on a
+	 * case-folding destination at all — the filesystem that scanned it would
+	 * have collapsed them to one file already; when their folded targets
+	 * disagree the ambiguity is refused outright rather than guessed at.)
 	 *
 	 * @param array<int, string>            $candidate       The absolute path being tested, as components.
 	 * @param array<int, string>            $root_components The destination root, as components.
 	 * @param array<array-key, string>      $exact           Every declared link, keyed by its exact normalised path.
-	 * @param array<array-key, string|null> $folded          The same, keyed by lower-cased path; null marks a key whose spellings disagree.
+	 * @param array<array-key, string|null> $folded          The same, keyed by {@see self::confinement_fold()}'s output; null marks a key whose spellings disagree.
 	 * @param string                        $link_path       The link being judged, for the diagnostic message only.
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
@@ -1058,7 +1127,7 @@ final class FileWriter {
 				return $exact[ $relative ];
 			}
 
-			$folded_key = strtolower( $relative );
+			$folded_key = $this->confinement_fold( $relative );
 			if ( array_key_exists( $folded_key, $folded ) ) {
 				if ( null === $folded[ $folded_key ] ) {
 					$message = sprintf(
@@ -1513,6 +1582,72 @@ final class FileWriter {
 		}
 		$prefix = $root . '/';
 		return 0 === strncasecmp( $relative_path, $prefix, strlen( $prefix ) );
+	}
+
+	/**
+	 * Fold one archive-relative path the way the destination filesystem folds it.
+	 *
+	 * {@see self::assert_symlink_targets_confined()} indexes the archive's
+	 * declared links twice — once byte-exactly, once under this fold — so
+	 * that a target naming an intermediate link by a DIFFERENT spelling of
+	 * the same on-disk name is still resolved through it, matching whatever
+	 * the real destination filesystem would do. strtolower(), which this
+	 * method replaced, folds ASCII only; APFS (macOS) and NTFS (Windows) fold
+	 * the WHOLE of Unicode, so every non-ASCII spelling of one filename — a
+	 * Greek final sigma "ς" for a medial sigma "σ", a German "ß" for "ss", a
+	 * Kelvin sign "K" for a Latin "K" — was a way past a
+	 * byte-exact-then-ASCII-fold guard, on the exact filesystems this guard
+	 * exists to defend. (Measured, not assumed: a plausible-looking Turkish
+	 * dotless "ı" does NOT collide with a plain "i" under this fold, because
+	 * it has no case-fold mapping at all — see the corpus in
+	 * FileWriterTest for the full measured list, both what collides and what
+	 * deliberately does not.)
+	 *
+	 * Two properties, both measured against the destination filesystem's own
+	 * behaviour rather than reasoned from first principles:
+	 *
+	 *  1. GATED ON THE DESTINATION, checked FIRST. On a case-sensitive
+	 *     filesystem this is the identity: every distinct spelling really is
+	 *     a distinct file there, so folding at all would merge names the
+	 *     filesystem itself keeps apart, refusing a perfectly good archive
+	 *     that never collided on the system that made it. This is not an
+	 *     optimisation — it is why a Linux host (the overwhelming majority of
+	 *     WordPress hosting, and case-sensitive) is never affected by
+	 *     anything below this point.
+	 *  2. NFD, THEN CASE-FOLD, THEN NFD AGAIN — Unicode D145 canonical
+	 *     caseless matching. The order is load-bearing: case-folding BEFORE
+	 *     decomposing leaves combining marks in the wrong order for the Greek
+	 *     ypogegrammeni family, and composing first (NFC, rather than
+	 *     decomposing) leaves whole families of the same escape open.
+	 *
+	 * Reachable here only when the fold CAN be done properly: the destination
+	 * being case-insensitive at all AND both Normalizer (ext-intl) and
+	 * mb_convert_case() (mbstring) being present is guaranteed on entry, by
+	 * {@see self::assert_symlink_targets_confined()}'s own preflight, which
+	 * refuses the restore before either of this method's two call sites is
+	 * ever reached otherwise — so there is no silent degrade to a weaker fold
+	 * to fall back to here: on a host that cannot do this properly, the
+	 * restore has already been refused, honestly, rather than quietly
+	 * checked with a guard that has degraded.
+	 *
+	 * @param string $value An archive-relative path, already normalised.
+	 * @return string A key equal for exactly those spellings the destination treats as one file.
+	 */
+	private function confinement_fold( string $value ): string {
+		if ( $this->destination_is_case_sensitive() ) {
+			return $value;
+		}
+
+		$decomposed = Normalizer::normalize( $value, Normalizer::FORM_D );
+		if ( is_string( $decomposed ) ) {
+			$value = $decomposed;
+		}
+
+		$folded = mb_convert_case( $value, MB_CASE_FOLD, 'UTF-8' );
+
+		$stable = Normalizer::normalize( $folded, Normalizer::FORM_D );
+
+		return is_string( $stable ) ? $stable : $folded;
 	}
 
 	/**
