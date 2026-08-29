@@ -180,6 +180,55 @@ the answer and is not. That flag controls *where links are allowed to point*,
 not *whether your host can create them at all*. It will not help here, and you
 will have switched off a genuine security protection for nothing.
 
+### "this host is missing … so that comparison cannot be done"
+
+> FileWriter: the restore was stopped before anything was written. This
+> destination filesystem treats filenames that differ only in letter case as
+> the same file, and safely checking that every symbolic link this backup
+> declares stays inside the site depends on comparing filenames the same way
+> this filesystem does — but this host is missing …, so that comparison
+> cannot be done.
+
+**Uncommon, and only on a destination that folds case at all. An environment
+problem, not a fault in the backup.**
+
+**What happened.** Confirming that a symbolic link in your backup stays inside
+your site means comparing filenames exactly the way this computer's own disk
+would. On a filesystem that treats `Uploads` and `uploads` as the same file —
+macOS and Windows both do this, Linux does not — that comparison needs two PHP
+extensions, `intl` and `mbstring`. This host is missing at least one of them
+(the message names exactly which), so Pontifex cannot do the comparison
+safely, and refuses rather than fall back to a weaker check that a crafted
+backup could talk its way past.
+
+**Nothing has been written.** This is checked before the restore starts, the
+same as the free-space and symlink-creation checks above.
+
+**Your backup is very probably fine.** This message is about what this
+computer can check, not about what the archive contains — the same
+distinction as "this backup could not be read, so it was not checked" further
+down this page.
+
+**What to do.** Ask whoever manages this host to enable the extension named in
+the message — `intl`, `mbstring`, or both — then restore again.
+
+**What not to do.** Deleting this backup and taking a fresh one will not help;
+the backup was never the thing in question. Restoring the same file again
+without changing anything on the host will fail the same way every time.
+
+And do not reach for `--allow-unsafe-symlinks` to make it go away. It would
+work — that flag returns before this check, before any symlink check, ever
+runs. But what it switches off is not this one gap, it is the *whole*
+symbolic-link confinement check — the one described in the next entry below,
+that stops a backup planting a link to your `wp-config.php`. Reaching for it
+here trades a message about a missing PHP extension for switching off the
+actual protection.
+
+**Linux hosts never see this.** On a case-sensitive filesystem — the
+overwhelming majority of WordPress hosting — every distinct spelling is
+already a distinct file, no case-folding comparison is ever needed, and this
+check never runs at all.
+
 ### "refusing symlink … Re-run with --allow-unsafe-symlinks only if you trust this archive"
 
 **Uncommon in ordinary use. This one is protecting you, and you should take it
