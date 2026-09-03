@@ -846,6 +846,17 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * Invoke the private, static path_is_inspectable() through reflection.
+	 *
+	 * @param string $parent_directory Absolute path of the directory to test.
+	 * @return bool Whatever path_is_inspectable() returns.
+	 */
+	private static function path_is_inspectable_of( string $parent_directory ): bool {
+		$method = new ReflectionMethod( FileWriter::class, 'path_is_inspectable' );
+		return (bool) $method->invoke( null, $parent_directory );
+	}
+
+	/**
 	 * The proven attack: an intermediate hop link makes a textual check permit a leak of wp-config.php.
 	 *
 	 * Entry 1 points at the parent directory; entry 2's target reads, as text,
@@ -938,6 +949,14 @@ final class FileWriterTest extends TestCase {
 	 * kernel would eventually follow genuinely cannot be established here.
 	 * An unknown in a containment guard is refused, never guessed.
 	 *
+	 * A third entry ("leak.txt", resolving through "HOP") used to be needed to
+	 * TRIGGER this refusal at all: before the up-front check, ambiguity was
+	 * only noticed if some other link's resolution happened to pass through
+	 * the colliding name — see {@see self::test_preflight_refuses_two_folded_spellings_with_different_targets_even_when_nothing_resolves_through_either()}
+	 * for that gap closed. It is kept here, now redundant, because this test's
+	 * job is proving the refusal fires at all for this exact declaration set,
+	 * regardless of which of the two checks catches it.
+	 *
 	 * Case-sensitivity forced by reflection for the same reason as the sibling
 	 * test above: this scenario only exists at all on a case-folding
 	 * destination, and the test must mean that on every host it runs on.
@@ -947,17 +966,174 @@ final class FileWriterTest extends TestCase {
 	public function test_preflight_refuses_case_colliding_declarations_with_different_targets(): void {
 		$writer = new FileWriter( $this->fixture_root );
 		self::force_case_sensitivity( $writer, false );
+		$thrown = null;
 
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'differing only in letter case' );
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/Hop'      => '..',
+					'wp-content/uploads/hOp'      => 'somewhere',
+					'wp-content/uploads/leak.txt' => 'HOP/wp-config.php',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( 'wp-content/uploads/Hop', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/hOp', $message );
+	}
+
+	/**
+	 * Two spellings of one path that normalise identically, declaring DIFFERENT targets, refuse rather than pick a winner.
+	 *
+	 * The proven attack: a backup declaring "leak" and "./leak" as two
+	 * separate entries. normalise_entry_path() collapses both to "leak", so
+	 * indexing them into $exact used to silently keep only the LAST one —
+	 * while the write walk still writes both entries, including the one the
+	 * preflight never judged. Refusing the collision outright closes that
+	 * gap; the message must name both original spellings so the operator can
+	 * see exactly what the archive declared.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_two_spellings_of_one_path_with_different_targets(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'leak'   => 'a/b/hop/../../OUTSIDE/secret.txt',
+					'./leak' => 'sub',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( '"leak"', $message );
+		$this->assertStringContainsString( '"./leak"', $message );
+		$this->assertStringContainsString( 'a/b/hop/../../OUTSIDE/secret.txt', $message );
+		$this->assertStringContainsString( '"sub"', $message );
+	}
+
+	/**
+	 * The same two spellings, declaring the SAME target, must NOT be refused.
+	 *
+	 * The false-refusal guard for the test above: judging one spelling is
+	 * equivalent to judging both when they agree on the target, so a
+	 * legitimate archive that happens to record a path two ways (nothing
+	 * stops a third-party archive builder doing this) must restore, not be
+	 * refused over a distinction that makes no difference.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_two_spellings_of_one_path_with_the_same_target(): void {
+		$writer = new FileWriter( $this->fixture_root );
 
 		$writer->assert_symlink_targets_confined(
 			array(
-				'wp-content/uploads/Hop'      => '..',
-				'wp-content/uploads/hOp'      => 'somewhere',
-				'wp-content/uploads/leak.txt' => 'HOP/wp-config.php',
+				'leak'   => 'sub',
+				'./leak' => 'sub',
 			)
 		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally when two spellings of one path agree on the target.' );
+	}
+
+	/**
+	 * Two declared links whose spellings FOLD together, with different targets and NOTHING resolving through either, still refuse.
+	 *
+	 * Before this fix the ambiguity marker the indexing loop records
+	 * ({@see self::test_preflight_refuses_case_colliding_declarations_with_different_targets()}'s
+	 * sibling scenario) was only ever consulted from inside
+	 * declared_or_on_disk_target() — i.e. only if some OTHER link's
+	 * resolution happened to pass through the colliding name. Declare only
+	 * the two colliding links themselves, with no third "consumer" entry
+	 * resolving through either one, so the only thing that can catch this is
+	 * the up-front check run after the indexing loop and before resolution
+	 * starts. Case-sensitivity forced by reflection, as with every other test
+	 * in this section: this scenario only exists on a case-folding
+	 * destination.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_two_folded_spellings_with_different_targets_even_when_nothing_resolves_through_either(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/Hop' => 'somewhere-a',
+					'wp-content/uploads/hOp' => 'somewhere-b',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( 'wp-content/uploads/Hop', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/hOp', $message );
+		$this->assertStringContainsString( 'somewhere-a', $message );
+		$this->assertStringContainsString( 'somewhere-b', $message );
+	}
+
+	/**
+	 * The same folded pair, declaring the SAME target, must NOT be refused.
+	 *
+	 * The false-refusal guard for the test above: on a case-folding
+	 * destination two spellings that agree on their target are not a genuine
+	 * ambiguity — only one file can exist there either way, and both
+	 * declarations point it at the same place.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_two_folded_spellings_with_the_same_target(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/Hop' => 'somewhere',
+				'wp-content/uploads/hOp' => 'somewhere',
+			)
+		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally when two folded spellings agree on the target.' );
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, two links differing only in case must NOT be refused, even with different targets.
+	 *
+	 * The fold is the identity there (see {@see FileWriter::confinement_fold()}'s
+	 * own docblock), so "Hop" and "hOp" are two genuinely distinct files and
+	 * the up-front folded-collision check above must never fire. A false
+	 * refusal here would turn this security fix into an outage for the
+	 * overwhelming majority of WordPress hosting.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_case_differing_spellings_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, true );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/Hop' => 'harmless-a',
+				'wp-content/uploads/hOp' => 'harmless-b',
+			)
+		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally on a case-sensitive destination, regardless of targets.' );
 	}
 
 	/**
@@ -1153,6 +1329,122 @@ final class FileWriterTest extends TestCase {
 		$this->expectExceptionMessage( "this site's own wp-config.php" );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => 'existing/wp-config.php' ) );
+	}
+
+	// -------------------------------------------------------------------
+	// path_is_inspectable() and the fail-closed branch it feeds
+	//
+	// is_link() answers false for two situations that look identical from
+	// the outside: "there is genuinely nothing here" and "I could not look."
+	// path_is_inspectable() is what tells them apart, using the parent
+	// directory's EXECUTE bit (not its read bit) as the distinguishing fact,
+	// measured directly rather than assumed — see that method's own
+	// docblock for the measured table. The three cases below exercise it
+	// directly by reflection, matching {@see self::confinement_fold_of()}'s
+	// pattern; the fourth proves the whole preflight is wired to it.
+	// -------------------------------------------------------------------
+
+	/**
+	 * A parent directory that does not exist at all is trustworthy: no link can exist under it.
+	 *
+	 * False-refusal guard: an ordinary symlink target with components that
+	 * simply do not exist yet on disk must resolve normally, never refuse.
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_true_when_the_parent_does_not_exist(): void {
+		$absent = $this->fixture_root . '/does/not/exist';
+
+		$this->assertTrue( self::path_is_inspectable_of( $absent ), 'A parent directory that does not exist cannot hide a link from is_link(), so its false answer must be trusted.' );
+	}
+
+	/**
+	 * A parent directory that exists and is traversable is trustworthy: is_link() genuinely looked and found nothing.
+	 *
+	 * False-refusal guard: the ordinary "no link here" case, the common
+	 * outcome for the vast majority of path components a restore resolves.
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_true_when_the_parent_is_traversable(): void {
+		$uploads = $this->make_fixture_directory( 'wp-content/uploads' );
+
+		$this->assertTrue( self::path_is_inspectable_of( $uploads ), 'A traversable parent directory makes is_link()\'s false answer trustworthy.' );
+	}
+
+	/**
+	 * A parent directory that exists but cannot be traversed is NOT trustworthy.
+	 *
+	 * The measured reproducer: mode 0000 blocks the executable bit that
+	 * governs whether a filesystem lookup for a name inside the directory
+	 * can succeed at all, so is_link() cannot genuinely answer and its false
+	 * must not be trusted. Skipped as root, for whom chmod 0000 does not
+	 * block a stat (this project already knows the trap — the PHP 8.2 floor
+	 * is run in Docker as a non-root user for exactly this reason).
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_false_when_the_parent_exists_but_cannot_be_traversed(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test an untraversable directory when running as root (chmod is not enforced).' );
+		}
+
+		$locked = $this->make_fixture_directory( 'wp-content/locked' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; the point under test is that this process cannot look inside this directory.
+		chmod( $locked, 0o000 );
+
+		try {
+			$this->assertFalse( self::path_is_inspectable_of( $locked ), 'A parent directory this process cannot traverse must not be trusted to answer "no link here".' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restore traversability so tearDown can clean up.
+			chmod( $locked, 0o755 );
+		}
+	}
+
+	/**
+	 * The whole-archive preflight refuses as HostCannotComply, not silently trusts, when a component's parent directory cannot be traversed.
+	 *
+	 * The reproducer the audit found: a pre-existing directory at mode 0000
+	 * containing an escaping link, declared by the archive as an ordinary
+	 * directory entry at mode 0755 (a directory never enters the symlink
+	 * maps, so this preflight is the only thing standing between the
+	 * archive and the write walk). Before this fix, is_link() returning
+	 * false for "I could not look" was indistinguishable from "genuinely not
+	 * a link", so the preflight trusted it and let the restore proceed —
+	 * and the write walk then chmods the directory open, supplying its own
+	 * unlock. Here the declared link's target simply passes through the
+	 * locked directory; no chmod-unlock step is needed to prove the
+	 * preflight itself now refuses rather than guesses. Skipped as root, for
+	 * whom chmod 0000 does not block a stat.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_as_host_cannot_comply_when_a_components_parent_cannot_be_traversed(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test an untraversable directory when running as root (chmod is not enforced).' );
+		}
+
+		$writer  = new FileWriter( $this->fixture_root );
+		$uploads = $this->make_fixture_directory( 'wp-content/uploads' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; the point under test is that this process cannot look inside this directory.
+		chmod( $uploads, 0o000 );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => 'ghost/inside' ) );
+		} catch ( HostCannotComply $error ) {
+			$thrown = $error;
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restore traversability so tearDown can clean up.
+			chmod( $uploads, 0o755 );
+		}
+
+		$this->assertInstanceOf( HostCannotComply::class, $thrown );
+		$this->assertNotInstanceOf( ArchiveNotTrustworthy::class, $thrown, "a host limitation must never be reported as the archive's fault" );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( realpath( $this->fixture_root ) . '/wp-content/uploads', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/leak.txt', $message );
+		$this->assertStringContainsString( 'restore was stopped before anything was written', $message );
 	}
 
 	/**
