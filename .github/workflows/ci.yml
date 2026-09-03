@@ -133,7 +133,7 @@ jobs:
         run: composer audit --abandoned=report
 
       - name: OSV-Scanner (cross-ecosystem advisories)
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
         with:
           scan-args: |-
             --lockfile=composer.lock
@@ -227,13 +227,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # Plugin Check posts its summary as a pull-request comment, so this job
-    # needs pull-requests: write. Scoped to this job only — the others keep the
-    # minimal top-level permissions.
-    permissions:
-      contents: read
-      pull-requests: write
-
     # Same tiered gate as the integration suite (ADR 0007). Plugin Check runs
     # against the *built* package — the exact tree .distignore produces, with
     # production-only dependencies — not the source checkout. That is what a
@@ -254,41 +247,32 @@ jobs:
           php-version: '8.3'
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
           coverage: none
-          tools: composer:v2, wp-cli
+          tools: composer:v2
 
-      - name: Install production Composer dependencies
-        run: composer install --no-dev --no-interaction --prefer-dist --no-progress
-
-      - name: Build the distributable package
-        run: |
-          set -euo pipefail
-          # WP-CLI's package installer rejects the modern GitHub token format
-          # (the ghs_/github_pat_ prefixes contain characters its validator
-          # disallows, so passing a token fails with "github oauth token ...
-          # contains invalid characters"). dist-archive is a public repository,
-          # so clear every token source and install it anonymously.
-          composer config --global --unset github-oauth.github.com 2>/dev/null || true
-          unset GITHUB_TOKEN GH_TOKEN 2>/dev/null || true
-          wp package install wp-cli/dist-archive-command:^2.0
-          wp dist-archive . "${RUNNER_TEMP}/pontifex.tar.gz" --format=targz
-          mkdir -p build
-          # Strip the single top-level plugin folder so build/ directly holds the
-          # shipped tree (its name varies by dist-archive version).
-          tar -xzf "${RUNNER_TEMP}/pontifex.tar.gz" -C build --strip-components=1
-          echo "Built tree (this is what would ship):"
-          ls -la build
-
-      - name: Run Plugin Check on the built package
-        uses: wordpress/plugin-check-action@98a1788320d0add90df2d8183934ecccbc4e05d2 # v1
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          build-dir: ./build
-          slug: pontifex
-          # strict makes Plugin Check treat warnings (not only errors) as a
-          # build failure, so the "zero errors AND zero warnings" policy is
-          # enforced by CI rather than by hand. Without it the action goes
-          # green on warnings, which let four sanitisation warnings ride
-          # through v0.6.0 and v0.7.0 unnoticed.
-          strict: true
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install pinned wp-env
+        run: npm ci
+
+      # scripts/plugin-check.sh does everything from here: it copies the
+      # working tree (excluding anything git ignores), installs production
+      # Composer dependencies into that copy, builds the real distributable
+      # with wp dist-archive inside its own wp-env environment, and runs the
+      # PINNED Plugin Check against it. This is deliberately the same command
+      # a developer runs locally (see .github/CONTRIBUTING.md) rather than
+      # the wordpress/plugin-check-action this job used to call — the action
+      # has no version input and hardcodes an unpinned
+      # `wp plugin install plugin-check --activate`, so it always installs
+      # whatever Plugin Check wordpress.org is serving that day and could
+      # fail this release gate on code that has not changed. Running the
+      # same script here as on a developer's machine also means CI and local
+      # cannot drift apart into two different checks.
+      - name: Run Plugin Check on the built package
+        run: composer check:plugin
 
       # Publish only AFTER Plugin Check has passed, so the artifact that exists
       # is one that was verified. Until now the job built the distributable,
@@ -306,6 +290,6 @@ jobs:
           # better identifier for the job this artifact exists to do, which is
           # knowing exactly which bytes were verified.
           name: pontifex-${{ github.sha }}
-          path: ${{ runner.temp }}/pontifex.tar.gz
+          path: build/pontifex.tar.gz
           if-no-files-found: error
           retention-days: 90

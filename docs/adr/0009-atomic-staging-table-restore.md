@@ -83,7 +83,10 @@ verified clean:
 - The recovery layers stay: safety archive + auto-rollback now guard chiefly
   the file half of a restore, and compose with prevention as defence in depth.
 - File-side atomicity (wp-content) is out of scope here and remains
-  recovery-based; it is a separate, later arc.
+  recovery-based; it is a separate, later arc. Recovery itself was made
+  honest in [ADR 0024](./0024-recovery-reverts-by-ledger.md) — it now undoes
+  what a failed restore added — but the file half is still not transactional,
+  and that arc is still open.
 
 ## Alternatives considered
 

@@ -28,6 +28,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -303,6 +304,115 @@ final class RestoreRunnerTest extends TestCase {
 		$this->assertTrue( file_exists( $path ) );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
 		$this->assertSame( 'hello world', file_get_contents( $path ) );
+	}
+
+	/**
+	 * Restore() actually sweeps orphaned temp files an earlier, interrupted restore left behind.
+	 *
+	 * A leftover temp artefact is placed under the fixture root exactly as a
+	 * killed restore would have left one, before the runner is ever touched.
+	 * Running a real restore through the same archive-stream harness every
+	 * other test in this file uses, then asserting the artefact is gone
+	 * afterwards, proves RestoreRunner::restore() actually calls
+	 * FileWriter::sweep_orphaned_temp_files() as part of a real restore — not
+	 * merely that the method exists and behaves correctly in isolation,
+	 * which FileWriterTest already covers on its own.
+	 *
+	 * @return void
+	 */
+	public function test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileDoesNotExist( $orphan, 'restore() must sweep an orphaned temp file left by an earlier, interrupted restore.' );
+	}
+
+	/**
+	 * Verify() must NEVER sweep orphaned temp files — it is read-only.
+	 *
+	 * Adding a call to FileWriter::sweep_orphaned_temp_files() inside
+	 * verify() was found, under mutation, to leave the whole suite green: a
+	 * read-only verification silently deleting live files on disk is exactly
+	 * the regression FileWriter::sweep_orphaned_temp_files()'s own docblock
+	 * says never happens, because verify() "writes nothing and so has
+	 * nothing to sweep". This places an orphan exactly as
+	 * {@see self::test_restore_sweeps_orphaned_temp_files_left_by_an_earlier_interrupted_restore()}
+	 * does, but calls verify() instead of restore() through the same real
+	 * archive-stream harness every other test in this file uses, and asserts
+	 * the orphan is still there afterwards.
+	 *
+	 * @return void
+	 */
+	public function test_verify_does_not_sweep_orphaned_temp_files(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore' );
+
+		$runner = $this->make_runner();
+		$runner->verify( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileExists( $orphan, 'verify() must never sweep — it is read-only and must leave every file on disk untouched.' );
+	}
+
+	/**
+	 * The orphan sweep must run BEFORE the free-space preflight, not after — proven behaviourally.
+	 *
+	 * A restore that ran out of disk can leave a large temp file behind; the
+	 * NEXT restore's free-space preflight must see that space as already
+	 * reclaimed, or the leftover from the failed attempt permanently counts
+	 * against the retry it is blocking. Asserting call order would not prove
+	 * that — a fake could record "sweep, then check" while the real check
+	 * still measured a disk that had not actually been freed yet. Instead the
+	 * injected free-space reader ({@see FileWriter}'s constructor takes it as
+	 * a `Closure(string): (float|false)`) answers according to whether the
+	 * orphan is STILL on disk at the moment it is actually asked: an
+	 * insufficient figure while the orphan remains, standing in for the space
+	 * it still occupies, and ample room once it is gone. A restore that
+	 * proceeds and writes its entry therefore proves the sweep had already
+	 * run by the time the free-space preflight asked — the same fixture, run
+	 * against the ordering this change replaces (free space checked before
+	 * the sweep), would instead see the orphan still occupying space and
+	 * refuse with HostCannotComply.
+	 *
+	 * @return void
+	 */
+	public function test_restore_sweeps_the_orphan_before_the_free_space_preflight_measures_it(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $this->fixture_root . '/wp-content/uploads', 0o755, true );
+		$orphan = $this->fixture_root . '/wp-content/uploads/photo.jpg.' . uniqid( 'pontifex-', true ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: stands in for the space a crashed restore's leftover temp file still occupies.
+		file_put_contents( $orphan, 'half-written bytes from a killed restore, standing in for the disk space it still occupies' );
+
+		$file_writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and instead answers according to whether the orphan is still on disk — insufficient while it remains, ample once it is swept.
+			function ( string $path ) use ( $orphan ) {
+				return file_exists( $orphan ) ? 1 : PHP_INT_MAX;
+			}
+		);
+		$runner      = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			$file_writer,
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$runner->restore( self::build_archive_stream( array( self::file_plan( 'note.txt', 'hello world' ) ) ) );
+
+		$this->assertFileDoesNotExist( $orphan, 'The orphan must have been swept.' );
+		$this->assertFileExists(
+			$this->fixture_root . '/note.txt',
+			'The restore must have got past the free-space preflight and written its entry; it could only have passed because the orphan was already gone by the time the preflight asked.'
+		);
 	}
 
 	/**
@@ -707,6 +817,206 @@ final class RestoreRunnerTest extends TestCase {
 			static fn () => $runner->restore( self::build_archive_stream( $plans ) ),
 			$db
 		);
+	}
+
+	/**
+	 * Verify and restore must refuse a single oversized entry with the SAME exception type.
+	 *
+	 * Before this fix, verify_entry()'s decoded-byte budget parameter carried the
+	 * MEMORY-derived budget (gated on `! streams_decoded_payload(...)`, the
+	 * condition read_entry() uses for THAT budget) rather than this build's
+	 * compiled-in per-entry ceiling. `streams_decoded_payload()` is true for
+	 * every plain unencrypted file entry, so the gate was never satisfied for
+	 * the common case and verify() could never refuse an oversized plain file —
+	 * an archive restore() would refuse was reported SOUND. This drives an
+	 * identical archive through both paths and requires the identical
+	 * BuildCannotComply type from each, which is only true once the budget
+	 * parameter carries the meaning read_entry() gives it.
+	 *
+	 * @return void
+	 */
+	public function test_verify_and_restore_refuse_an_oversized_entry_with_the_same_exception_type(): void {
+		$limits = new ArchiveLimits( 50000, 3, 100, 1099511627776 );
+
+		// Built twice, deliberately: an EntryPlan's stream is consumed the first
+		// time an archive is written from it, so restore() and verify() each need
+		// their own fresh plan/stream pair rather than sharing one.
+		try {
+			$this->make_runner_with_limits( $limits )->restore(
+				self::build_archive_stream( array( self::file_plan( 'big.txt', 'apple' ) ) )
+			);
+			$this->fail( 'restore() should have refused the oversized entry.' );
+		} catch ( RuntimeException $restore_error ) {
+			$this->assertInstanceOf(
+				BuildCannotComply::class,
+				$restore_error,
+				'restore() must refuse an entry over the fixed decoded-byte ceiling as BuildCannotComply.'
+			);
+		}
+
+		try {
+			$this->make_runner_with_limits( $limits )->verify(
+				self::build_archive_stream( array( self::file_plan( 'big.txt', 'apple' ) ) )
+			);
+			$this->fail( 'verify() should have refused the SAME oversized entry — before this fix a plain file entry could never be refused this way by verify() at all.' );
+		} catch ( RuntimeException $verify_error ) {
+			$this->assertInstanceOf(
+				BuildCannotComply::class,
+				$verify_error,
+				'verify() must refuse the same oversized entry with the same exception type as restore().'
+			);
+		}
+	}
+
+	/**
+	 * Verify and restore must both refuse once the running total exceeds the
+	 * archive's decoded-byte budget, with the SAME exception type — the
+	 * headline regression this job closes.
+	 *
+	 * Before this fix, {@see \Pontifex\Restore\RestoreRunner::verify()} never
+	 * computed or checked any archive-total budget at all: it forwarded only
+	 * the memory-derived per-entry budget to verify_entry(), under the wrong
+	 * (inverted) gate. An archive whose combined declared content ran past the
+	 * archive-total ratio ceiling was reported SOUND by verify() and only then
+	 * refused by restore() the moment it actually walked the same entries —
+	 * exactly the "verify asks less than restore does" gap this job closes.
+	 * The fixture is {@see self::test_restore_rejects_total_exceeding_budget()}'s
+	 * own archive: a 15-byte absolute ceiling against three entries totalling
+	 * 17 declared bytes, so the shared budget bites partway through under both
+	 * verbs.
+	 *
+	 * @return void
+	 */
+	public function test_verify_and_restore_refuse_total_exceeding_budget_with_the_same_exception_type(): void {
+		$limits = new ArchiveLimits( 50000, 2147483648, 100, 15 );
+
+		// Built twice, deliberately: an EntryPlan's stream is consumed the first
+		// time an archive is written from it, so restore() and verify() each need
+		// their own fresh set of plans/streams rather than sharing one.
+		$fresh_plans = static fn (): array => array(
+			self::file_plan( 'a.txt', 'apple' ),
+			self::file_plan( 'b.txt', 'banana' ),
+			self::file_plan( 'c.txt', 'cherry' ),
+		);
+
+		$restore_class = null;
+		try {
+			$this->make_runner_with_limits( $limits )->restore( self::build_archive_stream( $fresh_plans() ) );
+			$this->fail( 'restore() should have refused the archive whose total exceeds its budget.' );
+		} catch ( RuntimeException $restore_error ) {
+			$restore_class = get_class( $restore_error );
+		}
+
+		try {
+			$this->make_runner_with_limits( $limits )->verify( self::build_archive_stream( $fresh_plans() ) );
+			$this->fail( 'verify() should have refused the SAME archive — before this fix it never computed an archive-total budget at all and reported this archive SOUND.' );
+		} catch ( RuntimeException $verify_error ) {
+			$this->assertSame(
+				$restore_class,
+				get_class( $verify_error ),
+				'verify() must refuse the archive-total-budget overrun with the exact same exception type as restore().'
+			);
+		}
+	}
+
+	/**
+	 * A verify() comfortably within every limit must still succeed.
+	 *
+	 * The regression guard the two tests above need: tightening verify()'s
+	 * structural and budget checks to match read_entry() must not turn into a
+	 * new source of false refusals against an ordinary, healthy archive.
+	 *
+	 * @return void
+	 */
+	public function test_verify_within_limits_succeeds(): void {
+		$limits = new ArchiveLimits( 100, 1048576, 100, 10485760 );
+		$runner = $this->make_runner_with_limits( $limits );
+		$plans  = array( self::file_plan( 'note.txt', 'hello world' ) );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+
+		$this->assertTrue( true, 'verify() must not refuse a comfortably-within-limits archive.' );
+	}
+
+	/**
+	 * Build an EntryPlan for a db_chunk whose declared byte_count is inflated
+	 * far past its actual SQL payload.
+	 *
+	 * The shape {@see \Pontifex\Manifest\DatabaseScanner}'s
+	 * `( $limit * $row_bytes ) + …` chunk-sizing estimate produces for the
+	 * last, under-filled chunk of a table: a db_chunk's declared size is a
+	 * prediction (rows-per-chunk times MySQL's own average row length), not a
+	 * measurement, and a real stock-WordPress database-only archive has been
+	 * measured declaring up to 3.8x its actual decoded total. Deliberately
+	 * NOT {@see self::db_chunk_plan()}, which always declares the SQL's own
+	 * true length — this helper is the only way to construct the drifted
+	 * shape a real scanner produces.
+	 *
+	 * @param string $table_name      Source table name.
+	 * @param int    $statement_count Number of statements in the chunk.
+	 * @param string $sql             SQL bytes (semicolon-newline terminated) — the entry's ACTUAL payload.
+	 * @param int    $declared_bytes  The (inflated) byte_count the header declares.
+	 * @return EntryPlan A plan ready to feed to ArchiveWriter.
+	 */
+	private static function inflated_db_chunk_plan( string $table_name, int $statement_count, string $sql, int $declared_bytes ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( 0, $table_name, $statement_count, $declared_bytes, 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) );
+	}
+
+	/**
+	 * The verify method must SUCCEED on an archive whose db_chunk entries
+	 * declare far more than they actually decode to — sized so that counting
+	 * the DECLARED total would breach the archive-total budget, while the
+	 * ACTUAL total (what restore() really writes) comfortably fits it.
+	 *
+	 * The regression this pins: RestoreRunner::verify() must never be
+	 * STRICTER than the restore() it vouches for. Before excluding db_chunks
+	 * from the running total, this exact archive would have been refused by
+	 * verify() (10,000 declared bytes against a 7,000-byte budget) while
+	 * restore() accepted it (its real ~77-byte payload is nowhere near the
+	 * budget) — an archive an operator could actually restore, reported
+	 * broken by the check meant to tell them whether they could. Both verbs
+	 * are driven here and BOTH must succeed, proving they still agree.
+	 *
+	 * @return void
+	 */
+	public function test_verify_succeeds_on_an_archive_whose_db_chunks_declare_far_more_than_they_actually_decode_to(): void {
+		$sql_postmeta   = "CREATE TABLE `wp_postmeta` (id INT);\n";
+		$sql_usermeta   = "CREATE TABLE `wp_usermeta` (id INT);\n";
+		$declared_each  = 5000;
+		$actual_total   = strlen( $sql_postmeta ) + strlen( $sql_usermeta );
+		$declared_total = 2 * $declared_each;
+
+		// The budget must sit at or above a single entry's declared size (or
+		// the per-entry ceiling — unaffected by this fix and still checked
+		// against every entry, including db_chunks — would refuse it before
+		// the archive-total accumulation is ever reached), but below the
+		// combined declared total, so counting declared sizes would breach it
+		// while counting the true, tiny actual total never comes close.
+		$budget = 7000;
+		$this->assertGreaterThanOrEqual( $declared_each, $budget, 'Fixture sanity: the budget must clear the per-entry ceiling.' );
+		$this->assertLessThanOrEqual( $budget, $actual_total, 'Fixture sanity: the true total must fit comfortably inside the budget.' );
+		$this->assertGreaterThan( $budget, $declared_total, 'Fixture sanity: the declared total must breach the budget.' );
+
+		$limits      = new ArchiveLimits( 50000, 1000000, 100000, $budget );
+		$fresh_plans = static fn (): array => array(
+			self::inflated_db_chunk_plan( 'wp_postmeta', 1, $sql_postmeta, $declared_each ),
+			self::inflated_db_chunk_plan( 'wp_usermeta', 1, $sql_usermeta, $declared_each ),
+		);
+
+		// Built twice, deliberately: an EntryPlan's stream is consumed the first
+		// time an archive is written from it, so verify() and restore() each need
+		// their own fresh set of plans/streams rather than sharing one.
+		$this->make_runner_with_limits( $limits )->verify( self::build_archive_stream( $fresh_plans() ) );
+		$this->assertTrue( true, 'verify() must accept an archive whose db_chunks merely declare an inflated size.' );
+
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner_with_limits( $limits, $db );
+		$runner->restore( self::build_archive_stream( $fresh_plans() ) );
+
+		$executed = implode( "\n", $db->executed_statements() );
+		$this->assertStringContainsString( 'wp_postmeta', $executed, 'restore() must actually have replayed the first table — proving this was not vacuously skipped.' );
+		$this->assertStringContainsString( 'wp_usermeta', $executed, 'restore() must actually have replayed the second table.' );
 	}
 
 	/**

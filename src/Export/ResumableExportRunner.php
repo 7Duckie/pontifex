@@ -27,6 +27,7 @@ use Pontifex\Archive\Writer\IncrementalArchiveWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\WordPress\WordPressContext;
@@ -133,11 +134,11 @@ final class ResumableExportRunner {
 	/**
 	 * Create the job for a new resumable export.
 	 *
-	 * @param ExportOptions $options    Where to write, plus signing and the unencrypted-archive reason. Encryption is refused.
-	 * @param string        $scan_root  Absolute path the file scan starts from.
-	 * @param string        $path_prefix Prefix for recorded paths ('' whole-site, 'wp-content' content-only).
-	 * @param string[]      $exclusions The exclusion patterns in force.
-	 * @param int           $now        Unix timestamp of creation.
+	 * @param ExportOptions                       $options     Where to write, plus signing and the unencrypted-archive reason. Encryption is refused.
+	 * @param string                              $scan_root   Absolute path the file scan starts from.
+	 * @param string                              $path_prefix Prefix for recorded paths ('' whole-site, 'wp-content' content-only).
+	 * @param array<int, ExclusionPattern|string> $exclusions The exclusion patterns in force, each carrying its own kind scope and anchoring (see {@see ExclusionPattern}); a bare string is accepted too, for backward compatibility, and treated as untagged (matches every entry kind, unanchored).
+	 * @param int                                 $now         Unix timestamp of creation.
 	 * @return Job The persisted pending job.
 	 * @throws RuntimeException If the export is encrypted (not resumable by design) or a job is already active.
 	 */
@@ -151,7 +152,7 @@ final class ResumableExportRunner {
 			'temp'                  => $options->output_path() . '.' . uniqid( 'pontifex-job-', true ) . '.part',
 			'scan_root'             => $scan_root,
 			'path_prefix'           => $path_prefix,
-			'exclusions'            => array_values( $exclusions ),
+			'exclusions'            => self::serialise_exclusion_patterns( $exclusions ),
 			'signed'                => null !== $options->signing(),
 			'reason'                => $options->encryption_disabled_reason(),
 			'scope'                 => null !== $options->scope() ? $options->scope()->to_array() : null,
@@ -159,9 +160,73 @@ final class ResumableExportRunner {
 			'bytes_written'         => 0,
 			'files_changed'         => 0,
 			'media_type_unresolved' => 0,
+			'exclusion_matches'     => array(),
 		);
 
 		return $this->job_store->create( Job::KIND_EXPORT, $payload, $now );
+	}
+
+	/**
+	 * Turn the exclusion patterns start() was given into the JSON-encodable
+	 * shape persisted onto the job payload.
+	 *
+	 * Only the pattern text and the kind scope are recorded — anchoring is
+	 * not, because it is fully determined by scope for every factory
+	 * {@see ExclusionPattern} exposes (untagged is never anchored; an
+	 * operator pattern always is), so {@see self::reconstruct_exclusion_patterns()}
+	 * recovers it from the scope alone. A bare string is accepted alongside
+	 * a tagged entry — untagged, matching every kind — so a caller that has
+	 * not been updated to supply tagged patterns keeps working exactly as
+	 * it did before tagging existed, rather than fataling.
+	 *
+	 * @param array<int, ExclusionPattern|string> $exclusions The exclusion patterns start() was given.
+	 * @return array<int, array{pattern: string, scope: string}> The persisted shape.
+	 */
+	private static function serialise_exclusion_patterns( array $exclusions ): array {
+		return array_map(
+			static function ( $entry ): array {
+				$pattern = $entry instanceof ExclusionPattern ? $entry : ExclusionPattern::untagged( (string) $entry );
+				return array(
+					'pattern' => $pattern->pattern(),
+					'scope'   => $pattern->scope(),
+				);
+			},
+			array_values( $exclusions )
+		);
+	}
+
+	/**
+	 * Rebuild the tagged exclusion patterns {@see self::serialise_exclusion_patterns()}
+	 * persisted onto the job payload.
+	 *
+	 * Each stored entry is either the tagged shape start() writes today — an
+	 * array with 'pattern' and 'scope' keys — or a bare string, kept
+	 * readable for a job a pre-tagging build of Pontifex may have started
+	 * and left interrupted across an upgrade; a bare string is treated as
+	 * untagged, exactly as an unscoped pattern always has been. This is
+	 * what makes the tagging survive the persisted round trip: what
+	 * start() is given is what every later tick reconstructs, including
+	 * the first.
+	 *
+	 * @param array<int, mixed> $stored The payload's 'exclusions' entries, as persisted.
+	 * @return ExclusionPattern[] The reconstructed tagged patterns.
+	 */
+	private static function reconstruct_exclusion_patterns( array $stored ): array {
+		$entries = array();
+		foreach ( $stored as $item ) {
+			if ( ! is_array( $item ) ) {
+				$entries[] = ExclusionPattern::untagged( (string) $item );
+				continue;
+			}
+			$pattern   = isset( $item['pattern'] ) ? (string) $item['pattern'] : '';
+			$scope     = isset( $item['scope'] ) ? (string) $item['scope'] : ExclusionPattern::SCOPE_ANY;
+			$entries[] = match ( $scope ) {
+				ExclusionPattern::SCOPE_FILE  => ExclusionPattern::operator_file( $pattern ),
+				ExclusionPattern::SCOPE_TABLE => ExclusionPattern::operator_table( $pattern ),
+				default                       => ExclusionPattern::untagged( $pattern ),
+			};
+		}
+		return $entries;
 	}
 
 	/**
@@ -225,9 +290,13 @@ final class ResumableExportRunner {
 
 		// Rebuild the manifest plan exactly as start() saw it. The scan is
 		// deterministic (sorted), so an unchanged tree yields the same sequence.
-		// Which halves to capture come from the recorded scope, so a files-only or
-		// db-only resume omits the same half on every tick (ADR 0016).
-		$rules            = ExclusionRules::from_array( array_map( 'strval', (array) $payload['exclusions'] ) );
+		// The exclusion patterns are rebuilt tagged (kind scope and anchoring
+		// intact, see ExclusionPattern) so a file pattern still cannot reach a
+		// database table after the persisted round trip — on every tick,
+		// including the first. Which halves to capture come from the recorded
+		// scope, so a files-only or db-only resume omits the same half on every
+		// tick (ADR 0016).
+		$rules            = ExclusionRules::from_tagged_patterns( self::reconstruct_exclusion_patterns( (array) $payload['exclusions'] ) );
 		$scope            = null !== ( $payload['scope'] ?? null ) ? Scope::from_array( (array) $payload['scope'] ) : null;
 		$include_files    = null === $scope || $scope->includes_files();
 		$include_database = null === $scope || $scope->includes_database();
@@ -251,7 +320,27 @@ final class ResumableExportRunner {
 		// progress surface reading the job mid-tick has its denominator from
 		// the first seconds of the first tick — the admin bar rides on it, and
 		// a scheduled job has no other writer for it.
-		if ( (int) ( $payload['total_bytes'] ?? 0 ) !== $stream->estimated_bytes() ) {
+		//
+		// The scan just completed ($builder->build() above) is the WHOLE tree
+		// for this tick — ManifestStream materialises every item at
+		// construction, and FileScanner/DatabaseScanner call $rules->matches()
+		// on every candidate during that scan. So $rules->match_counts() is
+		// already this tick's complete, whole-tree total, not an amount to add
+		// to anything earlier. The stored value is therefore OVERWRITTEN with
+		// this tick's counts, never added to them: every tick re-scans
+		// everything, so the LAST tick's counts are the true totals, and
+		// adding a tick's counts on top of what is already stored would
+		// multiply every count by however many ticks the export took.
+		$exclusion_matches         = $rules->match_counts();
+		$total_bytes_changed       = (int) ( $payload['total_bytes'] ?? 0 ) !== $stream->estimated_bytes();
+		$exclusion_matches_changed = ( $payload['exclusion_matches'] ?? array() ) !== $exclusion_matches;
+
+		// Set unconditionally so the counts ride along on $payload for every
+		// later save_progress() call this tick makes, even one triggered by
+		// the entry loop below rather than by either condition just checked.
+		$payload['exclusion_matches'] = $exclusion_matches;
+
+		if ( $total_bytes_changed || $exclusion_matches_changed ) {
 			$payload['total_bytes'] = $stream->estimated_bytes();
 			$job->set_payload( $payload );
 			$this->job_store->save( $job );

@@ -109,7 +109,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		global $wpdb;
 
 		$adapter     = new WpdbAdapter( $wpdb );
-		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$before_rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		$plans   = array( self::file_plan( 'wp-content/uploads/note.txt', "files-only content\n" ) );
 		$archive = self::build_partial_archive( $plans, Scope::files_only( array() ) );
@@ -123,7 +123,7 @@ final class PartialScopeRestoreTest extends TestCase {
 
 		// The database half was absent, so it must be exactly as it was.
 		$this->assertSame( 1, $adapter->row_count( $this->scratch_table ), 'A files-only restore must not touch the database.' );
-		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 ), 'The live table is byte-identical after a files-only restore.' );
+		$this->assertSame( $before_rows, $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql(), 'The live table is byte-identical after a files-only restore.' );
 	}
 
 	/**
@@ -142,7 +142,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- Integration test: mutate before restore to prove the replay.
 		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET label = %s WHERE id = %d', $this->scratch_table, 'changed', 1 ) );
 
-		$sql   = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$sql   = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 		$plans = array( self::db_chunk_plan( $this->scratch_table, substr_count( $sql, ";\n" ), $sql ) );
 		// Re-dump AFTER building the chunk so the archive carries the 'changed' row;
 		// then set the live row back so the restore visibly re-applies 'changed'.
@@ -153,7 +153,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		$this->runner()->restore( $archive );
 
 		// The database half was restored: the row is back to 'changed'.
-		$rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$rows = $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 		$this->assertStringContainsString( 'changed', $rows, 'A db-only restore replayed the archived table.' );
 
 		// The file half was absent, so the pre-existing file must survive untouched.
@@ -176,7 +176,7 @@ final class PartialScopeRestoreTest extends TestCase {
 		global $wpdb;
 
 		$adapter = new WpdbAdapter( $wpdb );
-		$sql     = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$sql     = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 		// A files-only scope, but the manifest carries a database chunk — a lie.
 		$plans   = array( self::db_chunk_plan( $this->scratch_table, substr_count( $sql, ";\n" ), $sql ) );
 		$archive = self::build_partial_archive( $plans, Scope::files_only( array() ) );

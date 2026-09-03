@@ -182,7 +182,7 @@ final class WpdbAdapterTest extends TestCase {
 			)
 		);
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 2 );
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 2 )->sql();
 
 		$this->assertStringContainsString( 'INSERT INTO `wp_posts`', $sql );
 		$this->assertStringContainsString( '`id`, `title`', $sql );
@@ -192,22 +192,33 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
-	 * The dump_table_rows method must return an empty string when no rows match.
+	 * The dump_table_rows method must return an empty SQL string and a null end
+	 * key when $limit is 0.
+	 *
+	 * A window explicitly asked to contain no rows is the one legitimate case
+	 * left for an empty-string return; a $limit > 0 window that comes back
+	 * empty is now treated as a failed read (see the two tests below) rather
+	 * than as the end of the table.
 	 *
 	 * @return void
 	 */
-	public function test_dump_table_rows_returns_empty_string_for_no_rows(): void {
+	public function test_dump_table_rows_returns_empty_string_when_limit_is_zero(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'prepare' )->willReturn( '' );
 		$wpdb->method( 'get_results' )->willReturn( array() );
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 100000, 10 );
+		$result = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 100000, 0 );
 
-		$this->assertSame( '', $sql );
+		$this->assertSame( '', $result->sql() );
+		$this->assertNull( $result->end_key(), 'A window that emitted no rows must have a null end key.' );
 	}
 
 	/**
 	 * The dump_table_rows method must throw when $wpdb signals an error.
+	 *
+	 * A failed $wpdb->get_results() returns an empty array, never null, so
+	 * the mock reflects that real shape rather than the null a stale guard
+	 * here once checked for and which never actually fired.
 	 *
 	 * @return void
 	 */
@@ -215,9 +226,34 @@ final class WpdbAdapterTest extends TestCase {
 		$wpdb             = $this->mock_wpdb();
 		$wpdb->last_error = 'Lost connection mid-query';
 		$wpdb->method( 'prepare' )->willReturn( '' );
-		$wpdb->method( 'get_results' )->willReturn( null );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 
 		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+	}
+
+	/**
+	 * The dump_table_rows method must throw when a planned window returns no rows.
+	 *
+	 * Every window this method is asked for lies within a previously-read
+	 * row_count(), so a $limit > 0 window with no last_error signalled and an
+	 * empty result is a failed read, not the end of the table — the defect
+	 * this job closes. The former `null === $rows` guard never fired here,
+	 * because a failed get_results() returns an empty array, not null, and
+	 * the read fell straight through to a silent empty-string return that
+	 * DatabaseScanner::build_chunk() read as "this table is finished".
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_throws_when_a_planned_window_returns_no_rows(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturn( '' );
+		$wpdb->method( 'get_results' )->willReturn( array() );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
 	}
@@ -239,7 +275,7 @@ final class WpdbAdapterTest extends TestCase {
 			)
 		);
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 );
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 )->sql();
 
 		$this->assertStringContainsString( 'NULL', $sql );
 	}
@@ -258,7 +294,7 @@ final class WpdbAdapterTest extends TestCase {
 			)
 		);
 
-		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 );
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 )->sql();
 
 		$this->assertStringContainsString( 'VALUES (42)', $sql );
 	}
@@ -498,10 +534,8 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
-	 * Row dumps must be ordered by the primary key so pagination is stable.
-	 *
-	 * Without an ORDER BY, MySQL guarantees no row order, so consecutive OFFSET
-	 * windows can overlap or leave gaps — the root of a real live-site incident.
+	 * A single-column primary key's first window must be ordered by it, with
+	 * no WHERE and no OFFSET — a pure keyset seek, never a scan.
 	 *
 	 * @return void
 	 */
@@ -524,13 +558,16 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array( array( 'ID' => 1 ) );
 			}
 		);
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
 
-		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d OFFSET %d', $prepared, 'The row dump must carry an ORDER BY over the primary key.' );
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `ID` LIMIT %d', $prepared, 'The first window of a keyed table must carry an ORDER BY over the primary key and no OFFSET.' );
 	}
 
 	/**
@@ -566,13 +603,312 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array(
+					array(
+						'object_id'        => 1,
+						'term_taxonomy_id' => 2,
+					),
+				);
 			}
 		);
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_term_relationships', 0, 10 );
 
-		$this->assertContains( 'SELECT * FROM %i ORDER BY `object_id`, `term_taxonomy_id` LIMIT %d OFFSET %d', $prepared );
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `object_id`, `term_taxonomy_id` LIMIT %d', $prepared );
+	}
+
+	/**
+	 * A single-column key's later window must carry a plain `col > val` WHERE,
+	 * never OFFSET.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_uses_a_plain_comparison_for_a_single_column_key(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array( array( 'ID' => 7 ) );
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10, array( 'ID' => 5 ) );
+
+		$this->assertContains( 'SELECT * FROM %i WHERE `ID` > %s ORDER BY `ID` LIMIT %d', $prepared, 'A single-column key must use a plain comparison, never OFFSET.' );
+	}
+
+	/**
+	 * A composite key's later window must carry a row-constructor WHERE, so
+	 * the index is still used for the comparison.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_uses_a_row_constructor_for_a_composite_key(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'object_id',
+							'Seq_in_index' => '1',
+						),
+						array(
+							'Column_name'  => 'term_taxonomy_id',
+							'Seq_in_index' => '2',
+						),
+					);
+				}
+				return array(
+					array(
+						'object_id'        => 4,
+						'term_taxonomy_id' => 9,
+					),
+				);
+			}
+		);
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows(
+			'wp_term_relationships',
+			0,
+			10,
+			array(
+				'object_id'        => 1,
+				'term_taxonomy_id' => 2,
+			)
+		);
+
+		$this->assertContains(
+			'SELECT * FROM %i WHERE (`object_id`, `term_taxonomy_id`) > (%s, %s) ORDER BY `object_id`, `term_taxonomy_id` LIMIT %d',
+			$prepared,
+			'A composite key must use a row-constructor comparison so the index is still used.'
+		);
+	}
+
+	/**
+	 * A table with no primary key must ignore $after_key entirely and keep
+	 * LIMIT/OFFSET windowing.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_without_a_primary_key_ignores_after_key(): void {
+		$wpdb     = $this->mock_wpdb();
+		$prepared = array();
+		$wpdb->method( 'prepare' )->willReturnCallback(
+			static function ( string $query ) use ( &$prepared ): string {
+				$prepared[] = $query;
+				return $query;
+			}
+		);
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array();
+				}
+				return array( array( 'colour' => 'red' ) );
+			}
+		);
+		$wpdb->method( 'get_col' )->willReturn( array( 'colour' ) );
+
+		$result = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_keyless', 20, 10, array( 'colour' => 'blue' ) );
+
+		$this->assertContains( 'SELECT * FROM %i ORDER BY `colour` LIMIT %d OFFSET %d', $prepared, 'A table with no primary key must keep plain LIMIT/OFFSET even when $after_key is supplied.' );
+		$this->assertNull( $result->end_key(), 'A table with no primary key must never report an end key.' );
+	}
+
+	/**
+	 * The keyset end key must be the last emitted row's primary-key values.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_returns_the_end_key_of_the_last_row(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturnCallback( static fn ( string $query ): string => $query );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array( array( 'ID' => 3 ), array( 'ID' => 7 ), array( 'ID' => 12 ) );
+			}
+		);
+
+		$result = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+
+		$this->assertSame( array( 'ID' => 12 ), $result->end_key(), 'The end key must be the LAST row emitted, not the first.' );
+	}
+
+	/**
+	 * A composite key's end key must carry every key column's value from the last row.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_returns_the_composite_end_key_of_the_last_row(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturnCallback( static fn ( string $query ): string => $query );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'object_id',
+							'Seq_in_index' => '1',
+						),
+						array(
+							'Column_name'  => 'term_taxonomy_id',
+							'Seq_in_index' => '2',
+						),
+					);
+				}
+				return array(
+					array(
+						'object_id'        => 1,
+						'term_taxonomy_id' => 2,
+					),
+					array(
+						'object_id'        => 4,
+						'term_taxonomy_id' => 9,
+					),
+				);
+			}
+		);
+
+		$result = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_term_relationships', 0, 10 );
+
+		$this->assertSame(
+			array(
+				'object_id'        => 4,
+				'term_taxonomy_id' => 9,
+			),
+			$result->end_key()
+		);
+	}
+
+	/**
+	 * Job 10's guards must still fire on the keyset path: a signalled error throws.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_throws_on_error(): void {
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = 'Lost connection mid-query';
+		$wpdb->method( 'prepare' )->willReturnCallback( static fn ( string $query ): string => $query );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+	}
+
+	/**
+	 * Job 10's guards must still fire on the keyset path: a planned window
+	 * that returns no rows is a failed read, not the end of the table.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_throws_when_a_planned_window_returns_no_rows(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturnCallback( static fn ( string $query ): string => $query );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'ID',
+							'Seq_in_index' => '1',
+						),
+					);
+				}
+				return array();
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_posts' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 10 );
+	}
+
+	/**
+	 * A cursor missing one of the table's key columns must be refused rather
+	 * than silently bound as an empty string — binding '' would read as
+	 * `id > 0` for an integer column and restart the window near the
+	 * beginning of the table instead of continuing from the real cursor.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_by_keyset_throws_when_after_key_is_missing_a_column(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'prepare' )->willReturnCallback( static fn ( string $query ): string => $query );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(
+						array(
+							'Column_name'  => 'object_id',
+							'Seq_in_index' => '1',
+						),
+						array(
+							'Column_name'  => 'term_taxonomy_id',
+							'Seq_in_index' => '2',
+						),
+					);
+				}
+				return array(
+					array(
+						'object_id'        => 4,
+						'term_taxonomy_id' => 9,
+					),
+				);
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'wp_term_relationships' );
+
+		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_term_relationships', 0, 10, array( 'object_id' => 1 ) );
 	}
 
 	/**
@@ -591,7 +927,22 @@ final class WpdbAdapterTest extends TestCase {
 				return $query;
 			}
 		);
-		$wpdb->method( 'get_results' )->willReturn( array() );
+		$wpdb->method( 'get_results' )->willReturnCallback(
+			static function ( string $sql ): array {
+				if ( str_contains( $sql, 'SHOW KEYS' ) ) {
+					return array(); // No primary key: falls back to SHOW COLUMNS.
+				}
+				// The row read itself: a non-empty result, since this test's
+				// $limit is 10 and an empty result for a planned window now
+				// throws (this test is about the ORDER BY clause, not that).
+				return array(
+					array(
+						'colour' => 'red',
+						'shape'  => 'circle',
+					),
+				);
+			}
+		);
 		$wpdb->method( 'get_col' )->willReturn( array( 'colour', 'shape' ) );
 
 		( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_keyless', 0, 10 );
@@ -626,7 +977,10 @@ final class WpdbAdapterTest extends TestCase {
 						),
 					);
 				}
-				return array();
+				// The row read itself: a non-empty result, since every call
+				// below uses $limit = 10 and an empty result for a planned
+				// window now throws (this test is about SHOW KEYS caching).
+				return array( array( 'ID' => 1 ) );
 			}
 		);
 

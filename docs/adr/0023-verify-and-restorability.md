@@ -1,7 +1,12 @@
 # 0023 — verify answers for the archive, a dry run answers for the restore
 
-- **Status:** Accepted, 2026-08-05. Implemented; shipping version to be set at the cut (v1.1.0 on the reading below).
-- **Deciders:** 7Duckie (raised by the hardening arc; the last of its open findings).
+- **Status:** Accepted, 2026-08-05. Implemented and shipped in v1.1.0. Amended
+  2026-08-12 (the third outcome had no exception route) and 2026-08-13 (the
+  check was handed the wrong budget, and skipped four structural checks) — see
+  the Amendments.
+- **Deciders:** 7Duckie (raised by the hardening arc; the last of its open
+  findings. Both amendments: raised by the 2026-08-09 audit and stress
+  campaign).
 
 ## Context
 
@@ -127,3 +132,133 @@ verify collecting a passphrase it currently never needs. The preflight report is
 advice, never the guard: `restore()` runs every one of these checks again and
 still fails closed, which is what makes it safe for the reporting path to stay
 quiet when a check cannot be evaluated.
+
+## Amendment — 2026-08-12: the third outcome was written down, not built
+
+This ADR called itself "the last of" the hardening arc's open findings. It was
+not, and this amendment says so plainly rather than letting the record imply
+otherwise.
+
+**New information:** "Three outcomes, not two" above describes a bucket for
+"the check reached no decision", reported as neither sound, refused, nor
+broken — and states that "sorting reads the exception's type". Both sentences
+were aspirations this decision recorded, not a route this decision's own
+implementation actually built. `RestoreController::verify_gate()` had exactly
+two ways to leave "OK": a caught `Throwable` returned `GATE_BROKEN`
+unconditionally, and `GATE_REFUSED` was reached only by inspecting the
+preflight report afterwards — never by any exception, of any type. A
+`HostCannotComply` thrown mid-walk is a `Throwable`, so it landed on
+`GATE_BROKEN` by the same construction as a genuinely corrupt archive.
+`Cli\VerifyCommand`'s verify path and `Admin\VerifyController`'s verify action
+had the identical shape. The third bucket this ADR describes in prose was
+therefore unreachable by any code path that existed: nothing had been built
+for an exception to route to, so "sorting reads the exception's type" was
+true only for the two-way REFUSED/BROKEN split this ADR did implement, never
+for the three-way split its own prose promised.
+
+This was found, not reasoned to: a real host with a `memory_limit` of 40 MB
+— WordPress's own default — reported a perfectly sound archive as "Not
+verified — this backup is broken." The identical file, checked from the
+command line on the same machine with no such limit, verified sound. That is
+exactly the failure this ADR's "This host cannot restore it right now" bucket
+was written to prevent, on the operation the whole hardening arc was cut to
+make trustworthy.
+
+**Amended decision:** the missing route now exists. `RestoreController::verify_gate()`,
+`Admin\VerifyController` and `Cli\VerifyCommand` each catch `HostCannotComply`
+ahead of their generic `Throwable` catch and report a fourth outcome, **could
+not check** — a
+deliberately different name from this ADR's own "the check reached no
+decision", because a *caught* `HostCannotComply` is a stronger, narrower claim
+than any unclassified failure: this is a check that specifically hit a host
+condition, not merely a check that failed to reach one of the other three
+verdicts. `Cli\VerifyCommand` halts **2**, a new exit code distinct from the
+`0`/`1` this ADR shipped, so a script gating on it can tell "unknown" apart
+from "bad" rather than folding a host problem into the same bucket as a
+genuinely broken or refused archive. `Admin\VerifyController` reports the
+equivalent outcome on the Verify screen, and `Admin\RestoreController` reports
+it on the Restore screen for both a forward restore and a rollback — all three
+worded so as never to say "broken" and never to imply the backup should be
+discarded. `RestoreController::restore()` also never takes a safety archive
+against a backup that could not be checked in the first place, matching the
+ordinary preflight-refusal behaviour this ADR already established (rollback
+never takes one regardless of gate outcome, so this is specific to a forward
+restore). Everything else in this ADR stands, including the two-way
+REFUSED/BROKEN split it did build and the reasoning behind it.
+
+**The lesson this amendment exists to record:** a decision document that
+describes an outcome in prose is not evidence the outcome is reachable. The
+next claim that a divergence is "closed" should be checked against the actual
+catch sites and their fall-through default, not against what this document
+says they do.
+
+## Amendment — 2026-08-13: the budget the check was handed was never the one the restore enforces
+
+The lesson recorded immediately above applied a second time, to a second half of
+the same claim. This ADR set out to close the verify/restore divergence; a
+whole further family of it survived, and this amendment records it rather than
+leaving the "closed" status to imply otherwise.
+
+**New information:** `EntryReader` has two entry points that are supposed to ask
+the same structural questions — `read_entry()`, which decodes, and
+`verify_entry()`, which only hashes. They did not, because one parameter name
+meant two different things. In `read_entry()`, `$max_decoded_bytes` is this
+build's compiled-in per-entry ceiling, applied to **every** entry, with the
+memory-derived budget passed separately and applied only to shapes that must be
+buffered whole. In `verify_entry()`, the parameter *of that same name* received
+the **memory** budget from `RestoreRunner::verify()`, and was then gated on
+`! streams_decoded_payload( … )` — the condition `read_entry()` uses for the
+memory budget, not for the ceiling. The two were exact inverses, and the comment
+above the check claimed it mirrored `read_entry()`.
+
+Because `streams_decoded_payload()` is true for every plain unencrypted file
+entry, that gate was never satisfied in the common case: **no verification could
+ever refuse an oversized file.** `RestoreRunner::verify()` also computed no
+archive-total budget at all, where `walk()` computes one and enforces it as it
+goes. Four structural checks `read_entry()` performs — the tighter record
+framing, the codec-id cross-check between manifest and record, the
+encryption-family check, and the registered-codec check — had no counterpart on
+the verify path either, so an archive contradicting itself in any of those four
+ways verified sound and was refused by the restore.
+
+**Amended decision:** `verify_entry()` now takes the same two budgets
+`read_entry()` takes and applies each on the same condition — the ceiling to
+every entry, the memory budget only to shapes buffered whole — and performs the
+four structural checks alongside the kind cross-check it already made. It
+returns the header's declared decoded size so a caller can keep a running total
+without decoding. `RestoreRunner::verify()` computes the per-entry limit and the
+archive-total budget exactly as `walk()` does. `assert_kind_agrees()`, until now
+the only structural check in this reader outside ADR 0022's taxonomy, raises
+`ArchiveNotTrustworthy` rather than a bare `RuntimeException`; the verdict it
+produces is unchanged.
+
+**One asymmetry is deliberate, and it is the opposite of a gap.** `walk()`
+accumulates each entry's *actual* decoded size; a verification never decodes, so
+it has only the *declared* size. For a file entry that declared size is
+trustworthy — the writer corrects it at write time and the reader enforces
+declared equals actual on both decode paths. For a `db_chunk` it is not: it is a
+prediction, `DatabaseScanner` sizing a chunk as rows-per-chunk times MySQL's own
+`Avg_row_length`, and the last chunk of every table under-fills it. Measured on
+a stock WordPress database-only archive, the declared total ran **3.8× the
+actual**, with individual chunks as far out as **58×**. Accumulating those
+predictions would have made the check *stricter* than the restore it vouches
+for — able to refuse an archive a restore would accept, which is this ADR's own
+failure mode with the sign flipped. Only file entries are therefore accumulated,
+making the running total a lower bound: the check can under-refuse relative to a
+restore, never over-refuse. A `db_chunk` declaring an enormous size is still
+caught by the per-entry ceiling, which applies to every entry regardless of
+kind, and one that inflates only at decode time is still caught by `walk()`,
+which sums real sizes.
+
+**What a verification still does not prove**, stated here so it is not
+rediscovered as a finding a third time: a header that *understates* its true
+decoded size passes verification and is caught only when a restore decodes it.
+That is inherent in never decoding, not an oversight.
+
+**The lesson this amendment exists to record:** the first amendment was found by
+running a real host; this one was found by reading two methods side by side and
+noticing that one parameter carried two meanings. Neither was caught by the
+three quality gates, and the corrected implementation passed all three while
+still containing the `db_chunk` over-refusal — which was found only by measuring
+declared against actual on a real archive. A shared parameter name is not a
+shared contract.

@@ -17,6 +17,7 @@ use RuntimeException;
 use UnexpectedValueException;
 use SplFileInfo;
 use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Walks a directory tree and enumerates everything within it.
@@ -350,6 +351,7 @@ final class FileScanner {
 	 * @param SplFileInfo $info          The iterator's view of the item.
 	 * @return ScannedEntry A fully-populated value object.
 	 * @throws RuntimeException If the item cannot be stat()ed or, for symlinks, the link target cannot be read.
+	 * @throws HostCannotComply If readlink() is not available on this host to read a symlink's target.
 	 */
 	private static function build_scanned_entry(
 		string $kind,
@@ -361,6 +363,13 @@ final class FileScanner {
 		// SplFileInfo's getSize/getMTime/getPerms can follow links in some PHP configurations.
 		// We explicitly call lstat() to be sure we measure the link itself.
 		if ( EntryHeader::KIND_SYMLINK === $kind ) {
+			if ( ! function_exists( 'readlink' ) ) {
+				throw new HostCannotComply(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $absolute_path is reported verbatim for diagnostic context; exception path, not HTML output.
+					sprintf( 'Could not read the symbolic link "%s": readlink() is not available on this host, commonly because it is listed in disable_functions. A site that contains symbolic links cannot be backed up until it is enabled.', $absolute_path )
+				);
+			}
+
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readlink -- Filesystem read for archive enumeration; WP_Filesystem has no equivalent.
 			$target = readlink( $absolute_path );
 			if ( false === $target ) {

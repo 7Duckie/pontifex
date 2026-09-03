@@ -1,0 +1,10 @@
+{
+	"core": "WordPress/WordPress#7.0.3",
+	"phpVersion": "8.3",
+	"port": 8912,
+	"testsEnvironment": false,
+	"mappings": {
+		"wp-content/plugins/pontifex": "./build/pkg",
+		"wp-content/pontifex-src": "./build/src"
+	}
+}

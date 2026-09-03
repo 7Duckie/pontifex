@@ -142,6 +142,46 @@ is untrusted.
   containing more than one statement) incidentally defeated that same driver
   protection, letting a smuggled statement run against the live database
   outside the chunk's declared table.
+- The destination table identifier itself — the value every statement above
+  is anchored to — is, in turn, confined to the live database's own table
+  prefix before it is used for anything at all. On shared hosting, several
+  WordPress installations often occupy one database, kept apart only by
+  each site's own table prefix (`wpa_options`, `wpb_options`); prior to this
+  check, the identifier the restore engine "constructs" was, whenever no
+  cross-prefix rewrite was active (at the time, the ordinary case for every
+  restore path — only `wp pontifex import` ever wired one up at all), simply
+  the archive's own header value, verbatim — fully attacker-controlled. A
+  `db_chunk` naming a neighbouring
+  site's table would stage under that name and then be installed over the
+  real table by the atomic cut-over `RENAME`, confirmed against a live
+  database with no undo available: the pre-restore safety archive backs up
+  only this site's own tables. `DatabaseWriter` now refuses any destination
+  identifier that does not begin with the live connection's own prefix
+  before it is staged, and the same prefix scopes the best-effort sweep of a
+  crashed earlier run's leftover tables, so that sweep cannot drop a
+  neighbouring site's own `pontifexstg_*` / `pontifexold_*` tables either.
+  Skipped only when the live connection reports no prefix at all (an
+  unconfigured `$wpdb`), mirroring the identical skip `WpdbAdapter`'s
+  export-side scope guard already uses. Every restore path now wires a
+  cross-prefix rewrite the same way — `wp pontifex import`, `wp pontifex
+  rollback`, and the admin Restore screen alike — so this confinement is no
+  longer reached only via the CLI. The SOURCE prefix a rewrite strips before
+  gluing on the destination's own is taken from the archive's provenance when
+  it carries one (every archive written by a current Pontifex does), or,
+  failing that, derived from the archive's own `db_chunk` table names: the
+  shared leading run of every table the archive declares, discarding any
+  candidate that a single table does not share, so a plugin table ending in a
+  core suffix (`wp_myplugin_options`) cannot narrow the derived prefix
+  (`Pontifex\Restore\SourceTablePrefix`). Both the recorded and the derived
+  value are archive-supplied and untrusted, and neither is ever used as the
+  identifier's DESTINATION prefix — only as the leading run stripped from the
+  archive's own table name before this site's own prefix, never
+  archive-supplied, is glued on in its place. A wrong or hostile source
+  prefix therefore only changes how many of the archive's own leading
+  characters are discarded before the rewrite; it cannot make the result land
+  outside the destination prefix the confinement above enforces, which is why
+  deriving it from archive-supplied names is safe in a way trusting an
+  archive-supplied value as the destination prefix itself never was.
 - The opening-bytes shape check is deliberately blind to a `CREATE TABLE`
   statement's body — a real table can legitimately carry a `FOREIGN KEY`
   reference there — and that silence was itself a confirmed vulnerability: a
@@ -339,10 +379,12 @@ cannot be used to escape that directory.
 
 That gate covers the ajax actions, not a direct web request for the
 archive file itself. The backups directory is additionally guarded by a
-deny-all `.htaccess` and an `index.php` written best-effort when the
-directory is created (`ProtectedDirectory`) — an Apache-only mechanism:
-it does nothing on nginx, and every write is silently swallowed on
-failure, so it cannot be relied on. A backup's filename is a predictable
+deny-all `.htaccess` and an `index.php`, checked and repaired every time
+the directory is ensured (`ProtectedDirectory`) — repair only replaces a
+file that is a truncated or empty write Pontifex made itself, never one
+it did not write. It remains an Apache-only mechanism: it does nothing on
+nginx, and every write is silently swallowed on failure, so it cannot be
+relied on. A backup's filename is a predictable
 UTC timestamp (`pontifex-backup-<UTC>.wpmig`), so on nginx, or on any
 host where those guard writes failed, an unauthenticated request for
 that filename under `wp-content/pontifex/backups/` can reach the

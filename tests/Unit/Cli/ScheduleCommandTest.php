@@ -174,11 +174,12 @@ final class ScheduleCommandTest extends TestCase {
 			->with(
 				ScheduleStore::OPTION,
 				array(
-					'enabled'    => true,
-					'frequency'  => Schedule::FREQUENCY_WEEKLY,
-					'hour'       => 4,
-					'retention'  => 5,
-					'exclusions' => array(),
+					'enabled'          => true,
+					'frequency'        => Schedule::FREQUENCY_WEEKLY,
+					'hour'             => 4,
+					'retention'        => 5,
+					'exclusions'       => array(),
+					'table_exclusions' => array(),
 				)
 			);
 
@@ -223,11 +224,12 @@ final class ScheduleCommandTest extends TestCase {
 			->with(
 				ScheduleStore::OPTION,
 				array(
-					'enabled'    => true,
-					'frequency'  => Schedule::FREQUENCY_DAILY,
-					'hour'       => 3,
-					'retention'  => 3,
-					'exclusions' => array( 'wp-content/cache/**', 'wp_actionscheduler_*' ),
+					'enabled'          => true,
+					'frequency'        => Schedule::FREQUENCY_DAILY,
+					'hour'             => 3,
+					'retention'        => 3,
+					'exclusions'       => array( 'wp-content/cache/**', 'wp_actionscheduler_*' ),
+					'table_exclusions' => array(),
 				)
 			);
 
@@ -274,6 +276,165 @@ final class ScheduleCommandTest extends TestCase {
 				'frequency' => 'daily',
 				'hour'      => '3',
 				'exclude'   => '/[unterminated/',
+			)
+		);
+	}
+
+	/**
+	 * A bare `--exclude` (no value) is refused rather than silently clearing
+	 * the stored list. WP-CLI passes `true` for a bare flag, and that must
+	 * not be mistaken for "clear the patterns" — clearing is instead
+	 * expressed with an explicit empty value, `--exclude=`.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_a_bare_exclude_flag_is_refused(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )
+			->once()
+			->with( Mockery::pattern( '/--exclude flag needs a value/' ) )
+			->andThrow( new RuntimeException( 'halt' ) );
+
+		$context = $this->context_mock(
+			array(
+				'enabled'    => false,
+				'frequency'  => 'daily',
+				'hour'       => 3,
+				'retention'  => 3,
+				'exclusions' => array( 'wp-content/cache/**' ),
+			)
+		);
+		$context->shouldNotReceive( 'save_option' );
+
+		$command = new ScheduleCommand( $context );
+
+		$this->expectExceptionMessage( 'halt' );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency' => 'daily',
+				'hour'      => '3',
+				'exclude'   => true,
+			)
+		);
+	}
+
+	/**
+	 * A bare `--exclude-table` (no value) is refused the same way as a bare `--exclude`.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_a_bare_exclude_table_flag_is_refused(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )
+			->once()
+			->with( Mockery::pattern( '/--exclude-table flag needs a value/' ) )
+			->andThrow( new RuntimeException( 'halt' ) );
+
+		$context = $this->context_mock(
+			array(
+				'enabled'          => false,
+				'frequency'        => 'daily',
+				'hour'             => 3,
+				'retention'        => 3,
+				'table_exclusions' => array( 'wp_actionscheduler_*' ),
+			)
+		);
+		$context->shouldNotReceive( 'save_option' );
+
+		$command = new ScheduleCommand( $context );
+
+		$this->expectExceptionMessage( 'halt' );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency'     => 'daily',
+				'hour'          => '3',
+				'exclude-table' => true,
+			)
+		);
+	}
+
+	/**
+	 * `set --exclude-table` stores the comma-split patterns as table
+	 * exclusions, kept apart from the file-scoped `exclusions` list.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_exclude_table_stores_the_patterns(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+
+		$context = $this->context_mock(
+			array(
+				'enabled'   => false,
+				'frequency' => 'daily',
+				'hour'      => 3,
+				'retention' => 3,
+			)
+		);
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				ScheduleStore::OPTION,
+				array(
+					'enabled'          => true,
+					'frequency'        => Schedule::FREQUENCY_DAILY,
+					'hour'             => 3,
+					'retention'        => 3,
+					'exclusions'       => array(),
+					'table_exclusions' => array( 'wp_actionscheduler_*', 'wp_options' ),
+				)
+			);
+
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( ScheduleStore::CRON_HOOK );
+		Functions\expect( 'wp_schedule_event' )->once();
+
+		$command = new ScheduleCommand( $context );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency'     => 'daily',
+				'hour'          => '3',
+				'exclude-table' => 'wp_actionscheduler_*, wp_options',
+			)
+		);
+
+		$this->assertTrue( true );
+	}
+
+	/**
+	 * `set --exclude-table` with a malformed regex is refused, mirroring `--exclude`'s own validation.
+	 *
+	 * @return void
+	 */
+	public function test_set_with_an_invalid_exclude_table_pattern_is_refused(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )
+			->once()
+			->with( Mockery::pattern( '/not valid/' ) )
+			->andThrow( new RuntimeException( 'halt' ) );
+
+		$context = $this->context_mock();
+		$context->shouldNotReceive( 'save_option' );
+
+		$command = new ScheduleCommand( $context );
+
+		$this->expectExceptionMessage( 'halt' );
+
+		$command(
+			array( 'set' ),
+			array(
+				'frequency'     => 'daily',
+				'hour'          => '3',
+				'exclude-table' => '/[unterminated/',
 			)
 		);
 	}
@@ -332,6 +493,83 @@ final class ScheduleCommandTest extends TestCase {
 	}
 
 	/**
+	 * `show` names both stored exclusion lists, labelled by kind, when patterns are set.
+	 *
+	 * This is the one place an operator can see what an unattended backup
+	 * will leave out before trusting it — file and table patterns are
+	 * genuinely different things since the exclusion split, so the readout
+	 * must say which list is which rather than merging them.
+	 *
+	 * @return void
+	 */
+	public function test_show_prints_both_exclusion_lists_when_set(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )
+			->once()
+			->with( 'File exclusions: wp-content/cache/**, wp_actionscheduler_log.php.' );
+		$wp_cli->shouldReceive( 'log' )
+			->once()
+			->with( 'Table exclusions: wp_actionscheduler_*.' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+
+		Functions\expect( 'wp_next_scheduled' )->once()->with( ScheduleStore::CRON_HOOK )->andReturn( time() + 3600 );
+
+		$command = new ScheduleCommand(
+			$this->context_mock(
+				array(
+					'enabled'          => true,
+					'frequency'        => 'daily',
+					'hour'             => 3,
+					'retention'        => 3,
+					'exclusions'       => array( 'wp-content/cache/**', 'wp_actionscheduler_log.php' ),
+					'table_exclusions' => array( 'wp_actionscheduler_*' ),
+				)
+			)
+		);
+
+		$command( array( 'show' ), array() );
+
+		$this->assertTrue( true );
+	}
+
+	/**
+	 * `show` says plainly when a list is empty, rather than printing nothing.
+	 *
+	 * @return void
+	 */
+	public function test_show_reports_empty_exclusion_lists_sensibly(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )
+			->once()
+			->with( 'File exclusions: none — an unattended backup excludes no files beyond the curated defaults.' );
+		$wp_cli->shouldReceive( 'log' )
+			->once()
+			->with( 'Table exclusions: none — an unattended backup excludes no database tables beyond the curated defaults.' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+
+		Functions\expect( 'wp_next_scheduled' )->once()->with( ScheduleStore::CRON_HOOK )->andReturn( time() + 3600 );
+
+		$command = new ScheduleCommand(
+			$this->context_mock(
+				array(
+					'enabled'   => true,
+					'frequency' => 'daily',
+					'hour'      => 3,
+					'retention' => 3,
+				)
+			)
+		);
+
+		$command( array( 'show' ), array() );
+
+		$this->assertTrue( true );
+	}
+
+	/**
 	 * `off` disables the schedule but keeps its settings for a later re-enable.
 	 *
 	 * @return void
@@ -354,11 +592,62 @@ final class ScheduleCommandTest extends TestCase {
 			->with(
 				ScheduleStore::OPTION,
 				array(
-					'enabled'    => false,
-					'frequency'  => Schedule::FREQUENCY_WEEKLY,
-					'hour'       => 5,
-					'retention'  => 4,
-					'exclusions' => array(),
+					'enabled'          => false,
+					'frequency'        => Schedule::FREQUENCY_WEEKLY,
+					'hour'             => 5,
+					'retention'        => 4,
+					'exclusions'       => array(),
+					'table_exclusions' => array(),
+				)
+			);
+
+		Functions\expect( 'wp_clear_scheduled_hook' )->once()->with( ScheduleStore::CRON_HOOK );
+		Functions\expect( 'wp_schedule_event' )->never();
+
+		$command = new ScheduleCommand( $context );
+
+		$command( array( 'off' ), array() );
+
+		$this->assertTrue( true );
+	}
+
+	/**
+	 * `off` keeps BOTH exclusion lists, not just the file-scoped one.
+	 *
+	 * The two lists are stored and validated separately since the exclusion
+	 * split, so a rebuild that forwards only `exclusions()` would silently
+	 * drop `table_exclusions()` to its empty default — the operator's stored
+	 * table-exclusion patterns vanish the moment the schedule is turned off,
+	 * even though the command promises settings are kept.
+	 *
+	 * @return void
+	 */
+	public function test_off_keeps_both_exclusion_lists(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+
+		$context = $this->context_mock(
+			array(
+				'enabled'          => true,
+				'frequency'        => 'weekly',
+				'hour'             => 5,
+				'retention'        => 4,
+				'exclusions'       => array( 'wp-content/cache/**', 'wp_actionscheduler_log.php' ),
+				'table_exclusions' => array( 'wp_actionscheduler_*', 'wp_options' ),
+			)
+		);
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				ScheduleStore::OPTION,
+				array(
+					'enabled'          => false,
+					'frequency'        => Schedule::FREQUENCY_WEEKLY,
+					'hour'             => 5,
+					'retention'        => 4,
+					'exclusions'       => array( 'wp-content/cache/**', 'wp_actionscheduler_log.php' ),
+					'table_exclusions' => array( 'wp_actionscheduler_*', 'wp_options' ),
 				)
 			);
 

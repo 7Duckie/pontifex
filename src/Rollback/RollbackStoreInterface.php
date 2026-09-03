@@ -10,7 +10,7 @@ declare(strict_types=1);
 namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
-use RuntimeException;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Contract for the directory that holds pre-import safety archives.
@@ -23,8 +23,9 @@ use RuntimeException;
  *
  * The store owns three facts about safety archives: where they live
  * (`wp-content/pontifex/rollback/`, per ADR 0005), how they are named
- * (`pre-import-rollback-<UTC>.wpmig`, so the most recent sorts last), and how
- * many are kept (retention is applied by the caller through {@see prune()}).
+ * (`pre-import-rollback-<UTC>.wpmig`) and listed ({@see archives()} orders
+ * them by modification time, not by name), and how many are kept (retention
+ * is applied by the caller through {@see prune()}).
  */
 interface RollbackStoreInterface {
 
@@ -46,7 +47,7 @@ interface RollbackStoreInterface {
 	 * directory already exists.
 	 *
 	 * @return void
-	 * @throws RuntimeException If the directory cannot be created.
+	 * @throws HostCannotComply If the directory cannot be created.
 	 */
 	public function ensure_directory(): void;
 
@@ -64,8 +65,10 @@ interface RollbackStoreInterface {
 	/**
 	 * Return every safety archive in the directory, oldest first.
 	 *
-	 * Ordered lexicographically, which — given the UTC naming — is also
-	 * chronological. Empty when the directory is absent or holds none.
+	 * Ordered by modification time — clamped to the current time, so a forged
+	 * or clock-skewed future-dated name cannot claim to be the newest — not by
+	 * name; see {@see \Pontifex\Rollback\RollbackStore::compare_by_age()} for
+	 * the full rule. Empty when the directory is absent or holds none.
 	 *
 	 * @return array<int, string> Absolute archive paths, oldest to newest.
 	 */

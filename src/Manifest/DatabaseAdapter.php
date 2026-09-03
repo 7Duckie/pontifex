@@ -20,10 +20,12 @@ use RuntimeException;
  * Concentrates all knowledge of WordPress's `$wpdb` into a single
  * adapter class whose own tests use brain/monkey.
  *
- * All return values are byte-sized strings ready to be written to an
- * archive entry. SQL statements end with semicolons and newlines so
- * that concatenating multiple {@see DatabaseAdapter::dump_table_rows()}
- * results produces a valid SQL script.
+ * Most methods return byte-sized strings ready to be written to an archive
+ * entry; {@see self::dump_table_rows()} returns a {@see RowDumpResult}
+ * wrapping its SQL alongside the keyset cursor a caller chains into the
+ * next window. SQL statements end with semicolons and newlines so that
+ * concatenating multiple {@see DatabaseAdapter::dump_table_rows()} results'
+ * SQL produces a valid SQL script.
  */
 interface DatabaseAdapter {
 
@@ -66,20 +68,39 @@ interface DatabaseAdapter {
 	public function dump_table_schema( string $table_name ): string;
 
 	/**
-	 * Dump a slice of rows from the given table as INSERT statements.
+	 * Dump a slice of rows from the given table as one INSERT statement.
 	 *
-	 * Returns the SQL for rows in the range [$offset, $offset + $limit).
-	 * If $offset is past the end of the table, returns an empty string.
-	 * The returned SQL ends with a trailing newline; concatenation
-	 * with subsequent dumps produces a valid script.
+	 * A table with a primary key is windowed by keyset — `WHERE (pk) >
+	 * (after_key) ORDER BY (pk) LIMIT $limit` — so pagination is a pure index
+	 * seek rather than a scan the server must read and discard $offset rows
+	 * on every call; $offset is then ignored. A table with no primary key has
+	 * no column set guaranteed unique, so a keyset predicate could skip or
+	 * loop on duplicate rows: it keeps today's `LIMIT $limit OFFSET $offset`
+	 * windowing instead, and $after_key is ignored.
 	 *
-	 * @param string $table_name Fully prefixed table name.
-	 * @param int    $offset     0-based starting row index; must be non-negative.
-	 * @param int    $limit      Maximum number of rows to dump; must be positive.
-	 * @return string SQL bytes encoding the rows; empty if no rows match.
-	 * @throws RuntimeException If the rows cannot be retrieved.
+	 * The returned {@see RowDumpResult}'s SQL ends with a trailing newline;
+	 * concatenation with subsequent dumps produces a valid script. Its SQL is
+	 * empty only when $limit is 0 — a window explicitly asked to contain no
+	 * rows. Any other empty result must be raised as a failure rather than
+	 * returned: every window an implementation is asked for is planned from a
+	 * row count read beforehand, so a $limit > 0 window that comes back empty
+	 * means the read failed, and returning an empty result for it tells the
+	 * caller the table is finished. That is how rows went missing from
+	 * backups silently while the export reported success.
+	 *
+	 * The result's end key is the primary-key values of the last row emitted
+	 * — the value a caller doing keyset pagination feeds back in as the next
+	 * call's $after_key — and is null when the table has no primary key, or
+	 * the window emitted no rows.
+	 *
+	 * @param string                                    $table_name Fully prefixed table name.
+	 * @param int                                       $offset     0-based starting row index; must be non-negative. Used only for a table with no primary key.
+	 * @param int                                       $limit      Maximum number of rows to dump; 0 requests no rows, any greater value must yield at least one.
+	 * @param array<string, int|string|float|bool>|null $after_key  The previous window's end key, for a table with a primary key; null for the first window, or for a table with no primary key.
+	 * @return RowDumpResult The window's SQL bytes (empty only when $limit is 0) and its end key.
+	 * @throws RuntimeException If the rows cannot be retrieved, or a $limit > 0 window returns none.
 	 */
-	public function dump_table_rows( string $table_name, int $offset, int $limit ): string;
+	public function dump_table_rows( string $table_name, int $offset, int $limit, ?array $after_key = null ): RowDumpResult;
 
 	/**
 	 * Execute one SQL statement against the database.
@@ -161,6 +182,20 @@ interface DatabaseAdapter {
 	 * @throws RuntimeException If $prefix is empty (a full-database listing is never intended).
 	 */
 	public function list_tables_by_prefix( string $prefix ): array;
+
+	/**
+	 * The WordPress table prefix of the database this adapter is connected to.
+	 *
+	 * This is the scope every restore is confined to: {@see \Pontifex\Restore\DatabaseWriter}
+	 * refuses to stage a table whose name does not begin with it, because on
+	 * shared hosting several WordPress installations often share one
+	 * database, kept apart only by each site's own table prefix
+	 * (`wpa_options`, `wpb_options`) — a table name outside this prefix
+	 * belongs to a neighbouring site, never to the one being restored onto.
+	 *
+	 * @return string The live prefix; an empty string means an unconfigured connection whose prefix cannot be established.
+	 */
+	public function table_prefix(): string;
 
 	/**
 	 * The table's average stored row width, in bytes, or 0 when unknown.

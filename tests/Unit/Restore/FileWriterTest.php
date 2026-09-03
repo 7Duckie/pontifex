@@ -11,12 +11,16 @@ namespace Pontifex\Tests\Unit\Restore;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use ReflectionClassConstant;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\FileScanner;
 use Pontifex\Restore\FileWriter;
 
@@ -206,6 +210,32 @@ final class FileWriterTest extends TestCase {
 	 */
 	private static function manifest_file_entry( string $path, int $length ): ManifestEntry {
 		return ManifestEntry::for_file( 0, 0, $length, $path, 0, str_repeat( "\0", 32 ) );
+	}
+
+	/**
+	 * Build a $decoded_sizes map — path => decoded byte size — matching each entry's own STORED length.
+	 *
+	 * A convenience for the tests exercising the growth/largest-entry
+	 * arithmetic itself, where the distinction between compressed and
+	 * decoded bytes is not what is under test: this keeps assert_free_space_for()'s
+	 * decoded-size figure identical to its stored length, so those tests keep
+	 * meaning exactly what they said before decoded-byte weighing existed. The
+	 * headline decoded-vs-compressed tests below deliberately do NOT use this
+	 * helper — they build a $decoded_sizes map that disagrees with length() on
+	 * purpose.
+	 *
+	 * @param array<int, ManifestEntry> $entries The entries to build a matching size map for.
+	 * @return array<string, int> Each entry's own path mapped to its own length().
+	 */
+	private static function decoded_sizes_matching_length( array $entries ): array {
+		$sizes = array();
+		foreach ( $entries as $entry ) {
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$sizes[ $path ] = $entry->length();
+			}
+		}
+		return $sizes;
 	}
 
 	// -------------------------------------------------------------------
@@ -697,6 +727,46 @@ final class FileWriterTest extends TestCase {
 		$this->assertSame( 'new-target', readlink( $link ) );
 	}
 
+	/**
+	 * The disabled-symlink() refusal is HostCannotComply, not a bare
+	 * RuntimeException.
+	 *
+	 * The refusal branch is only reachable on a host where symlink() has
+	 * genuinely been removed (e.g. via disable_functions) — function_exists()
+	 * cannot be faked in-process, so this shells out to a real child process
+	 * the same way {@see \Pontifex\Tests\Unit\Archive\Reader\ArchiveReaderTest::test_manifest_decode_refused_when_the_host_forbids_raising_the_limit()}
+	 * does for ini_set. This is the regression guard for the disabled-symlink()
+	 * refusal disagreeing with its sibling guards
+	 * ({@see FileWriter::assert_symlinks_creatable()} and the readlink()
+	 * guard inside {@see FileWriter::declared_or_on_disk_target()}), which both
+	 * already throw HostCannotComply for the identical "this host removed the
+	 * function I need" condition.
+	 *
+	 * @return void
+	 */
+	public function test_write_symlink_refuses_as_host_cannot_comply_when_symlink_is_unavailable(): void {
+		$snippet = 'require getenv( "PONTIFEX_AUTOLOAD" );'
+			. ' $writer = new Pontifex\\Restore\\FileWriter( getenv( "PONTIFEX_FIXTURE_ROOT" ) );'
+			. ' $header = Pontifex\\Archive\\Format\\EntryHeader::for_symlink( "link", "target.txt", 0 );'
+			. ' $result = new Pontifex\\Archive\\Reader\\EntryReadResult( $header, "" );'
+			. ' try { $writer->write_entry( $result ); echo "NO-REFUSAL"; }'
+			. ' catch ( Throwable $e ) { echo get_class( $e ) . "|" . $e->getMessage(); }';
+
+		$command = sprintf(
+			'PONTIFEX_AUTOLOAD=%s PONTIFEX_FIXTURE_ROOT=%s php -d disable_functions=symlink -r %s 2>&1',
+			escapeshellarg( dirname( __DIR__, 3 ) . '/vendor/autoload.php' ),
+			escapeshellarg( $this->fixture_root ),
+			escapeshellarg( $snippet )
+		);
+
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec -- Test-only: the refusal branch is reachable only where symlink() is genuinely unavailable, which cannot be simulated in-process; a real child process is the only honest way to exercise it.
+		$output = (string) shell_exec( $command );
+
+		$this->assertStringStartsWith( HostCannotComply::class . '|', $output, 'symlink() unavailable must refuse as HostCannotComply, matching its sibling guards.' );
+		$this->assertStringContainsString( 'symlink() is not available on this host', $output );
+		$this->assertStringNotContainsString( 'NO-REFUSAL', $output );
+	}
+
 	// -------------------------------------------------------------------
 	// Whole-archive symlink preflight (assert_symlink_targets_confined())
 	//
@@ -740,6 +810,50 @@ final class FileWriterTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
 		file_put_contents( $this->fixture_root . '/wp-config.php', $secret );
 		return $secret;
+	}
+
+	/**
+	 * Force a writer's cached case-sensitivity probe result via reflection.
+	 *
+	 * {@see FileWriter::$case_sensitive_destination} is a private, once-probed
+	 * cache: {@see FileWriter::confinement_fold()} and the preflight in
+	 * {@see FileWriter::assert_symlink_targets_confined()} both branch on it.
+	 * Leaving it to whatever the real filesystem backing $this->fixture_root
+	 * happens to be would make a fold test mean one thing on a case-folding
+	 * host (macOS, Windows) and something else entirely on a case-sensitive
+	 * one (Linux CI) — every fold test in this file forces the answer instead,
+	 * so it means the same thing wherever it runs.
+	 *
+	 * @param FileWriter $writer         The writer whose cache to set.
+	 * @param bool       $case_sensitive The value to force the cache to.
+	 * @return void
+	 */
+	private static function force_case_sensitivity( FileWriter $writer, bool $case_sensitive ): void {
+		$property = new ReflectionProperty( FileWriter::class, 'case_sensitive_destination' );
+		$property->setValue( $writer, $case_sensitive );
+	}
+
+	/**
+	 * Invoke the private confinement_fold() through reflection.
+	 *
+	 * @param FileWriter $writer The writer to call it on.
+	 * @param string     $value  An archive-relative path, already normalised.
+	 * @return string Whatever confinement_fold() returns.
+	 */
+	private static function confinement_fold_of( FileWriter $writer, string $value ): string {
+		$method = new ReflectionMethod( FileWriter::class, 'confinement_fold' );
+		return (string) $method->invoke( $writer, $value );
+	}
+
+	/**
+	 * Invoke the private, static path_is_inspectable() through reflection.
+	 *
+	 * @param string $parent_directory Absolute path of the directory to test.
+	 * @return bool Whatever path_is_inspectable() returns.
+	 */
+	private static function path_is_inspectable_of( string $parent_directory ): bool {
+		$method = new ReflectionMethod( FileWriter::class, 'path_is_inspectable' );
+		return (bool) $method->invoke( null, $parent_directory );
 	}
 
 	/**
@@ -802,10 +916,19 @@ final class FileWriterTest extends TestCase {
 	 * links at write time. This is node-tar's CVE-2021-37701 in miniature, and
 	 * the fold is the same fix.
 	 *
+	 * confinement_fold() is gated on the REAL destination
+	 * ({@see self::destination_is_case_sensitive()}), so it folds at all only
+	 * where the destination genuinely does — case-sensitivity is therefore
+	 * forced by reflection rather than left to whatever filesystem happens to
+	 * back this test's tempdir, or this test would mean "the fold works" on a
+	 * case-folding host (macOS) and "no attack was even attempted" on a
+	 * case-sensitive one (Linux CI).
+	 *
 	 * @return void
 	 */
 	public function test_preflight_refuses_a_hop_spelled_in_a_different_case(): void {
 		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
 
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( "this site's own wp-config.php" );
@@ -826,21 +949,191 @@ final class FileWriterTest extends TestCase {
 	 * kernel would eventually follow genuinely cannot be established here.
 	 * An unknown in a containment guard is refused, never guessed.
 	 *
+	 * A third entry ("leak.txt", resolving through "HOP") used to be needed to
+	 * TRIGGER this refusal at all: before the up-front check, ambiguity was
+	 * only noticed if some other link's resolution happened to pass through
+	 * the colliding name — see {@see self::test_preflight_refuses_two_folded_spellings_with_different_targets_even_when_nothing_resolves_through_either()}
+	 * for that gap closed. It is kept here, now redundant, because this test's
+	 * job is proving the refusal fires at all for this exact declaration set,
+	 * regardless of which of the two checks catches it.
+	 *
+	 * Case-sensitivity forced by reflection for the same reason as the sibling
+	 * test above: this scenario only exists at all on a case-folding
+	 * destination, and the test must mean that on every host it runs on.
+	 *
 	 * @return void
 	 */
 	public function test_preflight_refuses_case_colliding_declarations_with_different_targets(): void {
 		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+		$thrown = null;
 
-		$this->expectException( RuntimeException::class );
-		$this->expectExceptionMessage( 'differing only in letter case' );
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/Hop'      => '..',
+					'wp-content/uploads/hOp'      => 'somewhere',
+					'wp-content/uploads/leak.txt' => 'HOP/wp-config.php',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( 'wp-content/uploads/Hop', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/hOp', $message );
+	}
+
+	/**
+	 * Two spellings of one path that normalise identically, declaring DIFFERENT targets, refuse rather than pick a winner.
+	 *
+	 * The proven attack: a backup declaring "leak" and "./leak" as two
+	 * separate entries. normalise_entry_path() collapses both to "leak", so
+	 * indexing them into $exact used to silently keep only the LAST one —
+	 * while the write walk still writes both entries, including the one the
+	 * preflight never judged. Refusing the collision outright closes that
+	 * gap; the message must name both original spellings so the operator can
+	 * see exactly what the archive declared.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_two_spellings_of_one_path_with_different_targets(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'leak'   => 'a/b/hop/../../OUTSIDE/secret.txt',
+					'./leak' => 'sub',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( '"leak"', $message );
+		$this->assertStringContainsString( '"./leak"', $message );
+		$this->assertStringContainsString( 'a/b/hop/../../OUTSIDE/secret.txt', $message );
+		$this->assertStringContainsString( '"sub"', $message );
+	}
+
+	/**
+	 * The same two spellings, declaring the SAME target, must NOT be refused.
+	 *
+	 * The false-refusal guard for the test above: judging one spelling is
+	 * equivalent to judging both when they agree on the target, so a
+	 * legitimate archive that happens to record a path two ways (nothing
+	 * stops a third-party archive builder doing this) must restore, not be
+	 * refused over a distinction that makes no difference.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_two_spellings_of_one_path_with_the_same_target(): void {
+		$writer = new FileWriter( $this->fixture_root );
 
 		$writer->assert_symlink_targets_confined(
 			array(
-				'wp-content/uploads/Hop'      => '..',
-				'wp-content/uploads/hOp'      => 'somewhere',
-				'wp-content/uploads/leak.txt' => 'HOP/wp-config.php',
+				'leak'   => 'sub',
+				'./leak' => 'sub',
 			)
 		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally when two spellings of one path agree on the target.' );
+	}
+
+	/**
+	 * Two declared links whose spellings FOLD together, with different targets and NOTHING resolving through either, still refuse.
+	 *
+	 * Before this fix the ambiguity marker the indexing loop records
+	 * ({@see self::test_preflight_refuses_case_colliding_declarations_with_different_targets()}'s
+	 * sibling scenario) was only ever consulted from inside
+	 * declared_or_on_disk_target() — i.e. only if some OTHER link's
+	 * resolution happened to pass through the colliding name. Declare only
+	 * the two colliding links themselves, with no third "consumer" entry
+	 * resolving through either one, so the only thing that can catch this is
+	 * the up-front check run after the indexing loop and before resolution
+	 * starts. Case-sensitivity forced by reflection, as with every other test
+	 * in this section: this scenario only exists on a case-folding
+	 * destination.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_two_folded_spellings_with_different_targets_even_when_nothing_resolves_through_either(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined(
+				array(
+					'wp-content/uploads/Hop' => 'somewhere-a',
+					'wp-content/uploads/hOp' => 'somewhere-b',
+				)
+			);
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( 'wp-content/uploads/Hop', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/hOp', $message );
+		$this->assertStringContainsString( 'somewhere-a', $message );
+		$this->assertStringContainsString( 'somewhere-b', $message );
+	}
+
+	/**
+	 * The same folded pair, declaring the SAME target, must NOT be refused.
+	 *
+	 * The false-refusal guard for the test above: on a case-folding
+	 * destination two spellings that agree on their target are not a genuine
+	 * ambiguity — only one file can exist there either way, and both
+	 * declarations point it at the same place.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_two_folded_spellings_with_the_same_target(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/Hop' => 'somewhere',
+				'wp-content/uploads/hOp' => 'somewhere',
+			)
+		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally when two folded spellings agree on the target.' );
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, two links differing only in case must NOT be refused, even with different targets.
+	 *
+	 * The fold is the identity there (see {@see FileWriter::confinement_fold()}'s
+	 * own docblock), so "Hop" and "hOp" are two genuinely distinct files and
+	 * the up-front folded-collision check above must never fire. A false
+	 * refusal here would turn this security fix into an outage for the
+	 * overwhelming majority of WordPress hosting.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_case_differing_spellings_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, true );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				'wp-content/uploads/Hop' => 'harmless-a',
+				'wp-content/uploads/hOp' => 'harmless-b',
+			)
+		);
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally on a case-sensitive destination, regardless of targets.' );
 	}
 
 	/**
@@ -1036,6 +1329,122 @@ final class FileWriterTest extends TestCase {
 		$this->expectExceptionMessage( "this site's own wp-config.php" );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => 'existing/wp-config.php' ) );
+	}
+
+	// -------------------------------------------------------------------
+	// path_is_inspectable() and the fail-closed branch it feeds
+	//
+	// is_link() answers false for two situations that look identical from
+	// the outside: "there is genuinely nothing here" and "I could not look."
+	// path_is_inspectable() is what tells them apart, using the parent
+	// directory's EXECUTE bit (not its read bit) as the distinguishing fact,
+	// measured directly rather than assumed — see that method's own
+	// docblock for the measured table. The three cases below exercise it
+	// directly by reflection, matching {@see self::confinement_fold_of()}'s
+	// pattern; the fourth proves the whole preflight is wired to it.
+	// -------------------------------------------------------------------
+
+	/**
+	 * A parent directory that does not exist at all is trustworthy: no link can exist under it.
+	 *
+	 * False-refusal guard: an ordinary symlink target with components that
+	 * simply do not exist yet on disk must resolve normally, never refuse.
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_true_when_the_parent_does_not_exist(): void {
+		$absent = $this->fixture_root . '/does/not/exist';
+
+		$this->assertTrue( self::path_is_inspectable_of( $absent ), 'A parent directory that does not exist cannot hide a link from is_link(), so its false answer must be trusted.' );
+	}
+
+	/**
+	 * A parent directory that exists and is traversable is trustworthy: is_link() genuinely looked and found nothing.
+	 *
+	 * False-refusal guard: the ordinary "no link here" case, the common
+	 * outcome for the vast majority of path components a restore resolves.
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_true_when_the_parent_is_traversable(): void {
+		$uploads = $this->make_fixture_directory( 'wp-content/uploads' );
+
+		$this->assertTrue( self::path_is_inspectable_of( $uploads ), 'A traversable parent directory makes is_link()\'s false answer trustworthy.' );
+	}
+
+	/**
+	 * A parent directory that exists but cannot be traversed is NOT trustworthy.
+	 *
+	 * The measured reproducer: mode 0000 blocks the executable bit that
+	 * governs whether a filesystem lookup for a name inside the directory
+	 * can succeed at all, so is_link() cannot genuinely answer and its false
+	 * must not be trusted. Skipped as root, for whom chmod 0000 does not
+	 * block a stat (this project already knows the trap — the PHP 8.2 floor
+	 * is run in Docker as a non-root user for exactly this reason).
+	 *
+	 * @return void
+	 */
+	public function test_path_is_inspectable_is_false_when_the_parent_exists_but_cannot_be_traversed(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test an untraversable directory when running as root (chmod is not enforced).' );
+		}
+
+		$locked = $this->make_fixture_directory( 'wp-content/locked' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; the point under test is that this process cannot look inside this directory.
+		chmod( $locked, 0o000 );
+
+		try {
+			$this->assertFalse( self::path_is_inspectable_of( $locked ), 'A parent directory this process cannot traverse must not be trusted to answer "no link here".' );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restore traversability so tearDown can clean up.
+			chmod( $locked, 0o755 );
+		}
+	}
+
+	/**
+	 * The whole-archive preflight refuses as HostCannotComply, not silently trusts, when a component's parent directory cannot be traversed.
+	 *
+	 * The reproducer the audit found: a pre-existing directory at mode 0000
+	 * containing an escaping link, declared by the archive as an ordinary
+	 * directory entry at mode 0755 (a directory never enters the symlink
+	 * maps, so this preflight is the only thing standing between the
+	 * archive and the write walk). Before this fix, is_link() returning
+	 * false for "I could not look" was indistinguishable from "genuinely not
+	 * a link", so the preflight trusted it and let the restore proceed —
+	 * and the write walk then chmods the directory open, supplying its own
+	 * unlock. Here the declared link's target simply passes through the
+	 * locked directory; no chmod-unlock step is needed to prove the
+	 * preflight itself now refuses rather than guesses. Skipped as root, for
+	 * whom chmod 0000 does not block a stat.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_as_host_cannot_comply_when_a_components_parent_cannot_be_traversed(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Cannot test an untraversable directory when running as root (chmod is not enforced).' );
+		}
+
+		$writer  = new FileWriter( $this->fixture_root );
+		$uploads = $this->make_fixture_directory( 'wp-content/uploads' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Test fixture; the point under test is that this process cannot look inside this directory.
+		chmod( $uploads, 0o000 );
+		$thrown = null;
+
+		try {
+			$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/leak.txt' => 'ghost/inside' ) );
+		} catch ( HostCannotComply $error ) {
+			$thrown = $error;
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restore traversability so tearDown can clean up.
+			chmod( $uploads, 0o755 );
+		}
+
+		$this->assertInstanceOf( HostCannotComply::class, $thrown );
+		$this->assertNotInstanceOf( ArchiveNotTrustworthy::class, $thrown, "a host limitation must never be reported as the archive's fault" );
+		$message = $thrown->getMessage();
+		$this->assertStringContainsString( realpath( $this->fixture_root ) . '/wp-content/uploads', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/leak.txt', $message );
+		$this->assertStringContainsString( 'restore was stopped before anything was written', $message );
 	}
 
 	/**
@@ -1368,6 +1777,411 @@ final class FileWriterTest extends TestCase {
 		}
 
 		$this->assertTrue( $result, 'The cached value must be returned unchanged; a re-probe against an unwritable root could not have produced true.' );
+	}
+
+	/**
+	 * The name the case-sensitivity probe actually builds is recognised as an orphan.
+	 *
+	 * The destination_is_case_sensitive() probe file exists on disk for only
+	 * the handful of instructions between its own file_put_contents() and its
+	 * finally block's unlink() — there is no external vantage point from
+	 * which a test could observe the transient name directly while the file
+	 * exists, so this cannot be driven by, say, a glob() taken mid-call.
+	 * {@see FileWriter::case_probe_basenames()} is the pure, side-effect-free
+	 * name-construction logic that method calls to decide what to write and
+	 * then remove; driving THAT method through reflection — rather than
+	 * retyping the shape by hand into this test — proves this property
+	 * against the real code that runs, not against this test's own mental
+	 * model of it. See that method's own docblock for why it exists at all.
+	 *
+	 * Looped, for the same reason
+	 * {@see self::test_temp_artefact_suffix_always_matches_the_orphan_pattern()}
+	 * loops: a single sample could pass even if the construction were subtly
+	 * inconsistent with what {@see \Pontifex\Filesystem\TempArtefact} expects,
+	 * because both random_bytes() and TempArtefact::suffix() themselves vary
+	 * per call.
+	 *
+	 * @return void
+	 */
+	public function test_case_probe_basename_is_recognised_as_an_orphan(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$names = (array) $method->invoke( null );
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( (string) $names[0] ),
+				sprintf( 'The case-sensitivity probe\'s own basename "%s" must be recognised by TempArtefact::is_orphan_name().', $names[0] )
+			);
+		}
+	}
+
+	/**
+	 * A probe-shaped orphan left at the installation root by a killed case-sensitivity probe is swept.
+	 *
+	 * {@see FileWriter::destination_is_case_sensitive()} always writes its
+	 * probe file directly at $this->destination_root — never under the
+	 * required prefix — so a restore killed between that write and its own
+	 * finally's unlink() leaves the orphan exactly where
+	 * {@see FileWriter::sweep_orphaned_temp_files()}'s REACH section already
+	 * looks on a content-only restore: $this->destination_root's own
+	 * immediate children, listed there specifically because a capability
+	 * probe of this shape can fall in the installation root rather than
+	 * under "wp-content". Before Task 1's fix this orphan carried no
+	 * recognisable shape at all and would have survived every restore
+	 * indefinitely; this proves it is now removed like any other of this
+	 * writer's own temp artefacts.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_case_probe_orphan_at_the_installation_root_under_a_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+		$this->make_fixture_directory( 'wp-content' );
+
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+		$names  = (array) $method->invoke( null );
+		$orphan = $this->fixture_root . '/' . $names[0];
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: stands in for a case-sensitivity probe abandoned mid-restore by a kill.
+		file_put_contents( $orphan, '' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * The probe's two derived names still differ only by the case of their letters, never by the newly-shared suffix.
+	 *
+	 * Proves the invariant the whole probe depends on, directly against
+	 * {@see FileWriter::case_probe_basenames()}'s real output rather than a
+	 * hand-typed example: strtolower() of one name must equal strtolower()
+	 * of the other, so a case-FOLDING filesystem's file_exists() check for
+	 * the flipped spelling still resolves to the very file just written —
+	 * while the raw byte strings must still differ, so a case-SENSITIVE
+	 * filesystem's identical check still reports two distinct files rather
+	 * than one. Both properties held before {@see \Pontifex\Filesystem\TempArtefact}'s
+	 * shared suffix was appended to each name; this pins that appending the
+	 * SAME suffix, unflipped, to both spellings (rather than flipping the
+	 * whole name including the suffix) could not have disturbed either one.
+	 *
+	 * "PontifexCaseProbe" always contributes at least one ASCII letter
+	 * regardless of what random_bytes() happens to draw, so the two names
+	 * are guaranteed to be byte-distinct on every run — this is not a
+	 * property that could pass by luck the way a purely random comparison
+	 * might, but the loop still guards against a construction-order mistake
+	 * (e.g. flipping the suffix too) that only a particular hex draw would
+	 * expose.
+	 *
+	 * @return void
+	 */
+	public function test_case_probe_names_differ_only_by_case(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'case_probe_basenames' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$names = (array) $method->invoke( null );
+
+			$this->assertNotSame(
+				$names[0],
+				$names[1],
+				'the two spellings must be byte-distinct, or a case-sensitive filesystem could never tell them apart'
+			);
+			$this->assertSame(
+				strtolower( (string) $names[0] ),
+				strtolower( (string) $names[1] ),
+				'the two spellings must fold to the same name, or a case-insensitive filesystem could never tell they are "the same" file'
+			);
+		}
+	}
+
+	// -------------------------------------------------------------------
+	// Unicode confinement fold (confinement_fold()) and its own preflight
+	//
+	// confinement_fold() replaced strtolower(), which folds ASCII only, with
+	// Unicode D145 canonical caseless matching (NFD, case-fold, NFD again) —
+	// but only on a destination that actually folds case at all
+	// ({@see self::destination_is_case_sensitive()}). Every test below forces
+	// that cached probe result by reflection rather than trusting whichever
+	// filesystem happens to back $this->fixture_root on the machine running
+	// it; see {@see self::force_case_sensitivity()}'s own docblock for why.
+	//
+	// The corpus in the first test below was measured against this build's
+	// real ext-intl/mbstring tables with a throwaway script, not assumed —
+	// two of the categories named in the brief that motivated this suite
+	// (a literal Turkish DOTLESS "ı", and fullwidth Latin letters) do NOT
+	// collide under confinement_fold(), and the second test below documents
+	// why, with the measurement recorded alongside it rather than silently
+	// dropped.
+	// -------------------------------------------------------------------
+
+	/**
+	 * The Unicode case-folding attack corpus: real filesystem collisions strtolower() missed.
+	 *
+	 * Every pair below is two DIFFERENT byte strings that a real
+	 * case-insensitive filesystem (APFS, NTFS) treats as naming the same
+	 * file. Before this fix, {@see FileWriter::assert_symlink_targets_confined()}
+	 * indexed declared links under strtolower(), which is ASCII-only, so an
+	 * intermediate link named the "other" Unicode spelling of an already-
+	 * declared name was invisible to the fold lookup — exactly the CVE-2021-37701
+	 * hop-attack shape this class's own preflight defends against, just spelled
+	 * with a character strtolower() does not touch. confinement_fold() must
+	 * therefore fold every pair here to the same key.
+	 *
+	 * Each collision was verified against this build's actual ext-intl
+	 * (Normalizer) and mbstring (mb_convert_case) tables:
+	 *
+	 *  - Kelvin sign (U+212A) folds to Latin "k" (Unicode CaseFolding.txt).
+	 *  - German sharp s "ß" (U+00DF) folds to "ss" — only under FULL case
+	 *    folding, which is what mb_convert_case( ..., MB_CASE_FOLD, ... )
+	 *    turned out to apply here.
+	 *  - Greek final sigma "ς" (U+03C2) folds to medial sigma "σ" (U+03C3).
+	 *  - The Greek "prosgegrammeni" family: a capital vowel carrying an iota
+	 *    subscript as ONE precomposed character (e.g. U+1FBC, U+1FCC) folds to
+	 *    its lower-case DECOMPOSED form (base letter + combining
+	 *    ypogegrammeni, U+1FB3 / U+1FC3) — the exact family
+	 *    {@see FileWriter::confinement_fold()}'s own docblock names as
+	 *    sensitive to fold/decompose ORDER, which is why it decomposes,
+	 *    folds, then decomposes again rather than once.
+	 *  - Turkish capital "İ" (LATIN CAPITAL LETTER I WITH DOT ABOVE, U+0130)
+	 *    folds, under full folding, to "i" followed by an EXPLICIT combining
+	 *    dot above (U+0069 U+0307) — not to a bare "i". This is the one
+	 *    corpus entry that does not match the brief's own phrasing ("a
+	 *    Turkish dotless ı for a dotted i") once measured: see the sibling
+	 *    "does not over-merge" test below for the dotless letter, which has
+	 *    no fold mapping at all.
+	 *  - Two spellings whose only difference is the ORDER two combining marks
+	 *    of different combining classes were written in. Unicode canonical
+	 *    reordering — applied by the SECOND Normalizer::normalize() call
+	 *    inside confinement_fold() — sorts them into the same sequence
+	 *    regardless of the order they arrived in.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_unifies_unicode_case_folding_attack_spellings(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$corpus = array(
+			'Kelvin sign vs Latin K'                    => array( "wp-content/uploads/30\u{212A}-report.pdf", 'wp-content/uploads/30K-report.pdf' ),
+			'German sharp s (ß) vs "ss"'                => array( 'wp-content/themes/straße/style.css', 'wp-content/themes/strasse/style.css' ),
+			'Greek final sigma (ς) vs medial sigma (σ)' => array( "wp-content/uploads/logo\u{03C2}.svg", "wp-content/uploads/logo\u{03C3}.svg" ),
+			'Greek ALPHA WITH PROSGEGRAMMENI vs alpha+ypogegrammeni' => array( "wp-content/uploads/\u{1FBC}-notes.txt", "wp-content/uploads/\u{1FB3}-notes.txt" ),
+			'Greek ETA WITH PROSGEGRAMMENI vs eta+ypogegrammeni' => array( "wp-content/uploads/\u{1FCC}-notes.txt", "wp-content/uploads/\u{1FC3}-notes.txt" ),
+			'Turkish İ (dotted capital) vs "i" + combining dot above' => array( "wp-content/uploads/\u{0130}stanbul", "wp-content/uploads/i\u{0307}stanbul" ),
+			'Combining marks in reversed order (diaeresis, cedilla)' => array( "wp-content/uploads/a\u{0308}\u{0327}-file", "wp-content/uploads/a\u{0327}\u{0308}-file" ),
+		);
+
+		foreach ( $corpus as $label => $pair ) {
+			list( $spelling_a, $spelling_b ) = $pair;
+
+			$this->assertNotSame( $spelling_a, $spelling_b, "fixture bug in \"$label\": the two spellings must be different byte strings to prove anything" );
+			$this->assertSame(
+				self::confinement_fold_of( $writer, $spelling_a ),
+				self::confinement_fold_of( $writer, $spelling_b ),
+				"\"$label\": a case-insensitive destination must fold both spellings to the same key"
+			);
+		}
+	}
+
+	/**
+	 * Two categories that resemble the attack corpus above must NOT be merged by confinement_fold().
+	 *
+	 * Measured, not assumed, against this build's real tables:
+	 *
+	 *  - Fullwidth Latin ("Ｋ", U+FF2B) resembles ASCII "K" but the
+	 *    relationship is a COMPATIBILITY equivalence (NFKC/NFKD), not a case
+	 *    one. {@see FileWriter::confinement_fold()}'s own docblock explains
+	 *    this was deliberately rejected: compatibility normalisation "merges
+	 *    pairs — the fullwidth Latin block against ordinary ASCII, for one —
+	 *    that the destination filesystem itself keeps apart, which would
+	 *    refuse legitimate archives no attacker had any part in." Measured
+	 *    directly here: Normalizer::FORM_D, what confinement_fold() actually
+	 *    calls, does not touch this pair.
+	 *  - The Turkish DOTLESS small "ı" (U+0131) has no case-fold mapping at
+	 *    all in the locale-independent Unicode tables PHP's Normalizer and
+	 *    mbstring apply here (only a Turkic-LOCALE-specific mapping exists,
+	 *    and it is not applied) — it folds to itself, so it never collides
+	 *    with a plain "i". This is why the corpus above uses the DOTTED
+	 *    capital "İ" for its Turkish entry instead.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_does_not_over_merge_fullwidth_or_turkish_dotless_i(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$pairs = array(
+			'Fullwidth Latin K (compatibility form) vs ASCII K' => array( "wp-content/uploads/\u{FF2B}-copy.txt", 'wp-content/uploads/K-copy.txt' ),
+			'Turkish dotless ı (no fold mapping) vs ASCII i'    => array( "wp-content/uploads/\u{0131}stanbul", 'wp-content/uploads/istanbul' ),
+		);
+
+		foreach ( $pairs as $label => $pair ) {
+			list( $spelling_a, $spelling_b ) = $pair;
+
+			$this->assertNotSame(
+				self::confinement_fold_of( $writer, $spelling_a ),
+				self::confinement_fold_of( $writer, $spelling_b ),
+				"\"$label\": confinement_fold() must not merge these — a real case-insensitive filesystem does not, so merging them would refuse a legitimate archive over nothing"
+			);
+		}
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, confinement_fold() is the identity for every spelling.
+	 *
+	 * This is what stops the fix from becoming a false-refusal outage on
+	 * Linux, the overwhelming majority of WordPress hosting: the audit that
+	 * drove this fix measured an UNGATED fold — one that folded regardless of
+	 * the real destination — refusing 18 of 18 real legitimate backups there.
+	 * Includes spellings drawn from the attack corpus above, to prove the
+	 * SAME two strings that collide on a case-insensitive destination stay
+	 * genuinely distinct on a case-sensitive one.
+	 *
+	 * @return void
+	 */
+	public function test_confinement_fold_is_the_identity_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, true );
+
+		$paths = array(
+			'wp-content/uploads/Straße/style.css',
+			'wp-content/uploads/30K-report.pdf',
+			"wp-content/uploads/logo\u{03C2}.svg",
+			'wp-content/Uploads',
+			'wp-content/uploads',
+		);
+
+		foreach ( $paths as $path ) {
+			$this->assertSame( $path, self::confinement_fold_of( $writer, $path ), 'On a case-sensitive destination, confinement_fold() must return the value completely unchanged.' );
+		}
+
+		$this->assertNotSame(
+			self::confinement_fold_of( $writer, 'wp-content/Uploads' ),
+			self::confinement_fold_of( $writer, 'wp-content/uploads' ),
+			'Two genuinely distinct spellings must not collide on a case-sensitive destination — a false refusal here is worse than the attack this fold defends against.'
+		);
+	}
+
+	/**
+	 * The proven hop attack, spelled with a non-ASCII Unicode case variant instead of an ASCII one.
+	 *
+	 * Sibling to {@see self::test_preflight_refuses_a_hop_spelled_in_a_different_case()},
+	 * which strtolower() ALSO would have caught — ASCII-only folding is
+	 * already enough for "HOP" vs "hop". This is the actual gap
+	 * confinement_fold() closes: the leak entry names the hop using Greek
+	 * final sigma "ς", where the hop itself was declared with medial sigma
+	 * "σ". The two are unrelated by ASCII case — strtolower() treats them as
+	 * two different names and would have let this straight through — on
+	 * exactly the filesystems (APFS, NTFS) that fold them to one, the ones
+	 * this whole preflight exists to defend.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_a_hop_spelled_with_a_non_ascii_case_variant(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		self::force_case_sensitivity( $writer, false );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( "this site's own wp-config.php" );
+
+		$writer->assert_symlink_targets_confined(
+			array(
+				"wp-content/uploads/hop\u{03C3}" => '..',
+				'wp-content/uploads/leak.txt'    => "hop\u{03C2}/../wp-config.php",
+			)
+		);
+	}
+
+	/**
+	 * On a case-insensitive destination, a missing host fact refuses the whole restore, naming what is missing.
+	 *
+	 * This is {@see FileWriter::assert_symlink_targets_confined()}'s OWN
+	 * preflight, gated first on whether the destination folds case at all
+	 * (see that method's docblock) — forced true by reflection here, since
+	 * that is the only branch where a missing extension matters.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_refuses_when_destination_folds_case_and_the_host_cannot_fold_unicode(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "intl" extension, which provides the Normalizer class' );
+			}
+		);
+		self::force_case_sensitivity( $writer, false );
+
+		$this->expectException( HostCannotComply::class );
+		$this->expectExceptionMessage( 'the "intl" extension, which provides the Normalizer class' );
+
+		$writer->assert_symlink_targets_confined( array() );
+	}
+
+	/**
+	 * The extension refusal is HostCannotComply, never ArchiveNotTrustworthy.
+	 *
+	 * ADR 0022's whole point: this host cannot check a perfectly sound
+	 * archive, which is a host limitation, not a verdict on the backup.
+	 * Reporting a good backup as broken is the one message capable of
+	 * talking someone out of keeping it.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_extension_refusal_is_host_cannot_comply_not_archive_not_trustworthy(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "mbstring" extension' );
+			}
+		);
+		self::force_case_sensitivity( $writer, false );
+
+		$thrown = null;
+		try {
+			$writer->assert_symlink_targets_confined( array() );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		}
+
+		$this->assertInstanceOf( HostCannotComply::class, $thrown );
+		$this->assertNotInstanceOf( ArchiveNotTrustworthy::class, $thrown );
+	}
+
+	/**
+	 * On a case-SENSITIVE destination, the same missing-extension report must NOT refuse the restore.
+	 *
+	 * Confinement_fold() never touches either extension on a destination that
+	 * does not fold case, so this host was never exposed to the gap they
+	 * close. Refusing it anyway would turn a security fix into an outage for
+	 * a Linux site that was already safe — exactly the false-refusal risk the
+	 * gate in {@see FileWriter::assert_symlink_targets_confined()} exists to
+	 * avoid.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_does_not_refuse_for_a_missing_extension_on_a_case_sensitive_destination(): void {
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			null,
+			null,
+			static function (): array {
+				return array( 'the "intl" extension, which provides the Normalizer class', 'the "mbstring" extension' );
+			}
+		);
+		self::force_case_sensitivity( $writer, true );
+
+		$writer->assert_symlink_targets_confined( array() );
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally, without consulting the extension-availability closure at all, on a case-sensitive destination.' );
 	}
 
 	// -------------------------------------------------------------------
@@ -2316,7 +3130,8 @@ final class FileWriterTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'needs about 10 MB free, and only 2 MB is available' );
 
-		$writer->assert_free_space_for( array( self::manifest_file_entry( 'big.iso', $ten_mb ) ) );
+		$entries = array( self::manifest_file_entry( 'big.iso', $ten_mb ) );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
@@ -2337,9 +3152,10 @@ final class FileWriterTest extends TestCase {
 			}
 		);
 
-		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'medium.bin', $five_mb ) ) );
+		$entries = array( self::manifest_file_entry( 'medium.bin', $five_mb ) );
+		$result  = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'Ample free space must not refuse the restore.' );
+		$this->assertTrue( $result, 'Ample free space must not refuse the restore, and a real reading was taken.' );
 	}
 
 	/**
@@ -2385,7 +3201,7 @@ final class FileWriterTest extends TestCase {
 		$this->expectException( RuntimeException::class );
 		$this->expectExceptionMessage( 'stopped before changing anything' );
 
-		$writer->assert_free_space_for( $entries );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
@@ -2435,9 +3251,9 @@ final class FileWriterTest extends TestCase {
 			}
 		);
 
-		$result = $writer->assert_free_space_for( $entries );
+		$result = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'A rollback where every file already matches must be permitted despite the low free space.' );
+		$this->assertTrue( $result, 'A rollback where every file already matches must be permitted despite the low free space, and a real reading was taken.' );
 	}
 
 	/**
@@ -2476,14 +3292,18 @@ final class FileWriterTest extends TestCase {
 
 		$this->expectException( RuntimeException::class );
 
-		$writer->assert_free_space_for( $entries );
+		$writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 	}
 
 	/**
-	 * An unknown free-space reading (false, e.g. under open_basedir) must never refuse the restore.
+	 * An unknown free-space reading (false, e.g. under open_basedir) must never refuse the restore, and reports that no reading was taken.
 	 *
 	 * Matches the posture {@see \Pontifex\Rollback\SafetyArchiver::preflight_disk_space()}
-	 * already takes: an unknown must never become a refusal.
+	 * already takes: an unknown must never become a refusal. The return value
+	 * is what this restore-time caller ignores (see RestoreRunner::restore()
+	 * and the import dry run) but {@see \Pontifex\Restore\RestorePreflight::read_only_report()}
+	 * reads, to tell an operator the check could not be answered rather than
+	 * silently calling the destination fine.
 	 *
 	 * @return void
 	 */
@@ -2500,9 +3320,10 @@ final class FileWriterTest extends TestCase {
 
 		// An enormous entry that would certainly be refused if any real free-space
 		// figure were compared against it.
-		$result = $writer->assert_free_space_for( array( self::manifest_file_entry( 'huge.bin', 500 * 1024 * 1024 ) ) );
+		$entries = array( self::manifest_file_entry( 'huge.bin', 500 * 1024 * 1024 ) );
+		$result  = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
 
-		$this->assertNull( $result, 'An unknown free-space reading must not refuse the restore.' );
+		$this->assertFalse( $result, 'An unknown free-space reading must not refuse the restore, and must report that no reading was taken.' );
 	}
 
 	/**
@@ -2537,14 +3358,112 @@ final class FileWriterTest extends TestCase {
 			self::manifest_file_entry( '../escape.bin', 500 * 1024 * 1024 ),
 		);
 
-		$result = $writer->assert_free_space_for( $entries );
-		$this->assertNull( $result, 'The hostile entry must be skipped, not treated as a disk-space shortfall.' );
+		$result = $writer->assert_free_space_for( $entries, self::decoded_sizes_matching_length( $entries ) );
+		$this->assertTrue( $result, 'The hostile entry must be skipped, not treated as a disk-space shortfall, and a real reading was taken for the entry that remains.' );
 
 		// write_entry() must still be the one to refuse that same hostile entry,
 		// with its own path-safety message, once the walk actually reaches it.
 		$this->expectException( InvalidArgumentException::class );
 		$this->expectExceptionMessage( 'parent-directory segment' );
 		$writer->write_entry( self::file_result( '../escape.bin', 'forged' ) );
+	}
+
+	/**
+	 * The headline regression test: the preflight budgets the DECODED total, never the entry's stored/compressed length.
+	 *
+	 * A manifest entry's length() here is a tiny 1 KB — standing in for a
+	 * highly-compressible stored record — while the caller-supplied decoded
+	 * size for that same path is a full 50 MB, standing in for what the
+	 * restore will actually write once decoded. Only 2 MB is reported free:
+	 * comfortably more than the 1 KB stored figure, nowhere near the 50 MB
+	 * decoded one. If this method ever went back to weighing length()
+	 * instead of $decoded_sizes, "needed" would collapse to 1 KB, 2 MB would
+	 * easily cover it, and this test would fail to throw at all — which is
+	 * exactly the shape of the defect this method exists to fix (measured on
+	 * a real database-heavy archive: a 1.4 MB stored budget against 123 MB
+	 * actually written).
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_budgets_the_decoded_total_not_the_compressed_length(): void {
+		$stored_length = 1024;
+		$decoded_bytes = 50 * 1024 * 1024;
+		$two_mb        = 2 * 1024 * 1024;
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $two_mb ) {
+				return $two_mb;
+			}
+		);
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'needs about 50 MB free, and only 2 MB is available' );
+
+		$writer->assert_free_space_for(
+			array( self::manifest_file_entry( 'db-heavy.dat.gz', $stored_length ) ),
+			array( 'db-heavy.dat.gz' => $decoded_bytes )
+		);
+	}
+
+	/**
+	 * The positive counterpart: a decoded total the free space DOES cover is permitted, even though the manifest's own compressed length disagrees wildly.
+	 *
+	 * Free space sits between the two figures — comfortably above the
+	 * decoded 3 MB this test cares about, and nowhere near what the stored
+	 * 200-byte length would suggest is needed if it (wrongly) governed the
+	 * comparison in the other direction. Proves the fix is not simply "always
+	 * weigh the bigger of the two numbers" — the stored length must play no
+	 * part in the arithmetic at all, only the decoded figure the caller supplies.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_permits_when_decoded_total_fits_despite_tiny_compressed_length(): void {
+		$stored_length = 200;
+		$decoded_bytes = 3 * 1024 * 1024;
+		$ten_mb        = 10 * 1024 * 1024;
+
+		$writer = new FileWriter(
+			$this->fixture_root,
+			false,
+			null,
+			// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- Must match the injected Closure(string): (float|false) contract; this fake reader ignores which path is being asked about and always answers with the fixed figure under test.
+			static function ( string $path ) use ( $ten_mb ) {
+				return $ten_mb;
+			}
+		);
+
+		$result = $writer->assert_free_space_for(
+			array( self::manifest_file_entry( 'options-table.dat.gz', $stored_length ) ),
+			array( 'options-table.dat.gz' => $decoded_bytes )
+		);
+
+		$this->assertTrue( $result, 'A decoded total the free space covers must be permitted, whatever the compressed length says.' );
+	}
+
+	/**
+	 * A file entry with no corresponding $decoded_sizes entry is a caller contract violation, refused loudly rather than silently under-measured.
+	 *
+	 * The caller ({@see \Pontifex\Restore\RestorePreflight::declared_file_sizes()})
+	 * always builds a decoded size for every file entry it hands to this
+	 * method, so this can only happen if a caller passes a $decoded_sizes map
+	 * that does not match $manifest_entries. Falling back to 0 or to length()
+	 * would silently reintroduce a fresh way to under-measure — precisely
+	 * what this method exists to stop doing — so a missing entry fails loudly
+	 * instead.
+	 *
+	 * @return void
+	 */
+	public function test_assert_free_space_for_refuses_a_file_entry_missing_from_decoded_sizes(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		$this->expectException( InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'No decoded size was supplied for file entry "note.txt"' );
+
+		$writer->assert_free_space_for( array( self::manifest_file_entry( 'note.txt', 1000 ) ), array() );
 	}
 
 	// -------------------------------------------------------------------
@@ -2974,5 +3893,1045 @@ final class FileWriterTest extends TestCase {
 
 		$this->assertFalse( $result );
 		$this->assertDirectoryDoesNotExist( $missing_directory, 'the probe must not have created the missing parent directory, or left anything inside it' );
+	}
+
+	// -------------------------------------------------------------------
+	// sweep_orphaned_temp_files()
+	// -------------------------------------------------------------------
+
+	/**
+	 * Build a filename shaped exactly like a temp artefact this writer's own
+	 * producers create — the very shape sweep_orphaned_temp_files() is built
+	 * to recognise.
+	 *
+	 * Deliberately calls uniqid() itself rather than embedding a hand-typed
+	 * hex string: a hand-typed sample risks an accidental non-hex character
+	 * slipping in (an 'h' or a 'g'), which would silently test the wrong
+	 * thing. Going through the real generator, the same one production code
+	 * uses, keeps every fixture built by this helper genuinely representative.
+	 *
+	 * @param string $stem The part of the name before the temp suffix, e.g. "photo.jpg" or ".symlink-probe".
+	 * @return string $stem with a fresh, uniquely-suffixed temp shape appended.
+	 */
+	private static function orphaned_temp_name( string $stem ): string {
+		return $stem . '.' . uniqid( 'pontifex-', true ) . '.tmp';
+	}
+
+	/**
+	 * A file orphan a killed restore left behind is removed.
+	 *
+	 * Stands in for {@see FileWriter::write_file()}'s own sibling temp,
+	 * abandoned by a restore that died between the write and the rename that
+	 * would otherwise have completed it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_file_orphan_left_by_a_killed_restore(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( 'photo.jpg' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'half-written bytes' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * A dangling-symlink probe orphan is removed.
+	 *
+	 * {@see FileWriter::probe_symlink_creation()}'s own artefact is a symlink
+	 * whose target is chosen to never exist, so is_file() reports false for
+	 * it — this is the shape the isLink()-before-isFile() ordering in
+	 * sweep_orphaned_temp_files() exists to catch.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_a_dangling_symlink_probe_orphan(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( '.symlink-probe' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; a dangling probe symlink is the subject under test.
+		symlink( 'this-target-does-not-exist.tmp', $orphan );
+		$this->assertTrue( is_link( $orphan ), 'precondition: the orphan must exist as a symlink' );
+		$this->assertFalse( file_exists( $orphan ), 'precondition: the link must be dangling (its target does not exist)' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 1, $removed );
+		$this->assertFalse( is_link( $orphan ), 'the dangling link itself must be gone' );
+	}
+
+	/**
+	 * A resumable export's .part file is left alone.
+	 *
+	 * A `.part` file is live state a still-running export is writing to, not
+	 * a restore artefact; deleting one would destroy real, unrecoverable work.
+	 *
+	 * Placed under wp-content/uploads, NOT wp-content/pontifex — mutation
+	 * testing found that a fixture placed under wp-content/pontifex passes
+	 * this test even when {@see \Pontifex\Filesystem\TempArtefact}'s orphan
+	 * pattern is mutated to also match ".part", because
+	 * {@see self::test_sweep_skips_pontifexs_own_working_directory()}'s
+	 * prune removes that whole directory from the walk before the pattern is
+	 * ever consulted. Placing it under uploads, which the sweep does walk,
+	 * means this test actually exercises the pattern's own refusal to match
+	 * ".part", rather than passing for the unrelated reason that the
+	 * directory was never entered at all.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_resumable_exports_part_file_alone(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$part   = $dir . '/site-export.wpmig.part';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $part, 'in-progress export state' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $part );
+	}
+
+	/**
+	 * A user's own similarly-named file is left alone.
+	 *
+	 * "notes.pontifex-backup.tmp" and "data.pontifex.tmp" have no uniqid()
+	 * shape at all (no hex run followed by a dot and a decimal run), so
+	 * neither is close to matching. "archive.pontifex-2024.01.tmp" and
+	 * "db.pontifex-1.2.tmp" are closer — "2024" and "1" are legal hex runs,
+	 * and both are followed by a dot and a decimal run — but neither reaches
+	 * the eight-character floor {@see \Pontifex\Filesystem\TempArtefact}'s
+	 * orphan pattern requires, which is exactly the false positive that floor exists to
+	 * rule out; a real uniqid()-shaped hex run is always fourteen characters,
+	 * so the floor never excludes a genuine artefact.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_users_own_similarly_named_files_alone(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$one    = $dir . '/notes.pontifex-backup.tmp';
+		$two    = $dir . '/data.pontifex.tmp';
+		$three  = $dir . '/archive.pontifex-2024.01.tmp';
+		$four   = $dir . '/db.pontifex-1.2.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $one, 'a' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $two, 'b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $three, 'c' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $four, 'd' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $one );
+		$this->assertFileExists( $two );
+		$this->assertFileExists( $three );
+		$this->assertFileExists( $four );
+	}
+
+	/**
+	 * The sweep never descends through a symlink.
+	 *
+	 * The catastrophic-if-wrong case: a matching orphan sits under a real
+	 * directory that is a SIBLING of the sweep root, reachable only through a
+	 * symlink placed inside the sweep root. A sweep that followed the link
+	 * would find and remove it; the correct sweep must not even look.
+	 *
+	 * Confined to the "wp-content" prefix deliberately, so the file under
+	 * "outside/" is not also directly reachable by ordinary, non-symlinked
+	 * traversal — the symlink is the ONLY path to it, which is what makes
+	 * this test actually exercise the guard rather than passing for an
+	 * unrelated reason (prefix confinement alone).
+	 *
+	 * @return void
+	 */
+	public function test_sweep_never_descends_through_a_symlink(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$outside = $this->make_fixture_directory( 'outside' );
+		$orphan  = $outside . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$content_dir = $this->make_fixture_directory( 'wp-content' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; the sweep must never follow this link.
+		symlink( '../outside', $content_dir . '/link' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed, 'nothing reachable only through a symlink may ever be counted' );
+		$this->assertFileExists( $orphan, 'a file reachable only through a symlink must never be swept' );
+	}
+
+	/**
+	 * A symlinked sweep root itself is refused, not merely descended into carefully.
+	 *
+	 * {@see self::test_sweep_never_descends_through_a_symlink()} above places
+	 * its symlink INSIDE the sweep root and proves the walk does not follow
+	 * an interior link — a different case entirely, already protected by
+	 * {@see RecursiveIteratorIterator}'s own `hasChildren( $allowLinks = false )`
+	 * default. This test covers the case a follow-up adversarial mutation
+	 * audit found completely unpinned: deleting the `is_link( $sweep_root )`
+	 * guard from {@see FileWriter::sweep_orphaned_temp_files()} left all 1862
+	 * tests in this project green, because no existing test ever made
+	 * "wp-content" — the sweep root itself — a symlink.
+	 *
+	 * That guard exists because is_dir() FOLLOWS a symlink to ask whether its
+	 * TARGET is a directory, so, without it, `is_dir( $sweep_root )` would
+	 * report true for a symlinked "wp-content" and
+	 * {@see RecursiveDirectoryIterator}'s own constructor would then open
+	 * whatever the link resolves to just as readily as it opens a real
+	 * directory — `hasChildren( $allowLinks = false )` only governs a symlink
+	 * the walk MEETS while descending, never what it was HANDED as its own
+	 * starting point. And {@see FileWriter::assert_no_symlinked_ancestor()}
+	 * refuses every entry {@see FileWriter::write_entry()} is asked to write
+	 * through a symlinked "wp-content", so in this exact layout the writer's
+	 * own reach is zero, while the sweep's — without this guard — would have
+	 * been the link's whole foreign target tree.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_refuses_a_symlinked_sweep_root(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$outside = $this->make_fixture_directory( 'outside' );
+		$orphan  = $outside . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; "wp-content" — the sweep root itself — is the symlink under test.
+		symlink( 'outside', $this->fixture_root . '/wp-content' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed, 'a symlinked sweep root must refuse the whole sweep' );
+		$this->assertFileExists( $orphan, 'a file behind a symlinked sweep root must never be swept' );
+	}
+
+	/**
+	 * A sweep root that RESOLVES outside the destination root, via a symlinked intermediate component, is refused — independently of the is_link() guard above.
+	 *
+	 * The realpath() block in {@see FileWriter::sweep_orphaned_temp_files()}
+	 * is a SECOND, independent confinement guard, and the same mutation audit
+	 * found it just as unpinned as the is_link() guard above: deleting the
+	 * whole realpath() block also left all 1862 tests green, because
+	 * {@see self::test_sweep_refuses_a_symlinked_sweep_root()} above trips
+	 * `is_link( $sweep_root )` first and never reaches this code at all — no
+	 * existing test exercised the realpath() block on its own.
+	 *
+	 * So this fixture is built deliberately to avoid that overlap: the sweep
+	 * root's own FINAL path component ("wp-content") is a genuine directory,
+	 * never itself a symlink, so `is_link( $sweep_root )` reads false and the
+	 * first guard cannot be what refuses this case — proven below by an
+	 * explicit precondition assertion, not merely assumed. What sends the
+	 * sweep root somewhere outside the destination root instead is an
+	 * INTERMEDIATE path component: required_prefix is set to
+	 * "link/wp-content", and "link" is a symlink pointing at an entirely
+	 * separate temporary directory that also happens to contain a
+	 * "wp-content" child. is_dir( $sweep_root ) still reports true — the
+	 * directory really is there, on the far side of the link — so the walk
+	 * would otherwise proceed unhindered; only realpath() resolving the
+	 * whole path the way the kernel actually would, and finding it lands
+	 * outside $this->destination_root, is what refuses it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_refuses_a_sweep_root_that_resolves_outside_the_destination_root(): void {
+		$outside_root    = sys_get_temp_dir() . '/pontifex-filewriter-test-outside-' . bin2hex( random_bytes( 8 ) );
+		$outside_content = $outside_root . '/wp-content';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup; a real directory entirely outside the destination root, reached only via the symlinked "link" component below.
+		mkdir( $outside_content, 0o755, true );
+		$orphan = $outside_content . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		try {
+			$writer = new FileWriter( $this->fixture_root, false, 'link/wp-content' );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup; the INTERMEDIATE component "link" is the symlink under test, not the sweep root's own final component.
+			symlink( $outside_root, $this->fixture_root . '/link' );
+
+			$sweep_root = $this->fixture_root . '/link/wp-content';
+			$this->assertFalse( is_link( $sweep_root ), 'precondition: the sweep root itself must not be a symlink, so the is_link() guard cannot be what refuses this case' );
+			$this->assertTrue( is_dir( $sweep_root ), 'precondition: the sweep root must genuinely resolve to a real, existing directory, so is_dir() cannot be what refuses this case' );
+
+			$removed = $writer->sweep_orphaned_temp_files();
+
+			$this->assertSame( 0, $removed, 'a sweep root resolving outside the destination root must refuse the whole sweep' );
+			$this->assertFileExists( $orphan, 'a file behind a sweep root that resolves outside the destination root must never be swept' );
+		} finally {
+			self::rmtree( $outside_root );
+		}
+	}
+
+	/**
+	 * Pontifex's own working directory is skipped.
+	 *
+	 * A matching name under wp-content/pontifex/jobs survives — the same
+	 * guard {@see FileWriter::assert_not_pontifex_working_path()} enforces
+	 * for entries being WRITTEN applies here to entries being SWEPT.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_skips_pontifexs_own_working_directory(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$jobs   = $this->make_fixture_directory( 'wp-content/pontifex/jobs' );
+		$orphan = $jobs . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * Pontifex's own working directory is skipped under a REQUIRED PREFIX too.
+	 *
+	 * The test above proves this with $required_prefix null, where the sweep
+	 * root and the destination root are the same directory, so the callback
+	 * filter's relative-path slice — `substr( ..., strlen( $destination_root ) + 1 )`
+	 * — and a hypothetical slice measured from the (narrower) sweep root
+	 * instead would cut the string in exactly the same place; mutation
+	 * testing found that swapping `strlen( $destination_root ) + 1` for
+	 * `strlen( $sweep_root ) + 1` left that test, and the whole suite, green.
+	 * Every restore this plugin actually ships runs with $required_prefix set
+	 * to "wp-content" (the default, content-only mode), where the two lengths
+	 * differ: sliced relative to the sweep root, this orphan's path would
+	 * read as "pontifex/jobs/…", which
+	 * {@see FileWriter::is_pontifex_working_path()} does not recognise (it
+	 * expects "wp-content/pontifex/…"), so that mutation would walk straight
+	 * into Pontifex's own jobs directory and delete a live
+	 * JobStore/JobProgressLog temp file mid-write, on every content-only
+	 * restore. Proving the guard holds under exactly the mode this plugin
+	 * actually runs closes that gap.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_skips_pontifexs_own_working_directory_under_a_required_prefix(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+		$jobs   = $this->make_fixture_directory( 'wp-content/pontifex/jobs' );
+		$orphan = $jobs . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must survive' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * A required_prefix of "wp-content" confines the RECURSIVE walk to that subtree — but the installation root is still reached separately.
+	 *
+	 * This test used to plant its "outside the prefix" orphan directly at the
+	 * destination root and assert it survived, on the theory that
+	 * {@see FileWriter::assert_within_required_prefix()} refuses every WRITE
+	 * outside that boundary, so nothing outside it could ever hold one of
+	 * this writer's own temp files. An adversarial audit demonstrated that
+	 * theory false: the capability probe behind
+	 * {@see FileWriter::assert_symlinks_creatable()} can itself leave its
+	 * dangling-symlink orphan directly at the installation root (see REACH in
+	 * {@see FileWriter::sweep_orphaned_temp_files()}'s own docblock for the
+	 * two real cases), so that orphan is now correctly swept too — this test
+	 * proves the fix rather than the false assumption it used to encode. An
+	 * orphan nested a level deeper still, outside "wp-content" entirely, sits
+	 * somewhere neither the recursive walk nor the non-recursive
+	 * installation-root scan ever reaches, and survives.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_confines_the_recursive_walk_but_still_reaches_the_installation_root(): void {
+		$writer = new FileWriter( $this->fixture_root, false, 'wp-content' );
+
+		$root_orphan = $this->fixture_root . '/' . self::orphaned_temp_name( 'orphan' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $root_orphan, 'at the installation root, e.g. a symlink-capability probe orphan' );
+
+		$genuinely_outside_dir    = $this->make_fixture_directory( 'other' );
+		$genuinely_outside_orphan = $genuinely_outside_dir . '/' . self::orphaned_temp_name( 'orphan' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $genuinely_outside_orphan, 'nested outside both wp-content and the installation-root scan' );
+
+		$content_dir   = $this->make_fixture_directory( 'wp-content' );
+		$inside_orphan = $content_dir . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $inside_orphan, 'inside the prefix' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 2, $removed );
+		$this->assertFileDoesNotExist( $root_orphan, 'a probe orphan at the installation root must be swept too' );
+		$this->assertFileExists( $genuinely_outside_orphan, 'an orphan nested outside both the prefix and the installation root must survive' );
+		$this->assertFileDoesNotExist( $inside_orphan );
+	}
+
+	/**
+	 * A directory named like a temp artefact survives and is not counted.
+	 *
+	 * This proves only the observable OUTCOME: a directory whose name happens
+	 * to match the orphan pattern, and everything inside it, is left
+	 * untouched and does not contribute to the returned count. It does NOT
+	 * prove that isFile() is what produces that outcome — unlink() refuses a
+	 * directory on every platform regardless of that guard, so this test
+	 * cannot isolate isFile() from unlink()'s own refusal, and does not claim
+	 * to.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_directory_named_like_a_temp_file_alone(): void {
+		$writer          = new FileWriter( $this->fixture_root );
+		$uploads         = $this->make_fixture_directory( 'wp-content/uploads' );
+		$temp_shaped_dir = $uploads . '/' . self::orphaned_temp_name( 'leftover' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $temp_shaped_dir, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $temp_shaped_dir . '/inner.txt', 'still here' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertDirectoryExists( $temp_shaped_dir );
+		$this->assertFileExists( $temp_shaped_dir . '/inner.txt' );
+	}
+
+	/**
+	 * The returned count is the number of files actually removed.
+	 *
+	 * Three orphans are placed; the count must be exactly 3 — describing what
+	 * was actually done, never merely how many names matched.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_returns_the_count_of_files_actually_removed(): void {
+		$writer  = new FileWriter( $this->fixture_root );
+		$dir     = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphans = array(
+			$dir . '/' . self::orphaned_temp_name( 'a.jpg' ),
+			$dir . '/' . self::orphaned_temp_name( 'b.jpg' ),
+			$dir . '/' . self::orphaned_temp_name( 'c.jpg' ),
+		);
+		foreach ( $orphans as $orphan ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+			file_put_contents( $orphan, 'x' );
+		}
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 3, $removed );
+		foreach ( $orphans as $orphan ) {
+			$this->assertFileDoesNotExist( $orphan );
+		}
+	}
+
+	/**
+	 * The returned count reflects only unlink() calls that actually succeeded.
+	 *
+	 * A matching orphan sits inside a directory this process cannot write to
+	 * (0o555: read and execute, no write) — unlink() needs write permission
+	 * on the PARENT directory, not the file itself, so the removal attempt
+	 * fails. Mutating the removal loop to `@unlink( $path ); ++$removed;`
+	 * unconditionally (dropping the surrounding `if`) left every other sweep
+	 * test in this suite green, because every fixture those tests plant sits
+	 * somewhere genuinely removable; only a fixture the sweep cannot actually
+	 * delete can catch that mutation, which is why this test exists on its
+	 * own.
+	 *
+	 * Skips whenever this process turns out not to actually be constrained
+	 * by the 0o555 mode just set — proven EMPIRICALLY, by attempting to
+	 * create a probe file inside the directory right after the chmod,
+	 * rather than inferred from identity. `getmyuid()` was tried first and
+	 * was wrong: it reports who owns the SCRIPT FILE on disk, not what this
+	 * process can actually do, and inside a container where the repository
+	 * is bind-mounted from the host, the files are host-owned while PHP
+	 * itself runs as root — so `0 === getmyuid()` reads false even though
+	 * root is about to unlink straight through the 0o555 mode regardless.
+	 * A capability probe must measure the thing it is about to rely on,
+	 * never infer it from identity. The mode is restored in a `finally` so
+	 * tearDown() can still remove the fixture, following
+	 * {@see self::test_a_failed_write_leaves_the_original_intact_and_no_temp()}'s
+	 * existing pattern in this file.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_does_not_count_an_orphan_it_could_not_actually_remove(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan = $dir . '/' . self::orphaned_temp_name( 'stuck' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'cannot actually be removed' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the DIRECTORY unwritable so the removal attempt fails, the condition under test.
+		chmod( $dir, 0o555 );
+
+		try {
+			$write_probe_path = $dir . '/.pontifex-write-probe-' . bin2hex( random_bytes( 8 ) );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked by the 0o555 mode just set, rather than inferring it from uid.
+			$can_still_write = false !== @file_put_contents( $write_probe_path, '' );
+			if ( $can_still_write ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Cleanup of the capability probe's own artefact before skipping.
+				@unlink( $write_probe_path );
+				$this->markTestSkipped( 'This process can still write into a 0o555 directory (commonly root inside a container over a host-owned bind mount), so the condition this test needs cannot be produced here.' );
+			}
+
+			$removed = $writer->sweep_orphaned_temp_files();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+			chmod( $dir, 0o755 );
+		}
+
+		$this->assertSame( 0, $removed, 'a name that matched but failed to unlink must not be counted as removed' );
+		$this->assertFileExists( $orphan );
+	}
+
+	/**
+	 * The sweep never throws, even when it cannot open a directory inside it — and it still removes what it CAN reach.
+	 *
+	 * {@see RecursiveIteratorIterator::CATCH_GET_CHILD} is what stops the
+	 * UnexpectedValueException raised when the walker tries to open a
+	 * directory it cannot read from escaping the walk entirely. Removing
+	 * that flag left every other sweep test in this suite green, because
+	 * none of them ever plants a directory the walker cannot even open.
+	 * Several locked, unreadable directories are planted (created BEFORE the
+	 * one reachable orphan, so a filesystem that returns directory entries
+	 * in roughly creation order encounters every one of them first) so that,
+	 * whichever order the real filesystem happens to return entries in, it
+	 * is overwhelmingly likely that at least one locked directory is reached
+	 * before the reachable orphan is: without CATCH_GET_CHILD, the first
+	 * such encounter throws and the whole walk stops right there, so the
+	 * reachable orphan is never removed. With CATCH_GET_CHILD, each locked
+	 * directory is skipped and the walk carries on regardless, so the
+	 * reachable orphan is removed every time. The assertion is therefore
+	 * twofold: the call does not throw, and the reachable orphan is removed.
+	 *
+	 * Skips whenever this process turns out not to actually be constrained
+	 * by the 0o000 mode just set — proven EMPIRICALLY, by attempting to
+	 * list one of the locked directories right after the chmod, rather than
+	 * inferred from identity. `getmyuid()` was tried first and was wrong in
+	 * BOTH directions here: it answers who owns the SCRIPT FILE on disk,
+	 * not what this process can actually do, and root reads a 0o000
+	 * directory perfectly well regardless of what any uid check reports —
+	 * so a test guarded only by identity would report as neither correctly
+	 * skipped nor genuinely exercised, depending on what a bind mount
+	 * happens to make `getmyuid()` say, while silently proving nothing
+	 * either way. A capability probe must measure the thing it is about to
+	 * rely on, never infer it from identity. The mode is restored in a
+	 * `finally` so tearDown() can still remove the fixture, following
+	 * {@see self::test_a_failed_write_leaves_the_original_intact_and_no_temp()}'s
+	 * existing pattern in this file.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_never_throws_on_an_unreadable_directory_and_still_removes_a_reachable_orphan(): void {
+		$writer      = new FileWriter( $this->fixture_root );
+		$locked_dirs = array();
+		for ( $i = 0; $i < 8; $i++ ) {
+			$locked_dirs[] = $this->make_fixture_directory( 'wp-content/locked-' . $i );
+		}
+		$reachable_dir = $this->make_fixture_directory( 'wp-content/uploads' );
+		$orphan        = $reachable_dir . '/' . self::orphaned_temp_name( 'reachable' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'must still be removed' );
+
+		foreach ( $locked_dirs as $locked_dir ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the directory unreadable so the walker cannot open it, the condition under test.
+			chmod( $locked_dir, 0o000 );
+		}
+
+		try {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked from listing a directory just chmod'd to 0o000, rather than inferring it from uid.
+			$can_still_read = false !== @scandir( $locked_dirs[0] );
+			if ( $can_still_read ) {
+				$this->markTestSkipped( 'This process can still list a 0o000 directory (commonly root inside a container), so the condition this test needs cannot be produced here.' );
+			}
+
+			$removed = $writer->sweep_orphaned_temp_files();
+		} finally {
+			foreach ( $locked_dirs as $locked_dir ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+				chmod( $locked_dir, 0o755 );
+			}
+		}
+
+		$this->assertSame( 1, $removed, 'the sweep must still remove a reachable orphan despite unreadable directories elsewhere in the walk' );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * Every name TempArtefact::suffix() (and, through it, FileWriter's own
+	 * private temp_sibling_path()) produces is recognised by
+	 * TempArtefact::is_orphan_name(), over many generated names.
+	 *
+	 * Re-pointed at the new home rather than deleted: FileWriter no longer
+	 * builds or recognises this shape itself — both halves moved to
+	 * {@see \Pontifex\Filesystem\TempArtefact} (see that class's own
+	 * docblock for why two independent copies of a security-relevant
+	 * pattern, one per deleter, would be a drift hazard). temp_sibling_path()
+	 * stays private and stays in this class — it is one of
+	 * TempArtefact::suffix()'s real callers — so this test keeps proving the
+	 * same anti-drift property against the new home: it is still driven by
+	 * reflection rather than duplicating a regex here, so this asserts the
+	 * two are consistent WITH EACH OTHER instead of merely asserting the
+	 * test author's own copy of a pattern matches itself.
+	 * {@see \Pontifex\Tests\Unit\Filesystem\TempArtefactTest} separately
+	 * covers TempArtefact::suffix() and TempArtefact::is_orphan_name()
+	 * against each other directly, with no FileWriter involved at all.
+	 *
+	 * uniqid()'s random component means a single sample could pass even if
+	 * the two were subtly inconsistent (wrong digit counts, a stray anchor);
+	 * looping asserts it holds for the generator's actual output
+	 * distribution, not one lucky draw.
+	 *
+	 * @return void
+	 */
+	public function test_temp_artefact_suffix_always_matches_the_orphan_pattern(): void {
+		$sibling_method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
+
+		for ( $i = 0; $i < 50; $i++ ) {
+			$suffix = TempArtefact::suffix();
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( $suffix ),
+				sprintf( 'TempArtefact::suffix() output "%s" must be recognised by TempArtefact::is_orphan_name().', $suffix )
+			);
+
+			$sibling      = (string) $sibling_method->invoke( null, '/some/target/path/note.txt' );
+			$sibling_name = basename( $sibling );
+			$this->assertTrue(
+				TempArtefact::is_orphan_name( $sibling_name ),
+				sprintf( 'FileWriter::temp_sibling_path() output "%s" must be recognised as an orphan.', $sibling_name )
+			);
+		}
+	}
+
+	/**
+	 * Sweeping a destination that contains no orphans returns 0 and removes nothing.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_of_a_clean_destination_returns_zero_and_removes_nothing(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $dir . '/photo.jpg', 'ordinary content' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $dir . '/photo.jpg' );
+	}
+
+	// -------------------------------------------------------------------
+	// Creation ledger invariants (ADR 0024 follow-up: fixing the verdict
+	// that was not true for an entry's own implicit intermediate
+	// directories, and pinning four behaviours that survived mutation
+	// with no test noticing).
+	// -------------------------------------------------------------------
+
+	/**
+	 * Overwriting something already on the site — a file (buffered and
+	 * streamed), a directory, and a symlink — must never add it to the
+	 * creation ledger, so recovery can never delete something the failed
+	 * import did not introduce.
+	 *
+	 * Every write_*() method captures $existed_before BEFORE it changes the
+	 * filesystem and gates its own record_created_path() call on
+	 * `! $existed_before`. Removing that guard from any ONE of the four
+	 * sites — write_file(), write_file_from_stream(), write_directory(), or
+	 * write_symlink() — would make its kind of entry, once merely
+	 * OVERWRITTEN rather than created, look identical in the ledger to a
+	 * genuine creation: recovery would then delete a file, directory, or
+	 * symlink that was on the site before the import ever ran. This seeds
+	 * all four kinds, restores an entry over each, and proves none of the
+	 * four ends up in the ledger by running the real cleanup and finding
+	 * every one of them still there afterwards, unchanged in kind.
+	 *
+	 * @return void
+	 */
+	public function test_overwriting_pre_existing_entries_of_every_kind_never_adds_them_to_the_ledger(): void {
+		$writer = new FileWriter( $this->fixture_root );
+
+		// A pre-existing file, overwritten through the buffered write path.
+		$buffered_file = $this->fixture_root . '/wp-content/buffered.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( dirname( $buffered_file ), 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: seeding the pre-existing file the buffered path overwrites.
+		file_put_contents( $buffered_file, 'ORIGINAL BUFFERED' );
+
+		// A pre-existing file, overwritten through the streamed write path.
+		$streamed_file = $this->fixture_root . '/wp-content/streamed.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup: seeding the pre-existing file the streamed path overwrites.
+		file_put_contents( $streamed_file, 'ORIGINAL STREAMED' );
+
+		// A pre-existing directory, "overwritten" (its mode updated in place).
+		$existing_dir = $this->fixture_root . '/wp-content/existing-dir';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: seeding the pre-existing directory the restore overwrites.
+		mkdir( $existing_dir, 0o755, true );
+
+		// A pre-existing symlink, overwritten with a new target.
+		$existing_link = $this->fixture_root . '/wp-content/existing-link';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_symlink -- Test fixture setup: seeding the pre-existing symlink the restore overwrites.
+		symlink( '/old/target', $existing_link );
+
+		$writer->write_entry( self::file_result( 'wp-content/buffered.txt', 'NEW BUFFERED' ) );
+
+		$stream_contents = 'NEW STREAMED';
+		$stream_header   = EntryHeader::for_file( 'wp-content/streamed.txt', strlen( $stream_contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+		fwrite( $stream, $stream_contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+		rewind( $stream );
+		$writer->write_entry( EntryReadResult::for_stream( $stream_header, $stream, strlen( $stream_contents ) ) );
+
+		$writer->write_entry( self::directory_result( 'wp-content/existing-dir', 0o700 ) );
+		$writer->write_entry( self::symlink_result( 'wp-content/existing-link', 'new-target' ) );
+
+		// Sanity check: every write actually landed as the new content, mode,
+		// or target — proving this test exercises real overwrites, not no-ops
+		// that would pass trivially regardless of the guard under test.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW BUFFERED', file_get_contents( $buffered_file ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW STREAMED', file_get_contents( $streamed_file ) );
+		clearstatcache( true, $existing_dir );
+		$this->assertSame( 0o700, fileperms( $existing_dir ) & 0o7777 );
+		$this->assertSame( 'new-target', readlink( $existing_link ) );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertSame( array(), $report->removed_paths(), 'nothing this run merely overwrote should ever be considered "removed" during cleanup' );
+		$this->assertSame( array(), $report->failed_paths() );
+		$this->assertTrue( $report->is_precise_revert() );
+		$this->assertFileExists( $buffered_file, 'a pre-existing file overwritten via the buffered path must survive cleanup' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW BUFFERED', file_get_contents( $buffered_file ) );
+		$this->assertFileExists( $streamed_file, 'a pre-existing file overwritten via the streamed path must survive cleanup' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading the test's own fixture back.
+		$this->assertSame( 'NEW STREAMED', file_get_contents( $streamed_file ) );
+		$this->assertDirectoryExists( $existing_dir, 'a pre-existing directory must survive cleanup' );
+		$this->assertTrue( is_link( $existing_link ), 'a pre-existing symlink must survive cleanup' );
+		$this->assertSame( 'new-target', readlink( $existing_link ) );
+	}
+
+	/**
+	 * The ledger's record_created_path() call must run only AFTER
+	 * finalise_temp() has actually succeeded — never merely after the temp
+	 * file itself has landed.
+	 *
+	 * ADR 0024 ("The ordering that makes it safe") names this the one thing
+	 * standing between the ledger and a bug worse than the one it fixes:
+	 * record a path before the write that creates it has truly landed, and an
+	 * abort between the two leaves a ledger entry for a path that was never
+	 * really created — recovery would then delete something it never
+	 * touched. The tempting-looking mutation this pins against is moving
+	 * write_file_from_stream()'s record_created_path() call to right after
+	 * the temp file is copied — "it's basically done at that point" — rather
+	 * than after finalise_temp() (chmod, touch, RENAME) has actually
+	 * returned.
+	 *
+	 * Reaching that window for real, rather than merely asserting it in
+	 * prose, needs the temp file to have genuinely landed while the FINAL
+	 * rename() still fails. FileWriter's own temp filename is built from
+	 * uniqid() (via {@see \Pontifex\Filesystem\TempArtefact::suffix()}), so
+	 * it cannot be predicted from outside the class and pre-seeded — and a
+	 * directory's write permission gates creating a new file in it and
+	 * renaming a file within it identically, so chmodding the directory
+	 * unwritable before write_entry() is called blocks the temp file from
+	 * ever being written at all (proving nothing about ordering), while
+	 * chmodding it only after write_entry() returns is too late to affect
+	 * anything that happened inside that same call.
+	 *
+	 * A PHP stream filter is the way through both problems. Appended to the
+	 * payload stream write_file_from_stream() reads from, its filter()
+	 * method runs exactly when stream_copy_to_stream() asks that stream for
+	 * its first chunk — which happens AFTER write_file_from_stream() has
+	 * already called fopen($temp_path, 'wb'), and opening a file for writing
+	 * creates its directory entry immediately, before a single byte is
+	 * copied. Chmodding the directory at that moment therefore lands in
+	 * exactly the window where the temp file already exists but
+	 * finalise_temp()'s rename() has not yet run: the data write that
+	 * follows goes to an already-open file descriptor (no directory
+	 * permission needed for that), finalise_temp()'s chmod()/touch() calls
+	 * on the temp file need only ownership of it (not directory permission
+	 * either), and rename() is the one operation left that genuinely needs
+	 * the directory to be writable — so it, and only it, fails. Proven
+	 * directly against this exact mechanism before being relied on here (a
+	 * plain script reproducing the same fopen/chmod-mid-copy/rename sequence
+	 * outside PHPUnit) rather than assumed.
+	 *
+	 * Gated on an empirical capability probe, never on identity: `getmyuid()`
+	 * reports who owns the SCRIPT FILE on disk, not what this process can
+	 * actually do, and is wrong in exactly this codebase under a
+	 * bind-mounted container (root process, host-owned files) — see
+	 * {@see self::test_sweep_does_not_count_an_orphan_it_could_not_actually_remove()}
+	 * for the same lesson already learned once in this file. The probe
+	 * attempts the REAL mechanism this test depends on — renaming a file
+	 * within a directory just chmod'd unwritable — and skips only if that
+	 * attempt actually succeeds, i.e. this process is not constrained by the
+	 * mode.
+	 *
+	 * @return void
+	 */
+	public function test_a_created_path_is_never_recorded_before_finalise_temp_actually_succeeds(): void {
+		$probe_dir = $this->fixture_root . '/probe';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup for the capability probe below.
+		mkdir( $probe_dir, 0o755, true );
+		$probe_source = $probe_dir . '/source';
+		$probe_target = $probe_dir . '/target';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup for the capability probe below.
+		file_put_contents( $probe_source, 'x' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Making the probe directory unwritable, the condition the real test below depends on.
+		chmod( $probe_dir, 0o555 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- Capability probe: proves whether THIS process is actually blocked from renaming within a directory just chmod'd to 0o555, rather than inferring it from uid.
+		$probe_rename_worked = @rename( $probe_source, $probe_target );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the probe directory so it, and any leftovers inside it, can be cleaned up.
+		chmod( $probe_dir, 0o755 );
+		if ( $probe_rename_worked ) {
+			$this->markTestSkipped( 'This process can still rename within a directory just chmod\'d to 0o555 (commonly root inside a container over a host-owned bind mount), so the condition this test needs cannot be produced here.' );
+		}
+
+		$filter_name = 'pontifex-filewritertest-chmod-on-first-read';
+		if ( ! in_array( $filter_name, stream_get_filters(), true ) ) {
+			// An anonymous class, registered by its dynamically-obtained name,
+			// rather than a dedicated fixture class: this file is the sole owner
+			// of this test, and the filter has no state beyond one boolean that
+			// resets naturally with each stream_filter_append() call (a fresh
+			// instance per append), so a shared, named class would buy nothing a
+			// second file elsewhere in the tree would need to know about.
+			$filter = new class() extends \php_user_filter {
+				/**
+				 * Whether this filter instance has already fired its chmod side effect.
+				 *
+				 * @var bool
+				 */
+				private bool $already_fired = false;
+
+				/**
+				 * Pass every byte through unchanged; chmod the configured directory before the FIRST chunk.
+				 *
+				 * $this->params carries the ['directory' => ..., 'mode' => ...] pair
+				 * passed to stream_filter_append()'s fourth argument — PHP's own
+				 * php_user_filter base class populates it automatically, so no
+				 * static state is needed to get configuration into this instance.
+				 *
+				 * @param resource $in       Input bucket brigade.
+				 * @param resource $out      Output bucket brigade.
+				 * @param int      $consumed Bytes consumed, updated by reference.
+				 * @param bool     $closing  Whether the stream is closing.
+				 * @return int One of the PSFS_* constants.
+				 */
+				public function filter( $in, $out, &$consumed, bool $closing ): int {
+					if ( ! $this->already_fired ) {
+						$this->already_fired = true;
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Test-only timing hook: this chmod IS the condition under test, fired mid-copy so the destination temp file has already landed before its directory becomes unwritable.
+						@chmod( $this->params['directory'], $this->params['mode'] );
+					}
+					// phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- Standard PHP stream-filter idiom: stream_bucket_make_writeable() returns null once the bucket brigade is exhausted, so the assignment IS the loop's own termination test.
+					while ( $bucket = stream_bucket_make_writeable( $in ) ) {
+						$consumed += $bucket->datalen;
+						stream_bucket_append( $out, $bucket );
+					}
+					return PSFS_PASS_ON;
+				}
+			};
+			stream_filter_register( $filter_name, get_class( $filter ) );
+		}
+
+		$area = $this->fixture_root . '/wp-content/newarea';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: the directory the stream filter will chmod mid-copy.
+		mkdir( $area, 0o755, true );
+
+		$contents = 'this file must never be recorded';
+		$header   = EntryHeader::for_file( 'wp-content/newarea/newfile.txt', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+		fwrite( $stream, $contents );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+		rewind( $stream );
+		stream_filter_append(
+			$stream,
+			$filter_name,
+			STREAM_FILTER_READ,
+			array(
+				'directory' => $area,
+				'mode'      => 0o555,
+			)
+		);
+
+		$writer = new FileWriter( $this->fixture_root );
+		$thrown = null;
+		try {
+			$writer->write_entry( EntryReadResult::for_stream( $header, $stream, strlen( $contents ) ) );
+		} catch ( RuntimeException $error ) {
+			$thrown = $error;
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Restoring the fixture directory so tearDown can clean it.
+			chmod( $area, 0o755 );
+		}
+
+		$this->assertInstanceOf( RuntimeException::class, $thrown, 'the final rename must actually fail for this test to prove anything about ordering' );
+		$this->assertStringContainsString( 'Could not move file into place', $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $area . '/newfile.txt', 'the rename never landed, so the target must not exist' );
+
+		$created_paths = ( new ReflectionProperty( FileWriter::class, 'created_paths' ) )->getValue( $writer );
+		$this->assertSame( array(), $created_paths, 'a write whose finalise_temp() step failed must leave no ledger entry at all, however far the write had otherwise progressed' );
+	}
+
+	/**
+	 * A created, empty directory is removed with rmdir(), not unlink() —
+	 * and is reported as REMOVED, never as failed.
+	 *
+	 * The unlink() function cannot remove a directory on any platform this
+	 * plugin supports; if remove_one_created_path() ever called it for a
+	 * LEDGER_KIND_DIRECTORY entry instead of rmdir(), the removal attempt
+	 * would fail outright, the directory would survive on disk, and the
+	 * cleanup report would misclassify a directory as "could not be removed"
+	 * rather than removing it. A top-level directory name is used
+	 * deliberately, so the only ledger entry in play is the one this test is
+	 * about — a nested path would also record an intermediate ancestor (see
+	 * {@see self::test_removing_created_paths_deletes_intermediate_directories_a_file_entry_implicitly_created()}),
+	 * which would make this assertion about exactly which paths were removed
+	 * ambiguous.
+	 *
+	 * @return void
+	 */
+	public function test_a_created_empty_directory_is_removed_with_rmdir_not_unlink(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::directory_result( 'newdir', 0o755 ) );
+
+		$path = $this->fixture_root . '/newdir';
+		$this->assertDirectoryExists( $path, 'Sanity check: the directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertDirectoryDoesNotExist( $path );
+		$this->assertSame( array( 'newdir' ), $report->removed_paths() );
+		$this->assertSame( array(), $report->failed_paths() );
+		$this->assertTrue( $report->is_precise_revert() );
+	}
+
+	/**
+	 * Cleanup removes the intermediate directories a single file entry
+	 * implicitly created — and leaves alone a directory that already existed
+	 * before the restore.
+	 *
+	 * Both {@see FileWriter::ensure_parent_directory()} and
+	 * {@see FileWriter::write_directory()} used to hand their target straight
+	 * to a single RECURSIVE mkdir(). Every intermediate level PHP silently
+	 * created that way was never passed to record_created_path(): a single
+	 * file entry "wp-content/plugins/intruder/evil.php", restored where
+	 * neither "wp-content/plugins" nor "wp-content/plugins/intruder" yet
+	 * existed, left BOTH of those directories on disk with no ledger entry
+	 * for either — recovery would neither remove them nor report them as
+	 * failures, and {@see CreationLedgerCleanupReport::is_precise_revert()}
+	 * would still (wrongly) answer true. This is the scenario from the brief,
+	 * reproduced exactly: "wp-content" is seeded so it exists BEFORE the
+	 * restore, "plugins" and "intruder" do not, and the file lands three
+	 * levels below the destination root.
+	 *
+	 * @return void
+	 */
+	public function test_removing_created_paths_deletes_intermediate_directories_a_file_entry_implicitly_created(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup: a directory that exists BEFORE the restore runs, and so must survive cleanup.
+		mkdir( $this->fixture_root . '/wp-content', 0o755, true );
+
+		$writer->write_entry( self::file_result( 'wp-content/plugins/intruder/evil.php', '<?php /* intruder */' ) );
+
+		$plugins  = $this->fixture_root . '/wp-content/plugins';
+		$intruder = $plugins . '/intruder';
+		$evil     = $intruder . '/evil.php';
+		$this->assertFileExists( $evil, 'Sanity check: the file actually landed.' );
+		$this->assertDirectoryExists( $plugins, 'Sanity check: the implicit intermediate directory was actually created.' );
+		$this->assertDirectoryExists( $intruder, 'Sanity check: the implicit intermediate directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array() );
+
+		$this->assertFileDoesNotExist( $evil );
+		$this->assertDirectoryDoesNotExist( $intruder, 'the intermediate directory the file entry implicitly created must be removed' );
+		$this->assertDirectoryDoesNotExist( $plugins, 'the OTHER intermediate directory the file entry implicitly created must also be removed' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'a directory that existed BEFORE the restore must survive cleanup' );
+		$this->assertTrue( $report->is_precise_revert(), 'every path this run created — the file and both intermediate directories — was accounted for and removed' );
+	}
+
+	/**
+	 * An intermediate directory the new level-by-level helper creates carries
+	 * the exact same mode a plain recursive mkdir() with the same mode
+	 * argument would have produced.
+	 *
+	 * {@see FileWriter::create_directory_recording_intermediates()}'s own
+	 * docblock states that it changes what gets RECORDED, never what gets
+	 * CREATED. This pins the second half of that claim directly against a
+	 * CONTROL directory built with a plain recursive mkdir() in the same
+	 * process (so both are subject to the identical umask), rather than
+	 * merely trusting the reasoning in prose.
+	 *
+	 * @return void
+	 */
+	public function test_intermediate_directories_carry_the_same_mode_a_recursive_mkdir_would_have_produced(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::file_result( 'wp-content/plugins/intruder/evil.php', 'x' ) );
+
+		$intermediate = $this->fixture_root . '/wp-content/plugins';
+		clearstatcache( true, $intermediate );
+		$actual_mode = fileperms( $intermediate ) & 0o7777;
+
+		$parent_dir_mode = (int) ( new ReflectionClassConstant( FileWriter::class, 'PARENT_DIR_MODE' ) )->getValue();
+		$control_root    = sys_get_temp_dir() . '/pontifex-filewriter-mode-control-' . bin2hex( random_bytes( 8 ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Building a CONTROL directory with a plain recursive mkdir(), for a same-process, same-umask mode comparison against the value under test.
+		mkdir( $control_root . '/a/b', $parent_dir_mode, true );
+		clearstatcache( true, $control_root . '/a' );
+		$control_mode = fileperms( $control_root . '/a' ) & 0o7777;
+		self::rmtree( $control_root );
+
+		$this->assertSame( $control_mode, $actual_mode, 'an intermediate directory created by the new helper must carry the same mode a recursive mkdir() with the same mode argument would have produced' );
+	}
+
+	/**
+	 * A directory this run created is skipped by cleanup — counted in
+	 * NEITHER removed_paths() NOR failed_paths() — when a path deliberately
+	 * preserved still lives inside it, and is_precise_revert() stays true.
+	 *
+	 * B1 made the ledger record "wp-content" itself (an implicit intermediate
+	 * directory) alongside "wp-content/keep.txt" here, since neither existed
+	 * before this write. Preserving "wp-content/keep.txt" — telling cleanup
+	 * "this one belongs to the site's prior state, leave it" — necessarily
+	 * leaves "wp-content" non-empty, so rmdir() on it refuses on its own
+	 * merits. Without {@see \Pontifex\Restore\FileWriter::preserved_ancestor_directories()},
+	 * that refusal would be counted as a cleanup FAILURE, which is incoherent:
+	 * a directory that survives purely because the caller asked to KEEP
+	 * something inside it is not a failure of anything, and must not stop
+	 * this from being reported as a precise revert. This is the "one more
+	 * test" pinning that rule directly, at the same level the other four
+	 * ledger tests in this file work at (real write_entry() calls, real
+	 * remove_created_paths(), no RestoreRunner involved) — contrast
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest::test_a_path_the_safety_archive_also_declares_is_never_removed()},
+	 * which proves the identical rule through the full restore engine.
+	 *
+	 * @return void
+	 */
+	public function test_a_directory_containing_a_preserved_path_is_skipped_not_reported_as_failed(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$writer->write_entry( self::file_result( 'wp-content/keep.txt', 'kept content' ) );
+
+		$this->assertFileExists( $this->fixture_root . '/wp-content/keep.txt', 'Sanity check: the file was actually written.' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'Sanity check: the implicit intermediate directory was actually created.' );
+
+		$report = $writer->remove_created_paths( array( 'wp-content/keep.txt' ) );
+
+		$this->assertFileExists( $this->fixture_root . '/wp-content/keep.txt', 'The preserved file must survive.' );
+		$this->assertDirectoryExists( $this->fixture_root . '/wp-content', 'The directory that merely contains a preserved path must survive too.' );
+		$this->assertSame( array(), $report->removed_paths(), 'a directory kept only because something inside it was preserved is not a removal' );
+		$this->assertSame( array(), $report->failed_paths(), 'a directory kept only because something inside it was preserved is not a FAILED removal either' );
+		$this->assertTrue( $report->is_precise_revert(), 'a directory surviving purely because of a deliberate preservation must not stop this from being a precise revert' );
 	}
 }

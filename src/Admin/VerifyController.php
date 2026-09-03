@@ -17,11 +17,14 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Lock\BackupProgress;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\PreflightReport;
+use Pontifex\Restore\RestorePreflight;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\WordPress\WordPressContext;
@@ -38,8 +41,10 @@ use Psr\Log\LoggerInterface;
  * page load:
  *
  *  - {@see self::verify()} runs one verification to completion, writing live
- *    progress to a transient the browser polls, and reports a sound or broken
- *    verdict as JSON.
+ *    progress to a transient the browser polls, and reports the outcome as
+ *    JSON — sound, broken, or (when this host stops the check before it can
+ *    reach either answer) a distinct "could not check" outcome that is
+ *    deliberately not reported as broken.
  *  - {@see self::progress()} returns that transient so the page can fill a bar.
  *
  * Both actions are deny-by-default: the {@see Menu::CAPABILITY} capability and a
@@ -200,7 +205,11 @@ final class VerifyController {
 	 * nonce, resolves the requested filename to a real backup, refuses an
 	 * encrypted archive (CLI-only), then reads and hash-checks every entry. A
 	 * sound archive reports the verified entry count; a broken one reports the
-	 * failure (the detail goes to the log). Writes nothing to the site.
+	 * failure (the detail goes to the log); a host that stops the walk before
+	 * it can reach either answer — most commonly too little memory — reports
+	 * its own distinct outcome rather than being folded into "broken", because
+	 * nothing was actually learned about the backup either way. Writes nothing
+	 * to the site.
 	 *
 	 * @return void
 	 */
@@ -329,6 +338,43 @@ final class VerifyController {
 					),
 				)
 			);
+		} catch ( HostCannotComply $error ) {
+			// This host, not the backup, is what stopped the walk short — a low
+			// memory_limit unable to hold a db_chunk it must buffer whole is the
+			// case that keeps happening in practice, and WordPress's own default
+			// is 40 MB. Nothing was learned about the backup either way, so this
+			// must not fall into the generic catch below and be reported as
+			// damaged over a problem that belongs to this server, not the file.
+			$this->logger->warning( 'Admin verify could not run to completion: this host could not comply.', array( 'exception' => $error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+
+			wp_send_json_success(
+				array(
+					'sound'           => false,
+					'could_not_check' => true,
+					'message'         => __( 'Could not check — this host stopped part-way through verifying this backup. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' ),
+				)
+			);
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and this host is fine; a ceiling compiled
+			// into every build of Pontifex is what stopped the walk on an
+			// entry too large to process. That fits the same REFUSED outcome
+			// the preflight route above reaches by inspecting a
+			// PreflightReport, reached here directly from a throw instead
+			// because the walk never got that far. Must not fall into the
+			// generic catch below and be reported broken — that message
+			// could talk somebody out of a backup that was never damaged,
+			// over a limit no server setting can change.
+			$this->logger->warning( 'Admin verify: the archive is intact but this build will not process one of its entries.', array( 'exception' => $error ) );
+			$this->finish( is_resource( $source ) ? $source : null );
+
+			wp_send_json_success(
+				array(
+					'sound'   => false,
+					'refused' => true,
+					'message' => __( 'Refused — this backup is not damaged; every hash matched, but one of its entries is larger than this build of Pontifex will restore. The backup does not need replacing — no server setting changes this build\'s limit. The Pontifex log has the details of which entry.', 'pontifex' ),
+				)
+			);
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin verify failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
@@ -413,6 +459,22 @@ final class VerifyController {
 	 * telling somebody to throw away a file that is very probably their only
 	 * copy.
 	 *
+	 * Four states, not two. A host finding says this server could not restore
+	 * it right now; nothing at all — no host finding and no inconclusive check
+	 * of any kind — says it has the room. An inconclusive free-space check
+	 * (the reading could not be taken at all, e.g. disk_free_space() restricted
+	 * or disabled on this host) gets its own specific sentence, checked first
+	 * because it is the more useful one. But free space is not the only check
+	 * that can go unanswered, and any OTHER unanswered check must be caught
+	 * too: falling through to "has the room" for a check this method simply
+	 * did not name by name would be the exact same positive claim built from
+	 * an absent observation that this method exists to refuse — only reached
+	 * from one line lower. That case has no observation to report, so it says
+	 * only that some checks about this server went unanswered, never that the
+	 * server does or does not have room. Both inconclusive cases are checked
+	 * BEFORE the "has the room" fallback, because neither is a clean report
+	 * even though neither produced a host finding either.
+	 *
 	 * The host's symbolic-link capability is deliberately absent: establishing it
 	 * means creating a link, and this screen writes nothing.
 	 *
@@ -420,15 +482,23 @@ final class VerifyController {
 	 * @return string The line to display.
 	 */
 	private function restorability_line( PreflightReport $report ): string {
-		if ( ! $report->host_cannot_restore() ) {
-			return __( 'This server has the room to restore it.', 'pontifex' );
+		if ( $report->host_cannot_restore() ) {
+			return sprintf(
+				/* translators: %s: the reason this server cannot restore right now */
+				__( 'The backup is fine, but this server could not restore it right now: %s', 'pontifex' ),
+				implode( ' ', $report->host_findings() )
+			);
 		}
 
-		return sprintf(
-			/* translators: %s: the reason this server cannot restore right now */
-			__( 'The backup is fine, but this server could not restore it right now: %s', 'pontifex' ),
-			implode( ' ', $report->host_findings() )
-		);
+		if ( array_key_exists( RestorePreflight::CHECK_FREE_SPACE, $report->inconclusive() ) ) {
+			return __( 'Whether this server has room to restore it could not be established.', 'pontifex' );
+		}
+
+		if ( array() !== $report->inconclusive() ) {
+			return __( 'Some checks about whether this server could restore it could not be answered.', 'pontifex' );
+		}
+
+		return __( 'This server has the room to restore it.', 'pontifex' );
 	}
 
 	/**

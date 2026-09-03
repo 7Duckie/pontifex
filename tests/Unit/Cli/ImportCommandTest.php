@@ -30,6 +30,8 @@ use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
+use Pontifex\Migrate\RewriteReport;
+use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
@@ -80,6 +82,13 @@ use RuntimeException;
  * AssertionFailedError extends RuntimeException, so a bare
  * `catch ( RuntimeException $e )` would otherwise swallow a failed assertion
  * as if it were the expected refusal.
+ *
+ * The class also carries the --new-url flag-gate tests: the migration flag
+ * was renamed from --url (which WP-CLI reserves for itself and silently
+ * strips before this command ever sees it) to --new-url, and the command now
+ * refuses a bare --url found on the raw command line rather than treating it
+ * as a same-URL restore. Those tests share the fixture/mock helpers above but
+ * are otherwise independent of the ADR 0012 signature-gate story.
  */
 final class ImportCommandTest extends TestCase {
 
@@ -95,6 +104,19 @@ final class ImportCommandTest extends TestCase {
 	private ?string $temp_archive_path = null;
 
 	/**
+	 * The real $_SERVER['argv'] as it stood before this test ran.
+	 *
+	 * The bare --url flag-gate tests below overwrite $_SERVER['argv'] to
+	 * simulate what an operator actually typed on the command line; saving it
+	 * here lets tearDown() put it back unconditionally, so a test that leaves
+	 * it changed (including one that fails) can never poison another test's
+	 * view of the command line.
+	 *
+	 * @var array<int, string>|null
+	 */
+	private ?array $original_argv = null;
+
+	/**
 	 * Create a real, readable temp archive path for the import source.
 	 *
 	 * The file itself is written per-test (each test needs a different
@@ -105,10 +127,13 @@ final class ImportCommandTest extends TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		$this->temp_archive_path = sys_get_temp_dir() . '/pontifex-import-adr0012-test-' . uniqid( '', true ) . '.wpmig';
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.MissingUnslash,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Saving the real command line for tearDown() to restore; never output or stored beyond that, so there is nothing here for a WordPress sanitiser to sanitise.
+		$this->original_argv = $_SERVER['argv'] ?? null;
 	}
 
 	/**
-	 * Remove the temp archive file (and any sibling key files) the test created.
+	 * Remove the temp archive file (and any sibling key files) the test created,
+	 * and restore $_SERVER['argv'] to what it was before the test ran.
 	 *
 	 * @return void
 	 */
@@ -122,6 +147,14 @@ final class ImportCommandTest extends TestCase {
 			}
 		}
 		$this->temp_archive_path = null;
+
+		if ( null !== $this->original_argv ) {
+			$_SERVER['argv'] = $this->original_argv;
+		} else {
+			unset( $_SERVER['argv'] );
+		}
+		$this->original_argv = null;
+
 		parent::tearDown();
 	}
 
@@ -387,6 +420,248 @@ final class ImportCommandTest extends TestCase {
 		);
 
 		$this->assertFileExists( $this->temp_archive_path, 'The restore must have proceeded (Mockery verifies restore() was called exactly once).' );
+	}
+
+	/**
+	 * Case 5: --new-url is accepted and reaches the migration path.
+	 *
+	 * The renamed flag (WP-CLI reserves --url for itself and strips it before
+	 * this command ever sees it, so the migration flag is now --new-url,
+	 * which is not reserved and reaches $associative_args normally).
+	 *
+	 * @return void
+	 */
+	public function test_import_accepts_new_url_and_migrates_after_restoring(): void {
+		self::write_content_only_archive_to( $this->temp_archive_path, null );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once();
+
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+		$url_migrator->shouldReceive( 'source_url' )->once()->andReturn( 'https://old.test' );
+		$url_migrator->shouldReceive( 'migrate' )
+			->once()
+			->with( 'https://old.test', 'https://new.example' )
+			->andReturn( new RewriteReport( 1, array(), 1, 1, 1, 0 ) );
+
+		// A bare double: --no-rollback-archive means create() must never be
+		// touched, and an untouched Mockery mock throws immediately if it is.
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'error' );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver,
+			$url_migrator
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'              => true,
+				'rollback-archive' => false,
+				'new-url'          => 'https://new.example',
+			)
+		);
+
+		$this->assertFileExists(
+			$this->temp_archive_path,
+			'The restore and the migration must both have proceeded (Mockery verifies restore()/migrate() were each called exactly once).'
+		);
+	}
+
+	/**
+	 * Case 6: --new-url with an empty value is refused with the existing message.
+	 *
+	 * @return void
+	 */
+	public function test_import_refuses_an_empty_new_url(): void {
+		$this->assert_import_is_refused_by_the_url_flag_gate(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'     => true,
+				'new-url' => '',
+			),
+			'--new-url requires a new site URL'
+		);
+	}
+
+	/**
+	 * Case 7: a bare --url on the raw command line is refused, naming --new-url.
+	 *
+	 * WP-CLI reserves --url and strips it before this command ever sees it —
+	 * $associative_args never carries it, so only $_SERVER['argv'] shows what
+	 * was actually typed. Set directly here (tearDown() restores the real
+	 * value afterwards) to simulate that. The positional args are
+	 * deliberately empty, proving the refusal fires before require_archive_path()
+	 * — "An archive path is required" must never be the message here.
+	 *
+	 * @return void
+	 */
+	public function test_import_refuses_a_bare_url_on_the_command_line(): void {
+		$_SERVER['argv'] = array( 'wp', 'pontifex', 'import', $this->temp_archive_path, '--url', '--yes' );
+
+		$this->assert_import_is_refused_by_the_url_flag_gate(
+			array(),
+			array( 'yes' => true ),
+			'Use --new-url instead'
+		);
+	}
+
+	/**
+	 * Case 8: --url on the command line is refused even when --new-url is also supplied.
+	 *
+	 * WP-CLI would deliver --new-url normally (it is not reserved), so
+	 * $associative_args carries it here exactly as a real invocation would —
+	 * but a --url also typed on the command line must still refuse: supplying
+	 * both is far more likely a mistake than an intention.
+	 *
+	 * @return void
+	 */
+	public function test_import_refuses_url_on_the_command_line_even_with_new_url_supplied(): void {
+		$_SERVER['argv'] = array(
+			'wp',
+			'pontifex',
+			'import',
+			$this->temp_archive_path,
+			'--url=https://mistake.example',
+			'--new-url=https://correct.example',
+			'--yes',
+		);
+
+		$this->assert_import_is_refused_by_the_url_flag_gate(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'     => true,
+				'new-url' => 'https://correct.example',
+			),
+			'Use --new-url instead'
+		);
+	}
+
+	/**
+	 * Case 9: absent both --new-url and a --url on the command line, an
+	 * ordinary same-URL restore still runs.
+	 *
+	 * The regression guard: the flag rename and the new up-front refusal must
+	 * never touch the everyday, unmigrated restore.
+	 *
+	 * @return void
+	 */
+	public function test_import_without_new_url_or_url_still_restores_to_the_same_site(): void {
+		$_SERVER['argv'] = array( 'wp', 'pontifex', 'import', $this->temp_archive_path, '--yes' );
+
+		self::write_content_only_archive_to( $this->temp_archive_path, null );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once();
+
+		// A bare double: with neither flag present the migrator must never be
+		// consulted, and an untouched Mockery mock throws immediately if it is.
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+
+		// A bare double: --no-rollback-archive means create() must never be
+		// touched, and an untouched Mockery mock throws immediately if it is.
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'error' );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver,
+			$url_migrator
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'              => true,
+				'rollback-archive' => false,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_archive_path, 'The restore must have proceeded (Mockery verifies restore() was called exactly once).' );
+	}
+
+	/**
+	 * Shared body for the --new-url/--url flag-gate refusal tests (cases 6-8):
+	 * run the import and assert it was refused by WP_CLI::error() carrying the
+	 * given message.
+	 *
+	 * Deliberately separate from {@see self::assert_import_is_refused_by_the_signature_gate()}
+	 * rather than reused under a misleading name — this gate has nothing to do
+	 * with ADR 0012. The restore engine, the URL migrator and the safety
+	 * archiver are left as bare Mockery doubles with no expectations at all:
+	 * if the gate under test is bypassed, execution reaches one of them and
+	 * Mockery's own BadMethodCallException (a LogicException) surfaces
+	 * uncaught, distinguishable from the RuntimeException this method expects.
+	 *
+	 * @param array<int, string>         $positional_args       The CLI positional args to invoke with.
+	 * @param array<string, string|bool> $associative_args      The CLI flags to invoke with.
+	 * @param string                     $expected_message_part A substring that must appear in the captured WP_CLI::error() message.
+	 * @return void
+	 * @throws AssertionFailedError If the import is not refused, or refuses for a different reason than the mocked WP_CLI::error().
+	 */
+	private function assert_import_is_refused_by_the_url_flag_gate( array $positional_args, array $associative_args, string $expected_message_part ): void {
+		$restore_runner  = Mockery::mock( RestoreRunnerInterface::class );
+		$url_migrator    = Mockery::mock( UrlMigratorInterface::class );
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+
+		$captured_message = null;
+		$wp_cli           = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->once()->andReturnUsing(
+			function ( string $message ) use ( &$captured_message ): void {
+				$captured_message = $message;
+				throw new RuntimeException( 'test-forced-halt' );
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver,
+			$url_migrator
+		);
+
+		try {
+			$command( $positional_args, $associative_args );
+			$this->fail( 'The import must be refused before any write.' );
+		} catch ( AssertionFailedError $bug ) {
+			// PHPUnit's own AssertionFailedError extends RuntimeException; re-throw
+			// it first so the catch below can never mistake a failed assertion
+			// (e.g. the fail() above, or a Mockery bad-method-call surfacing here)
+			// for the expected refusal.
+			throw $bug;
+		} catch ( RuntimeException $error ) {
+			$this->assertSame(
+				'test-forced-halt',
+				$error->getMessage(),
+				'The exception must be the one thrown by the mocked WP_CLI::error(), not some other RuntimeException.'
+			);
+		}
+
+		$this->assertNotNull( $captured_message, 'WP_CLI::error() must have been called exactly once.' );
+		$this->assertStringContainsString( $expected_message_part, $captured_message );
 	}
 
 	/**

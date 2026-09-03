@@ -12,6 +12,7 @@ namespace Pontifex\Restore;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Manifest\DatabaseAdapter;
 use Pontifex\Manifest\SqlSpanScanner;
 
@@ -353,9 +354,47 @@ final class DatabaseWriter {
 		}
 		$sql_mode                  = $this->adapter->sql_mode();
 		$this->backslash_is_escape = null === $sql_mode ? false : ! str_contains( $sql_mode, 'NO_BACKSLASH_ESCAPES' );
+
+		// list_tables_by_prefix() runs SHOW TABLES LIKE across the WHOLE
+		// database, not just this site's own tables — on a shared database an
+		// unscoped sweep would drop a NEIGHBOURING site's own staging and
+		// parked tables (its pontifexold_* briefly holds that site's live
+		// tables during ITS OWN cut-over), the same cross-site exposure
+		// write_entry()'s destination-table guard closes above.
+		//
+		// Every staged name is STAGING_PREFIX . $dest_table, but $dest_table
+		// does NOT always begin with the LIVE prefix: during a cross-prefix
+		// restore it begins with $this->dest_prefix instead (see
+		// self::expected_destination_prefix() and write_entry()'s guard,
+		// which checks against the same value for the same reason). A run
+		// that crashes mid cross-prefix restore therefore leaves its
+		// leftovers under STAGING_PREFIX . $dest_prefix, not
+		// STAGING_PREFIX . $live_prefix — sweeping only the live prefix
+		// would never find them, and they would sit there for ever. So both
+		// prefixes this writer could ever have staged under are swept: the
+		// live connection's own, and the destination prefix this restore is
+		// actually targeting. The two are equal in the ordinary case (no
+		// rewrite, or a same-prefix one), and de-duplicating keeps that case
+		// down to exactly two lookups (one per STAGING_PREFIX/OLD_PREFIX),
+		// same as before this widened. When both are empty, there is no
+		// scope to confine to at all, and the sweep falls back to today's
+		// unscoped behaviour rather than risk passing a bare, always-
+		// throwing prefix to list_tables_by_prefix().
+		$scopes = array_unique(
+			array_filter(
+				array( $this->adapter->table_prefix(), $this->expected_destination_prefix() ),
+				static fn ( string $prefix ): bool => '' !== $prefix
+			)
+		);
+		if ( array() === $scopes ) {
+			$scopes = array( '' );
+		}
+
 		foreach ( array( self::STAGING_PREFIX, self::OLD_PREFIX ) as $prefix ) {
-			foreach ( $this->adapter->list_tables_by_prefix( $prefix ) as $leftover ) {
-				$this->drop_table_best_effort( $leftover );
+			foreach ( $scopes as $scope ) {
+				foreach ( $this->adapter->list_tables_by_prefix( $prefix . $scope ) as $leftover ) {
+					$this->drop_table_best_effort( $leftover );
+				}
 			}
 		}
 	}
@@ -385,6 +424,7 @@ final class DatabaseWriter {
 	 *
 	 * @param EntryReadResult $result A decoded entry whose header is a db_chunk.
 	 * @throws InvalidArgumentException If $result is not a db_chunk entry.
+	 * @throws ArchiveNotTrustworthy    If the destination table name does not begin with the prefix this restore is targeting — the live database's own prefix, or, during a cross-prefix restore, the destination prefix this writer was constructed with — it would belong to a different WordPress installation, never this one.
 	 * @throws RuntimeException         If the chunk has no table name, the staged name would be over-long, statement_count disagrees with the parsed count, a statement fails the shape/containment checks, the object a CREATE built is not an ordinary local table or already held rows the moment it existed (ADR 0019), or any adapter call fails.
 	 */
 	public function write_entry( EntryReadResult $result ): void {
@@ -405,6 +445,68 @@ final class DatabaseWriter {
 		}
 
 		$dest_table = $this->destination_table_name( $source_table );
+
+		// $dest_table is either the archive's own header value or, under a
+		// cross-prefix restore, that value with only its LEADING prefix
+		// substituted — either way it is ultimately attacker-controlled, and
+		// nothing about destination_table_name() confines the result to a
+		// table this site owns. On shared hosting, several WordPress
+		// installations often share one database, kept apart only by each
+		// site's own table prefix (`wpa_options`, `wpb_options`); a table name
+		// outside the prefix this restore is targeting belongs to a
+		// NEIGHBOURING site, not this one, and staging it would go on to
+		// RENAME it over that neighbour's real table at cut-over. The
+		// pre-restore safety archive backs up only THIS site's own tables, so
+		// there would be no undo for damage done to a table it never knew
+		// existed. Checked here — before $dest_table is recorded in
+		// $staged_tables and before any SQL runs — so a refusal changes
+		// nothing at all.
+		//
+		// The prefix to compare against is NOT always the live connection's
+		// own reported prefix. When a cross-prefix rewrite is active,
+		// $dest_table was just built FROM $this->dest_prefix, so that is the
+		// prefix every legitimately-rewritten table will carry — and
+		// $dest_prefix is safe to trust here for a different reason than
+		// $live_prefix is: it is a constructor argument this writer was
+		// built with, supplied by Pontifex's own calling code, never read
+		// from the archive. (Only $source_table and the archive's declared
+		// $source_prefix are archive-derived, and neither is the comparison
+		// target.) Comparing against the live prefix unconditionally was
+		// tried first and was wrong: it assumed $dest_prefix always equals
+		// the live connection's own prefix, which is true only because
+		// Cli\ImportCommand happens to set it from wpdb_prefix() — a detail
+		// of one caller, not a guarantee DatabaseWriter itself can rely on.
+		// It refused a legitimate cross-prefix restore outright, confirmed
+		// against a real database.
+		//
+		// Both branches still close the same route. With no rewrite active (an
+		// admin restore, a same-prefix import, or any other construction with
+		// no prefixes) the destination IS the live database, so its own
+		// reported prefix is the right scope, exactly as before. With a
+		// rewrite active — only reachable via `wp pontifex import` today — a
+		// chunk whose table does not start with the archive's declared
+		// $source_prefix passes through destination_table_name() UNREWRITTEN
+		// (see that method), so it is still checked, and still refused,
+		// against $dest_prefix.
+		//
+		// Skipped when the resulting prefix is empty, mirroring
+		// WpdbAdapter::assert_prefixed_table()'s identical skip for an
+		// unconfigured $wpdb: there is no scope to confine to, and refusing
+		// unconditionally would be a false refusal wherever no prefix can be
+		// established. (When a rewrite is active $dest_prefix can never be
+		// empty here — prefix_rewrite_active() requires it — so this can only
+		// happen in the no-rewrite branch, on an unconfigured connection.)
+		$expected_prefix = $this->expected_destination_prefix();
+		if ( '' !== $expected_prefix && ! str_starts_with( $dest_table, $expected_prefix ) ) {
+			$message = sprintf(
+				'Refusing to restore table "%s": it is not part of this site, whose tables begin with "%s". A backup can only replace the site it belongs to. Nothing has been changed.',
+				$dest_table,
+				$expected_prefix
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive-derived destination table name and the expected prefix for diagnostic context; exception path, not HTML output.
+			throw new ArchiveNotTrustworthy( $message );
+		}
+
 		$this->refuse_over_long_staged_name( $dest_table );
 
 		// Recorded before execution so abort_staging() also removes a table
@@ -1020,6 +1122,25 @@ final class DatabaseWriter {
 		return '' !== $this->source_prefix
 			&& '' !== $this->dest_prefix
 			&& $this->source_prefix !== $this->dest_prefix;
+	}
+
+	/**
+	 * The prefix a table this restore stages must begin with, to belong to this site.
+	 *
+	 * Shared by {@see self::write_entry()}'s cross-site guard and
+	 * {@see self::begin_staging()}'s leftover sweep, so the two can never
+	 * disagree about which prefix a restore is actually targeting. With a
+	 * cross-prefix rewrite active, every legitimately-rewritten table begins
+	 * with $this->dest_prefix — a constructor argument this writer was built
+	 * with, supplied by Pontifex's own calling code, never read from the
+	 * archive — so that is the scope, regardless of what the live connection
+	 * itself reports. Without a rewrite the destination IS the live database,
+	 * so its own reported prefix is the scope instead.
+	 *
+	 * @return string The prefix to confine to; '' when none can be established.
+	 */
+	private function expected_destination_prefix(): string {
+		return $this->prefix_rewrite_active() ? $this->dest_prefix : $this->adapter->table_prefix();
 	}
 
 	/**

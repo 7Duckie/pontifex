@@ -192,7 +192,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param DatabaseWriter       $database_writer   Replays db_chunk entries into the database.
 	 * @param ArchiveLimits|null   $limits            Defensive limits to enforce; null applies the conservative defaults.
 	 * @param int|null             $memory_limit_bytes The runtime PHP memory limit in bytes (0 or null for unlimited); an entry whose decoded size would exceed a fraction of it is refused before it can exhaust the request. Unlimited (a CLI run) applies no memory-derived cap.
-	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded. Defaults to discarding them; trailing and optional, so no existing caller changes.
+	 * @param LoggerInterface|null $logger           Optional. Records the few things a completed restore should still mention — a directory left more permissive than the archive recorded, or a count of leftover temp artefacts an earlier, interrupted restore left behind and this one swept away. Defaults to discarding them; trailing and optional, so no existing caller changes.
 	 */
 	public function __construct( EntryReader $entry_reader, FileWriter $file_writer, DatabaseWriter $database_writer, ?ArchiveLimits $limits = null, ?int $memory_limit_bytes = null, ?LoggerInterface $logger = null ) {
 		$this->logger              = $logger ?? new NullLogger();
@@ -234,6 +234,30 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 */
 	public function preflight(): RestorePreflight {
 		return $this->preflight;
+	}
+
+	/**
+	 * Remove every path this run's FileWriter newly created, except any $preserved_paths still declares.
+	 *
+	 * Exposed so a caller that already has a wired runner — a failed import's own
+	 * recovery handler, in ImportCommand and RestoreController — can undo exactly
+	 * what THIS run created after replaying the pre-import safety archive, without
+	 * rebuilding the FileWriter and risking a mismatch with the one that actually
+	 * did the writing. Deliberately NOT on {@see RestoreRunnerInterface}: that
+	 * contract is part of the public API frozen at v1.0.0, and adding a method to
+	 * an interface breaks every implementer. A caller holding only the interface
+	 * (a test fake, most obviously) has no ledger to consult and no cleanup to run
+	 * — see each call site's own `instanceof RestoreRunner` guard.
+	 *
+	 * See {@see FileWriter::remove_created_paths()} for what "newly created" means,
+	 * the three rules deletion obeys, and why a directory only ever disappears once
+	 * it is genuinely empty.
+	 *
+	 * @param array<int, string> $preserved_paths Relative paths the safety archive also declares; never removed even when this run's writer created them.
+	 * @return CreationLedgerCleanupReport What was removed, what could not be, and whether the ledger recorded every creation.
+	 */
+	public function remove_created_paths( array $preserved_paths ): CreationLedgerCleanupReport {
+		return $this->file_writer->remove_created_paths( $preserved_paths );
 	}
 
 	/**
@@ -311,12 +335,42 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// and refuses the same archive rather than calling it sound.
 		$this->preflight->assert_symlink_targets_confined( $declared_symlink_targets );
 
+		// Sweep leftover temp artefacts a crashed earlier restore abandoned on
+		// the filesystem — the file-side twin of the leftover-table sweep
+		// DatabaseWriter::begin_staging() performs a little further below
+		// (ADR 0009). Runs after every OTHER preflight above has already had
+		// its chance to refuse — this one is not itself among them, and it is
+		// not side-effect-free: it writes a one-off case-sensitivity probe
+		// file of its own, removed again before it reasons about an orphan.
+		// See FileWriter::sweep_orphaned_temp_files() for why this is
+		// best-effort and can never itself gate a restore.
+		//
+		// It runs BEFORE the free-space preflight immediately below,
+		// deliberately: a leftover from a crashed earlier restore can be as
+		// large as however much of that attempt had been written before it
+		// died, and removing it is exactly what can let the free-space
+		// preflight pass on the retry it would otherwise wrongly refuse.
+		// SafetyArchiver::create() reached the same conclusion for the same
+		// reason ahead of its own free-space preflight — see the comment
+		// there, next to {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}
+		// — so the two now agree.
+		$swept = $this->file_writer->sweep_orphaned_temp_files();
+		if ( $swept > 0 ) {
+			$this->logger->info(
+				'Removed temporary files an interrupted earlier restore left behind.',
+				array( 'count' => $swept )
+			);
+		}
+
 		// Refuse before anything is touched — filesystem or database — when the
 		// destination cannot hold this restore. FileWriter owns the destination
 		// directory, so it owns this estimate; see its own docblock for why the
-		// figure leans low rather than risk refusing a restore that would have
-		// succeeded.
-		$this->preflight->assert_free_space_for( $manifest );
+		// figure is the DECODED size a restore will actually write, read from
+		// each file entry's own header, rather than the entry's stored/compressed
+		// size — the two can differ by orders of magnitude for compressible
+		// content, which is why this check now needs the archive stream as well
+		// as the manifest.
+		$this->preflight->assert_free_space_for( $archive_source, $manifest );
 
 		$this->database_writer->begin_staging( (string) $provenance->db_charset() );
 
@@ -379,10 +433,45 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * decode payloads: a verification only needs the stored bytes to be intact, and
 	 * skipping the decode keeps memory flat and lets a large entry report progress.
 	 *
+	 * The defensive budgets are computed exactly as {@see self::walk()} computes
+	 * them, so a hostile or oversized archive is refused here on terms at least
+	 * as strict as restore()'s — but the running archive-total accumulation is
+	 * deliberately NOT symmetric with walk(), and that asymmetry is the point,
+	 * not a gap. walk() accumulates each entry's ACTUAL decoded size
+	 * ({@see \Pontifex\Archive\Reader\EntryReadResult::decoded_size()}), because
+	 * restore() decodes every entry as it writes it. This method never decodes
+	 * anything (ADR 0010), so the only size it has for an entry is the header's
+	 * DECLARED size ({@see \Pontifex\Archive\Format\EntryHeader::estimated_bytes()})
+	 * — and for a file entry that declared size IS trustworthy, because
+	 * {@see \Pontifex\Archive\Writer\EntryWriter} corrects it at write time and
+	 * {@see \Pontifex\Archive\Reader\EntryReader} enforces declared == actual on
+	 * both decode paths. A db_chunk's declared size is not: it is a PREDICTION
+	 * — {@see \Pontifex\Manifest\DatabaseScanner} sizes a chunk as
+	 * `( $limit * $row_bytes ) + …`, rows-per-chunk times MySQL's own
+	 * `Avg_row_length` — and the last chunk of every table under-fills that
+	 * estimate, sometimes by several times over. Only file entries' declared
+	 * sizes are therefore accumulated into the running total below; a
+	 * db_chunk's declared size is still checked against the per-entry ceiling
+	 * (every entry is, regardless of kind), just never added to the running
+	 * archive-total. Counting it would have made verify() STRICTER than the
+	 * restore it is meant to vouch for — a real stock-WordPress database-only
+	 * archive measured declared db_chunk totals up to 3.8x the actual decoded
+	 * total — so verify() could refuse an archive restore() would accept, the
+	 * opposite of what it exists to guard against. Excluding db_chunks makes
+	 * the running total a LOWER bound on the true total: verify() can now only
+	 * under-refuse relative to restore(), never over-refuse, which is the safe
+	 * direction. A hostile db_chunk declaring an enormous size is still caught
+	 * by the per-entry ceiling; one that inflates only at decode time is still
+	 * caught by restore()'s own walk(), which sums real sizes. Separately, a
+	 * FILE header that understates its true decoded size still passes
+	 * verification and is only caught when restore() actually decodes it —
+	 * that narrower gap is accepted, because verify's job is to catch what can
+	 * be known without decoding, not to close it by making verification decode.
+	 *
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
-	 * @throws RuntimeException If the archive is malformed, declares too many entries, or hash verification fails.
+	 * @throws RuntimeException If the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
@@ -407,14 +496,48 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			);
 		}
 
+		$total_budget   = $this->limits->max_total_for_archive( $this->stream_size( $archive_source ) );
+		$decoded_so_far = 0;
+
 		$done = 0;
 		foreach ( $entries as $manifest_entry ) {
-			$this->entry_reader->verify_entry(
+			// The bomb ceiling (per-entry and archive-total decoded bytes) applies to
+			// every entry; the memory-derived budget is passed separately, because it
+			// applies only to entries the reader must buffer whole — a plain file
+			// entry streams through chunk-sized memory to a spool (ADR 0010). Mirrors
+			// walk()'s own per-entry limit exactly.
+			$remaining   = $total_budget - $decoded_so_far;
+			$entry_limit = $this->limits->max_entry_bytes() < $remaining ? $this->limits->max_entry_bytes() : $remaining;
+
+			$declared_size = $this->entry_reader->verify_entry(
 				$archive_source,
 				$manifest_entry,
 				$on_bytes,
+				$entry_limit,
 				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
 			);
+
+			// A db_chunk's declared size is a prediction (DatabaseScanner's
+			// rows-per-chunk * average-row-length estimate), not a measurement, and
+			// routinely overstates the real total by several times over — see this
+			// method's own docblock. Only a file entry's declared size (corrected at
+			// write time, and enforced against its actual decoded size on every read
+			// path) is trustworthy enough to accumulate here; a db_chunk still meets
+			// the per-entry ceiling check above, it just never inflates this running
+			// total, so verify() can only under-refuse relative to restore(), never
+			// over-refuse it.
+			if ( ! $manifest_entry->is_db_chunk() ) {
+				$decoded_so_far += $declared_size;
+			}
+			if ( $decoded_so_far > $total_budget ) {
+				throw new RuntimeException(
+					sprintf(
+						'Restored data exceeds the maximum of %d bytes permitted for this archive.',
+						(int) $total_budget
+					)
+				);
+			}
+
 			++$done;
 			if ( null !== $on_entry_verified ) {
 				$on_entry_verified( $done, $total );

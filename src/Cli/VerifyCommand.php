@@ -20,6 +20,8 @@ use Pontifex\Archive\ScopeSummary;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
@@ -40,9 +42,14 @@ use Pontifex\WordPress\WordPressRoot;
  * `import --dry-run`, exposed as a standalone command so a backup can be
  * checked against cold storage with no destination site involved.
  *
- * It exits 0 when the archive is sound and non-zero when it is broken or
- * refused (a failed hash, a malformed structure, or a defensive-limit
- * breach), so it can gate scripts and scheduled jobs.
+ * Three exit codes, not two, because "the check could not run" is not the
+ * same fact as "the check ran and failed": exit 0 means the archive is
+ * sound, exit 1 means it is broken or refused (a failed hash, a malformed
+ * structure, or a defensive-limit breach), and exit 2 means this host
+ * stopped the check before it reached either answer — commonly too little
+ * memory — which says nothing about the archive at all. A script gating on
+ * this command should treat 2 as "unknown", not fold it into the "bad"
+ * bucket exit 1 already means.
  *
  * ## OPTIONS
  *
@@ -282,6 +289,42 @@ final class VerifyCommand {
 
 			$this->print_sound( $archive_path, $entry_total, $this->describe_archive_scope( $source ) );
 			$this->print_restorability( $report );
+		} catch ( HostCannotComply $error ) {
+			// This host, not the archive, is what stopped the walk short — a
+			// low memory_limit unable to hold a db_chunk it must buffer whole
+			// is the case that keeps happening in practice, and WordPress's
+			// own default is 40 MB. Nothing was learned about the archive
+			// either way, so it must not join the broken path below and be
+			// reported as damaged over a problem that belongs to this host.
+			$this->logger->warning(
+				'Verify could not run to completion: this host could not comply.',
+				array(
+					'archive'   => $archive_path,
+					'exception' => $error,
+				)
+			);
+
+			$this->print_could_not_check( $archive_path, $error );
+			WP_CLI::halt( 2 );
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and the host is fine; this build's own
+			// compiled-in per-entry ceiling stopped the walk on an entry too
+			// large to process. That is the same REFUSED verdict the preflight
+			// route below reaches by inspecting a PreflightReport once the walk
+			// finishes — reached here directly from a throw instead, because
+			// this walk never got that far. Must not fall into the broken path
+			// below: "broken" sends somebody to fetch a fresh copy, and the
+			// fresh copy would be refused the identical way.
+			$this->logger->error(
+				'Verify complete: the archive is intact but this build will not process one of its entries.',
+				array(
+					'archive'   => $archive_path,
+					'exception' => $error,
+				)
+			);
+
+			$this->print_refused_for_build_limit( $archive_path, $error );
+			WP_CLI::halt( 1 );
 		} catch ( Throwable $error ) {
 			$this->logger->error(
 				'Verify failed: archive is not sound.',
@@ -717,7 +760,22 @@ final class VerifyCommand {
 	 * Deliberately never fails the command. A full disk or a host that cannot
 	 * create symbolic links says nothing about the backup — and reporting it as a
 	 * verification failure would tell somebody their only copy was bad, which is
-	 * the one message capable of talking a person out of a good backup.
+	 * the one message capable of talking a person out of a good backup. The same
+	 * holds for a check that could not even be answered: an inconclusive
+	 * free-space reading (or any other preflight that never reached a decision)
+	 * is not a finding against the archive either, so it is reported the same
+	 * way — a warning about this server, never a change to the verdict.
+	 *
+	 * Not to be confused with {@see self::print_could_not_check()}. That verdict
+	 * means the whole verification walk stopped because this host could not
+	 * comply, and it DOES change the exit code (halts 2). This method only ever
+	 * runs after the walk has already finished and the archive is already known
+	 * sound; the checks it reports here are narrower, read-only restore
+	 * preflights, and one of them failing to reach a decision leaves the exit
+	 * code exactly where it was.
+	 *
+	 * A report can carry a host finding AND an inconclusive check at once, so
+	 * both blocks below are independent and can both print in the same run.
 	 *
 	 * The host's symbolic-link capability is not among these: establishing it
 	 * requires creating a link, and verify writes nothing. `wp pontifex doctor`
@@ -728,20 +786,35 @@ final class VerifyCommand {
 	 * @return void
 	 */
 	private function print_restorability( PreflightReport $report ): void {
-		if ( ! $report->host_cannot_restore() ) {
+		if ( ! $report->host_cannot_restore() && array() === $report->inconclusive() ) {
 			return;
 		}
 
 		$redactor = PathRedactor::from_environment();
-		WP_CLI::warning(
-			__( 'The backup is fine, but this host could not restore it right now:', 'pontifex' )
-		);
-		foreach ( $report->host_findings() as $message ) {
-			WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+
+		if ( $report->host_cannot_restore() ) {
+			WP_CLI::warning(
+				__( 'The backup is fine, but this host could not restore it right now:', 'pontifex' )
+			);
+			foreach ( $report->host_findings() as $message ) {
+				WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+			}
+			WP_CLI::log(
+				__( 'This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore.', 'pontifex' )
+			);
 		}
-		WP_CLI::log(
-			__( 'This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore.', 'pontifex' )
-		);
+
+		if ( array() !== $report->inconclusive() ) {
+			WP_CLI::warning(
+				__( 'Some checks about whether this host could restore it could not be answered:', 'pontifex' )
+			);
+			foreach ( $report->inconclusive() as $message ) {
+				WP_CLI::log( '  - ' . $redactor->redact( $message ) );
+			}
+			WP_CLI::log(
+				__( 'This is about this server, not about the backup.', 'pontifex' )
+			);
+		}
 	}
 
 	/**
@@ -764,6 +837,80 @@ final class VerifyCommand {
 				$redactor->redact( $error->getMessage() ),
 				$redactor->redact( $archive_path )
 			)
+		);
+	}
+
+	/**
+	 * Print the "could not check" verdict: this host stopped the walk before it finished.
+	 *
+	 * Kept apart from BROKEN for the same reason REFUSED is kept apart from it:
+	 * the two exist because "broken" is the one word capable of talking somebody
+	 * out of a backup that is very probably fine, and every verdict that is not
+	 * genuinely that must say something else. BROKEN means the hash walk ran to
+	 * completion and an entry failed it — reach for another copy. REFUSED means
+	 * the walk ran to completion, every hash matched, and the archive should
+	 * still not be restored. This verdict means the walk never reached either
+	 * answer: this host — commonly too little memory, WordPress's own 40 MB
+	 * default among them — stopped it first, so nothing whatsoever was learned
+	 * about the archive. Calling that BROKEN would condemn a file for a fact
+	 * about this server, not about it. The archive should be kept exactly as
+	 * it is; the fix is here, on this host, and is usually as simple as raising
+	 * memory_limit or freeing disk space, then trying again.
+	 *
+	 * Halts 2, not 1: `wp pontifex verify` has always used a plain 0-or-1
+	 * gate, and a script keyed on that convention deserves a value that means
+	 * "unknown", not one it would read as "bad" alongside a genuinely broken or
+	 * refused archive — the two outcomes this verdict is deliberately not.
+	 *
+	 * @param string           $archive_path The archive verification could not complete for.
+	 * @param HostCannotComply $error        The host problem that stopped the walk.
+	 * @return void
+	 */
+	private function print_could_not_check( string $archive_path, HostCannotComply $error ): void {
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: the host problem that stopped the check, 2: the archive path */
+				__( 'Could not check: %1$s (%2$s)', 'pontifex' ),
+				$redactor->redact( $error->getMessage() ),
+				$redactor->redact( $archive_path )
+			)
+		);
+		WP_CLI::log(
+			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly.', 'pontifex' )
+		);
+	}
+
+	/**
+	 * Print the refused verdict for a build limit: intact bytes, one entry too large for this build to process.
+	 *
+	 * A second route to REFUSED, alongside {@see self::print_refused()}'s
+	 * preflight findings — this one is printed straight from a thrown
+	 * {@see BuildCannotComply}, because the walk stopped before a
+	 * PreflightReport could even be built. It must read nothing like
+	 * {@see self::print_could_not_check()}: that verdict names a problem THIS
+	 * HOST can fix by freeing memory or disk. This one names a ceiling
+	 * compiled into every build of Pontifex, identical on every host — no
+	 * server setting moves it, and a fresh copy of the same backup would be
+	 * refused the identical way. The archive is exactly what it says it is,
+	 * only larger than this build will process.
+	 *
+	 * @param string            $archive_path The archive that was verified.
+	 * @param BuildCannotComply $error        The build limit that stopped the walk; its message names the entry.
+	 * @return void
+	 */
+	private function print_refused_for_build_limit( string $archive_path, BuildCannotComply $error ): void {
+		$redactor = PathRedactor::from_environment();
+		WP_CLI::log(
+			sprintf(
+				/* translators: 1: which entry was too large and by how much, 2: the archive path */
+				__( 'Archive is REFUSED: every hash matched, so the file is not damaged — but %1$s (%2$s)', 'pontifex' ),
+				$redactor->redact( $error->getMessage() ),
+				$redactor->redact( $archive_path )
+			)
+		);
+		WP_CLI::log(
+			__( 'This build of Pontifex will not restore a single entry over 2 GB, on any host — no server setting changes that. The backup is not damaged and does not need replacing.', 'pontifex' )
 		);
 	}
 }

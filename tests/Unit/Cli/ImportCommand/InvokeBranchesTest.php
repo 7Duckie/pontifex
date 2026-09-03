@@ -31,6 +31,7 @@ use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Job\JobStore;
@@ -314,6 +315,16 @@ final class InvokeBranchesTest extends TestCase {
 	 * automatic rollback occurred. The command still exits non-zero — now by halting
 	 * rather than by re-throwing.
 	 *
+	 * The forward engine here is a {@see RestoreRunnerInterface} mock, not a real
+	 * {@see \Pontifex\Restore\RestoreRunner} — so it has no creation ledger for the
+	 * failure handler to consult, and the recovery honestly reports a MERGE rather than
+	 * a precise revert (see {@see \Pontifex\Restore\FileWriter::remove_created_paths()}
+	 * and ImportCommand's own RECOVERY_* constants). Both outcomes share the phrase
+	 * "rolled back to its state before the import", which is what this test asserts on;
+	 * proving the PRECISE wording needs the real engine, and that is exercised at the
+	 * RestoreRunner/FileWriter level in
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}.
+	 *
 	 * The order matters and is asserted: the verdict says why the import stopped, then
 	 * the warning says what was done about it. Reversed, the operator reads that their
 	 * site was rolled back before reading why.
@@ -360,7 +371,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli->shouldReceive( 'warning' )->atLeast()->once()->andReturnUsing(
 			static function ( string $message ) use ( &$rolled_back, &$printed ): void {
 				$printed[] = $message;
-				if ( str_contains( $message, 'automatically rolled back' ) ) {
+				if ( str_contains( $message, 'rolled back to its state before the import' ) ) {
 					$rolled_back = true;
 				}
 			}
@@ -382,7 +393,7 @@ final class InvokeBranchesTest extends TestCase {
 			@unlink( $safety_path );
 		}
 
-		$this->assertTrue( $rolled_back, 'The operator is warned that the site was automatically rolled back.' );
+		$this->assertTrue( $rolled_back, 'The operator is warned that the site\'s database was rolled back.' );
 
 		$output = implode( "\n", $printed );
 		$this->assertStringContainsString( 'Import refused.', $output, 'A real import states plainly that it refused, without the dry-run framing.' );
@@ -390,7 +401,7 @@ final class InvokeBranchesTest extends TestCase {
 		$this->assertStringNotContainsString( 'Your site was not changed.', $output, 'A real import must never claim nothing happened — the site was written to.' );
 
 		$verdict_at = self::index_of_line_containing( $printed, 'simulated restore failure' );
-		$warning_at = self::index_of_line_containing( $printed, 'automatically rolled back' );
+		$warning_at = self::index_of_line_containing( $printed, 'rolled back to its state before the import' );
 		$this->assertNotNull( $verdict_at, 'The failure verdict names the engine\'s own message.' );
 		$this->assertNotNull( $warning_at, 'The recovery warning is printed.' );
 		$this->assertLessThan(
@@ -554,14 +565,14 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * With --url, the command migrates the database after restoring.
+	 * With --new-url, the command migrates the database after restoring.
 	 *
 	 * Ordering is asserted: restore() runs before migrate(), so the URL rewrite
 	 * only touches data the restore has already put in place.
 	 *
 	 * @return void
 	 */
-	public function test_invoke_with_url_migrates_after_restoring(): void {
+	public function test_invoke_with_new_url_migrates_after_restoring(): void {
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
 		$restore_runner->shouldReceive( 'restore' )->once()->ordered();
 
@@ -590,8 +601,8 @@ final class InvokeBranchesTest extends TestCase {
 		$command(
 			array( $this->temp_archive_path ),
 			array(
-				'yes' => true,
-				'url' => 'https://new.example',
+				'yes'     => true,
+				'new-url' => 'https://new.example',
 			)
 		);
 
@@ -599,11 +610,11 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * Without --url, the migrator is never consulted.
+	 * Without --new-url, the migrator is never consulted.
 	 *
 	 * @return void
 	 */
-	public function test_invoke_without_url_never_migrates(): void {
+	public function test_invoke_without_new_url_never_migrates(): void {
 		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
 		$url_migrator->shouldNotReceive( 'source_url' );
 		$url_migrator->shouldNotReceive( 'migrate' );
@@ -628,11 +639,11 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * A --dry-run with --url reads the source URL to announce the plan but migrates nothing.
+	 * A --dry-run with --new-url reads the source URL to announce the plan but migrates nothing.
 	 *
 	 * @return void
 	 */
-	public function test_invoke_dry_run_with_url_announces_but_does_not_migrate(): void {
+	public function test_invoke_dry_run_with_new_url_announces_but_does_not_migrate(): void {
 		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
 		$restore_runner->shouldReceive( 'verify' )->once();
 		$restore_runner->shouldNotReceive( 'restore' );
@@ -663,7 +674,7 @@ final class InvokeBranchesTest extends TestCase {
 			array( $this->temp_archive_path ),
 			array(
 				'dry-run' => true,
-				'url'     => 'https://new.example',
+				'new-url' => 'https://new.example',
 			)
 		);
 
@@ -1171,6 +1182,37 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
+	 * A build that cannot comply is distinguished from both a bad archive and a
+	 * host problem.
+	 *
+	 * The archive is sound and the host is fine; a ceiling compiled into every
+	 * build of Pontifex is what stopped this one entry. Telling the operator
+	 * to fetch a fresh copy would send them nowhere — the same ceiling
+	 * refuses the identical entry in the fresh copy too — and telling them to
+	 * fix their server would be equally useless, since no server setting
+	 * moves this number.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_a_build_that_cannot_comply_and_halts(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$this->run_failing_dry_run( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+
+		$output = implode( "\n", $printed );
+		$this->assertStringContainsString( 'Dry run: this restore would be refused. Your site was not changed.', $output );
+		$this->assertStringContainsString( 'wp-content/uploads/2024/huge-video.mov', $output, 'The verdict must name the entry that was too large.' );
+		$this->assertStringContainsString( '2 GB', $output, 'The verdict must give the limit as a human figure, not a raw byte count.' );
+		$this->assertStringContainsString( 'not damaged', $output );
+		$this->assertStringContainsString( 'does not need replacing', $output );
+		$this->assertStringNotContainsString( 'fetch a fresh copy', $output, 'A fresh copy of the same archive would be refused identically.' );
+		$this->assertStringNotContainsString( 'cannot be trusted', $output );
+		$this->assertStringNotContainsString( 'this server', $output, 'No server setting fixes a limit compiled into the build.' );
+	}
+
+	/**
 	 * A wrong request is reported without blaming the archive or the host.
 	 *
 	 * Nothing is wrong with anything; the invocation needs correcting, so the
@@ -1183,10 +1225,10 @@ final class InvokeBranchesTest extends TestCase {
 		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
 		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
 
-		$this->run_failing_dry_run( new InvalidRequest( '--url requires a new site URL' ) );
+		$this->run_failing_dry_run( new InvalidRequest( '--new-url requires a new site URL' ) );
 
 		$output = implode( "\n", $printed );
-		$this->assertStringContainsString( 'The request needs correcting: --url requires a new site URL', $output );
+		$this->assertStringContainsString( 'The request needs correcting: --new-url requires a new site URL', $output );
 		$this->assertStringNotContainsString( 'cannot be trusted', $output );
 		$this->assertStringNotContainsString( 'Full details are in the Pontifex log', $output );
 	}

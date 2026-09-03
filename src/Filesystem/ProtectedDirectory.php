@@ -67,6 +67,13 @@ final class ProtectedDirectory {
 	 * `wp-content/pontifex/` tree is covered without ever touching `wp-content`
 	 * itself (dropping a deny-all guard there would break the site's uploads).
 	 *
+	 * The return value reports the directory only: it is true whenever the
+	 * directory exists on disk, whether or not either guard could be written or
+	 * repaired. A guard failure never turns this false, because refusing to
+	 * proceed with the backup or restore the directory exists for — over a
+	 * directory that is merely unguarded rather than actually broken — would be
+	 * a worse outcome than the unguarded directory itself.
+	 *
 	 * @param string $dir  Absolute directory path to create and protect.
 	 * @param int    $mode Directory mode to create with (e.g. 0700).
 	 * @return bool True if the directory exists (created or already present) after the call.
@@ -105,28 +112,106 @@ final class ProtectedDirectory {
 	}
 
 	/**
-	 * Write both guard files into a directory if they are absent.
+	 * Write both guard files into a directory, repairing one this class
+	 * previously failed to write in full.
 	 *
 	 * @param string $dir The directory to guard.
 	 * @return void
 	 */
 	private static function write_guards( string $dir ): void {
-		self::write_if_absent( $dir . '/.htaccess', self::HTACCESS );
-		self::write_if_absent( $dir . '/index.php', self::INDEX_PHP );
+		try {
+			self::write_or_repair( $dir . '/.htaccess', self::HTACCESS );
+			self::write_or_repair( $dir . '/index.php', self::INDEX_PHP );
+		} catch ( \Throwable $ignored ) {
+			// A host can remove file_put_contents(), file_get_contents(), filesize(),
+			// is_link() or is_file() entirely via disable_functions. On PHP 8, calling
+			// a disabled function raises \Error rather than the suppressible warning
+			// it raised on PHP 7, so the @ operators below cannot stop it reaching
+			// here. An unguarded directory must never break the backup or restore the
+			// directory was created for, so any such failure is swallowed.
+			unset( $ignored );
+		}
 	}
 
 	/**
-	 * Write a guard file unless it already exists (silently on failure).
+	 * Write a guard file, or repair it if what is on disk is a truncated or
+	 * empty write this class made itself.
 	 *
-	 * @param string $path     Absolute path to write.
-	 * @param string $contents File contents.
+	 * `file_put_contents()` writes from the first byte, so a write cut short —
+	 * a full disk being the measured cause — always leaves behind a PREFIX of
+	 * the intended content; an empty file is just the prefix of zero length.
+	 * An operator's own file placed at this path will not, by chance, happen
+	 * to be a prefix of Pontifex's guard, so "is what's on disk a prefix of
+	 * what we would write" repairs every partial write this class could have
+	 * produced without ever touching a genuine customisation. This closes a
+	 * failure measured on a real site: the `wp-content/pontifex/` tree was
+	 * first created at zero free disk space, so `file_put_contents()` created
+	 * each guard file and then wrote nothing into it — and because the file
+	 * then existed, the previous file_exists()-then-write logic never
+	 * revisited it. All four guard files stayed empty permanently, and the
+	 * whole-site backups the directory holds were reachable by a plain web
+	 * request on that Apache host.
+	 *
+	 * A symbolic link at this path is never written through, even though it
+	 * would otherwise read as a prefix match: Pontifex never creates one
+	 * here, so one present is not ours to repair, and writing through it
+	 * would follow the link and place guard bytes wherever the link points —
+	 * possibly outside this directory entirely.
+	 *
+	 * @param string $path     Absolute path to write or repair.
+	 * @param string $contents The full intended guard contents.
 	 * @return void
 	 */
-	private static function write_if_absent( string $path, string $contents ): void {
-		if ( file_exists( $path ) ) {
+	private static function write_or_repair( string $path, string $contents ): void {
+		if ( is_link( $path ) ) {
+			// This must be checked before file_exists() below, not after: a
+			// symlink whose target does not exist is exactly the case this
+			// guards against, and file_exists() follows the link and reports
+			// false for one — so a check placed after it is unreachable for the
+			// dangling case, and the branch below would then write the guard
+			// straight through the link, creating its target instead of a guard
+			// file. This closes a hole that predates the repair work in this
+			// method: the original file_exists()-then-write code had the same
+			// gap, it was simply never exercised.
 			return;
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors.Discouraged -- Plugin-owned guard file; WP_Filesystem is unavailable in CLI/test contexts and a guard failure must never surface.
-		@file_put_contents( $path, $contents );
+
+		if ( ! file_exists( $path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors.Discouraged -- Plugin-owned guard file; WP_Filesystem is unavailable in CLI/test contexts and a guard failure must never surface.
+			@file_put_contents( $path, $contents );
+			return;
+		}
+
+		if ( ! is_file( $path ) ) {
+			// A directory, or anything else at this path that is not a plain
+			// file: not ours.
+			return;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_filesize -- Sizing a plugin-owned guard file, before reading it, to rule out a large file that cannot possibly be a prefix of ours; WP_Filesystem is unavailable in CLI/test contexts.
+		$size = filesize( $path );
+		if ( false === $size || $size > strlen( $contents ) ) {
+			// Bigger than the guard we would write, or unreadable: it cannot be a
+			// prefix of our content, so it is not a partial write of ours.
+			return;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents, WordPress.PHP.NoSilencedErrors.Discouraged -- Reading a plugin-owned guard file, already size-bounded above, to test whether it is a prefix of our own content; WP_Filesystem is unavailable in CLI/test contexts.
+		$existing = @file_get_contents( $path );
+		if ( false === $existing || $contents === $existing ) {
+			// Unreadable, or already the full guard: nothing to repair.
+			return;
+		}
+
+		if ( str_starts_with( $contents, $existing ) ) {
+			// What is on disk is the leading bytes of what we intend to write —
+			// exactly what a write cut short by a full disk leaves behind.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors.Discouraged -- Plugin-owned guard file; WP_Filesystem is unavailable in CLI/test contexts and a guard failure must never surface.
+			@file_put_contents( $path, $contents );
+			return;
+		}
+
+		// Some other content entirely, not a prefix of ours: an operator's own
+		// file. Leave it untouched.
 	}
 }

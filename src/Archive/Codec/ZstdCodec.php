@@ -224,12 +224,18 @@ final class ZstdCodec implements Codec {
 	/**
 	 * Assert that the zstd PHP extension is loaded.
 	 *
+	 * Raises {@see CodecUnavailableException}, not the plain
+	 * {@see CodecException} every other failure in this class raises: an
+	 * absent extension is a fact about this host, not about the bytes being
+	 * encoded or decoded, and a caller (see {@see \Pontifex\Archive\Reader\EntryReader})
+	 * relies on the narrower type to tell the two apart.
+	 *
 	 * @return void
-	 * @throws CodecException If ext-zstd is not loaded.
+	 * @throws CodecUnavailableException If ext-zstd is not loaded.
 	 */
 	private function assert_available(): void {
 		if ( ! extension_loaded( 'zstd' ) ) {
-			throw new CodecException( 'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.' );
+			throw new CodecUnavailableException( 'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.' );
 		}
 	}
 

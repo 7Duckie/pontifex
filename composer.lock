@@ -273,16 +273,16 @@
         },
         {
             "name": "phpseclib/phpseclib",
-            "version": "3.0.55",
+            "version": "3.0.56",
             "source": {
                 "type": "git",
                 "url": "https://github.com/phpseclib/phpseclib.git",
-                "reference": "db9744e6d47e742b1f974e965ad49bdd041105af"
+                "reference": "7adbbe38cde25e2df2116dbf2673c407e24fa305"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/phpseclib/phpseclib/zipball/db9744e6d47e742b1f974e965ad49bdd041105af",
-                "reference": "db9744e6d47e742b1f974e965ad49bdd041105af",
+                "url": "https://api.github.com/repos/phpseclib/phpseclib/zipball/7adbbe38cde25e2df2116dbf2673c407e24fa305",
+                "reference": "7adbbe38cde25e2df2116dbf2673c407e24fa305",
                 "shasum": ""
             },
             "require": {
@@ -363,7 +363,7 @@
             ],
             "support": {
                 "issues": "https://github.com/phpseclib/phpseclib/issues",
-                "source": "https://github.com/phpseclib/phpseclib/tree/3.0.55"
+                "source": "https://github.com/phpseclib/phpseclib/tree/3.0.56"
             },
             "funding": [
                 {
@@ -379,7 +379,7 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-06-14T23:24:10+00:00"
+            "time": "2026-08-03T04:36:50+00:00"
         },
         {
             "name": "psr/log",
@@ -943,19 +943,21 @@
         },
         {
             "name": "hamcrest/hamcrest-php",
-            "version": "v2.1.1",
+            "version": "v3.0.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/hamcrest/hamcrest-php.git",
-                "reference": "f8b1c0173b22fa6ec77a81fe63e5b01eba7e6487"
+                "reference": "b61cd040da1a4925bc90a51c074f5297e7c0fa52"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/hamcrest/hamcrest-php/zipball/f8b1c0173b22fa6ec77a81fe63e5b01eba7e6487",
-                "reference": "f8b1c0173b22fa6ec77a81fe63e5b01eba7e6487",
+                "url": "https://api.github.com/repos/hamcrest/hamcrest-php/zipball/b61cd040da1a4925bc90a51c074f5297e7c0fa52",
+                "reference": "b61cd040da1a4925bc90a51c074f5297e7c0fa52",
                 "shasum": ""
             },
             "require": {
+                "ext-ctype": "*",
+                "ext-dom": "*",
                 "php": "^7.4|^8.0"
             },
             "replace": {
@@ -964,13 +966,15 @@
                 "kodova/hamcrest-php": "*"
             },
             "require-dev": {
+                "phpstan/phpstan": "^2.1",
+                "phpstan/phpstan-phpunit": "^2.0",
                 "phpunit/php-file-iterator": "^1.4 || ^2.0 || ^3.0",
                 "phpunit/phpunit": "^4.8.36 || ^5.7 || ^6.5 || ^7.0 || ^8.0 || ^9.0"
             },
             "type": "library",
             "extra": {
                 "branch-alias": {
-                    "dev-master": "2.1-dev"
+                    "dev-master": "3.0-dev"
                 }
             },
             "autoload": {
@@ -988,9 +992,9 @@
             ],
             "support": {
                 "issues": "https://github.com/hamcrest/hamcrest-php/issues",
-                "source": "https://github.com/hamcrest/hamcrest-php/tree/v2.1.1"
+                "source": "https://github.com/hamcrest/hamcrest-php/tree/v3.0.0"
             },
-            "time": "2025-04-30T06:54:44+00:00"
+            "time": "2026-03-17T11:56:53+00:00"
         },
         {
             "name": "infection/abstract-testframework-adapter",
@@ -1508,29 +1512,28 @@
         },
         {
             "name": "mockery/mockery",
-            "version": "1.6.12",
+            "version": "1.6.15",
             "source": {
                 "type": "git",
                 "url": "https://github.com/mockery/mockery.git",
-                "reference": "1f4efdd7d3beafe9807b08156dfcb176d18f1699"
+                "reference": "967a801bd188989a5669bd280f252d51c0fdc9ee"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/mockery/mockery/zipball/1f4efdd7d3beafe9807b08156dfcb176d18f1699",
-                "reference": "1f4efdd7d3beafe9807b08156dfcb176d18f1699",
+                "url": "https://api.github.com/repos/mockery/mockery/zipball/967a801bd188989a5669bd280f252d51c0fdc9ee",
+                "reference": "967a801bd188989a5669bd280f252d51c0fdc9ee",
                 "shasum": ""
             },
             "require": {
-                "hamcrest/hamcrest-php": "^2.0.1",
-                "lib-pcre": ">=7.0",
+                "hamcrest/hamcrest-php": "^2.0 || ^3.0",
                 "php": ">=7.3"
             },
             "conflict": {
                 "phpunit/phpunit": "<8.0"
             },
             "require-dev": {
-                "phpunit/phpunit": "^8.5 || ^9.6.17",
-                "symplify/easy-coding-standard": "^12.1.14"
+                "phpunit/phpunit": "^9.6.36",
+                "symplify/easy-coding-standard": "^13.2.17"
             },
             "type": "library",
             "autoload": {
@@ -1587,7 +1590,7 @@
                 "security": "https://github.com/mockery/mockery/security/advisories",
                 "source": "https://github.com/mockery/mockery"
             },
-            "time": "2024-05-16T03:13:13+00:00"
+            "time": "2026-08-19T19:37:52+00:00"
         },
         {
             "name": "myclabs/deep-copy",
@@ -5142,16 +5145,16 @@
         },
         {
             "name": "squizlabs/php_codesniffer",
-            "version": "3.13.5",
+            "version": "3.13.6",
             "source": {
                 "type": "git",
                 "url": "https://github.com/PHPCSStandards/PHP_CodeSniffer.git",
-                "reference": "0ca86845ce43291e8f5692c7356fccf3bcf02bf4"
+                "reference": "4c378e1a528ea066890fc2397cbdd2f94eb2fc91"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/0ca86845ce43291e8f5692c7356fccf3bcf02bf4",
-                "reference": "0ca86845ce43291e8f5692c7356fccf3bcf02bf4",
+                "url": "https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/4c378e1a528ea066890fc2397cbdd2f94eb2fc91",
+                "reference": "4c378e1a528ea066890fc2397cbdd2f94eb2fc91",
                 "shasum": ""
             },
             "require": {
@@ -5217,7 +5220,7 @@
                     "type": "thanks_dev"
                 }
             ],
-            "time": "2025-11-04T16:30:35+00:00"
+            "time": "2026-08-06T00:17:32+00:00"
         },
         {
             "name": "staabm/side-effects-detector",
@@ -6706,16 +6709,16 @@
         },
         {
             "name": "wp-phpunit/wp-phpunit",
-            "version": "7.0.2",
+            "version": "7.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-phpunit/wp-phpunit.git",
-                "reference": "0d17335392d78b12b3e7e6b519cd53db728df52a"
+                "reference": "797edc710afc958854852d859c93d9aa1de6447d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-phpunit/wp-phpunit/zipball/0d17335392d78b12b3e7e6b519cd53db728df52a",
-                "reference": "0d17335392d78b12b3e7e6b519cd53db728df52a",
+                "url": "https://api.github.com/repos/wp-phpunit/wp-phpunit/zipball/797edc710afc958854852d859c93d9aa1de6447d",
+                "reference": "797edc710afc958854852d859c93d9aa1de6447d",
                 "shasum": ""
             },
             "type": "library",
@@ -6750,7 +6753,7 @@
                 "issues": "https://github.com/wp-phpunit/issues",
                 "source": "https://github.com/wp-phpunit/wp-phpunit"
             },
-            "time": "2026-07-10T02:38:55+00:00"
+            "time": "2026-08-20T00:59:59+00:00"
         },
         {
             "name": "yoast/phpunit-polyfills",

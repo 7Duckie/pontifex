@@ -10,13 +10,15 @@ declare(strict_types=1);
 namespace Pontifex\Tests\Unit\Rollback;
 
 use Mockery;
-use RuntimeException;
+use ReflectionMethod;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\SafetyArchiver;
@@ -121,8 +123,10 @@ final class SafetyArchiverTest extends TestCase {
 	 * not. Proven with the same deliberately-oversized single entry
 	 * {@see \Pontifex\Tests\Unit\Export\ExportRunnerTest} uses to prove the
 	 * refusal fires for an ordinary export — this test asserts create() turns
-	 * that refusal into a restore-stopping RuntimeException, not that a file
-	 * merely appeared on disk.
+	 * that refusal into a restore-stopping HostCannotComply, not that a file
+	 * merely appeared on disk. HostCannotComply, not a bare RuntimeException:
+	 * this installation's own reader is what cannot hold a manifest this
+	 * large, not evidence against the site being backed up.
 	 *
 	 * @return void
 	 */
@@ -137,7 +141,7 @@ final class SafetyArchiverTest extends TestCase {
 			$this->manifest_builder_returning( $plans )
 		);
 
-		$this->expectException( RuntimeException::class );
+		$this->expectException( HostCannotComply::class );
 		$this->expectExceptionMessage( 'A safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
 
 		$archiver->create( '/var/www/html' );
@@ -293,6 +297,9 @@ final class SafetyArchiverTest extends TestCase {
 	/**
 	 * The preflight refuses, and writes nothing, when free space is too low.
 	 *
+	 * Refuses as HostCannotComply, not a bare RuntimeException: the site being
+	 * backed up is not at fault, this host's free space is.
+	 *
 	 * @return void
 	 */
 	public function test_create_refuses_when_free_space_is_below_the_estimate(): void {
@@ -312,7 +319,7 @@ final class SafetyArchiverTest extends TestCase {
 		try {
 			$archiver->create( '/var/www/html' );
 			$this->fail( 'create() should have refused: free space is below the estimate.' );
-		} catch ( RuntimeException $error ) {
+		} catch ( HostCannotComply $error ) {
 			$this->assertStringContainsString( 'Not enough free disk space', $error->getMessage() );
 		}
 
@@ -350,6 +357,218 @@ final class SafetyArchiverTest extends TestCase {
 		);
 
 		$this->assertGreaterThan( 0, $reported, 'create() forwards byte progress from the export pipeline.' );
+	}
+
+	// -------------------------------------------------------------------------
+	// sweep_orphaned_archive_temps()
+	// -------------------------------------------------------------------------
+
+	/**
+	 * An orphaned archive temp left by a killed safety-archive write is removed.
+	 *
+	 * Stands in for {@see \Pontifex\Export\ExportRunner::temp_destination_path()}'s
+	 * own sibling temp, abandoned by an import that died between the write
+	 * and the rename that would otherwise have completed it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_an_orphaned_archive_temp(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$orphan = $store->directory() . '/pre-import-rollback-20260101T000000Z.wpmig' . TempArtefact::suffix();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'an abandoned safety-archive write' );
+
+		$removed = $this->invoke_sweep( $this->archiver_for_sweep_tests( $store ) );
+
+		$this->assertSame( 1, $removed );
+		$this->assertFileDoesNotExist( $orphan );
+	}
+
+	/**
+	 * A real safety archive is left untouched.
+	 *
+	 * The most important sweep test in this suite: the sweep must never eat
+	 * an operator's actual undo. A real archive is named
+	 * `pre-import-rollback-<UTC>.wpmig` — no uniqid()-shaped temp suffix at
+	 * all — so {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()}
+	 * must never match it.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_real_safety_archive_untouched(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$real = $store->directory() . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $real, 'a real safety archive' );
+
+		$removed = $this->invoke_sweep( $this->archiver_for_sweep_tests( $store ) );
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $real );
+	}
+
+	/**
+	 * A resumable export's `.part` file is left untouched.
+	 *
+	 * A `.part` file is live state a still-running export is writing to —
+	 * see {@see \Pontifex\Export\ResumableExportRunner} — and deleting one
+	 * would destroy real, unrecoverable work. This directory could never
+	 * legitimately hold one (admin and scheduled backups write `.part` files
+	 * through ResumableExportRunner, a different caller entirely, never
+	 * through this archiver), but the sweep must still refuse to match the
+	 * shape unconditionally, exactly as
+	 * {@see \Pontifex\Filesystem\TempArtefact::is_orphan_name()} does.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_part_file_untouched(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$part = $store->directory() . '/pre-import-rollback-20260101T000000Z.wpmig.' . uniqid( 'pontifex-job-', true ) . '.part';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $part, 'live resumable state' );
+
+		$removed = $this->invoke_sweep( $this->archiver_for_sweep_tests( $store ) );
+
+		$this->assertSame( 0, $removed );
+		$this->assertFileExists( $part );
+	}
+
+	/**
+	 * A directory named like a temp artefact is left alone and not counted.
+	 *
+	 * Never produced by anything in this plugin, but not this method's
+	 * business to assume impossible — see
+	 * {@see \Pontifex\Rollback\SafetyArchiver::sweep_orphaned_archive_temps()}'s
+	 * own docblock (REMOVAL).
+	 *
+	 * @return void
+	 */
+	public function test_sweep_leaves_a_directory_named_like_a_temp_artefact_alone(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$temp_shaped_dir = $store->directory() . '/pre-import-rollback-20260101T000000Z.wpmig' . TempArtefact::suffix();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Test fixture setup.
+		mkdir( $temp_shaped_dir );
+
+		$removed = $this->invoke_sweep( $this->archiver_for_sweep_tests( $store ) );
+
+		$this->assertSame( 0, $removed );
+		$this->assertDirectoryExists( $temp_shaped_dir );
+	}
+
+	/**
+	 * The returned count reflects only files actually removed.
+	 *
+	 * Three orphans are placed; the count must be exactly 3 — describing
+	 * what was actually done, never merely how many matching names were
+	 * found.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_returns_the_count_of_temps_actually_removed(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$orphans = array();
+		for ( $i = 0; $i < 3; $i++ ) {
+			$orphan = $store->directory() . '/pre-import-rollback-2026010' . $i . 'T000000Z.wpmig' . TempArtefact::suffix();
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+			file_put_contents( $orphan, 'x' );
+			$orphans[] = $orphan;
+		}
+
+		$removed = $this->invoke_sweep( $this->archiver_for_sweep_tests( $store ) );
+
+		$this->assertSame( 3, $removed );
+		foreach ( $orphans as $orphan ) {
+			$this->assertFileDoesNotExist( $orphan );
+		}
+	}
+
+	/**
+	 * The sweep runs BEFORE the free-space preflight, not after.
+	 *
+	 * Proves the ordering documented on {@see SafetyArchiver::create()}: an
+	 * orphan is placed, the free-space reading is stubbed low enough that
+	 * {@see SafetyArchiver::preflight_disk_space()} refuses, and create() is
+	 * called end-to-end (not the private sweep method directly). If the
+	 * sweep ran after the preflight — or not at all ahead of it — the thrown
+	 * HostCannotComply would leave the orphan in place; because it survives
+	 * neither, this proves the sweep already ran by the time the preflight
+	 * had its chance to refuse.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_runs_before_the_free_space_preflight_refuses(): void {
+		$store = new RollbackStore( $this->base );
+		$store->ensure_directory();
+
+		$orphan = $store->directory() . '/pre-import-rollback-20260101T000000Z.wpmig' . TempArtefact::suffix();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $orphan, 'an abandoned safety-archive write' );
+
+		$plans = array( $this->file_plan( 'wp-content/note.txt', "content\n" ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( 1.0 ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		try {
+			$archiver->create( '/var/www/html' );
+			$this->fail( 'create() should have refused: free space is below the estimate.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString( 'Not enough free disk space', $error->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist(
+			$orphan,
+			'The sweep must run before the free-space preflight refuses, so the orphan is gone even though create() threw.'
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// Sweep-test helpers.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A SafetyArchiver wired against a real store, for driving the private
+	 * sweep method directly (never through create()).
+	 *
+	 * No manifest builder is passed: {@see SafetyArchiver::sweep_orphaned_archive_temps()}
+	 * never touches it, and {@see self::manifest_builder_returning()}'s mock
+	 * expects exactly one build() call, which a test that never calls
+	 * create() would leave unmet.
+	 *
+	 * @param RollbackStore $store The store the archiver is rooted at.
+	 * @return SafetyArchiver
+	 */
+	private function archiver_for_sweep_tests( RollbackStore $store ): SafetyArchiver {
+		return new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store
+		);
+	}
+
+	/**
+	 * Invoke the private sweep_orphaned_archive_temps() method by reflection.
+	 *
+	 * @param SafetyArchiver $archiver The archiver to invoke it on.
+	 * @return int The number of temp artefacts actually removed.
+	 */
+	private function invoke_sweep( SafetyArchiver $archiver ): int {
+		$method = new ReflectionMethod( SafetyArchiver::class, 'sweep_orphaned_archive_temps' );
+		return (int) $method->invoke( $archiver );
 	}
 
 	// -------------------------------------------------------------------------

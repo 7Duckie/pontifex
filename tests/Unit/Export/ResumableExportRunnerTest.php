@@ -28,6 +28,8 @@ use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
+use Pontifex\Manifest\ExclusionPattern;
+use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
@@ -161,6 +163,55 @@ final class ResumableExportRunnerTest extends TestCase {
 					}
 					$contents = $spec[2];
 					$plans[]  = new EntryPlan(
+						$header,
+						0,
+						str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+						static function () use ( $contents ) {
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+							$stream = fopen( 'php://memory', 'r+b' );
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+							fwrite( $stream, $contents );
+							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+							rewind( $stream );
+							return $stream;
+						}
+					);
+				}
+				return ManifestStream::from_plans( $plans );
+			}
+		);
+		return $builder;
+	}
+
+	/**
+	 * A ManifestBuilderInterface that filters plain file specs through the
+	 * given ExclusionRules exactly as the real FileScanner does: matches()
+	 * is called against EVERY candidate path — so match_counts() reflects
+	 * the whole tree scanned this tick, whichever entries end up excluded —
+	 * and a matched path is left out of the returned stream entirely.
+	 *
+	 * Unlike {@see self::fake_builder()}, this exists specifically for the
+	 * exclusion match-count tests, which need the rules a tick built to
+	 * actually be exercised; the plain fake builder above never calls
+	 * matches() at all, so match_counts() would stay all zero regardless of
+	 * what was configured.
+	 *
+	 * @param array<int, array{0: string, 1: string}> $file_specs Each spec is (relative path, contents).
+	 * @param ExclusionRules                          $rules      The rules this tick's scan runs against — the very instance run_tick() built, so its match_counts() reflect this call.
+	 * @return ManifestBuilderInterface The fake builder.
+	 */
+	private function fake_builder_honouring_exclusions( array $file_specs, ExclusionRules $rules ): ManifestBuilderInterface {
+		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'build' )->andReturnUsing(
+			static function () use ( $file_specs, $rules ): ManifestStream {
+				$plans = array();
+				foreach ( $file_specs as $spec ) {
+					list( $path, $contents ) = $spec;
+					if ( $rules->matches( $path, EntryHeader::KIND_FILE ) ) {
+						continue;
+					}
+					$header  = EntryHeader::for_file( $path, strlen( $contents ), 0644, 1690000000, 'application/octet-stream', 0 );
+					$plans[] = new EntryPlan(
 						$header,
 						0,
 						str_repeat( "\0", EntryWriter::NONCE_SIZE ),
@@ -503,6 +554,208 @@ final class ResumableExportRunnerTest extends TestCase {
 
 		$this->assert_archive_sound();
 		$this->assertSame( Job::STATUS_DONE, $store->get( $job->id() )->status() );
+	}
+
+	/**
+	 * A table-scoped exclusion pattern keeps its scope across the persisted
+	 * round trip: run_tick() rebuilds it from the job payload as a
+	 * table-scoped pattern, not an untagged one, even though its text is
+	 * spelled exactly like a scanned file path.
+	 *
+	 * Job 14 tagged every exclusion pattern with a kind scope so a file
+	 * pattern can never reach a database table (or the reverse). The fake
+	 * builder above never actually applies the rules it is handed, so no
+	 * archive-content assertion can see whether the scope survived — this
+	 * test instead captures the ExclusionRules the manifest builder
+	 * factory is called with, on a job reloaded from the store (a real
+	 * persist-then-read-back), and inspects it directly. Were run_tick()
+	 * ever to rebuild an untagged rule set again, this pattern would apply
+	 * to every kind and wrongly match the file entry below.
+	 *
+	 * @return void
+	 */
+	public function test_a_table_scoped_exclusion_keeps_its_scope_after_a_tick(): void {
+		$captured_rules = null;
+		$specs          = &$this->specs;
+		$store          = new JobStore( $this->content_dir );
+		$runner         = new ResumableExportRunner(
+			$this->environment_mock(),
+			$this->wordpress_context_mock(),
+			$store,
+			function ( ExclusionRules $rules ) use ( &$captured_rules, &$specs ): ManifestBuilderInterface {
+				$captured_rules = $rules;
+				return $this->fake_builder( $specs );
+			}
+		);
+
+		$job = $runner->start(
+			new ExportOptions( $this->output_path ),
+			'/tmp/wp/wp-content',
+			'wp-content',
+			array( ExclusionPattern::operator_table( 'wp-content/a.txt' ) ),
+			1700000000
+		);
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		$this->assertNotNull( $captured_rules, 'The manifest builder factory must receive the reconstructed rules on the first tick.' );
+		$this->assertFalse(
+			$captured_rules->matches( 'wp-content/a.txt', EntryHeader::KIND_FILE ),
+			'A table-scoped pattern must never match a file entry, even one spelled exactly like its own pattern text — the scope must survive the persisted round trip.'
+		);
+	}
+
+	/**
+	 * A second tick over an unchanged tree must not double the stored
+	 * exclusion match counts.
+	 *
+	 * Every tick's $builder->build() re-scans the WHOLE tree — ManifestStream
+	 * materialises every item at construction, and FileScanner/DatabaseScanner
+	 * call matches() on every candidate during that scan — so a tick's
+	 * match_counts() is already that tick's complete total, not an amount to
+	 * add to what an earlier tick already stored. This is the single test
+	 * that fails if ResumableExportRunner::run_tick()'s persistence is ever
+	 * changed from overwriting the stored counts to accumulating them: were
+	 * that to happen, the count asserted below would read 2 after the second
+	 * tick instead of staying at 1.
+	 *
+	 * @return void
+	 */
+	public function test_a_second_tick_does_not_double_the_exclusion_match_counts(): void {
+		$file_specs = array(
+			array( 'wp-content/a.txt', 'alpha' ),
+			array( 'wp-content/b.txt', 'beta' ),
+			array( 'wp-content/skip.txt', 'excluded content' ),
+		);
+
+		$store  = new JobStore( $this->content_dir );
+		$runner = new ResumableExportRunner(
+			$this->environment_mock(),
+			$this->wordpress_context_mock(),
+			$store,
+			function ( ExclusionRules $rules ) use ( &$file_specs ): ManifestBuilderInterface {
+				return $this->fake_builder_honouring_exclusions( $file_specs, $rules );
+			}
+		);
+
+		$job = $runner->start(
+			new ExportOptions( $this->output_path ),
+			'/tmp/wp/wp-content',
+			'wp-content',
+			array( ExclusionPattern::operator_file( 'wp-content/skip.txt' ) ),
+			1700000000
+		);
+
+		// Budget 0.0 forces exactly one entry per tick, so this is the first
+		// of two ticks needed to append both non-excluded files.
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$after_one = $store->get( $job->id() )->payload()['exclusion_matches'] ?? null;
+		$this->assertSame(
+			array(
+				array(
+					'pattern' => 'wp-content/skip.txt',
+					'count'   => 1,
+				),
+			),
+			$after_one,
+			'The first tick must record the one file its pattern excluded.'
+		);
+
+		// The second tick finishes the job: total_bytes and this deadline
+		// logic aside, the scan STILL walks all three specs again, exactly
+		// as the first tick did.
+		$done = $runner->tick( $store->get( $job->id() ), 0.0 );
+		$this->assertTrue( $done, 'The second tick must finish the export (two non-excluded files, one per tick).' );
+
+		$after_two = $store->get( $job->id() )->payload()['exclusion_matches'] ?? null;
+		$this->assertSame(
+			$after_one,
+			$after_two,
+			'A second tick over the same unchanged tree must leave the count exactly as it was — overwritten with this tick\'s own whole-tree total, never added to what was already stored.'
+		);
+	}
+
+	/**
+	 * The persisted payload carries the exclusion match counts keyed by
+	 * pattern text, with a genuine non-zero count for a pattern that
+	 * actually excluded something and 0 — not an absent entry — for one
+	 * that excluded nothing, mirroring
+	 * {@see \Pontifex\Manifest\ExclusionRules::match_counts()}'s own
+	 * contract once the export has finished.
+	 *
+	 * @return void
+	 */
+	public function test_exclusion_match_counts_reach_the_finished_payload(): void {
+		$file_specs = array(
+			array( 'wp-content/a.txt', 'alpha' ),
+			array( 'wp-content/skip.txt', 'excluded content' ),
+		);
+
+		$store  = new JobStore( $this->content_dir );
+		$runner = new ResumableExportRunner(
+			$this->environment_mock(),
+			$this->wordpress_context_mock(),
+			$store,
+			function ( ExclusionRules $rules ) use ( &$file_specs ): ManifestBuilderInterface {
+				return $this->fake_builder_honouring_exclusions( $file_specs, $rules );
+			}
+		);
+
+		$job = $runner->start(
+			new ExportOptions( $this->output_path ),
+			'/tmp/wp/wp-content',
+			'wp-content',
+			array(
+				ExclusionPattern::operator_file( 'wp-content/skip.txt' ),
+				ExclusionPattern::operator_file( 'wp-content/never-matches.txt' ),
+			),
+			1700000000
+		);
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$this->assertSame(
+			array(
+				array(
+					'pattern' => 'wp-content/skip.txt',
+					'count'   => 1,
+				),
+				array(
+					'pattern' => 'wp-content/never-matches.txt',
+					'count'   => 0,
+				),
+			),
+			$store->get( $job->id() )->payload()['exclusion_matches'] ?? null
+		);
+	}
+
+	/**
+	 * A job payload missing the exclusion_matches key entirely — a job
+	 * started by an earlier build, before this counter existed — still
+	 * resumes and finishes rather than fataling, and the key is populated
+	 * fresh once a tick has actually run.
+	 *
+	 * @return void
+	 */
+	public function test_a_payload_missing_exclusion_matches_still_resumes(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$stripped = $store->get( $job->id() );
+		$payload  = $stripped->payload();
+		unset( $payload['exclusion_matches'] );
+		$stripped->set_payload( $payload );
+		$store->save( $stripped );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$finished = $store->get( $job->id() );
+		$this->assertSame( Job::STATUS_DONE, $finished->status(), 'A payload missing the counter key must still resume and finish, not fatal.' );
+		$this->assertSame(
+			array(),
+			$finished->payload()['exclusion_matches'] ?? null,
+			'With no exclusion patterns configured for this job, the derived value is an empty array once a tick has run.'
+		);
 	}
 
 	/**

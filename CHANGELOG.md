@@ -16,6 +16,283 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A backup could get a symbolic link created that the safety check never
+  looked at, and a folder Pontifex could not see inside was silently treated
+  as safe.** Three separate ways the symbolic-link confinement check could be
+  made to decide something it had not actually established, all in the
+  preflight that runs before a restore writes anything.
+
+  First, a backup could declare one location twice under two spellings that
+  mean the same path — `leak` and `./leak`. Only the second was kept and
+  checked, while the restore still wrote **both**, so the entry nobody checked
+  was created anyway. The refusal that followed named the symbolic-link guard,
+  which read as the guard working. Two spellings of one path that disagree
+  about their target are now refused outright; where they agree, nothing
+  changes, because checking one is the same as checking both.
+
+  Second, when Pontifex followed a link to prove it stayed inside the site, a
+  folder it could not look inside answered "there is no shortcut here" — the
+  same answer as a folder that genuinely held none. It trusted that silence.
+  A backup could exploit it by declaring the very folder that was blocking the
+  check with open permissions, so the restore unlocked it moments later. The
+  check can now tell "nothing here" apart from "I could not look", and stops
+  on the second, reporting it as a host problem rather than a damaged backup —
+  the archive may be perfectly sound. If `open_basedir` rather than
+  permissions is what hides the folder, the two remain indistinguishable and
+  the containment rule catches the escape instead; this limit is recorded in
+  the code.
+
+  Third, two shortcuts whose names this filesystem treats as one file but
+  which declared different targets were both written, the last silently
+  replaced the first, and **the restore reported success** — leaving a site
+  holding a shortcut nobody chose. Pontifex already recognised the ambiguity
+  but only consulted it if some other link happened to resolve through that
+  name. It is now refused up front.
+
+  All three make a restore stricter, so a backup that restored before may now
+  be refused. Each refusal names the entries and targets involved, and none of
+  them can be triggered by a backup Pontifex wrote: its scanner emits exactly
+  one entry per real path.
+
+- **An exclusion pattern meant for a folder could silently take a whole
+  database table out of your backup, with no warning, and the backup still
+  verified as sound afterwards.** File patterns and table patterns were kept
+  in one shared list, matched against both files and table names alike, and
+  a pattern written as a regex matched anywhere in a name rather than from
+  its start. So typing `/comments/` into the exclusions box, meaning "skip
+  the comments folder", could just as easily match a `wp_comments` table and
+  drop it from the backup — exit code 0, no warning, and checking the backup
+  afterwards still called it sound, because nothing was inconsistent about
+  the archive it produced. The same unanchored matching meant `/log/` also
+  excluded a file named `blogmap.php`, because "log" sits inside "b**log**map"
+  — nowhere near where the pattern's author meant it to match. This repeated
+  on every unattended run: a scheduled backup carrying such a pattern lost
+  the same table, silently, every single time it fired.
+
+  File patterns and table patterns are now two entirely separate lists.
+  `--exclude`/`--exclude-file` (and the Backup screen's file-exclusions box)
+  can only ever match files, directories, and symlinks; `--exclude-table`
+  (and the screen's new table-exclusions box) can only ever match a bare
+  table name. A pattern written for one can no longer reach the other, by
+  construction, not by convention.
+
+### Changed
+
+- **An exclusion pattern written as a regex now only matches from the start
+  of the name — and this is a real behaviour change you may notice.** Only
+  the regex shape is affected (a pattern wrapped in forward slashes, like
+  `/\.log$/`); the other three shapes — an exact path, a glob such as
+  `*.log`, and a folder tree such as `path/**` — are already anchored by
+  their own meaning and are completely unchanged. If you had written a regex
+  to match a *suffix* — `/\.log$/`, to catch every file ending in `.log`
+  wherever it sits — **it now matches nothing at all**, because its match no
+  longer begins at position 0 of the name. Replace it with the glob
+  `*.log`, which does what you meant and is unaffected by this change.
+
+  This was anchored rather than refused on purpose. Refusing a pattern that
+  used to work would break a saved schedule the next time it ran
+  unattended, with nobody watching — the worst possible moment to discover
+  it. Anchoring it instead means the pattern simply stops catching anything
+  and the new match-count reporting below tells you so, quietly, on the
+  very next run.
+
+  **Pontifex's own curated defaults are unaffected.** They are not subject
+  to this anchoring at all, so the built-in `.git`-at-any-depth exclusion
+  keeps matching a `.git` folder wherever it sits in your site, exactly as
+  before.
+
+- **Pontifex now tells you how many things each exclusion pattern actually
+  matched**, on every surface that runs a backup: the `wp pontifex export`
+  summary, a resumable export's summary, the Backup screen's notice once a
+  backup finishes, and the log line a cron-driven scheduled backup writes.
+  A pattern that matched nothing now reports `0` rather than being left off
+  the list entirely — which is what makes a pattern that quietly ate a
+  table indistinguishable, until now, from one that correctly matched
+  nothing. One nuance worth knowing: a folder-tree pattern such as
+  `wp-content/cache/**` is counted as **one** match, however many thousands
+  of files sat underneath it, because the scanner prunes the whole folder
+  and never opens what is inside it to count them individually. Read the
+  number as "did this pattern do anything at all", not as a file count.
+
+- **The admin Backup screen has two exclusion boxes instead of one**, on
+  both the manual "Create a backup" section and the "Scheduled backups"
+  section: one for files, one for database tables. It previously had a
+  single box feeding both, which is the same shared-list problem the fix
+  above closes, now visible in the interface itself rather than only in
+  what you typed.
+
+- **`wp pontifex schedule set` gains `--exclude-table=<patterns>`**,
+  matching `export --exclude-table`, so a scheduled backup can leave out
+  database tables the same way a one-off export already could.
+  `wp pontifex schedule show` now prints both the file-exclusion and the
+  table-exclusion lists a scheduled backup will apply — it previously
+  printed neither, so what an unattended backup left out was invisible
+  until you went looking at the archive itself.
+
+- **`schedule set --exclude` or `--exclude-table` passed with no value at
+  all is now refused with an error**, instead of silently wiping the stored
+  list and reporting success as though nothing had changed. To clear a list
+  on purpose, pass an explicit empty value: `--exclude=`.
+
+- **A schedule saved before this change had one flat exclusion list; it is
+  now read as file patterns.** This is the safe direction to default it in:
+  if that one list had been silently excluding a database table, the table
+  now comes back into the backup rather than continuing to vanish from it.
+  Expect your next scheduled backup to be a little larger if that applied
+  to you.
+
+- **A backup interrupted part-way through its database half now asks you to
+  start again, rather than continuing.** The new bookmark that makes row
+  reading fast does not yet survive the process that created it, so a backup
+  resumed at that exact point cannot know where it had got to. Rather than
+  guess — which would re-read a table's first rows under a later batch's name,
+  duplicating some and dropping others — Pontifex stops and says so.
+
+  Two things limit when you would meet this. The database half **runs to
+  completion once it starts**, so an ordinary pause between stages never lands
+  inside it; only an outright kill, a host timeout or a crash does. And the
+  backup you are asked to redo is the one that just became dramatically
+  faster.
+
+### Fixed
+
+- **An interrupted download left a fragment under the backup's name, and then
+  blocked its own retry.** Fetching a backup from your own server wrote
+  straight to the path you asked for, so a download cut short partway left a
+  truncated file there — measured on a real server at 163,610,624 bytes.
+  Pontifex then refuses to fetch over an existing file, so retrying to the same
+  place was refused *by the wreckage of the attempt before it*. The only way
+  out was to spot the problem and delete a file most people would reasonably
+  take for a backup. Downloads now go to a temporary name and are renamed into
+  place only once the transfer has finished and its size matches what your
+  server reports, so an interrupted one never occupies the path you asked for
+  and retrying simply works. Verified on a real server: a download killed
+  part-way left nothing at the requested path, and the very next attempt
+  succeeded.
+
+- **The "is there room to restore?" check measured the wrong thing, and could
+  pass without measuring anything at all.** Before restoring, Pontifex checks
+  your server has space. It was adding up how much room your files take *inside
+  the backup file* — where they are compressed — rather than how much they will
+  take once unpacked, which is what actually gets written. Measured on real
+  backups: a database-heavy one budgeted 1.4 MB and would have written 123 MB,
+  an **87-fold** understatement; a single highly compressible file understated
+  by around two thousand fold. A server with almost nothing free passed the
+  check and then filled its disk part-way through, leaving a site half-old and
+  half-new. It now measures the unpacked size.
+
+  Separately, when a server would not tell Pontifex how much space was free —
+  some hosts switch that off — the check quietly counted as passed, and the
+  Verify screen turned that silence into *"This server has the room to restore
+  it."* A reading that could not be taken is now reported as exactly that:
+  **"Whether this server has room to restore it could not be established."**
+  The restore still goes ahead, because a server that will not answer this
+  question can usually still restore perfectly well — but it no longer claims
+  an answer it never got.
+
+- **Backing up a large database took hours, and a resumed backup could
+  duplicate rows.** Pontifex asked the database for rows a page at a time by
+  counting from the start — "skip the first 40,000, give me the next 4,096".
+  A database cannot actually skip: it reads and discards every row before the
+  starting point, every single time. Measured on a 1.1 GB database: **42
+  minutes to back up, against 119 seconds to restore the same file**, because
+  restoring never paginates. Backing up 4.48 million rows meant reading about
+  **2.45 billion**. The bigger the table, the worse it got, and it got worse
+  faster than the table grew. Pontifex now asks for "the rows after this one",
+  which the database can jump straight to. Tables without a primary key keep
+  the old method, because they have no column guaranteed unique to bookmark
+  on.
+
+  The same counting was also why an interrupted backup could come back wrong.
+  How many rows fit in a batch is worked out from the table's own average row
+  size, so a resumed backup that re-measured a changed table got a different
+  batch size, and batches counted from the start no longer lined up with what
+  had already been written. Measured: **166,608 rows written for a 150,000-row
+  table**, with exit code 0 and "Archive is sound". A bookmark is tied to
+  actual data, so a changed batch size can no longer misalign anything.
+
+- **A database stutter during a backup could drop rows and still report
+  success.** A shared host under load, or a brief network blip, is enough. The
+  check meant to catch a failed read asked whether the database had returned
+  *nothing at all* — but a failed read hands back an *empty list*, never the
+  particular kind of nothing being tested for, so the check could never fire.
+  A failed read was therefore treated as "this table has no more rows", and the
+  backup moved on to the next one. Measured on a 120,000-row table with its
+  reads interrupted mid-backup: the backup **reported success** and wrote
+  *"Exported 42 entries"*, and the file held **103,616 of the 120,000 rows** —
+  four whole batches missing, including the first. Checking that backup
+  afterwards called it sound, correctly: every byte present was intact, and
+  nothing was looking for the rows that were absent. A failed read is now
+  reported as a failure, the backup stops, and no file is written. An ordinary
+  backup is unaffected — it still writes every row.
+
+- **Checking a backup said "sound" for backups a restore then refused, and no
+  check could ever notice an oversized file.** The check and the restore are
+  meant to ask the same structural questions. They did not, because one
+  parameter name carried two different meanings: the restore path passed the
+  size ceiling compiled into every build of Pontifex, while the checking path
+  passed the memory-derived budget through a parameter of the same name — and
+  then tested it on the opposite condition. That condition is true for every
+  ordinary uncompressed-in-place file, so the test was skipped exactly where it
+  mattered and **no check could refuse an oversized file at all**. The checking
+  path also computed no whole-archive size budget, where a restore computes one
+  and enforces it as it goes, and skipped four structural checks a restore
+  performs: whether the record leaves room for the fields that follow it,
+  whether the compression method recorded in the index matches the one in the
+  entry itself, whether the encryption family is one Pontifex knows, and
+  whether the compression method is registered at all. An archive contradicting
+  itself in any of those ways was called sound and then refused. All of it is
+  now checked on both paths, on the same terms.
+
+  **You will notice this**, and it is the point: a backup with a single entry
+  over 2 GB, or whose total contents exceed a hundred times the size of the
+  backup file itself, is now reported as **refused** rather than sound. Every
+  such backup was already refused by a restore — the change is that you hear
+  about it when you check, instead of part-way through restoring.
+
+  One difference between the two paths is deliberate. A restore counts each
+  entry's real unpacked size as it goes; a check never unpacks anything, so it
+  can only read the size each entry declares. For a file that declared size is
+  reliable — it is corrected when the backup is written and enforced when it is
+  read. For a block of database rows it is a prediction, and a measurement on a
+  stock WordPress database found the prediction running **3.8 times** the real
+  total. Counting those predictions would have let the check refuse backups a
+  restore accepts, so database blocks are excluded from that running total.
+  They are still checked individually against the per-entry ceiling, and a
+  restore still measures them for real.
+
+- **A URL migration could run for seven minutes, print the single word
+  `Killed`, and leave the site half-moved.** A serialised value crafted (or
+  corrupted) to reference itself — fourteen bytes, `a:1:{i:0;R:1;}` — sent
+  the search-replace pass into a walk with no bound of any kind. Measured on
+  a real `wp pontifex import --new-url=<new-url>`: because WP-CLI runs with
+  no memory limit, the process ground for 434 seconds before the operating
+  system killed it, and the only thing printed was `Killed`. By then
+  `siteurl` and `home` had already been moved to the new address, but every
+  post was still left pointing at the old one — a half-migration that had
+  every appearance of a clean run, because nothing survived to say
+  otherwise. The walk is now bounded by depth and by a total-nodes-visited
+  budget, and breaching either abandons the whole value rather than
+  rewriting part of it: the value is kept exactly as it was, counted in the
+  same "value(s) kept unchanged for safety" total every other value left
+  alone for safety already is.
+
+- **`wp pontifex import <archive> --url=<new-url>` silently did nothing.**
+  WP-CLI reserves `--url` as one of its own global parameters and strips it
+  before any command ever sees it, so the migration flag documented since
+  v0.3.0 never reached Pontifex at all: the command printed "Restoring to
+  the same site URL; no URL rewriting," exited `0`, and left every URL on
+  the old domain — the opposite of what was asked for, with nothing said
+  about it. **The flag is renamed to `--new-url`**, which is not one of
+  WP-CLI's reserved names and so reaches the command normally. A bare
+  `--url` typed on the command line — an old script, or documentation from
+  before this fix — is now refused outright rather than silently ignored:
+  `wp pontifex import <archive> --url=<new-url>` now stops with an error
+  naming `--new-url`, instead of restoring to the same address without
+  telling you it did. **This is a breaking change**: any script or
+  scheduled job passing `--url` to `wp pontifex import` must be updated to
+  `--new-url`, or it will now fail loudly rather than quietly not migrate.
+
 - **A failed `wp pontifex import`, `export` or `rollback` showed a PHP stack
   trace and told you your website had a critical error.** Every failure — a
   truncated archive, a server with no room, a mistyped flag — was re-thrown out
@@ -55,6 +332,152 @@ v0.0.x decision log for the reasoning.
   on its own, but under WP-CLI these never reached that: WordPress's shutdown
   handler caught the fatal, printed the critical-error sentence, and exited `1`.
   All that changes is what is printed on the way out.
+
+- **A scheduled backup's own retention could delete its own fresh runs, and
+  keep a clock-skewed one for ever.** Retention decided which local backup was
+  oldest by sorting filenames, which is chronological only when every name was
+  generated by a healthy clock. A single backup taken while the system clock
+  was running ahead got a future-dated name that then sorted as permanently
+  newest, however old it actually was — measured on a live site, four
+  consecutive scheduled runs each deleted the PREVIOUS run's own fresh backup
+  in its place, while the clock-skewed one sat untouched and kept occupying a
+  retention slot. Retention is now decided by each backup's real, on-disk
+  modification time instead, with a future-dated one now treated as the oldest
+  of all — a timestamp that has not happened yet is the one thing retention
+  should trust least.
+
+- **Retention could delete a backup you made by hand, and always counted it
+  towards your `--retention` number even when it survived.** A hand-made
+  backup — from the Backup screen, or `wp pontifex export` — is stored under
+  the exact same name shape as a scheduled one, and retention could not tell
+  them apart: it pruned from every backup in the store, so yours could be
+  deleted in a scheduled run's place, and even when it was not, it still used
+  up one of the slots `--retention` was meant to reserve for backups the
+  schedule itself made. Pontifex now records which backups it created, and
+  retention only ever prunes from that record — a hand-made backup is never
+  deleted automatically, and never spends a scheduled slot. Backups already on
+  disk from before this update, hand-made or scheduled, are not in that new
+  record either, so they will not start being pruned automatically: expect
+  them to accumulate until you remove them yourself, which is safer than
+  guessing which of your existing backups the scheduler made.
+
+- **Offsite retention could delete the backup an export had just uploaded,
+  moments after uploading it — and call the run a success when every delete
+  had in fact failed.** Retention ordered a destination's archives oldest-first
+  by remote NAME, sound only if every name follows Pontifex's own timestamped
+  shape and the newest one really does sort last. On a real server it did not
+  hold: at a retention of 1, `wp pontifex export --destination` logged
+  "Uploaded the archive to the destination." and, two lines later, "Pruned old
+  archive from the destination:" naming that very same archive — a
+  future-dated name sorts last for ever, so any backup uploaded ahead of it
+  looked "oldest" and was deleted in its place. Separately, `prune()` reported
+  only the names it deleted, so "nothing needed pruning" and "every delete was
+  refused" were the same empty list: measured against a real server holding
+  five archives against a keep-count of two, `wp pontifex destination prune`
+  reported "already within its retention; nothing was pruned" while every
+  delete had actually failed — and the warning meant to catch exactly this
+  was never logged, because neither CLI call site ever gave the retention
+  pruner a logger to write to. Retention is now ordered by each archive's real
+  modification time at the destination instead of its name (the same fix
+  already shipped for local backups, above), and a prune that could not
+  delete everything it needed to now says so instead of reporting success:
+  `wp pontifex destination prune` stops with an error naming how many archives
+  remain, and `wp pontifex export --destination=<name>` warns rather than
+  staying silent. A listing failure part-way through `prune` no longer
+  surfaces as an uncaught PHP exception either — it is now the same readable
+  error every other failure in that command already produces.
+
+- **A killed or partially failed upload could leave a fragment sitting under a
+  real backup's name, which retention then treated as the newest backup on
+  the destination and pruned a sound one to make room for.** Measured against
+  a real server: a killed upload left 274,025,430 bytes of a
+  419,645,479-byte archive under the exact name a finished backup would have
+  used, and because a fresh fragment genuinely has a fresh modification time,
+  ordering by real age (above) cannot catch this on its own. Uploads now go to
+  a temporary remote name first and are renamed into place only once the
+  transfer has completed and the destination's own reported size matches the
+  local file — the same temporary-name-then-rename protection Pontifex's own
+  file restores have used since v0.6.0. A fragment stranded under the
+  temporary name is invisible to every listing, because it does not match the
+  shape retention was already refusing to touch. Because SFTP's own rename
+  will not overwrite an existing file, re-running an export to a name already
+  on the destination — the same `--output`, a retried upload that had in fact
+  landed, or two sites sharing one destination — now clears the old file
+  immediately before the rename that replaces it, once the new upload is
+  already verified. That is a narrower version of what every upload already
+  did before this change (write straight over whatever held the name), not a
+  new risk: the destination now holds a half-written file for a few
+  milliseconds around one rename, instead of for the entire length of a
+  transfer.
+
+- **A restore that failed for lack of disk space could not be retried,
+  because the space its own failed attempt had used stayed counted against
+  it.** The free-space preflight ran before the sweep that clears away a
+  crashed restore's leftover temp file, so a large half-written file the
+  FIRST attempt left behind was still sitting on disk — still counted as
+  used — when the retry asked whether there was room, and a large enough
+  leftover could refuse every subsequent attempt for ever. The sweep now
+  runs first, immediately before the free-space check, so a previous
+  attempt's own debris is cleared away before its size is ever weighed
+  against the retry — the same order `SafetyArchiver` already used ahead of
+  its own free-space check, for the same reason.
+
+- **A server too low on memory to finish checking a perfectly good backup said
+  the backup itself was broken.** `wp pontifex verify` and the admin Verify and
+  Restore screens caught every failure the read-only integrity walk could
+  raise the same way: whatever stopped the walk was reported as a broken
+  archive, because only two of the three outcomes ADR 0023 promised were ever
+  reachable from an exception — a caught failure landed on "broken" by
+  construction, whatever actually caused it. Measured with a `memory_limit` of
+  40 MB — WordPress's own default — against an archive that verified sound
+  moments later from the command line on the same machine with no such limit.
+  `verify` now has a fourth outcome, **could not check**, and a **new exit
+  code, `2`**: any automation keyed on `wp pontifex verify`'s exit status
+  should treat `2` as "unknown", not fold it in with the `1` that already
+  means "broken or refused". The admin Verify and Restore screens report the
+  same outcome without the word "broken", and Restore never takes a safety
+  archive against a backup that could not be checked in the first place. Two
+  siblings of the same mistake are fixed alongside it: an archive newer than
+  this Pontifex can read is now reported as exactly that — upgrade Pontifex —
+  rather than as damaged, and a rollback stopped by a host condition (no disk
+  space, a directory that will not accept a write) is reported the same way
+  instead of as a plain, unclassified failure. The sharpest sibling touches
+  `wp pontifex import` and `wp pontifex rollback` rather than `verify` — those
+  two decode every entry as they restore it, which `verify` deliberately never
+  does — and is the ordinary shape of moving to a new server: a backup made on
+  a host with the optional zstd compression extension, restored on a host
+  without it, was reported as an untrustworthy archive ("This archive cannot
+  be trusted…", pointing you at a fresh copy of a backup that was never the
+  problem), when the bytes are entirely fine and the same archive restores
+  cleanly wherever the extension is present. A missing extension now reports
+  correctly as a host problem ("This host cannot complete the restore…"),
+  while a genuinely malformed payload still reports as an untrustworthy
+  archive, as before — both now naming the real underlying reason instead of
+  the generic "Codec failed to decode entry payload." that used to discard it
+  either way.
+
+- **A sound backup with one very large file was told it "cannot be trusted",
+  and to fetch a fresh copy that would fail the identical way.** `wp pontifex
+  import` and `wp pontifex verify` (also reachable from the admin Restore and
+  Verify screens) check every entry against a fixed decoded-size ceiling — 2
+  GB, compiled into every build of Pontifex, the same on every host it runs on
+  — and treated a breach exactly like a genuine decompression bomb: "This
+  archive cannot be trusted… Do not restore this archive — fetch a fresh copy
+  of the backup." A fresh copy holds the identical file and would be refused
+  the identical way; the advice could never help. An honest file larger than a
+  number compiled into the plugin is a fact about neither the archive nor the
+  host it is running on, so it is now its own outcome. The operator is told
+  the backup is not damaged and does not need replacing, given the limit in
+  plain terms (2 GB, not a raw byte count), and pointed at nothing to change
+  on the server, because nothing there would help. `wp pontifex verify`'s
+  REFUSED verdict, and the admin Verify and Restore screens' Refused outcome,
+  now cover this case too, alongside the existing symbolic-link-escape and
+  scope-contradiction causes — still exit code `1`, unchanged. This is
+  unrelated to the memory-derived budget a low-memory host already hits on a
+  large entry, which is unaffected and still reports as a host problem, as
+  before; and to a genuine decompression bomb — a payload whose decoded size
+  runs away during decode — which still reports as an untrustworthy archive,
+  as before.
 
 ## [1.1.0] — 2026-08-06 — Verify stops promising what a restore will not honour
 

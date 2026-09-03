@@ -12,11 +12,14 @@ namespace Pontifex\Admin;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\WpdbAdapter;
@@ -27,6 +30,7 @@ use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -125,6 +129,54 @@ final class RestoreController {
 	 * @var string
 	 */
 	private const GATE_REFUSED = 'refused';
+
+	/**
+	 * Gate outcome: this host stopped verification before it could reach a verdict at all.
+	 *
+	 * Kept apart from {@see self::GATE_BROKEN} for the same reason
+	 * {@see self::GATE_REFUSED} is — the three outcomes call for three different
+	 * responses from whoever reads them. BROKEN means the verify walk ran to
+	 * completion and an entry failed it; REFUSED means the walk ran to
+	 * completion, every hash matched, and the archive should still not be
+	 * restored. This outcome means the walk never reached either answer: this
+	 * host — commonly too little memory, WordPress's own 40 MB default among
+	 * them — stopped it first, so nothing whatsoever was learned about the
+	 * archive. Reporting that as BROKEN is exactly the message capable of
+	 * talking somebody out of a backup that has never actually failed
+	 * anything; the archive should be kept as it is, and the fix belongs to
+	 * this host, not to a fresh export.
+	 *
+	 * @var string
+	 */
+	private const GATE_COULD_NOT_CHECK = 'could_not_check';
+
+	/**
+	 * Recovery outcome: every path the failed restore created was accounted for and undone.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_PRECISE = 'precise';
+
+	/**
+	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
+	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: recovery was attempted and did not complete at all.
+	 *
+	 * Kept distinct from "recovery was never attempted" (the ternary at this
+	 * class's one call site supplies null for that instead) — the two demand
+	 * different messages: one says the site was never touched, the other says
+	 * it may be left part-restored. Collapsing them very nearly happened
+	 * during this feature's own review; see {@see self::failure_message()}.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_FAILED = 'failed';
 
 	/**
 	 * Progress phase: verifying the chosen archive before anything is written.
@@ -339,6 +391,12 @@ final class RestoreController {
 		// recover the site if the restore then fails part-written. Null until it is taken,
 		// so a failure before that point knows the site was not yet changed.
 		$safety_path = null;
+		// The restore engine actually used for this request's forward restore, once wired
+		// below. The failure handler needs THIS instance, not a freshly-built one, to
+		// consult the creation ledger its own FileWriter kept — a second instance would
+		// have an empty ledger and nothing to undo. Null only if an exception strikes
+		// before it is wired, in which case the restore itself never started.
+		$runner = null;
 		try {
 			$source = $this->open_source( (string) $path );
 
@@ -371,7 +429,7 @@ final class RestoreController {
 			rewind( $source );
 			// A content-only restore restricts the file writer to the wp-content tree — the
 			// write-boundary backstop behind the scope gate above.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content' );
+			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content', $source );
 
 			// Phase 1: verify the backup as a gate. A broken backup is refused before
 			// the safety archive or any write — the whole point of previewing first.
@@ -383,11 +441,10 @@ final class RestoreController {
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'restored' => false,
-						'refused'  => self::GATE_REFUSED === $gate,
-						'message'  => self::GATE_REFUSED === $gate
-							? __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' ),
+						'restored'        => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->restore_gate_failure_message( $gate ),
 					)
 				);
 			} else {
@@ -466,12 +523,13 @@ final class RestoreController {
 			// If the safety archive was taken, the restore may have written part of the
 			// database, so replay it to return the site to its pre-restore state. When it was
 			// not taken (the failure preceded it), the site was not changed and nothing is
-			// replayed. Recovery never throws — it reports whether the site was restored.
-			$recovered = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path ) : null;
+			// replayed. Recovery never throws — it reports whether the site was restored, and
+			// whether the file-tree cleanup that goes with it could be proven complete.
+			$recovery = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner ) : null;
 
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovered ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovery ) ), 500 );
 		}
 	}
 
@@ -481,38 +539,89 @@ final class RestoreController {
 	 * Called only from the restore failure handler, once the safety archive has been
 	 * taken and the restore has then failed — so the database may be part-written. It
 	 * opens the safety archive, verifies it, and replays it unrestricted (like a
-	 * rollback), returning the site to its pre-restore state. It is wrapped so it can
-	 * never throw out of the failure handler: a recovery that itself fails is reported
-	 * as such, not escalated.
+	 * rollback), returning the site's DATABASE to its pre-restore state. A restore is
+	 * purely additive, though (see {@see FileWriter::write_entry()}'s own docblock),
+	 * so that replay alone leaves every FILE the failed restore created still on disk.
+	 * When $forward_runner is the real engine that ran the failed forward restore,
+	 * this also undoes exactly what that run's own FileWriter created — see
+	 * {@see RestoreRunner::remove_created_paths()} — so a file the failed restore
+	 * introduced does not survive alongside the recovered content. It is wrapped so it
+	 * can never throw out of the failure handler: a recovery that itself fails is
+	 * reported as such, not escalated.
 	 *
-	 * @param string $path The absolute path of the safety archive to replay.
-	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 * @param string                      $path           The absolute path of the safety archive to replay.
+	 * @param RestoreRunnerInterface|null $forward_runner The engine that ran the failed forward restore, or null if the restore never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
+	 * @return string One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $path ): bool {
+	private function recover_from_safety_archive( string $path, ?RestoreRunnerInterface $forward_runner ): string {
 		$source = null;
 		try {
 			$size   = $this->archive_size( $path );
 			$source = $this->open_source( $path );
 			// A safety archive is the site's own undo, so its replay is unrestricted — no
 			// required prefix, matching a rollback.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
 
-			if ( self::GATE_OK !== $this->verify_gate( $runner, $source, $size ) ) {
+			if ( self::GATE_OK !== $this->verify_gate( $recovery_runner, $source, $size ) ) {
 				$this->finish( $source );
-				return false;
+				return self::RECOVERY_FAILED;
 			}
 
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the recovery walk re-reads it; not a WP_Filesystem operation.
 			rewind( $source );
-			$this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
+			$this->restore_phase( $recovery_runner, $source, $size, self::PHASE_ROLLING_BACK );
 			$this->wordpress_context->flush_cache();
+
+			if ( ! $forward_runner instanceof RestoreRunner ) {
+				$this->finish( $source );
+				return self::RECOVERY_MERGE;
+			}
+
+			// The safety archive's own declared paths are what "belongs to the site's
+			// prior state" means — read fresh, one last time, before the stream closes.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream to read its manifest for the preserved-paths set; not a WP_Filesystem operation.
+			rewind( $source );
+			$preserved_paths = self::declared_content_paths( ( new ArchiveReader( $source ) )->manifest() );
 			$this->finish( $source );
-			return true;
+
+			$cleanup = $forward_runner->remove_created_paths( $preserved_paths );
+			if ( array() !== $cleanup->failed_paths() ) {
+				$this->logger->warning(
+					'Admin restore: recovery could not remove every path the failed restore created.',
+					array( 'failed_paths' => $cleanup->failed_paths() )
+				);
+			}
+
+			return $cleanup->is_precise_revert() ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
-			return false;
+			return self::RECOVERY_FAILED;
 		}
+	}
+
+	/**
+	 * Every file/directory/symlink path an already-decoded manifest declares.
+	 *
+	 * Used to build the preserved-paths set {@see RestoreRunner::remove_created_paths()}
+	 * must never delete from, even when the failed restore's own ledger recorded them:
+	 * anything the safety archive carries belongs to the site's prior state.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return array<int, string>
+	 */
+	private static function declared_content_paths( ArchiveManifest $manifest ): array {
+		$paths = array();
+		foreach ( $manifest->entries() as $entry ) {
+			if ( ! $entry->is_file() && ! $entry->is_directory() && ! $entry->is_symlink() ) {
+				continue;
+			}
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$paths[] = $path;
+			}
+		}
+		return $paths;
 	}
 
 	/**
@@ -555,7 +664,7 @@ final class RestoreController {
 			// (content-only for an admin restore, or whole-site for a CLI --whole-site
 			// import), so its replay is unrestricted — no required prefix, matching
 			// `wp pontifex rollback`.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
 
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
@@ -572,11 +681,10 @@ final class RestoreController {
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'rolled_back' => false,
-						'refused'     => self::GATE_REFUSED === $gate,
-						'message'     => self::GATE_REFUSED === $gate
-							? __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' ),
+						'rolled_back'     => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->rollback_gate_failure_message( $gate ),
 					)
 				);
 			} else {
@@ -775,12 +883,31 @@ final class RestoreController {
 	 * @param RestoreRunnerInterface $runner The engine to verify with.
 	 * @param resource               $source The open archive stream.
 	 * @param int                    $size   The archive size, the progress denominator.
-	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED} or {@see self::GATE_BROKEN}.
+	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
 	 */
 	private function verify_gate( RestoreRunnerInterface $runner, $source, int $size ): string {
 		$this->set_progress( self::PHASE_VERIFYING, 0, $size );
 		try {
 			$runner->verify( $source, null, $this->byte_callback( self::PHASE_VERIFYING, $size ) );
+		} catch ( HostCannotComply $error ) {
+			// This host, not the archive, is what stopped the walk short — a low
+			// memory_limit unable to hold a db_chunk it must buffer whole is the
+			// case that keeps happening in practice. Nothing was learned about
+			// the archive either way, so it must not fall into the broken branch
+			// below and be reported as damaged over a problem that is this
+			// host's, not the backup's.
+			$this->logger->warning( 'Admin restore: this host could not finish verifying the archive; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_COULD_NOT_CHECK;
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and this host is fine; a ceiling compiled
+			// into every build of Pontifex is what stopped the walk on an
+			// entry too large to process. That fits GATE_REFUSED's own
+			// meaning exactly — intact, but a restore will not accept it —
+			// so it must not fall into the generic Throwable catch below and
+			// be reported BROKEN, which would send the operator to fetch a
+			// fresh copy of a backup a fresh copy could never fix.
+			$this->logger->warning( 'Admin restore: the archive is intact but this build will not process one of its entries; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_REFUSED;
 		} catch ( Throwable $error ) {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
 			return self::GATE_BROKEN;
@@ -807,6 +934,57 @@ final class RestoreController {
 		}
 
 		return self::GATE_OK;
+	}
+
+	/**
+	 * The message shown when a forward restore's gate does not pass.
+	 *
+	 * Three outcomes call for three different responses, so the message must
+	 * name which one actually happened rather than collapsing them into a
+	 * single "it failed": BROKEN means an integrity check ran to completion
+	 * and found a problem — reach for another copy. REFUSED means every check
+	 * ran to completion and passed, but the archive should not be restored —
+	 * keep it either way, though not always for the same reason: a symbolic
+	 * link escaping the site or contents contradicting what the archive says
+	 * it holds means do not trust it and find out where it came from, while
+	 * an entry larger than this build of Pontifex will process means the
+	 * backup itself is fine and no server setting changes the ceiling.
+	 * COULD_NOT_CHECK means no check ran to completion at all, so nothing
+	 * whatsoever is known about the backup; folding it into BROKEN is exactly
+	 * the mistake this outcome exists to stop — a host low on memory
+	 * reporting a perfectly good file as damaged.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function restore_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: a symbolic link inside it may point outside your site, its contents may contradict what it says it holds, or one of its entries is larger than this build of Pontifex will restore. Nothing was restored. Keep the file: if the cause is an oversized entry, the backup is fine and no server setting changes that; otherwise, find out where the archive came from before trusting another copy. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying this backup, so nothing was restored. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' );
+	}
+
+	/**
+	 * The message shown when a rollback's gate does not pass.
+	 *
+	 * The rollback counterpart of {@see self::restore_gate_failure_message()};
+	 * see that method's docblock for why the three outcomes need three
+	 * different messages rather than one.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function rollback_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying the safety archive, so nothing was rolled back. That is not a verdict on the safety archive: no check reached a conclusion about it, only about this server right now. Check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	/**
@@ -932,17 +1110,54 @@ final class RestoreController {
 	 * outside the wp-content tree; a rollback passes null, replaying the safety
 	 * archive whatever its scope.
 	 *
+	 * The DatabaseWriter is wired with both table prefixes, mirroring
+	 * `Cli\ImportCommand`: the source prefix comes from the archive's own
+	 * provenance when it carries one, or is derived from its table names via
+	 * {@see SourceTablePrefix::resolve()} when it does not, so a cross-prefix
+	 * restore works in the browser too, not only from WP-CLI. For a rollback or
+	 * recovery replay this is normally a no-op — a safety archive is this
+	 * site's own, so its recorded (or derived) prefix and the destination
+	 * prefix already agree — but wiring every restore path the same way is
+	 * what keeps that true rather than assumed.
+	 *
 	 * @param string|null $required_prefix Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
+	 * @param resource    $source          The open, seekable archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
 	 * @return RestoreRunner A runner ready to verify and restore a plain archive.
 	 */
-	private function default_restore_runner( ?string $required_prefix ): RestoreRunner {
+	private function default_restore_runner( ?string $required_prefix, $source ): RestoreRunner {
+		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader = new ArchiveReader( $source );
+		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
 		return new RestoreRunner(
-			new EntryReader( CodecRegistry::with_defaults() ),
+			$entry_reader,
 			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) ),
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix ),
 			null,
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);
+	}
+
+	/**
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see SourceTablePrefix::resolve()} instead. Returns the
+	 * prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**
@@ -1146,25 +1361,34 @@ final class RestoreController {
 	 * The message returned when a restore fails.
 	 *
 	 * The underlying error is recorded in the log; the operator sees a plain
-	 * sentence rather than an exception string, and is told whether the site was
-	 * automatically rolled back.
+	 * sentence rather than an exception string, and is told what recovery
+	 * actually achieved — a precise revert, a merge that could not be proven
+	 * complete, or that recovery itself failed.
 	 *
-	 * @param Throwable $error     The failure (kept to keep the signature honest; not echoed).
-	 * @param bool|null $recovered Recovery outcome: true if the site was auto-rolled back to
-	 *                             its pre-restore state, false if that recovery also failed,
-	 *                             or null when no recovery was attempted (the site was not
-	 *                             changed, or this is a rollback failure).
+	 * @param Throwable   $error    The failure (kept to keep the signature honest; not echoed).
+	 * @param string|null $recovery One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when
+	 *                              the database was auto-rolled back to its pre-restore state,
+	 *                              {@see self::RECOVERY_FAILED} when recovery was attempted and did not
+	 *                              complete, or null when no recovery was attempted at all (the site was
+	 *                              not changed, or this is a rollback failure) — null is deliberately
+	 *                              NOT reused for "recovery failed": those two need different messages,
+	 *                              one saying the site was never touched and the other that it may be
+	 *                              left part-restored, so {@see self::recover_from_safety_archive()}
+	 *                              always returns a concrete outcome string when it runs at all.
 	 * @return string A human-readable failure message.
 	 */
-	private function failure_message( Throwable $error, ?bool $recovered = null ): string {
+	private function failure_message( Throwable $error, ?string $recovery = null ): string {
 		unset( $error );
-		if ( true === $recovered ) {
+		if ( self::RECOVERY_PRECISE === $recovery ) {
 			return __( 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.', 'pontifex' );
 		}
-		if ( false === $recovered ) {
-			return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
+		if ( self::RECOVERY_MERGE === $recovery ) {
+			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.', 'pontifex' );
 		}
-		return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
+		if ( null === $recovery ) {
+			return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
+		}
+		return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	// -------------------------------------------------------------------------
