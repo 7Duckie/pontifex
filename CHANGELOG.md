@@ -16,6 +16,44 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A backup could get a symbolic link created that the safety check never
+  looked at, and a folder Pontifex could not see inside was silently treated
+  as safe.** Three separate ways the symbolic-link confinement check could be
+  made to decide something it had not actually established, all in the
+  preflight that runs before a restore writes anything.
+
+  First, a backup could declare one location twice under two spellings that
+  mean the same path — `leak` and `./leak`. Only the second was kept and
+  checked, while the restore still wrote **both**, so the entry nobody checked
+  was created anyway. The refusal that followed named the symbolic-link guard,
+  which read as the guard working. Two spellings of one path that disagree
+  about their target are now refused outright; where they agree, nothing
+  changes, because checking one is the same as checking both.
+
+  Second, when Pontifex followed a link to prove it stayed inside the site, a
+  folder it could not look inside answered "there is no shortcut here" — the
+  same answer as a folder that genuinely held none. It trusted that silence.
+  A backup could exploit it by declaring the very folder that was blocking the
+  check with open permissions, so the restore unlocked it moments later. The
+  check can now tell "nothing here" apart from "I could not look", and stops
+  on the second, reporting it as a host problem rather than a damaged backup —
+  the archive may be perfectly sound. If `open_basedir` rather than
+  permissions is what hides the folder, the two remain indistinguishable and
+  the containment rule catches the escape instead; this limit is recorded in
+  the code.
+
+  Third, two shortcuts whose names this filesystem treats as one file but
+  which declared different targets were both written, the last silently
+  replaced the first, and **the restore reported success** — leaving a site
+  holding a shortcut nobody chose. Pontifex already recognised the ambiguity
+  but only consulted it if some other link happened to resolve through that
+  name. It is now refused up front.
+
+  All three make a restore stricter, so a backup that restored before may now
+  be refused. Each refusal names the entries and targets involved, and none of
+  them can be triggered by a backup Pontifex wrote: its scanner emits exactly
+  one entry per real path.
+
 - **An exclusion pattern meant for a folder could silently take a whole
   database table out of your backup, with no warning, and the backup still
   verified as sound afterwards.** File patterns and table patterns were kept
