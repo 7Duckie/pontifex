@@ -1030,10 +1030,10 @@ final class FileWriter {
 	 *
 	 * @param array<array-key, string> $declared_links Every symlink the archive declares, as entry path => raw target.
 	 * @return void
-	 * @throws ArchiveNotTrustworthy If any declared link's target resolves somewhere this restore will not allow.
+	 * @throws ArchiveNotTrustworthy If two declared entry paths normalise to one path with different targets, if two declared paths fold together on this destination with different targets, or if any declared link's target resolves somewhere this restore will not allow.
 	 * @throws HostCannotComply If the destination folds case and this host cannot fold Unicode case the way the destination does, so the check above cannot be answered safely.
 	 *
-	 * phpcs:ignore Squiz.Commenting.FunctionCommentThrowTag.WrongNumber -- ArchiveNotTrustworthy is genuinely raised, but propagated out of this method from the private helpers it calls, not thrown directly here; the tag stays because it is accurate and callers depend on it.
+	 * phpcs:ignore Squiz.Commenting.FunctionCommentThrowTag.WrongNumber -- ArchiveNotTrustworthy is thrown directly here twice AND propagated out of this method from the private helpers it calls; the tag stays singular because it is accurate and callers depend on it.
 	 */
 	public function assert_symlink_targets_confined( array $declared_links ): void {
 		if ( $this->allow_unsafe_symlinks ) {
@@ -1082,10 +1082,17 @@ final class FileWriter {
 		// link at precisely this path"; $folded answers the same question for a
 		// destination filesystem that does not distinguish "HOP" from "hop". A
 		// folded key whose spellings disagree about the target is recorded as
-		// null — genuinely ambiguous — and refuses if resolution ever reaches it,
-		// rather than picking one and hoping.
-		$exact  = array();
-		$folded = array();
+		// null — genuinely ambiguous — and refused below, up front, rather than
+		// only if some other link's resolution happens to pass through it.
+		//
+		// $exact_raw_path and $folded_detail carry the ORIGINAL spellings each
+		// map's keys were built from, purely so the refusals below can name
+		// them — $exact and $folded themselves are keyed by the normalised (or
+		// folded) path, which has already thrown that information away.
+		$exact          = array();
+		$exact_raw_path = array();
+		$folded         = array();
+		$folded_detail  = array();
 		foreach ( $declared_links as $raw_path => $raw_target ) {
 			try {
 				$link_path = $this->normalise_entry_path( (string) $raw_path );
@@ -1098,14 +1105,65 @@ final class FileWriter {
 				continue;
 			}
 
-			$exact[ $link_path ] = $raw_target;
+			if ( array_key_exists( $link_path, $exact ) ) {
+				if ( $exact[ $link_path ] === $raw_target ) {
+					// Two spellings of one path, e.g. "leak" and "./leak", declaring the
+					// SAME target: judging one is equivalent to judging both, so the
+					// single entry already indexed is kept and this repeat is skipped.
+					continue;
+				}
+
+				$message = sprintf(
+					'Refusing this backup: the entry paths "%s" and "%s" both normalise to "%s", but declare different symbolic-link targets for it — "%s" and "%s". Pontifex\'s own scanner emits exactly one entry per real path, so no legitimate backup contains two spellings of the same path with different targets.',
+					$exact_raw_path[ $link_path ],
+					(string) $raw_path,
+					$link_path,
+					$exact[ $link_path ],
+					$raw_target
+				);
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own entry paths and targets for diagnostic context; exception path, not HTML output.
+				throw new ArchiveNotTrustworthy( $message );
+			}
+
+			$exact[ $link_path ]          = $raw_target;
+			$exact_raw_path[ $link_path ] = (string) $raw_path;
 
 			$folded_key = $this->confinement_fold( $link_path );
-			if ( array_key_exists( $folded_key, $folded ) && $folded[ $folded_key ] !== $raw_target ) {
-				$folded[ $folded_key ] = null;
+
+			if ( ! array_key_exists( $folded_key, $folded ) ) {
+				$folded[ $folded_key ]        = $raw_target;
+				$folded_detail[ $folded_key ] = array( $link_path, $raw_target );
 				continue;
 			}
-			$folded[ $folded_key ] = $raw_target;
+
+			if ( null === $folded[ $folded_key ] || $folded[ $folded_key ] === $raw_target ) {
+				// Already known ambiguous, or this spelling agrees with the one
+				// already indexed: neither adds anything the detail above doesn't
+				// already carry.
+				continue;
+			}
+
+			// First collision for this folded key: capture both colliding spellings
+			// and targets before the null marker below throws that detail away.
+			$folded_detail[ $folded_key ] = array( $folded_detail[ $folded_key ][0], $folded_detail[ $folded_key ][1], $link_path, $raw_target );
+			$folded[ $folded_key ]        = null;
+		}
+
+		foreach ( $folded as $folded_key => $target ) {
+			if ( null !== $target ) {
+				continue;
+			}
+
+			list( $spelling_a, $target_a, $spelling_b, $target_b ) = $folded_detail[ $folded_key ];
+			$message = sprintf(
+				'Refusing this backup: the symbolic links "%s" and "%s" have spellings this destination filesystem treats as one file, but declare different targets — "%s" and "%s". Which one would survive on this filesystem cannot be decided, so the backup is refused.',
+				$spelling_a,
+				$spelling_b,
+				$target_a,
+				$target_b
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link paths and targets for diagnostic context; exception path, not HTML output.
+			throw new ArchiveNotTrustworthy( $message );
 		}
 
 		foreach ( $exact as $link_path => $raw_target ) {
@@ -1235,7 +1293,7 @@ final class FileWriter {
 	 * @param string                        $raw_target      Its raw target, for the diagnostic message only.
 	 * @return string|null The symlink's target, or null if $candidate is not a symlink.
 	 * @throws ArchiveNotTrustworthy If two declared spellings of one path disagree, or an on-disk link cannot be read.
-	 * @throws HostCannotComply If readlink() is not available on this host to read an existing on-disk link's target.
+	 * @throws HostCannotComply If a component's parent directory cannot be inspected to tell whether it holds a link, or if readlink() is not available on this host to read an existing on-disk link's target.
 	 */
 	private function declared_or_on_disk_target( array $candidate, array $root_components, array $exact, array $folded, string $link_path, string $raw_target ): ?string {
 		$root_depth = count( $root_components );
@@ -1249,6 +1307,10 @@ final class FileWriter {
 
 			$folded_key = $this->confinement_fold( $relative );
 			if ( array_key_exists( $folded_key, $folded ) ) {
+				// Backstop, kept deliberately for defence in depth: the up-front check
+				// in assert_symlink_targets_confined() now refuses every ambiguous
+				// folded key before the resolution loop that calls this method ever
+				// starts, so in the ordinary run of things this branch no longer fires.
 				if ( null === $folded[ $folded_key ] ) {
 					$message = sprintf(
 						'Refusing the symbolic link "%s": resolving its target "%s" reaches "%s", which this backup declares more than once with different targets, differing only in letter case. Which one a filesystem would keep cannot be decided, so the backup is refused.',
@@ -1265,7 +1327,25 @@ final class FileWriter {
 
 		$absolute = self::absolute_from_components( $candidate );
 		if ( ! is_link( $absolute ) ) {
-			return null;
+			$parent = dirname( $absolute );
+			if ( self::path_is_inspectable( $parent ) ) {
+				return null;
+			}
+
+			// Fail closed, as a host limitation rather than an archive defect: is_link()
+			// returning false means either "genuinely nothing here" or "I could not
+			// look", and path_is_inspectable() has just established this is the second
+			// case, so trusting the false answer would silently trust a component this
+			// process cannot actually see.
+			$message = sprintf(
+				'The restore was stopped before anything was written. Resolving the symbolic link "%s" (target "%s") needs to look inside "%s", but this process cannot see into that directory, so whether it holds a link cannot be established. This is not necessarily a problem with the backup, which may be perfectly sound: make "%s" readable and executable by the user PHP runs as, then restore again.',
+				$link_path,
+				$raw_target,
+				$parent,
+				$parent
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the archive's own link path and target plus a plugin-derived path, for diagnostic context; exception path, not HTML output.
+			throw new HostCannotComply( $message );
 		}
 
 		// Fail closed, but as a host limitation rather than an archive defect: the
@@ -1300,6 +1380,48 @@ final class FileWriter {
 		}
 
 		return $on_disk_target;
+	}
+
+	/**
+	 * Whether a false is_link() answer for something inside $parent_directory can be trusted.
+	 *
+	 * An is_link() answer of false covers two situations that look identical
+	 * from the outside: "there is genuinely nothing here" and "I could not
+	 * look." Measured directly on this project's own filesystem rather than
+	 * reasoned about (chmod 0000 on the parent directory, then compared
+	 * against a genuinely absent parent and an ordinary 0755 one):
+	 *
+	 *  - parent does not exist at all: is_link() false, is_dir() false,
+	 *    is_executable() false. No link can exist under a parent that isn't
+	 *    there, so the false reading is genuinely "no link" — trustworthy.
+	 *  - parent exists and is traversable (0755): is_link() false, is_dir()
+	 *    true, is_executable() true. The lookup actually ran and found
+	 *    nothing — trustworthy.
+	 *  - parent exists but is NOT traversable (0000): is_link() false,
+	 *    is_dir() true, is_executable() false. The lookup could not run at
+	 *    all, and is_link()'s false is indistinguishable from the case
+	 *    above — NOT trustworthy.
+	 *  - parent is OUTSIDE open_basedir: is_link() false, is_dir() false,
+	 *    is_executable() false — measured, not assumed. This reads exactly
+	 *    like a genuinely absent parent and is therefore trusted; it is a
+	 *    DELIBERATE LIMIT, not an oversight. The two cannot be told apart
+	 *    from here, and refusing on that basis would over-refuse on the
+	 *    ordinary shared-hosting case, where open_basedir is common and a
+	 *    resolution walk legitimately climbs to an above-root path that
+	 *    simply does not exist. An open_basedir-hidden escape is still
+	 *    caught, by the containment rule applied to the final resolved path
+	 *    in {@see self::assert_resolved_target_confined()}, not by this method.
+	 *
+	 * The distinguishing fact is the parent directory's EXECUTE bit, not its
+	 * READ bit: execute is what controls whether a filesystem lookup for a
+	 * specific name inside a directory can succeed, independent of whether
+	 * the directory's own listing can be read.
+	 *
+	 * @param string $parent_directory Absolute path of the directory a component's link status would be looked up in.
+	 * @return bool True if a false is_link() result for something inside $parent_directory can be trusted; false if $parent_directory exists but this process cannot see into it.
+	 */
+	private static function path_is_inspectable( string $parent_directory ): bool {
+		return ! is_dir( $parent_directory ) || is_executable( $parent_directory );
 	}
 
 	/**
