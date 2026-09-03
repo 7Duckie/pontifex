@@ -275,6 +275,52 @@ overwhelming majority of WordPress hosting — every distinct spelling is
 already a distinct file, no case-folding comparison is ever needed, and this
 check never runs at all.
 
+### "this process cannot see into that directory"
+
+> The restore was stopped before anything was written. Resolving the symbolic
+> link "…" (target "…") needs to look inside "…", but this process cannot see
+> into that directory, so whether it holds a link cannot be established.
+
+**Uncommon. An environment problem, not a fault in the backup.**
+
+**What happened.** To prove that a symbolic link in your backup stays inside
+your site, Pontifex follows it the way the computer would — one folder at a
+time, asking at each step "is this itself a shortcut?". One of the folders
+along that path has permissions that stop Pontifex looking inside it at all.
+The answer it gets back, "there is no shortcut here", is indistinguishable
+from "I could not look". Rather than treat silence as reassurance, it stops.
+
+**Why this is worth stopping for.** A folder Pontifex cannot see inside could
+hold a shortcut pointing anywhere at all, including out of your site and at
+your `wp-config.php`. Treating "I could not look" as "nothing here" was how a
+crafted backup could get a link created that this check never examined — and
+the backup could even supply its own unlock, by declaring that same folder
+with open permissions so the restore opened it up moments later.
+
+**Nothing has been written to your site.** This check runs during the
+before-anything-is-written preflight, alongside the other symbolic-link checks
+on this page.
+
+**Your backup may well be fine.** This message is about what this computer can
+inspect, not about what the archive contains.
+
+**What to do.** The message names the folder. Make it readable and executable
+by the user PHP runs as — usually your web server user — and restore again. On
+most hosts that means `chmod 755` on that folder, or asking whoever manages
+the host to correct its ownership.
+
+**What not to do.** Do not delete the backup and take a fresh one; the backup
+was never the thing in question. And do not reach for
+`--allow-unsafe-symlinks`, for exactly the reason given in the entry above —
+it does not switch off this one check, it switches off the whole confinement
+guard.
+
+**One limit worth knowing.** If `open_basedir` is what is hiding the folder
+rather than its permissions, Pontifex cannot tell that apart from the folder
+simply not existing, and you will not see this message. The containment rule
+still judges where the link finally lands, so an escape is still caught — just
+not by this particular check.
+
 ### "resolving its target … reaches an existing link on disk, but readlink() is not available"
 
 > Cannot check the symbolic link "…": resolving its target "…" reaches an
@@ -307,6 +353,67 @@ problem the moment it tries to record a symbolic link — see
 ["a site that contains symbolic links cannot be backed up" below](#a-site-that-contains-symbolic-links-cannot-be-backed-up-until-it-is-enabled)
 — because the cause is the host's configuration, not anything about this
 particular archive.
+
+### "both normalise to … but declare different symbolic-link targets"
+
+> Refusing this backup: the entry paths "…" and "…" both normalise to "…", but
+> declare different symbolic-link targets for it — "…" and "…".
+
+**Rare, and a genuine problem with the backup file rather than with your site.**
+
+**What happened.** The backup declares the same location twice, spelled two
+different ways — `leak` and `./leak`, say — and gives each spelling a
+different shortcut target. Those two spellings mean one and the same file, so
+only one of them can survive; the backup does not say which, and Pontifex will
+not guess.
+
+**Why this is refused rather than resolved.** Pontifex used to keep only the
+last of the two and check that one. The restore then wrote *both* entries, so
+the one it never checked got created anyway. Refusing outright is what closes
+that gap.
+
+**Your own backups will never contain this.** Pontifex's file scanner emits
+exactly one entry per real path, so this cannot arise from a backup this
+plugin wrote. A backup showing this has either been damaged in a very specific
+way or deliberately crafted.
+
+**Nothing has been written to your site.**
+
+**What to do.** If someone sent you this backup, do not restore it — tell them
+what the message says. If it is your own and you have another copy, use that.
+Keep the file rather than deleting it: it is evidence, and `wp pontifex verify`
+will report it as refused rather than broken, which is the distinction
+explained at the top of this page.
+
+### "have spellings this destination filesystem treats as one file"
+
+> Refusing this backup: the symbolic links "…" and "…" have spellings this
+> destination filesystem treats as one file, but declare different targets —
+> "…" and "…".
+
+**Rare, and only on a destination that folds case — macOS and Windows do,
+Linux does not.**
+
+**What happened.** The backup declares two shortcuts whose names differ only in
+a way this computer's disk ignores — `Hop` and `hOp`, for instance — and gives
+them different targets. On this filesystem both names are the same file, so
+creating the second would silently replace the first. Which one you would end
+up with is not something the backup settles, so Pontifex refuses instead of
+picking one.
+
+**What made this worth fixing.** Before, the restore created both in turn, the
+last one quietly won, and the restore reported success. You would have been
+told everything was fine while your site held a shortcut you never chose.
+
+**Nothing has been written to your site.**
+
+**What to do.** The same as the entry above: do not restore a backup someone
+sent you that does this, keep the file rather than deleting it, and use
+another copy if you have one.
+
+**Linux hosts never see this.** On a case-sensitive filesystem the two
+spellings are simply two different files, both are created, and there is
+nothing to decide.
 
 ### "refusing symlink … Re-run with --allow-unsafe-symlinks only if you trust this archive"
 
