@@ -76,7 +76,7 @@ jobs:
           echo "Tagged commit is on main. OK."
 
       - name: Set up PHP ${{ matrix.php_version }}
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php_version }}
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -133,7 +133,7 @@ jobs:
         run: composer audit --abandoned=report
 
       - name: OSV-Scanner (cross-ecosystem advisories)
-        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
         with:
           scan-args: |-
             --lockfile=composer.lock
@@ -172,7 +172,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up PHP ${{ matrix.php_version }}
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php_version }}
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -191,7 +191,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -242,7 +242,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up PHP 8.3
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.3'
           extensions: mbstring, openssl, sodium, zlib, json, pcre, zstd
@@ -250,7 +250,7 @@ jobs:
           tools: composer:v2
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -282,7 +282,7 @@ jobs:
       # should be the bytes CI verified, and nobody should have to reconstruct
       # after the fact which they were.
       - name: Publish the verified package as an artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # The commit SHA, not the ref name: a pull request's ref_name is
           # "<number>/merge", and a slash is not allowed in an artifact name --
