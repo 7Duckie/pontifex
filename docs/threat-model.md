@@ -110,7 +110,17 @@ is untrusted.
   --allow-unsafe-symlinks`; nothing in the admin browser UI can waive
   it — both the Restore and Verify controllers always construct the
   writer with this disabled — and the capability probe below always
-  runs regardless. Before any of this is even judged, the host is asked
+  runs regardless. Replaying this site's **own safety archive** is a
+  different case from the one this section is about, and since
+  2026-10-28 it behaves differently: a rollback or an automatic
+  recovery **skips** a link whose recorded target is absolute, names
+  it, and completes the rest of the replay, because that archive is
+  this site's own prior state written minutes earlier rather than
+  input from somewhere else ([ADR 0021](./adr/0021-symlink-target-confinement.md),
+  Amendment). The override flag is not involved — which is why the
+  admin Rollback button can recover a site the forward restore would
+  refuse — and a *relative* target that resolves outside the root is
+  still refused during a replay exactly as it is during a restore. Before any of this is even judged, the host is asked
   whether it can create a symlink at all, once per distinct directory a
   declared link would land in — collapsed to the nearest directory that
   already exists, since the walk creates the rest as it goes. Every
