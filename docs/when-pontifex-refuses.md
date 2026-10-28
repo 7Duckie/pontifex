@@ -437,13 +437,59 @@ it**. This is what the check is for. Find out where the file came from.
 If you did create it, from a site whose layout you control — a deliberately
 symlinked uploads directory, for instance — then `--allow-unsafe-symlinks` on
 `wp pontifex import` is what it is for. Use it only when you know which link is
-being refused and why. Note it also relaxes the automatic recovery, and there
-is no way to use it from the admin screens: the browser path always enforces
-confinement.
+being refused and why. There is no way to use it from the admin screens: the
+browser path always enforces confinement on a forward restore.
+
+**You do not need that flag to get your site back.** Recovery after a failed
+restore, and `wp pontifex rollback`, replay a safety archive — Pontifex's own
+snapshot of *this* site, taken minutes earlier, not an archive from anywhere
+else. Those replays no longer refuse a link whose recorded target is an
+absolute path; they skip that one link, finish the rest, and name what they
+skipped. See the entry below. Reaching for `--allow-unsafe-symlinks` to
+un-stick a recovery is neither necessary nor safe.
 
 **What not to do.** Do not reach for the flag to make the message go away. Of
 ten hostile archive shapes tested against an earlier version, eight wrote their
 links successfully and five handed back the contents of `wp-config.php`.
+
+### "could not be re-created, because its recorded target is an absolute path"
+
+> 1 symbolic link could not be re-created, because its recorded target is an
+> absolute path: wp-content/uploads/media -> /mnt/shared/media.
+
+**Not a refusal — this one tells you what did *not* happen inside something
+that otherwise succeeded.**
+
+**What happened.** Your site contains a symbolic link whose target is an
+absolute path, such as `wp-content/uploads/media -> /mnt/shared/media`. That
+is an ordinary hosting arrangement, not a fault. Recovery after a failed
+restore, and `wp pontifex rollback`, both replay a safety archive, and the
+confinement rule refuses any absolute link target — because for a backup from
+somewhere else, an absolute target is not confined to your site at all.
+
+Applied to a safety archive that rule was wrong, and it used to abort the whole
+recovery: the site had absolute links, so its own snapshot could never be
+replayed, and the remedy the failure message named — rollback — failed for the
+same reason. Pontifex refused its own undo.
+
+Now the replay skips that one link, completes everything else, and names what
+it skipped.
+
+**What this means for your site.** A restore only ever overwrites and creates;
+it never deletes. So the link is almost certainly still on disk exactly as it
+was, and nothing needs doing. The exception is if the restore that failed had
+already overwritten that particular link — then it is still pointing wherever
+that backup put it, and the message is telling you which one to check.
+
+**What to do.** Look at each link the message names. If it points where you
+expect, there is nothing to do. If it does not, re-create it yourself — this
+is one link, and you know where it should point better than any backup does.
+
+**Why a recovery that skips something reports a merge.** Where a recovery would
+otherwise report putting your site back exactly, a skipped link means it cannot
+prove that, so it reports having *merged* instead. That distinction is
+deliberate: a recovery that quietly claimed to be exact while leaving one thing
+unaccounted for would be worse than one that says so.
 
 ### "does not match a sanctioned shape" and other database refusals
 

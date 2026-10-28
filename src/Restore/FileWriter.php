@@ -231,6 +231,29 @@ final class FileWriter {
 	private bool $creation_ledger_incomplete = false;
 
 	/**
+	 * Every symbolic link this run skipped rather than refused, because {@see self::$replaying_safety_archive} is true and its target is absolute.
+	 *
+	 * Populated by {@see self::record_skipped_symlink()}, called from the two
+	 * places that would otherwise refuse such a link outright — the whole-archive
+	 * preflight ({@see self::assert_symlink_target_confined()}) and the per-entry
+	 * write ({@see self::write_symlink()}) — so a link the preflight already
+	 * decided to skip is never created later by the walk, and the two stay in
+	 * agreement about exactly which links were skipped. Keyed by the entry's own
+	 * normalised relative path, so recording the same link twice (once from each
+	 * of those call sites) simply overwrites the same key with the same value
+	 * rather than duplicating it. Exposed to callers via {@see self::skipped_symlinks()}
+	 * so a recovery handler can report which links a replay could not re-create,
+	 * and must therefore report a merge rather than a precise revert.
+	 *
+	 * Always empty when {@see self::$replaying_safety_archive} is false: an
+	 * ordinary forward restore of any archive refuses an absolute symlink target
+	 * outright, exactly as before this ledger existed.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $skipped_symlinks = array();
+
+	/**
 	 * Absolute path of the directory under which all entries are restored.
 	 *
 	 * Always stored without a trailing slash.
@@ -256,6 +279,33 @@ final class FileWriter {
 	 * @var bool
 	 */
 	private bool $allow_unsafe_symlinks;
+
+	/**
+	 * Whether this writer is replaying a safety archive (recovery or rollback), not restoring a foreign one.
+	 *
+	 * False by default, matching the writer's behaviour before this flag
+	 * existed: an absolute symlink target is refused outright by both
+	 * {@see self::assert_symlink_target_confined()} and {@see self::write_symlink()},
+	 * exactly as an ordinary forward restore of any archive still is.
+	 *
+	 * True only at the three places that replay a site's OWN safety archive —
+	 * `wp pontifex rollback`, and the automatic recovery a failed restore or
+	 * import triggers — never for a forward restore of an arbitrary archive.
+	 * The confinement guard those two methods enforce exists to stop a FOREIGN
+	 * archive planting a link outside the site; a safety archive is this site's
+	 * own prior state, and a restore is purely additive (see
+	 * {@see self::write_entry()}'s own docblock), so an absolute-target symlink
+	 * under the site either survived the failed operation untouched (already
+	 * correct on disk, skipping it is right) or was overwritten (the operator
+	 * gets a completed recovery plus a named list of what could not be
+	 * re-created, via {@see self::skipped_symlinks()}). Skips ONLY an absolute
+	 * target — a relative target that resolves outside the root is still
+	 * refused even when this is true; see {@see self::assert_resolved_target_confined()},
+	 * which this flag does not touch.
+	 *
+	 * @var bool
+	 */
+	private bool $replaying_safety_archive;
 
 	/**
 	 * Path prefix every restored entry must sit under, or null to allow any path.
@@ -358,11 +408,13 @@ final class FileWriter {
 	 * @param callable|null $disk_free_space              Optional free-space reader used by {@see self::assert_free_space_for()}, called as `( string $path ): float|false`; defaults to disk_free_space().
 	 * @param callable|null $symlink_probe                Optional symlink-capability probe used by {@see self::assert_symlinks_creatable()}, called as `( string $directory ): bool` once per distinct directory a declared link would actually be created in; defaults to {@see self::probe_symlink_creation()}, a real create-then-remove attempt against that directory.
 	 * @param callable|null $confinement_fold_availability Optional availability check used by {@see self::assert_symlink_targets_confined()}'s own preflight and by {@see self::confinement_fold()}, called as `(): array<int, string>`, returning one description per missing host fact (empty when the fold can be done properly); defaults to a real class_exists()/function_exists() check against Normalizer and mb_convert_case().
+	 * @param bool          $replaying_safety_archive     Optional. True only when this writer is replaying a site's own safety archive (rollback, or a failed restore/import's automatic recovery) rather than restoring a foreign archive; default false. See {@see self::$replaying_safety_archive} for what it changes and why it is safe.
 	 * @throws InvalidArgumentException If $destination_root is empty or not absolute.
 	 * @throws RuntimeException         If the destination cannot be created or its real path cannot be resolved.
 	 */
-	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null, ?callable $symlink_probe = null, ?callable $confinement_fold_availability = null ) {
+	public function __construct( string $destination_root, bool $allow_unsafe_symlinks = false, ?string $required_prefix = null, ?callable $disk_free_space = null, ?callable $symlink_probe = null, ?callable $confinement_fold_availability = null, bool $replaying_safety_archive = false ) {
 		$this->allow_unsafe_symlinks         = $allow_unsafe_symlinks;
+		$this->replaying_safety_archive      = $replaying_safety_archive;
 		$this->required_prefix               = null === $required_prefix ? null : rtrim( $required_prefix, '/' );
 		$this->disk_free_space               = null !== $disk_free_space
 			? Closure::fromCallable( $disk_free_space )
@@ -1201,10 +1253,21 @@ final class FileWriter {
 	 * @param array<array-key, string>      $exact       Every declared link, keyed by its exact normalised path.
 	 * @param array<array-key, string|null> $folded      The same, keyed by {@see self::confinement_fold()}'s output; null marks a key whose spellings disagree.
 	 * @return void
-	 * @throws ArchiveNotTrustworthy If the target is absolute, loops, cannot be resolved, or lands somewhere refused.
+	 * @throws ArchiveNotTrustworthy If the target is absolute and this writer is not replaying a safety archive, or the target loops, cannot be resolved, or lands somewhere refused.
 	 */
 	private function assert_symlink_target_confined( string $link_path, string $raw_target, array $exact, array $folded ): void {
 		if ( self::is_absolute_path( $raw_target ) ) {
+			if ( $this->replaying_safety_archive ) {
+				// See self::$replaying_safety_archive for the full reasoning: a safety
+				// archive is this site's own snapshot, not a foreign one, so an absolute
+				// target is skipped here rather than refused, and named later via
+				// self::skipped_symlinks(). A relative target that resolves outside the
+				// root still falls through to self::assert_resolved_target_confined()
+				// below and is refused there, even during replay.
+				$this->record_skipped_symlink( $link_path, $raw_target );
+				return;
+			}
+
 			$message = sprintf(
 				'Refusing the symbolic link "%s": its target "%s" is an absolute path, so it is not confined to this site at all. Re-run with --allow-unsafe-symlinks only if you trust this archive.',
 				$link_path,
@@ -2373,6 +2436,25 @@ final class FileWriter {
 	}
 
 	/**
+	 * Record that this replay skipped $relative_path rather than refusing it, because its target is absolute.
+	 *
+	 * Called from the two places that would otherwise refuse such a link outright
+	 * — {@see self::assert_symlink_target_confined()}'s own preflight, and
+	 * {@see self::write_symlink()} at the moment it would have created the link —
+	 * only when {@see self::$replaying_safety_archive} is true. Keyed by the
+	 * entry's own relative path, so a link both call sites report for is recorded
+	 * once, not twice; see {@see self::$skipped_symlinks} for why the two must
+	 * agree, and {@see self::skipped_symlinks()} for how a caller reads this back.
+	 *
+	 * @param string $relative_path The entry's normalised relative path.
+	 * @param string $raw_target    The target string recorded in the archive, verbatim.
+	 * @return void
+	 */
+	private function record_skipped_symlink( string $relative_path, string $raw_target ): void {
+		$this->skipped_symlinks[ $relative_path ] = $raw_target;
+	}
+
+	/**
 	 * Write file contents and set mode and mtime.
 	 *
 	 * The bytes land in a sibling temp file which is renamed over the target
@@ -3247,6 +3329,31 @@ final class FileWriter {
 	}
 
 	/**
+	 * Every symbolic link this run skipped rather than refused, because it is replaying a safety archive and the target is absolute.
+	 *
+	 * Always empty unless this writer was constructed with
+	 * $replaying_safety_archive true (see {@see self::__construct()}) — an
+	 * ordinary forward restore of any archive still refuses an absolute symlink
+	 * target outright, and skips nothing. Populated by
+	 * {@see self::record_skipped_symlink()}, called from both
+	 * {@see self::assert_symlink_target_confined()} and {@see self::write_symlink()}.
+	 *
+	 * A recovery handler (RestoreController's and ImportCommand's own
+	 * `recover_from_safety_archive()`) reads this after a replay to decide
+	 * whether the outcome can honestly be called a precise revert: any entry
+	 * here means it cannot, because the operator's site is missing a symlink the
+	 * safety archive declared, and the outcome must be reported as a merge —
+	 * see {@see CreationLedgerCleanupReport::is_precise_revert()} for the
+	 * parallel case (a capped or partially-failed creation-ledger cleanup) this
+	 * mirrors.
+	 *
+	 * @return array<string, string> Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 */
+	public function skipped_symlinks(): array {
+		return $this->skipped_symlinks;
+	}
+
+	/**
 	 * Remove one ledger path, best-effort, never throwing.
 	 *
 	 * A missing path (already gone, somehow) counts as removed: the outcome
@@ -3348,13 +3455,24 @@ final class FileWriter {
 	 * @param string $target_path   Absolute path where the link should be created.
 	 * @param string $link_target   The string the link should point at.
 	 * @param string $relative_path The entry's normalised relative path, for the creation ledger.
-	 * @throws RuntimeException If the target escapes the root (and is not allowed) or the link cannot be created.
+	 * @throws RuntimeException If the target escapes the root (and is not allowed, and is not an absolute target being skipped during a safety-archive replay — see {@see self::$replaying_safety_archive}) or the link cannot be created.
 	 * @throws HostCannotComply If symlink() is not available on this host.
 	 */
 	private function write_symlink( string $target_path, string $link_target, string $relative_path ): void {
 		$existed_before = self::path_exists_before_write( $target_path );
 
 		if ( ! $this->allow_unsafe_symlinks && $this->symlink_target_escapes_root( $target_path, $link_target ) ) {
+			if ( $this->replaying_safety_archive && self::is_absolute_path( $link_target ) ) {
+				// Mirrors self::assert_symlink_target_confined()'s own replay skip, and
+				// must agree with it: that preflight already decided, before a single
+				// entry was written, that this link is skipped rather than refused — this
+				// is that decision taking effect at the one place that would otherwise
+				// create it. A relative target that escapes the root still falls through
+				// to the throw below, even during replay; only an absolute target skips.
+				$this->record_skipped_symlink( $relative_path, $link_target );
+				return;
+			}
+
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $target_path and $link_target are reported verbatim for diagnostic context; exception path, not HTML output.
 				sprintf( 'Refusing the symbolic link "%s" whose target "%s" escapes the site. Re-run with --allow-unsafe-symlinks only if you trust this archive.', $target_path, $link_target )

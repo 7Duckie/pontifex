@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Admin;
 
+require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+
 use Brain\Monkey\Functions;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -16,13 +18,17 @@ use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\RestoreController;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\Cipher;
 use Pontifex\Archive\Crypto\EncryptionContext;
 use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Environment\Environment;
@@ -33,14 +39,21 @@ use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
+use Pontifex\Restore\DatabaseWriter;
+use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
+use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use ReflectionClassConstant;
+use ReflectionMethod;
 use RuntimeException;
+use wpdb;
 
 /**
  * Covers the controller's authorisation gates, the restore and rollback flows,
@@ -694,6 +707,128 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * Recovery reports the links outcome, never a precise revert, when the replay skips an absolute-target symlink.
+	 *
+	 * The forward runner here has written nothing, so the file cleanup is provably
+	 * complete and the skipped link is the ONLY gap. That used to be reported as
+	 * RECOVERY_MERGE, whose message asserts a cleanup that "could not be confirmed
+	 * complete" — false in this case. The expectation changed to
+	 * RECOVERY_MERGE_LINKS deliberately, with that message split; it is not a test
+	 * bent to fit the code.
+	 *
+	 * Exercised directly via reflection on the private method — not through the
+	 * full restore()/ajax flow — with two REAL {@see RestoreRunner} instances
+	 * (real FileWriter, real EntryReader; a {@see FakeDbAdapter} for the
+	 * database half, exactly as {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}
+	 * does). The recovery runner's FileWriter is built with
+	 * $replaying_safety_archive true, matching production's own
+	 * default_restore_runner( null, $source, true ) call for this leg, and is
+	 * injected via the constructor so default_restore_runner() itself is never
+	 * reached — no WordPress wiring beyond the environment()/context() doubles
+	 * this file already uses is needed. The forward runner is a second, freshly
+	 * built RestoreRunner that has written nothing, so its own cleanup is
+	 * always a precise revert on its own — isolating the outcome under test to
+	 * whether the replay skipped a symlink.
+	 *
+	 * @return void
+	 */
+	public function test_recovery_reports_merge_links_when_only_a_symlink_is_skipped(): void {
+		$safety_path = $this->base . '/pre-import-rollback-symlink-skipped.wpmig';
+		$this->write_archive_with_plans( $safety_path, array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) ) );
+
+		$outcome = $this->invoke_recovery_from_safety_archive( $safety_path );
+
+		$this->assertSame( self::recovery_merge_links_constant(), $outcome, 'A skipped symlink on a recovery whose cleanup was complete must be reported as the links outcome, never a precise revert and never the unconfirmed-cleanup merge.' );
+	}
+
+	/**
+	 * Recovery still reports a precise revert when nothing was skipped (false-positive guard).
+	 *
+	 * @return void
+	 */
+	public function test_recovery_still_reports_precise_when_nothing_is_skipped(): void {
+		$safety_path = $this->base . '/pre-import-rollback-nothing-skipped.wpmig';
+		$this->write_archive_with_plans( $safety_path, array( self::file_plan( 'wp-content/original.txt', 'ORIGINAL CONTENT' ) ) );
+
+		$outcome = $this->invoke_recovery_from_safety_archive( $safety_path );
+
+		$this->assertSame( self::recovery_precise_constant(), $outcome, 'A clean replay that skipped nothing must not be downgraded to a merge.' );
+	}
+
+	/**
+	 * A links-only merge names the skipped link and does not claim the file cleanup is unconfirmed.
+	 *
+	 * The cleanup WAS provably complete here, so sending the operator to the log for
+	 * stray paths would be false advice about something that never happened. What
+	 * the operator needs is the link itself — its path and the target it should
+	 * point at, so they can check it.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_a_links_only_merge_names_the_skipped_link(): void {
+		$message = $this->invoke_failure_message(
+			self::recovery_merge_links_constant(),
+			array( 'wp-content/uploads/media' => '/mnt/shared/media' )
+		);
+
+		$this->assertStringContainsString( 'rolled back to its state before the restore', $message );
+		$this->assertStringContainsString( 'file cleanup completed', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/media -> /mnt/shared/media', $message, 'The skipped link must be named, path and recorded target, in the operator-visible message.' );
+		$this->assertStringNotContainsString( 'could not be confirmed complete', $message, 'A cleanup that was provably complete must not be described as unconfirmed.' );
+		$this->assertStringNotContainsString( 'check the Pontifex log for which paths', $message, 'There are no stray paths to look for, so the message must not send the operator looking.' );
+	}
+
+	/**
+	 * A merge with an unconfirmed cleanup names the skipped link too, and keeps its own cleanup sentence.
+	 *
+	 * Both causes apply at once here, so both get said: the cleanup could not be
+	 * confirmed AND a link was not re-created. Dropping either would leave the
+	 * operator with half the picture.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_an_unconfirmed_cleanup_also_names_a_skipped_link(): void {
+		$message = $this->invoke_failure_message(
+			self::recovery_merge_constant(),
+			array( 'wp-content/uploads/media' => '/mnt/shared/media' )
+		);
+
+		$this->assertStringContainsString( 'could not be confirmed complete', $message, 'The cleanup sentence is still true and must stay.' );
+		$this->assertStringContainsString( 'wp-content/uploads/media -> /mnt/shared/media', $message, 'The skipped link must be named as well.' );
+	}
+
+	/**
+	 * A merge with an unconfirmed cleanup and no skipped link says exactly what it always said.
+	 *
+	 * The caveat helper returns an empty string for an empty array, so nothing —
+	 * not even a trailing space — may be appended to the long-standing message.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_an_unconfirmed_cleanup_without_links_is_unchanged(): void {
+		$this->assertSame(
+			'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.',
+			$this->invoke_failure_message( self::recovery_merge_constant() )
+		);
+	}
+
+	/**
+	 * The precise-revert message is unchanged, and ignores any skipped links it is handed.
+	 *
+	 * A precise revert and a skipped link cannot both be true — recovery downgrades
+	 * the one to the other — so this branch has no use for the array; it must not
+	 * start naming links just because one was passed in.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_a_precise_revert_is_unchanged(): void {
+		$expected = 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.';
+
+		$this->assertSame( $expected, $this->invoke_failure_message( self::recovery_precise_constant() ) );
+		$this->assertSame( $expected, $this->invoke_failure_message( self::recovery_precise_constant(), array( 'wp-content/uploads/media' => '/mnt/shared/media' ) ) );
+	}
+
+	/**
 	 * A restore that fails before the safety archive is taken reports the site unchanged.
 	 *
 	 * Here the safety archive creation itself fails, so the database was never written; no
@@ -1072,6 +1207,69 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertTrue( $this->json['data']['rolled_back'] );
 		$this->assertSame( 2, $this->json['data']['entries'] );
+	}
+
+	/**
+	 * The rollback handler's OWN default wiring builds its runner in replay mode.
+	 *
+	 * Every other rollback test in this file injects a RestoreRunner (mock or
+	 * real), which bypasses default_restore_runner() entirely and so proves
+	 * nothing about the $replaying_safety_archive argument rollback() itself
+	 * passes at its call site. This test injects NO runner, so rollback() must
+	 * build its own via default_restore_runner( null, $source, true ) — the
+	 * exact call this test exists to prove. It uses a real ArchiveWriter-built
+	 * safety archive declaring an absolute-target symlink and a real
+	 * RestoreRunner/FileWriter underneath (a FakeDbAdapter stands in for the
+	 * database half, and a WpdbStub satisfies WordPressContext::wpdb_instance()'s
+	 * type, exactly as {@see \Pontifex\Tests\Unit\Manifest\WpdbAdapterTest} does):
+	 * if replay mode were NOT wired through, the symlink's absolute target would
+	 * be refused and the rollback would report a failure instead of the success
+	 * asserted below.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_builds_its_own_runner_in_replay_mode(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-symlink.wpmig';
+		$this->write_archive_with_plans( $archive_path, array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) ) );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$wordpress_root = $this->base . '/wp-root';
+		$environment    = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->andReturnUsing(
+			function ( string $name ) use ( $wordpress_root ) {
+				return 'ABSPATH' === $name ? $wordpress_root . '/' : $wordpress_root . '/wp-content';
+			}
+		);
+		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
+
+		$context = $this->context();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( new wpdb() );
+		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
+
+		$controller = new RestoreController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			null, // No injected runner: this is the point of the test.
+			null
+		);
+
+		$controller->rollback();
+
+		$this->assertTrue( $this->json['success'], 'An absolute-target symlink must not make the rollback fail when replay mode is correctly wired.' );
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertStringContainsString( 'wp-content/uploads/media', $this->json['data']['message'], 'The skipped link must be named in the operator-visible message.' );
+		$this->assertStringContainsString( '/mnt/shared/media', $this->json['data']['message'] );
 	}
 
 	/**
@@ -1647,6 +1845,155 @@ final class RestoreControllerTest extends TestCase {
 			->write_archive( $this->sample_provenance( $scope ), array(), $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
+	}
+
+	/**
+	 * Write a valid, unencrypted, content-only archive carrying the given entries.
+	 *
+	 * Unlike {@see self::write_archive_with_scope()}, this carries real entries —
+	 * needed for {@see self::test_recovery_reports_merge_when_a_symlink_is_skipped()}
+	 * and its precise-revert companion, which replay the archive through a real
+	 * {@see RestoreRunner}/{@see FileWriter}, not an injected double.
+	 *
+	 * @param string      $path  Absolute path to write the archive to.
+	 * @param EntryPlan[] $plans The plans to include.
+	 * @return void
+	 */
+	private function write_archive_with_plans( string $path, array $plans ): void {
+		if ( ! is_dir( dirname( $path ) ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the temp fixture directory the archive is written into.
+			mkdir( dirname( $path ), 0o755, true );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
+		$dest = fopen( $path, 'w+b' );
+		if ( false === $dest ) {
+			$this->fail( 'Could not open the fixture archive for writing.' );
+		}
+		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
+			->write_archive( $this->sample_provenance( Scope::content_only( array() ) ), $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
+		fclose( $dest );
+	}
+
+	/**
+	 * Build a file EntryPlan.
+	 *
+	 * @param string $path     Relative path inside the archive.
+	 * @param string $contents File contents.
+	 * @return EntryPlan
+	 */
+	private static function file_plan( string $path, string $contents ): EntryPlan {
+		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build a symlink EntryPlan.
+	 *
+	 * @param string $path   Relative path of the link inside the archive.
+	 * @param string $target The target string recorded verbatim.
+	 * @return EntryPlan
+	 */
+	private static function symlink_plan( string $path, string $target ): EntryPlan {
+		$header = EntryHeader::for_symlink( $path, $target, 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream() );
+	}
+
+	/**
+	 * Open a php://memory stream, optionally pre-filled and rewound.
+	 *
+	 * @param string $contents Optional initial contents.
+	 * @return resource
+	 * @throws RuntimeException If php://memory cannot be opened.
+	 */
+	private static function memory_stream( string $contents = '' ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		if ( false === $stream ) {
+			throw new RuntimeException( 'Could not open php://memory.' );
+		}
+		if ( '' !== $contents ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+			fwrite( $stream, $contents );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+			rewind( $stream );
+		}
+		return $stream;
+	}
+
+	/**
+	 * Build a controller wired with a real recovery runner, and invoke recover_from_safety_archive() on it.
+	 *
+	 * The recovery runner's FileWriter is built with $replaying_safety_archive
+	 * true — matching production's own default_restore_runner( null, $source, true )
+	 * call for this exact leg — rooted under $this->base so
+	 * {@see self::tearDown()} cleans it up, and injected via
+	 * {@see self::controller()} so default_restore_runner() itself is never
+	 * reached. The forward runner is a second, freshly built RestoreRunner that
+	 * has written nothing, so remove_created_paths() on it is always a precise
+	 * revert on its own — isolating the outcome to whether the replay skipped a
+	 * symlink.
+	 *
+	 * @param string $safety_path Absolute path of the real safety archive to replay.
+	 * @return string One of RestoreController's own RECOVERY_* constants.
+	 */
+	private function invoke_recovery_from_safety_archive( string $safety_path ): string {
+		$this->stub_transients();
+
+		$recovery_runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/recovery-root', false, null, null, null, null, true ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+		$forward_runner  = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/forward-root' ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$controller = $this->controller( $recovery_runner );
+
+		$method = new ReflectionMethod( RestoreController::class, 'recover_from_safety_archive' );
+		return (string) $method->invoke( $controller, $safety_path, $forward_runner );
+	}
+
+	/**
+	 * RestoreController::RECOVERY_MERGE, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_merge_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_MERGE' ) )->getValue();
+	}
+
+	/**
+	 * RestoreController::RECOVERY_PRECISE, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_precise_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_PRECISE' ) )->getValue();
+	}
+
+	/**
+	 * RestoreController::RECOVERY_MERGE_LINKS, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_merge_links_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_MERGE_LINKS' ) )->getValue();
+	}
+
+	/**
+	 * Invoke the controller's private failure_message() with the given recovery outcome and skipped links.
+	 *
+	 * @param string|null           $recovery         One of RestoreController's own RECOVERY_* constants, or null for no recovery attempted.
+	 * @param array<string, string> $skipped_symlinks Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 * @return string The operator-visible failure message.
+	 */
+	private function invoke_failure_message( ?string $recovery, array $skipped_symlinks = array() ): string {
+		$method = new ReflectionMethod( RestoreController::class, 'failure_message' );
+		return (string) $method->invoke( $this->controller(), new RuntimeException( 'replay failed mid-restore' ), $recovery, $skipped_symlinks );
 	}
 
 	/**

@@ -329,6 +329,7 @@ final class RollbackCommand {
 				);
 
 				$this->print_summary( $archive_path, $entry_total );
+				$this->report_skipped_symlinks( $restore_runner );
 
 				// The rollback replayed the database with raw SQL, so flush WordPress's
 				// stale option cache before recording, or the counter write is lost
@@ -465,11 +466,14 @@ final class RollbackCommand {
 	 * @return RestoreRunner
 	 */
 	private function build_default_restore_runner( $source ): RestoreRunner {
-		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
-		$archive_reader  = new ArchiveReader( $source );
-		$source_prefix   = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
-		$dest_prefix     = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
-		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
+		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader = new ArchiveReader( $source );
+		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+		// $replaying_safety_archive is true: `wp pontifex rollback` IS a safety-archive
+		// replay (this site's own undo, not a foreign archive), so an absolute symlink
+		// target is skipped rather than refused — see FileWriter::$replaying_safety_archive.
+		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), false, null, null, null, null, true );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
 		return new RestoreRunner(
 			$entry_reader,
@@ -572,6 +576,65 @@ final class RollbackCommand {
 	private function print_summary( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
 			sprintf( /* translators: 1: number of entries restored, 2: the archive path */ __( 'Rolled back %1$d entries from %2$s', 'pontifex' ), $entry_count, $archive_path )
+		);
+	}
+
+	/**
+	 * Warn, in the log AND in the terminal, about every symbolic link this rollback could not re-create.
+	 *
+	 * A rollback replays a safety archive, so an absolute-target symlink is
+	 * skipped rather than refused (see {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive})
+	 * — but `wp pontifex rollback` makes no claim to a precise revert to begin
+	 * with; it is deliberately additive, with no creation ledger of its own
+	 * (ADR 0024), so there is no PRECISE/MERGE verdict to downgrade here, unlike
+	 * ImportCommand's and RestoreController's own recovery handlers. The one
+	 * obligation left is honesty: naming what was not re-created, not merely
+	 * logging it, because an operator running this from a terminal must see it
+	 * without going to the log — the same reasoning ExportCommand's own
+	 * {@see \Pontifex\Cli\ExportCommand::print_changed_file_warnings()} already
+	 * applies to a changed-file list, whose two-tier shape (one warning per
+	 * item, then one summary warning) this mirrors.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the replay; only a real {@see RestoreRunner} has a FileWriter to ask, so a test fake is silently skipped rather than reporting a false "nothing skipped".
+	 * @return void
+	 */
+	private function report_skipped_symlinks( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$skipped_symlinks = $restore_runner->skipped_symlinks();
+		if ( array() === $skipped_symlinks ) {
+			return;
+		}
+
+		$this->logger->warning(
+			'Rollback: some symbolic links could not be re-created because their recorded targets are absolute paths.',
+			array( 'skipped_symlinks' => $skipped_symlinks )
+		);
+
+		foreach ( $skipped_symlinks as $entry_path => $target ) {
+			WP_CLI::warning(
+				sprintf(
+					/* translators: 1: the symlink's path inside the site, 2: its recorded target */
+					__( '%1$s could not be re-created: its recorded target, %2$s, is an absolute path.', 'pontifex' ),
+					$entry_path,
+					$target
+				)
+			);
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of symbolic links that could not be re-created */
+				_n(
+					'%d symbolic link could not be re-created; the rest of the rollback completed.',
+					'%d symbolic links could not be re-created; the rest of the rollback completed.',
+					count( $skipped_symlinks ),
+					'pontifex'
+				),
+				count( $skipped_symlinks )
+			)
 		);
 	}
 
