@@ -161,9 +161,26 @@ final class RestoreController {
 	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
 	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
 	 *
+	 * When the cleanup WAS provably complete and the only thing standing between
+	 * the recovery and a precise revert is a skipped symbolic link, the outcome is
+	 * {@see self::RECOVERY_MERGE_LINKS} instead.
+	 *
 	 * @var string
 	 */
 	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: the site was rolled back and the file-tree cleanup WAS provably
+	 * complete, but the replay skipped one or more symbolic links whose recorded targets
+	 * are absolute paths, so the tree still cannot be proven to match the site's prior state.
+	 *
+	 * Distinct from {@see self::RECOVERY_MERGE}, whose message asserts a cleanup that could
+	 * not be confirmed — an assertion that is false in this case, and one that would send
+	 * the operator looking in the log for paths that were never left behind.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE_LINKS = 'merge_links';
 
 	/**
 	 * Recovery outcome: recovery was attempted and did not complete at all.
@@ -525,11 +542,12 @@ final class RestoreController {
 			// not taken (the failure preceded it), the site was not changed and nothing is
 			// replayed. Recovery never throws — it reports whether the site was restored, and
 			// whether the file-tree cleanup that goes with it could be proven complete.
-			$recovery = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner ) : null;
+			$skipped_symlinks = array();
+			$recovery         = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner, $skipped_symlinks ) : null;
 
 			$this->bump_counters( array( 'failed' => 1 ) );
 			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovery ) ), 500 );
+			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovery, $skipped_symlinks ) ), 500 );
 		}
 	}
 
@@ -549,18 +567,34 @@ final class RestoreController {
 	 * can never throw out of the failure handler: a recovery that itself fails is
 	 * reported as such, not escalated.
 	 *
-	 * @param string                      $path           The absolute path of the safety archive to replay.
-	 * @param RestoreRunnerInterface|null $forward_runner The engine that ran the failed forward restore, or null if the restore never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
-	 * @return string One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
+	 * The replay itself runs with $replaying_safety_archive true (see
+	 * {@see FileWriter::$replaying_safety_archive}), so an absolute-target symlink
+	 * the site had before the failed restore is skipped rather than refused — this
+	 * is this site's own prior state, not a foreign archive. Any such skip is
+	 * logged and downgrades the outcome from {@see self::RECOVERY_PRECISE} — to
+	 * {@see self::RECOVERY_MERGE_LINKS} when the file cleanup was otherwise
+	 * provably complete, or to {@see self::RECOVERY_MERGE} when it was not —
+	 * because the recovered tree is then not proven to match the site's prior
+	 * state.
+	 *
+	 * @param string                      $path             The absolute path of the safety archive to replay.
+	 * @param RestoreRunnerInterface|null $forward_runner   The engine that ran the failed forward restore, or null if the restore never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
+	 * @param array<string, string>       $skipped_symlinks Out-parameter. On return it holds every symbolic link the replay skipped, as entry path => the raw absolute target recorded in the archive, and is empty when nothing was skipped. It is written on every return path that got as far as the replay, so a caller can rely on it after any outcome other than the early {@see self::RECOVERY_FAILED} returns.
+	 * @return string One of {@see self::RECOVERY_PRECISE}, {@see self::RECOVERY_MERGE} or {@see self::RECOVERY_MERGE_LINKS} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $path, ?RestoreRunnerInterface $forward_runner ): string {
-		$source = null;
+	private function recover_from_safety_archive( string $path, ?RestoreRunnerInterface $forward_runner, array &$skipped_symlinks = array() ): string {
+		// Empty until the replay has actually run, so an early failure hands the caller
+		// nothing rather than whatever the variable held before the call.
+		$skipped_symlinks = array();
+		$source           = null;
 		try {
 			$size   = $this->archive_size( $path );
 			$source = $this->open_source( $path );
 			// A safety archive is the site's own undo, so its replay is unrestricted — no
-			// required prefix, matching a rollback.
-			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
+			// required prefix, matching a rollback. $replaying_safety_archive is true for
+			// the same reason: an absolute symlink target is skipped rather than refused,
+			// because this IS the site's own prior state, not a foreign archive.
+			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source, true );
 
 			if ( self::GATE_OK !== $this->verify_gate( $recovery_runner, $source, $size ) ) {
 				$this->finish( $source );
@@ -571,6 +605,22 @@ final class RestoreController {
 			rewind( $source );
 			$this->restore_phase( $recovery_runner, $source, $size, self::PHASE_ROLLING_BACK );
 			$this->wordpress_context->flush_cache();
+
+			// $recovery_runner replayed the safety archive with $replaying_safety_archive
+			// true, so an absolute-target symlink the site had before the failed restore
+			// may have been skipped rather than re-created — see
+			// FileWriter::$replaying_safety_archive. Only a real RestoreRunner has a
+			// FileWriter to ask; a test fake degrades to reporting none, the same posture
+			// $forward_runner already takes below. Assigned straight to the out-parameter,
+			// so the caller sees it on every return path from here on, including the early
+			// return and the catch below.
+			$skipped_symlinks = $recovery_runner instanceof RestoreRunner ? $recovery_runner->skipped_symlinks() : array();
+			if ( array() !== $skipped_symlinks ) {
+				$this->logger->warning(
+					'Admin restore: recovery could not re-create every symbolic link, because some recorded targets are absolute paths.',
+					array( 'skipped_symlinks' => $skipped_symlinks )
+				);
+			}
 
 			if ( ! $forward_runner instanceof RestoreRunner ) {
 				$this->finish( $source );
@@ -592,7 +642,16 @@ final class RestoreController {
 				);
 			}
 
-			return $cleanup->is_precise_revert() ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE;
+			// A skipped symlink means the recovered tree cannot be proven to match the
+			// site's prior state either, exactly like a ledger cap or a failed removal —
+			// so it downgrades an otherwise-precise revert. The two causes are kept apart
+			// because their messages differ: an unconfirmed cleanup sends the operator to
+			// the log for stray paths, which would be false advice when the cleanup was
+			// provably complete and the only gap is a link.
+			if ( ! $cleanup->is_precise_revert() ) {
+				return self::RECOVERY_MERGE;
+			}
+			return array() === $skipped_symlinks ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE_LINKS;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
@@ -622,6 +681,43 @@ final class RestoreController {
 			}
 		}
 		return $paths;
+	}
+
+	/**
+	 * A plain-text sentence naming every symbolic link a replay skipped, or '' when nothing was skipped.
+	 *
+	 * Appended onto {@see self::rollback()}'s own success message, because the
+	 * admin screen shows that message VERBATIM as the only surface an operator
+	 * sees (`assets/admin/pontifex-restore.js` sets it as plain textContent) —
+	 * there is no separate list the JS renders, so this is the only way the
+	 * screen can name what a rollback did not re-create. Returned with a
+	 * leading space so a caller can simply concatenate it onto a base message
+	 * that ends without trailing whitespace.
+	 *
+	 * @param array<string, string> $skipped_symlinks Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 * @return string
+	 */
+	private static function skipped_symlinks_caveat( array $skipped_symlinks ): string {
+		if ( array() === $skipped_symlinks ) {
+			return '';
+		}
+
+		$named = array();
+		foreach ( $skipped_symlinks as $entry_path => $target ) {
+			$named[] = sprintf( '%1$s -> %2$s', $entry_path, $target );
+		}
+
+		return ' ' . sprintf(
+			/* translators: 1: number of symbolic links that could not be re-created, 2: a comma-separated list of "path -> target" pairs */
+			_n(
+				'%1$d symbolic link could not be re-created, because its recorded target is an absolute path: %2$s.',
+				'%1$d symbolic links could not be re-created, because their recorded targets are absolute paths: %2$s.',
+				count( $skipped_symlinks ),
+				'pontifex'
+			),
+			count( $skipped_symlinks ),
+			implode( ', ', $named )
+		);
 	}
 
 	/**
@@ -663,8 +759,11 @@ final class RestoreController {
 			// A safety archive is the site's own backup of whatever scope was overwritten
 			// (content-only for an admin restore, or whole-site for a CLI --whole-site
 			// import), so its replay is unrestricted — no required prefix, matching
-			// `wp pontifex rollback`.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null, $source );
+			// `wp pontifex rollback`. $replaying_safety_archive is true for the same
+			// reason `wp pontifex rollback` itself is: this admin action IS a
+			// safety-archive replay, so an absolute symlink target is skipped rather
+			// than refused, exactly as the CLI command already does.
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null, $source, true );
 
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
@@ -692,6 +791,22 @@ final class RestoreController {
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
 
+				// The replay ran with $replaying_safety_archive true, so an absolute-target
+				// symlink the site had before is skipped rather than refused — see
+				// FileWriter::$replaying_safety_archive. A rollback makes no claim to a
+				// precise revert to begin with (it is deliberately additive, with no
+				// creation ledger of its own — ADR 0024), so there is no PRECISE/MERGE
+				// verdict to downgrade here, unlike recover_from_safety_archive() above.
+				// The one obligation left is honesty: naming what was not re-created, on
+				// the SCREEN (the operator never sees the log), not merely logging it.
+				$skipped_symlinks = $runner instanceof RestoreRunner ? $runner->skipped_symlinks() : array();
+				if ( array() !== $skipped_symlinks ) {
+					$this->logger->warning(
+						'Admin rollback: some symbolic links could not be re-created because their recorded targets are absolute paths.',
+						array( 'skipped_symlinks' => $skipped_symlinks )
+					);
+				}
+
 				// The rollback replayed the database too, so flush the now-stale option
 				// cache (see restore() for the full rationale) before anything reads it.
 				$this->wordpress_context->flush_cache();
@@ -717,7 +832,7 @@ final class RestoreController {
 							/* translators: %d: number of entries restored from the safety archive */
 							__( 'Rolled back — %d entries restored from the most recent safety archive. Your last restore has been undone.', 'pontifex' ),
 							$entries
-						),
+						) . self::skipped_symlinks_caveat( $skipped_symlinks ),
 					)
 				);
 			}
@@ -1120,11 +1235,12 @@ final class RestoreController {
 	 * prefix already agree — but wiring every restore path the same way is
 	 * what keeps that true rather than assumed.
 	 *
-	 * @param string|null $required_prefix Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
-	 * @param resource    $source          The open, seekable archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
+	 * @param string|null $required_prefix           Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
+	 * @param resource    $source                    The open, seekable archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
+	 * @param bool        $replaying_safety_archive  True only when this runner will replay this site's own safety archive (a rollback, or a failed restore's automatic recovery) rather than the operator's chosen archive; default false. See {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive}.
 	 * @return RestoreRunner A runner ready to verify and restore a plain archive.
 	 */
-	private function default_restore_runner( ?string $required_prefix, $source ): RestoreRunner {
+	private function default_restore_runner( ?string $required_prefix, $source, bool $replaying_safety_archive = false ): RestoreRunner {
 		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
 		$archive_reader = new ArchiveReader( $source );
 		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
@@ -1132,7 +1248,7 @@ final class RestoreController {
 
 		return new RestoreRunner(
 			$entry_reader,
-			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix ),
+			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix, null, null, null, $replaying_safety_archive ),
 			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix ),
 			null,
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
@@ -1365,25 +1481,29 @@ final class RestoreController {
 	 * actually achieved — a precise revert, a merge that could not be proven
 	 * complete, or that recovery itself failed.
 	 *
-	 * @param Throwable   $error    The failure (kept to keep the signature honest; not echoed).
-	 * @param string|null $recovery One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when
-	 *                              the database was auto-rolled back to its pre-restore state,
-	 *                              {@see self::RECOVERY_FAILED} when recovery was attempted and did not
-	 *                              complete, or null when no recovery was attempted at all (the site was
-	 *                              not changed, or this is a rollback failure) — null is deliberately
-	 *                              NOT reused for "recovery failed": those two need different messages,
-	 *                              one saying the site was never touched and the other that it may be
-	 *                              left part-restored, so {@see self::recover_from_safety_archive()}
-	 *                              always returns a concrete outcome string when it runs at all.
+	 * @param Throwable             $error            The failure (kept to keep the signature honest; not echoed).
+	 * @param string|null           $recovery         One of {@see self::RECOVERY_PRECISE}, {@see self::RECOVERY_MERGE} or
+	 *                                                {@see self::RECOVERY_MERGE_LINKS} when the database was auto-rolled back
+	 *                                                to its pre-restore state, {@see self::RECOVERY_FAILED} when recovery was
+	 *                                                attempted and did not complete, or null when no recovery was attempted at
+	 *                                                all (the site was not changed, or this is a rollback failure) — null is
+	 *                                                deliberately NOT reused for "recovery failed": those two need different
+	 *                                                messages, one saying the site was never touched and the other that it may
+	 *                                                be left part-restored, so {@see self::recover_from_safety_archive()}
+	 *                                                always returns a concrete outcome string when it runs at all.
+	 * @param array<string, string> $skipped_symlinks Every link the recovery replay skipped, as entry path => the raw absolute target recorded in the archive, as filled in by {@see self::recover_from_safety_archive()}. Named in the message for a merge of either kind; empty (and ignored) otherwise.
 	 * @return string A human-readable failure message.
 	 */
-	private function failure_message( Throwable $error, ?string $recovery = null ): string {
+	private function failure_message( Throwable $error, ?string $recovery = null, array $skipped_symlinks = array() ): string {
 		unset( $error );
 		if ( self::RECOVERY_PRECISE === $recovery ) {
 			return __( 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.', 'pontifex' );
 		}
 		if ( self::RECOVERY_MERGE === $recovery ) {
-			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.', 'pontifex' );
+			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.', 'pontifex' ) . self::skipped_symlinks_caveat( $skipped_symlinks );
+		}
+		if ( self::RECOVERY_MERGE_LINKS === $recovery ) {
+			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore and the file cleanup completed, but your site cannot be confirmed to be exactly as it was.', 'pontifex' ) . self::skipped_symlinks_caveat( $skipped_symlinks );
 		}
 		if ( null === $recovery ) {
 			return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );

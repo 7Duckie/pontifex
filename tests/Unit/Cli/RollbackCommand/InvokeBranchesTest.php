@@ -9,9 +9,21 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\RollbackCommand;
 
+use DateTimeImmutable;
+use DateTimeZone;
 use Brain\Monkey\Functions;
 use Mockery;
+use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\CipherException;
+use Pontifex\Archive\Format\EntryHeader;
+use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Reader\EntryReader;
+use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
+use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\RollbackCommand;
 use Pontifex\Environment\Environment;
@@ -20,9 +32,13 @@ use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
+use Pontifex\Restore\DatabaseWriter;
+use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Tests\TestCase;
+use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -194,6 +210,66 @@ final class InvokeBranchesTest extends TestCase {
 		$this->assertSame( 1, $stats['succeeded'] );
 		$this->assertSame( 0, $stats['failed'] );
 		$this->assertArrayHasKey( 'bytes_rolled_back', $stats );
+	}
+
+	/**
+	 * A rollback that skips an absolute-target symlink still succeeds, and warns the operator in the terminal AND the log.
+	 *
+	 * Unlike every other test in this file, the restore engine here is a REAL
+	 * {@see RestoreRunner} over a real {@see FileWriter} (built with
+	 * $replaying_safety_archive true, matching build_default_restore_runner()'s
+	 * own wiring) and a {@see FakeDbAdapter} for the database half — because
+	 * the fact under test is FileWriter's own skipped-symlink ledger reaching
+	 * the terminal, which a RestoreRunnerInterface mock has no ledger to
+	 * produce. $this->temp_archive_path is overwritten with a real archive
+	 * declaring one absolute-target symlink entry, in place of setUp()'s empty
+	 * placeholder (never parsed by the mocked-engine tests elsewhere in this
+	 * file). Proves the terminal output — not only the log — carries the link
+	 * and its target, since an operator running this from a terminal has no
+	 * other way to see it.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_warns_in_the_terminal_and_the_log_when_a_symlink_is_skipped(): void {
+		self::write_archive_with_plans(
+			$this->temp_archive_path,
+			array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) )
+		);
+
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_root   = sys_get_temp_dir() . '/pontifex-rollback-invoke-replay-' . bin2hex( random_bytes( 8 ) );
+		$restore_runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $restore_root, false, null, null, null, null, true ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$printed = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		$logged_warning = false;
+		$logger         = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'warning' )->once()->andReturnUsing(
+			static function ( string $message, array $context = array() ) use ( &$logged_warning ): void {
+				unset( $message, $context );
+				$logged_warning = true;
+			}
+		);
+
+		try {
+			$command = $this->build_command( $store, $restore_runner, $logger );
+			$command( array(), array( 'yes' => true ) );
+
+			$output = implode( "\n", $printed );
+			$this->assertStringContainsString( 'wp-content/uploads/media', $output, 'The skipped link must be named on the terminal, not only in the log.' );
+			$this->assertStringContainsString( '/mnt/shared/media', $output, 'The link\'s recorded target must be named on the terminal.' );
+			$this->assertTrue( $logged_warning, 'The skip must also be logged.' );
+		} finally {
+			self::rmtree( $restore_root );
+		}
 	}
 
 	/**
@@ -730,5 +806,92 @@ final class InvokeBranchesTest extends TestCase {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Build a symlink EntryPlan.
+	 *
+	 * Used only by {@see self::test_invoke_warns_in_the_terminal_and_the_log_when_a_symlink_is_skipped()},
+	 * the one test in this file that replays a real archive through a real
+	 * engine rather than a {@see RestoreRunnerInterface} mock.
+	 *
+	 * @param string $path   Relative path of the link inside the archive.
+	 * @param string $target The target string recorded verbatim.
+	 * @return EntryPlan
+	 */
+	private static function symlink_plan( string $path, string $target ): EntryPlan {
+		$header = EntryHeader::for_symlink( $path, $target, 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream() );
+	}
+
+	/**
+	 * Open a php://memory stream, optionally pre-filled and rewound.
+	 *
+	 * @param string $contents Optional initial contents.
+	 * @return resource
+	 * @throws RuntimeException If php://memory cannot be opened.
+	 */
+	private static function memory_stream( string $contents = '' ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		if ( false === $stream ) {
+			throw new RuntimeException( 'Could not open php://memory.' );
+		}
+		if ( '' !== $contents ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+			fwrite( $stream, $contents );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+			rewind( $stream );
+		}
+		return $stream;
+	}
+
+	/**
+	 * Write the given plans as a real, content-only, unencrypted archive to $path, overwriting whatever is there.
+	 *
+	 * @param string      $path  Absolute destination path (setUp()'s own $this->temp_archive_path).
+	 * @param EntryPlan[] $plans The plans to include.
+	 * @return void
+	 * @throws RuntimeException If the destination cannot be opened for writing.
+	 */
+	private static function write_archive_with_plans( string $path, array $plans ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Overwriting the temp fixture archive setUp() created.
+		$dest = fopen( $path, 'w+b' );
+		if ( false === $dest ) {
+			throw new RuntimeException( 'Could not open the fixture safety archive for writing.' );
+		}
+		$provenance = new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			'utf8mb4_unicode_520_ci',
+			new ExporterInfo( 'pontifex', '1.1.0' ),
+			new DateTimeImmutable( '2026-09-03T10:00:00+00:00', new DateTimeZone( 'UTC' ) )
+		);
+		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )->write_archive( $provenance, $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the fixture archive just written.
+		fclose( $dest );
+	}
+
+	/**
+	 * Recursively delete a directory tree, if it exists.
+	 *
+	 * @param string $path Absolute path to remove.
+	 * @return void
+	 */
+	private static function rmtree( string $path ): void {
+		if ( is_link( $path ) || ! is_dir( $path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
+			@unlink( $path );
+			return;
+		}
+		foreach ( scandir( $path ) as $entry ) {
+			if ( '.' !== $entry && '..' !== $entry ) {
+				self::rmtree( $path . '/' . $entry );
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
+		@rmdir( $path );
 	}
 }

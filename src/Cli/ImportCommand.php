@@ -158,9 +158,26 @@ final class ImportCommand {
 	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
 	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
 	 *
+	 * When the cleanup WAS provably complete and the only thing standing between
+	 * the recovery and a precise revert is a skipped symbolic link, the outcome is
+	 * {@see self::RECOVERY_MERGE_LINKS} instead.
+	 *
 	 * @var string
 	 */
 	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: the site was rolled back and the file-tree cleanup WAS provably
+	 * complete, but the replay skipped one or more symbolic links whose recorded targets
+	 * are absolute paths, so the tree still cannot be proven to match the site's prior state.
+	 *
+	 * Distinct from {@see self::RECOVERY_MERGE}, whose message asserts a cleanup that could
+	 * not be confirmed — an assertion that is false in this case, and one that would send
+	 * the operator looking in the log for paths that were never left behind.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE_LINKS = 'merge_links';
 
 	/**
 	 * Recovery outcome: recovery was attempted and did not complete at all.
@@ -594,11 +611,18 @@ final class ImportCommand {
 			// database, so replay it to return the site to its pre-import state before the
 			// command exits with the failure. When it was not taken the site was not changed.
 			if ( null !== $safety_path ) {
-				$recovery = $this->recover_from_safety_archive( $safety_path, $allow_unsafe, $restore_runner );
+				$skipped  = array();
+				$recovery = $this->recover_from_safety_archive( $safety_path, $allow_unsafe, $restore_runner, $skipped );
 				if ( self::RECOVERY_PRECISE === $recovery ) {
 					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
 				} elseif ( self::RECOVERY_MERGE === $recovery ) {
 					WP_CLI::warning( __( 'The import failed. Your site\'s database was rolled back to its state before the import, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed import created may still be present alongside the recovered content.', 'pontifex' ) );
+					// Both causes can apply at once (an unconfirmed cleanup AND a skipped
+					// link), so the links are named here too, not only below.
+					$this->report_skipped_symlinks( $skipped );
+				} elseif ( self::RECOVERY_MERGE_LINKS === $recovery ) {
+					WP_CLI::warning( __( 'The import failed. Your site\'s database was rolled back to its state before the import and the file cleanup completed, but one or more symbolic links could not be re-created because their recorded targets are absolute paths, so your site cannot be confirmed to be exactly as it was. The links are named below.', 'pontifex' ) );
+					$this->report_skipped_symlinks( $skipped );
 				} else {
 					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
 				}
@@ -759,13 +783,14 @@ final class ImportCommand {
 	 * this run swept up — reach the real per-transfer log file instead of the
 	 * NullLogger a caller that passes nothing would silently get.
 	 *
-	 * @param resource    $source                The open archive stream, read for its header and footer.
-	 * @param bool        $passphrase_stdin      True to read the passphrase from STDIN rather than prompt.
-	 * @param bool        $allow_unsafe_symlinks True to allow symlink targets that escape the restore root.
-	 * @param string|null $required_prefix       Prefix every restored file path must sit under ("wp-content" for a content-only restore), or null to allow any path (a whole-site restore).
+	 * @param resource    $source                    The open archive stream, read for its header and footer.
+	 * @param bool        $passphrase_stdin          True to read the passphrase from STDIN rather than prompt.
+	 * @param bool        $allow_unsafe_symlinks     True to allow symlink targets that escape the restore root.
+	 * @param string|null $required_prefix           Prefix every restored file path must sit under ("wp-content" for a content-only restore), or null to allow any path (a whole-site restore).
+	 * @param bool        $replaying_safety_archive  True only when this runner is replaying this site's own safety archive (the automatic recovery below), rather than restoring the operator's chosen archive; default false. See {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive}.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner( $source, bool $passphrase_stdin, bool $allow_unsafe_symlinks, ?string $required_prefix = null ): RestoreRunner {
+	private function build_default_restore_runner( $source, bool $passphrase_stdin, bool $allow_unsafe_symlinks, ?string $required_prefix = null, bool $replaying_safety_archive = false ): RestoreRunner {
 		$archive_reader = new ArchiveReader( $source );
 		$passphrase     = $archive_reader->header()->is_encrypted()
 			? Encryption::collect_for_import( $this->passphrase_source, $passphrase_stdin )
@@ -801,7 +826,7 @@ final class ImportCommand {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
-		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix );
+		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix, null, null, null, $replaying_safety_archive );
 		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
 		return new RestoreRunner(
 			$entry_reader,
@@ -898,12 +923,27 @@ final class ImportCommand {
 	 * the failure handler: a recovery that itself fails is reported as such, not escalated
 	 * over the original import error.
 	 *
+	 * The replay itself runs with $replaying_safety_archive true (see
+	 * {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive}), so an
+	 * absolute-target symlink the site had before the failed import is skipped
+	 * rather than refused — this is this site's own prior state, not a foreign
+	 * archive. Any such skip is logged and downgrades the outcome from
+	 * {@see self::RECOVERY_PRECISE} — to {@see self::RECOVERY_MERGE_LINKS} when the
+	 * file cleanup was otherwise provably complete, or to
+	 * {@see self::RECOVERY_MERGE} when it was not — because the recovered tree is
+	 * then not proven to match the site's prior state.
+	 *
 	 * @param string                      $safety_path             The absolute path of the safety archive to replay.
 	 * @param bool                        $allow_unsafe_symlinks   Whether to allow escaping symlink targets (mirrors the import).
 	 * @param RestoreRunnerInterface|null $forward_restore_runner  The engine that ran the failed forward import, or null if the import never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
-	 * @return string One of {@see self::RECOVERY_PRECISE} or {@see self::RECOVERY_MERGE} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
+	 * @param array<string, string>       $skipped_symlinks        Out-parameter. On return it holds every symbolic link the replay skipped, as entry path => the raw absolute target recorded in the archive, and is empty when nothing was skipped. It is written on every return path that got as far as the replay, so a caller can rely on it after any outcome other than the early {@see self::RECOVERY_FAILED} returns.
+	 * @return string One of {@see self::RECOVERY_PRECISE}, {@see self::RECOVERY_MERGE} or {@see self::RECOVERY_MERGE_LINKS} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks, ?RestoreRunnerInterface $forward_restore_runner ): string {
+	private function recover_from_safety_archive( string $safety_path, bool $allow_unsafe_symlinks, ?RestoreRunnerInterface $forward_restore_runner, array &$skipped_symlinks = array() ): string {
+		// Empty until the replay has actually run, so an early failure hands the caller
+		// nothing rather than whatever the variable held before the call.
+		$skipped_symlinks = array();
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- Opening the plugin-owned safety archive for recovery; an unopenable file is reported below, not raised as a WP-CLI halt.
 		$recovery_source = @fopen( $safety_path, 'rb' );
 		if ( false === $recovery_source ) {
@@ -915,7 +955,10 @@ final class ImportCommand {
 			// A safety archive is a plain archive of the site's own prior state, so its
 			// replay needs no passphrase and no required prefix — unrestricted, like a
 			// rollback. Verify it first, so a corrupt safety archive is not written back.
-			$runner = $this->restore_runner ?? $this->build_default_restore_runner( $recovery_source, false, $allow_unsafe_symlinks, null );
+			// $replaying_safety_archive is true: this IS a safety-archive replay, so an
+			// absolute symlink target is skipped rather than refused — see
+			// FileWriter::$replaying_safety_archive.
+			$runner = $this->restore_runner ?? $this->build_default_restore_runner( $recovery_source, false, $allow_unsafe_symlinks, null, true );
 
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the verify walk re-reads it; not a WP_Filesystem operation.
 			rewind( $recovery_source );
@@ -923,6 +966,21 @@ final class ImportCommand {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
 			rewind( $recovery_source );
 			$runner->restore( $recovery_source );
+
+			// $runner replayed the safety archive with $replaying_safety_archive true, so
+			// an absolute-target symlink the site had before the failed import may have
+			// been skipped rather than re-created — see FileWriter::$replaying_safety_archive.
+			// Only a real RestoreRunner has a FileWriter to ask; a test fake degrades to
+			// reporting none, the same posture $forward_restore_runner already takes below.
+			// Assigned straight to the out-parameter, so the caller sees it on every return
+			// path from here on, including the early return and the catch below.
+			$skipped_symlinks = $runner instanceof RestoreRunner ? $runner->skipped_symlinks() : array();
+			if ( array() !== $skipped_symlinks ) {
+				$this->logger->warning(
+					'Import auto-recovery: some symbolic links could not be re-created because their recorded targets are absolute paths.',
+					array( 'skipped_symlinks' => $skipped_symlinks )
+				);
+			}
 
 			if ( ! $forward_restore_runner instanceof RestoreRunner ) {
 				return self::RECOVERY_MERGE;
@@ -942,7 +1000,16 @@ final class ImportCommand {
 				);
 			}
 
-			return $cleanup->is_precise_revert() ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE;
+			// A skipped symlink means the recovered tree cannot be proven to match the
+			// site's prior state either, exactly like a ledger cap or a failed removal —
+			// so it downgrades an otherwise-precise revert. The two causes are kept apart
+			// because their messages differ: an unconfirmed cleanup sends the operator to
+			// the log for stray paths, which would be false advice when the cleanup was
+			// provably complete and the only gap is a link.
+			if ( ! $cleanup->is_precise_revert() ) {
+				return self::RECOVERY_MERGE;
+			}
+			return array() === $skipped_symlinks ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE_LINKS;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Import auto-recovery failed.', array( 'exception' => $recovery_error ) );
 			return self::RECOVERY_FAILED;
@@ -952,6 +1019,57 @@ final class ImportCommand {
 				fclose( $recovery_source );
 			}
 		}
+	}
+
+	/**
+	 * Warn, in the terminal, about every symbolic link a failed import's recovery could not re-create.
+	 *
+	 * The recovery runs inside the failure handler of a command an operator is
+	 * watching, and the log it writes to lives under wp-content/pontifex/logs,
+	 * where nobody looks unless something tells them to. A link that was not put
+	 * back is precisely the fact an operator needs in front of them when deciding
+	 * whether their site is as it was, and a bare "merge" verdict does not say
+	 * which link — so each one is named here, not merely logged. (The log entry
+	 * is already written by {@see self::recover_from_safety_archive()}, so this
+	 * method does not write a second one.)
+	 *
+	 * This mirrors {@see \Pontifex\Cli\RollbackCommand::report_skipped_symlinks()}'s
+	 * two-tier shape — one warning per link, then one summary warning — but takes
+	 * the skipped-link array directly rather than a runner, because
+	 * recover_from_safety_archive() already holds it, and words its summary for a
+	 * recovery rather than a rollback.
+	 *
+	 * @param array<string, string> $skipped_symlinks Every skipped link, as entry path => the raw absolute target recorded in the archive. Nothing is printed when it is empty.
+	 * @return void
+	 */
+	private function report_skipped_symlinks( array $skipped_symlinks ): void {
+		if ( array() === $skipped_symlinks ) {
+			return;
+		}
+
+		foreach ( $skipped_symlinks as $entry_path => $target ) {
+			WP_CLI::warning(
+				sprintf(
+					/* translators: 1: the symlink's path inside the site, 2: its recorded target */
+					__( '%1$s could not be re-created: its recorded target, %2$s, is an absolute path.', 'pontifex' ),
+					$entry_path,
+					$target
+				)
+			);
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of symbolic links that could not be re-created */
+				_n(
+					'%d symbolic link could not be re-created during recovery; check that it is still in place.',
+					'%d symbolic links could not be re-created during recovery; check that each is still in place.',
+					count( $skipped_symlinks ),
+					'pontifex'
+				),
+				count( $skipped_symlinks )
+			)
+		);
 	}
 
 	/**

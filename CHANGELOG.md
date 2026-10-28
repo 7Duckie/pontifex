@@ -16,6 +16,44 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A site with an ordinary absolute symbolic link under `wp-content` could
+  not be recovered after a failed restore, and the remedy the failure message
+  named failed for the same reason.** An absolute link target — something like
+  `wp-content/uploads/media` pointing at `/mnt/shared/media`, a common hosting
+  arrangement — is refused by the confinement rule, which exists to stop a
+  backup from somewhere else planting a link outside your site. That rule was
+  also being applied to **safety archives**: Pontifex's own snapshot of *this*
+  site, taken minutes earlier.
+
+  The result was that a site with such a link had safety archives none of its
+  recovery paths could replay. After a failed restore the operator was told
+  "automatic recovery also failed — your site may be partially restored", and
+  `wp pontifex rollback`, the remedy that message points at, failed
+  identically. Pontifex called its own intact undo untrustworthy, and on the
+  admin screens there was no override at all.
+
+  Replaying a safety archive — automatic recovery, `wp pontifex rollback`, and
+  the admin Rollback button — now **skips** a link whose recorded target is an
+  absolute path, completes the rest of the recovery, and names every link it
+  skipped. Because a restore only ever overwrites and creates and never
+  deletes, such a link is almost always still on disk untouched; where it is
+  not, the message tells you which one to check.
+
+  A recovery that skipped a link reports having **merged** rather than having
+  put the site back exactly, because it cannot prove the second — the same
+  distinction recovery already draws when it cannot account for everything.
+  That merge now names the link or links responsible, on the terminal for
+  `wp pontifex import` as well as on the admin screen, and it no longer
+  reports a file-cleanup problem that did not happen: when the cleanup was
+  provably complete, the message says so, instead of sending you to the log
+  to look for stray files that were never left behind.
+
+  **Nothing about an ordinary restore changed.** A forward restore of any
+  backup still refuses an absolute link target exactly as before, and so does
+  a safety-archive replay for a *relative* target that escapes the site. Only
+  an absolute target, and only when replaying this site's own safety archive,
+  is skipped.
+
 - **A backup could get a symbolic link created that the safety check never
   looked at, and a folder Pontifex could not see inside was silently treated
   as safe.** Three separate ways the symbolic-link confinement check could be

@@ -261,6 +261,24 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	}
 
 	/**
+	 * Every symbolic link this run's FileWriter skipped rather than refused, during a safety-archive replay.
+	 *
+	 * Exposed for the same reason and to the same callers as
+	 * {@see self::remove_created_paths()} — a failed restore/import's own recovery
+	 * handler, in ImportCommand and RestoreController, reads this after a replay
+	 * to decide whether it can honestly report a precise revert or must report a
+	 * merge. Deliberately NOT on {@see RestoreRunnerInterface}, for the same
+	 * reason: that contract is part of the public API frozen at v1.0.0. Always
+	 * empty unless this run's FileWriter was built with $replaying_safety_archive
+	 * true — see {@see FileWriter::skipped_symlinks()}.
+	 *
+	 * @return array<string, string> Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 */
+	public function skipped_symlinks(): array {
+		return $this->file_writer->skipped_symlinks();
+	}
+
+	/**
 	 * Read, verify, and write every entry from the archive stream.
 	 *
 	 * Opens an ArchiveReader around the source (which eagerly validates

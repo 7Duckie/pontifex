@@ -678,6 +678,87 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * An absolute symlink target is still refused when replaying a safety archive is explicitly turned off.
+	 *
+	 * The regression guard proving the ordinary forward restore of any archive
+	 * is unchanged by the new $replaying_safety_archive constructor parameter:
+	 * this passes `false` explicitly (the 7th positional argument), rather than
+	 * relying on the default, so the guard is not merely proving the default
+	 * still works but that turning replay off still refuses.
+	 *
+	 * @return void
+	 */
+	public function test_absolute_symlink_target_still_refused_when_explicitly_not_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, false );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'escapes the site' );
+
+		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
+	}
+
+	/**
+	 * Replaying a safety archive: an absolute symlink target is skipped, not refused, not created, and reported.
+	 *
+	 * The decided fix (see FileWriter::$replaying_safety_archive): a safety
+	 * archive is this site's own snapshot, so an absolute-target link is
+	 * skipped rather than refused. No exception, no link on disk, and the
+	 * skip is recorded so a recovery handler can tell the operator which link
+	 * could not be re-created.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_skips_an_absolute_target_symlink_when_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, true );
+
+		$writer->write_entry( self::symlink_result( 'link', '/etc/passwd' ) );
+
+		$link = $this->fixture_root . '/link';
+		$this->assertFalse( is_link( $link ), 'The skipped link must not be created.' );
+		$this->assertFalse( file_exists( $link ), 'Nothing at all must be written for a skipped link.' );
+		$this->assertSame( array( 'link' => '/etc/passwd' ), $writer->skipped_symlinks() );
+	}
+
+	/**
+	 * Replaying a safety archive: a relative target that escapes the root is still refused.
+	 *
+	 * The scope boundary, deliberately narrow: only an ABSOLUTE target is
+	 * skipped during replay. A relative target that resolves outside the
+	 * root is a separate, still-open gap this fix does not close, and must
+	 * keep refusing exactly as it does outside replay mode.
+	 *
+	 * @return void
+	 */
+	public function test_write_entry_still_refuses_a_relative_escaping_symlink_when_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, true );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'escapes the site' );
+
+		$writer->write_entry( self::symlink_result( 'uploads/link', '../../../../etc/passwd' ) );
+	}
+
+	/**
+	 * Replaying a safety archive: an ordinary in-bounds relative symlink is still created normally.
+	 *
+	 * Replay mode changes nothing about a link that was never a problem in the
+	 * first place — it is created exactly as it would be outside replay mode,
+	 * and nothing is recorded as skipped.
+	 *
+	 * @return void
+	 */
+	public function test_safe_relative_symlink_still_created_when_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, true );
+
+		$writer->write_entry( self::symlink_result( 'a/link', '../b/target.txt' ) );
+
+		$link = $this->fixture_root . '/a/link';
+		$this->assertTrue( is_link( $link ) );
+		$this->assertSame( '../b/target.txt', readlink( $link ) );
+		$this->assertSame( array(), $writer->skipped_symlinks(), 'A link that was never refused must never be recorded as skipped.' );
+	}
+
+	/**
 	 * The escaping target is allowed when --allow-unsafe-symlinks is set.
 	 *
 	 * @return void
@@ -1255,6 +1336,36 @@ final class FileWriterTest extends TestCase {
 		$this->expectExceptionMessage( 'is an absolute path' );
 
 		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '/etc/passwd' ) );
+	}
+
+	/**
+	 * Replaying a safety archive: the preflight skips an absolute target instead of refusing it, and records it.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_skips_an_absolute_target_when_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, true );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '/etc/passwd' ) );
+
+		$this->assertTrue( true, 'assert_symlink_targets_confined() must return normally, without throwing, for an absolute target during replay.' );
+		$this->assertSame( array( 'wp-content/uploads/link' => '/etc/passwd' ), $writer->skipped_symlinks() );
+	}
+
+	/**
+	 * Replaying a safety archive: the preflight still refuses a relative target that climbs above the site root.
+	 *
+	 * The scope boundary: only an absolute target is skipped during replay.
+	 *
+	 * @return void
+	 */
+	public function test_preflight_still_refuses_a_relative_escaping_target_when_replaying_safety_archive(): void {
+		$writer = new FileWriter( $this->fixture_root, false, null, null, null, null, true );
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'is not inside the site at' );
+
+		$writer->assert_symlink_targets_confined( array( 'wp-content/uploads/link' => '../../../etc/passwd' ) );
 	}
 
 	/**
