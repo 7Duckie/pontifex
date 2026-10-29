@@ -255,6 +255,120 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * The relink rewrites to the address this site had BEFORE the restore replaced it.
+	 *
+	 * The restore replays the database, wp_options included, so the moment it has run
+	 * this site's recorded URL is the backup's. A controller that asks for its own
+	 * address afterwards is handed the archive's URL and calls migrate( old, old ): a
+	 * rewrite that changes nothing, reported as a success, with the site carrying on
+	 * serving the old domain. A context whose site_url() is a constant cannot express
+	 * that, so here it answers with this site's address until the fake restore has run
+	 * and with the backup's address after it, as a real site does.
+	 *
+	 * @return void
+	 */
+	public function test_relink_rewrites_to_the_address_captured_before_the_restore_replaced_it(): void {
+		$restored = false;
+		$context  = $this->context(
+			static function () use ( &$restored ): string {
+				return $restored ? 'https://old-site.example' : 'https://this-site.test';
+			}
+		);
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$restored ): void {
+				$restored = true;
+			}
+		);
+
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://old-site.example', $calls );
+
+		$this->run_relink_restore( $context, $migrator, $runner );
+
+		$this->assertSame(
+			array( array( 'https://old-site.example', 'https://this-site.test' ) ),
+			$calls,
+			'The target must be this site\'s address from before the restore, not the backup\'s own address read back after it.'
+		);
+		$this->assertTrue( $this->json['success'] );
+		$this->assertStringContainsString( 'relinked', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup from another site still runs the rewrite and reports it.
+	 *
+	 * The counterpart to the same-site and no-source-URL cases below: the guard that
+	 * skips those must not switch the feature off for the backup it exists for.
+	 *
+	 * @return void
+	 */
+	public function test_relink_still_runs_and_is_reported_for_a_backup_from_another_site(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://old-site.example', $calls );
+
+		$this->run_relink_restore( $this->context(), $migrator );
+
+		$this->assertSame( array( array( 'https://old-site.example', 'https://this-site.test' ) ), $calls );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertStringStartsWith( 'Restored and relinked — ', $this->json['data']['message'] );
+		$this->assertStringContainsString( '7 database rows', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup taken at this site's own address skips the rewrite and reports a plain restore.
+	 *
+	 * The comparison is the one the preview hint uses, so a difference of case or a
+	 * trailing slash does not make the same site look like another. With nothing to
+	 * rewrite, the response must not claim a relink that did no work, and the skip is
+	 * logged so the reason can be traced.
+	 *
+	 * @return void
+	 */
+	public function test_relink_is_skipped_when_the_backup_is_from_this_same_site(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://This-Site.test/', $calls );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once();
+
+		$this->run_relink_restore( $this->context(), $migrator, null, $logger );
+
+		$this->assertSame( array(), $calls, 'A backup from this same site has nothing to rewrite.' );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$this->assertStringStartsWith( 'Restored — ', $this->json['data']['message'] );
+		$this->assertStringNotContainsString( 'relinked', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup recording no source URL skips the rewrite rather than rewriting from nothing.
+	 *
+	 * The rewriter refuses an empty search term by throwing, and by this point the
+	 * database has already been replaced, so that throw would roll back a restore that
+	 * had in fact succeeded. The migrator double stands in for any implementation that
+	 * reports an empty source URL.
+	 *
+	 * @return void
+	 */
+	public function test_relink_is_skipped_when_the_backup_records_no_source_url(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( '', $calls );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once();
+
+		$this->run_relink_restore( $this->context(), $migrator, null, $logger );
+
+		$this->assertSame( array(), $calls, 'There is nothing to rewrite from, so no rewrite may be attempted.' );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$this->assertStringStartsWith( 'Restored — ', $this->json['data']['message'] );
+	}
+
+	/**
 	 * Without the migrate flag, an ordinary restore never touches the migrator.
 	 *
 	 * The default — the box unticked — must leave the link rewriter untouched, so an
@@ -1702,9 +1816,10 @@ final class RestoreControllerTest extends TestCase {
 	/**
 	 * A WordPressContext mock that formats sizes and stores counters/history.
 	 *
+	 * @param callable|null $site_url Optional. Answers every site_url() call, so a test can make the address change as the restore runs; by default it is always https://this-site.test.
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
-	private function context() {
+	private function context( ?callable $site_url = null ) {
 		$context = Mockery::mock( WordPressContext::class );
 		$context->shouldReceive( 'format_size' )->andReturnUsing(
 			static function ( int $bytes ): string {
@@ -1719,10 +1834,89 @@ final class RestoreControllerTest extends TestCase {
 		);
 		$context->shouldReceive( 'save_option' );
 		$context->shouldReceive( 'flush_cache' );
-		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
+		$context->shouldReceive( 'site_url' )->andReturnUsing(
+			$site_url ?? static function (): string {
+				return 'https://this-site.test';
+			}
+		);
 		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
 		$context->shouldReceive( 'release_named_lock' );
 		return $context;
+	}
+
+	/**
+	 * Run restore() with the relink box ticked, over a sound content-only backup.
+	 *
+	 * Leaves the JSON response in $this->json. The restore engine is a double, so
+	 * nothing is written; the context, migrator and, optionally, the engine and logger
+	 * are the parts the relink tests vary.
+	 *
+	 * @param WordPressContext            $context  The context the controller reads this site's address from.
+	 * @param UrlMigratorInterface        $migrator The migrator double.
+	 * @param RestoreRunnerInterface|null $runner   Optional engine; by default one that verifies and restores without doing anything.
+	 * @param LoggerInterface|null        $logger   Optional logger; a NullLogger by default.
+	 * @return void
+	 */
+	private function run_relink_restore(
+		WordPressContext $context,
+		UrlMigratorInterface $migrator,
+		?RestoreRunnerInterface $runner = null,
+		?LoggerInterface $logger = null
+	): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		if ( null === $runner ) {
+			$runner = Mockery::mock( RestoreRunnerInterface::class );
+			$runner->shouldReceive( 'verify' )->once();
+			$runner->shouldReceive( 'restore' )->once();
+		}
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file']    = $name;
+		$_POST['migrate'] = '1';
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			$logger ?? new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'], $_POST['migrate'] );
+		}
+	}
+
+	/**
+	 * A migrator double that reports the given source URL and records every migrate() call.
+	 *
+	 * @param string                         $source_url The URL source_url() reports.
+	 * @param array<int, array<int, string>> $calls      Out-parameter. Filled with one array( old URL, new URL ) per migrate() call.
+	 * @return UrlMigratorInterface&\Mockery\MockInterface
+	 */
+	private function recording_migrator( string $source_url, array &$calls ) {
+		$migrator = Mockery::mock( UrlMigratorInterface::class );
+		$migrator->shouldReceive( 'source_url' )->once()->andReturn( $source_url );
+		$migrator->shouldReceive( 'migrate' )->andReturnUsing(
+			static function ( string $old_url, string $new_url ) use ( &$calls ): RewriteReport {
+				$calls[] = array( $old_url, $new_url );
+				return new RewriteReport( 3, array(), 10, 7, 7, 0 );
+			}
+		);
+		return $migrator;
 	}
 
 	/**
