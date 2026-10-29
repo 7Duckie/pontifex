@@ -980,7 +980,15 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 *
 	 * Null becomes NULL. Numeric scalar values are emitted unquoted
 	 * so their numeric form is preserved. Everything else is
-	 * single-quote-escaped via $wpdb->_real_escape().
+	 * single-quote-escaped via $wpdb->_real_escape(), then passed through
+	 * $wpdb->remove_placeholder_escape().
+	 *
+	 * The second call is not optional. _real_escape() finishes by replacing
+	 * every percent sign with a marker that is unique to the current request,
+	 * and $wpdb->query() strips that marker again when it runs a statement. The
+	 * statement built here is written into the archive instead, and a restore
+	 * strips a different marker, so one left in would be stored as literal text.
+	 * A percent sign needs no escaping inside a MySQL string literal.
 	 *
 	 * @param mixed $value The value to encode.
 	 * @return string SQL-literal form of the value.
@@ -993,7 +1001,7 @@ final class WpdbAdapter implements DatabaseAdapter {
 			return (string) $value;
 		}
 		$as_string = (string) $value;
-		$escaped   = $this->wpdb->_real_escape( $as_string );
+		$escaped   = $this->wpdb->remove_placeholder_escape( $this->wpdb->_real_escape( $as_string ) );
 		return "'" . $escaped . "'";
 	}
 

@@ -28,14 +28,46 @@ use wpdb;
 final class WpdbAdapterTest extends TestCase {
 
 	/**
+	 * The marker a modelled _real_escape() swaps in for a percent sign.
+	 *
+	 * Shaped like the real wpdb's per-request marker: an opening brace,
+	 * sixty-four hexadecimal characters, a closing brace. Only the mock's model
+	 * of the escape pair uses it; the tests assert on the SHAPE of what comes
+	 * out, never on this value, so they hold against the real wpdb too.
+	 *
+	 * @var string
+	 */
+	private const MODELLED_PLACEHOLDER = '{fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210}';
+
+	/**
 	 * Build a mock wpdb suitable for injecting into WpdbAdapter.
 	 *
+	 * An unconfigured method on a PHPUnit mock returns an empty string, and every
+	 * row dump now passes its escaped values through remove_placeholder_escape(),
+	 * so it gets a default here that hands its argument back unchanged. PHPUnit
+	 * lets the FIRST stub registered for a method answer, so a test cannot
+	 * override that default afterwards: a test that needs the real escape-and-strip
+	 * pair asks for it with $models_placeholder_escape instead.
+	 *
+	 * @param bool $models_placeholder_escape Whether _real_escape() and remove_placeholder_escape() model the real pair: single quotes doubled and every percent sign swapped for a marker, then the marker swapped back.
 	 * @return wpdb&\PHPUnit\Framework\MockObject\MockObject
 	 */
-	private function mock_wpdb() {
+	private function mock_wpdb( bool $models_placeholder_escape = false ) {
 		$mock             = $this->createMock( wpdb::class );
 		$mock->prefix     = 'wp_';
 		$mock->last_error = '';
+
+		if ( $models_placeholder_escape ) {
+			$mock->method( '_real_escape' )->willReturnCallback(
+				static fn ( string $value ): string => str_replace( '%', self::MODELLED_PLACEHOLDER, str_replace( "'", "''", $value ) )
+			);
+			$mock->method( 'remove_placeholder_escape' )->willReturnCallback(
+				static fn ( string $query ): string => str_replace( self::MODELLED_PLACEHOLDER, '%', $query )
+			);
+			return $mock;
+		}
+
+		$mock->method( 'remove_placeholder_escape' )->willReturnArgument( 0 );
 		return $mock;
 	}
 
@@ -297,6 +329,98 @@ final class WpdbAdapterTest extends TestCase {
 		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 )->sql();
 
 		$this->assertStringContainsString( 'VALUES (42)', $sql );
+	}
+
+	/**
+	 * A percent sign in a value must reach the archive as a percent sign.
+	 *
+	 * The real wpdb::_real_escape() swaps every percent sign for a per-request
+	 * marker, which wpdb::query() strips again when a statement runs. The
+	 * statement the adapter builds is written into an archive instead, so a
+	 * marker left in it is frozen there and replayed as literal text by a later
+	 * request: a permalink structure came back from a restore with the marker
+	 * welded into it. The assertion is on the SHAPE of the marker, not on the
+	 * mock's own value, so it holds against the real wpdb as well.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_writes_percent_signs_without_a_placeholder_marker(): void {
+		$wpdb = $this->mock_wpdb( true );
+		$wpdb->method( 'prepare' )->willReturn( '' );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array(
+					'option_name'  => 'permalink_structure',
+					'option_value' => '/%year%/%monthnum%/%day%/%postname%/',
+				),
+			)
+		);
+
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_options', 0, 1 )->sql();
+
+		$this->assertStringContainsString( '/%year%/%monthnum%/%day%/%postname%/', $sql );
+		$this->assertSame( 0, preg_match( '/\{[0-9a-f]{64}\}/', $sql ), 'No placeholder marker may be left in the emitted statement.' );
+	}
+
+	/**
+	 * A serialised value holding percent signs must keep its recorded length true.
+	 *
+	 * PHP-serialised data records each string's own byte length. A marker of
+	 * sixty-six characters standing in for each percent sign would leave the
+	 * recorded length wrong, so unserialize() would fail and the setting would
+	 * silently revert. The exact serialised text must therefore appear in the
+	 * statement untouched.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_keeps_a_serialised_length_true_when_the_value_holds_percent_signs(): void {
+		$text       = 'Hello %name%, you are 50% done';
+		$serialised = 'a:1:{s:4:"tmpl";s:30:"Hello %name%, you are 50% done";}';
+
+		// The fixture itself must be honest: the recorded 30 is the text's real byte length.
+		$this->assertSame( 30, strlen( $text ) );
+
+		$wpdb = $this->mock_wpdb( true );
+		$wpdb->method( 'prepare' )->willReturn( '' );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array(
+					'option_name'  => 'widget_greeting',
+					'option_value' => $serialised,
+				),
+			)
+		);
+
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_options', 0, 1 )->sql();
+
+		$this->assertStringContainsString( $serialised, $sql );
+		$this->assertSame( 0, preg_match( '/\{[0-9a-f]{64}\}/', $sql ), 'No placeholder marker may be left in the emitted statement.' );
+	}
+
+	/**
+	 * A single quote in a value must still be doubled, with or without a percent sign.
+	 *
+	 * Stripping the placeholder marker must not undo the quote escaping that
+	 * keeps a value inside its string literal.
+	 *
+	 * @return void
+	 */
+	public function test_dump_table_rows_still_doubles_single_quotes_alongside_percent_signs(): void {
+		$wpdb = $this->mock_wpdb( true );
+		$wpdb->method( 'prepare' )->willReturn( '' );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array(
+					'title' => "First's post",
+					'note'  => "It's 100% done",
+				),
+			)
+		);
+
+		$sql = ( new WpdbAdapter( $wpdb ) )->dump_table_rows( 'wp_posts', 0, 1 )->sql();
+
+		$this->assertStringContainsString( "'First''s post'", $sql );
+		$this->assertStringContainsString( "'It''s 100% done'", $sql );
 	}
 
 	/**
