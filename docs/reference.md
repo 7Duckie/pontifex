@@ -279,6 +279,15 @@ export's own upload — rather than a false "nothing was pruned".
 `doctor` reports environment readiness (no flags). `stats` takes `--format`.
 `diagnostics` takes `--output` and produces a redacted support bundle.
 
+`stats`'s recent-transfers list covers exports, imports and — since ADR 0026 —
+rollbacks, which previously left no trace in it. An import or rollback entry
+also carries a small set of counts describing what it did (entries written,
+rows a relink changed, percent signs repaired, symbolic links skipped, the
+recovery verdict, and the pre-restore check's verdict when it stopped there).
+Those counts are what the admin screens read, and the machine formats are
+unchanged: the detail is carried in the stored history, not added to the
+`--format` output.
+
 ---
 
 ## 3. Archive format

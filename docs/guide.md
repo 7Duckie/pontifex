@@ -259,6 +259,22 @@ your site.
 **So after any restore that reported a problem, look at your site.** Check
 your plugins list for anything you do not recognise.
 
+### You will be signed out, and that is expected
+
+A restore replaces every table, including the one holding your login session.
+So near the end the screen stops and tells you the session was reset. Nothing
+has gone wrong — it is the restore reaching its last stage.
+
+Log back in with the username and password from **the backup you just
+restored**, not the ones you used a minute ago. The database is now that
+backup's, so its accounts are the live ones.
+
+Then look at the **Overview** screen. It says what that restore actually did —
+how many entries it wrote, whether it rewrote your links and across how many
+rows, and anything it had to skip or repair. The Restore screen shows the same
+line for the first fifteen minutes, so if you come straight back to it after
+signing in, it is already there.
+
 ### If a past restore broke your permalinks
 
 Older versions of Pontifex had a defect that damaged every value containing a

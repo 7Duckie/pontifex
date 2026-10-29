@@ -148,6 +148,11 @@ What follows from this choice — positive, negative, and neutral?
   place of every percent sign, and a restore repairs the archives already
   carrying it — gated on the exporter version that wrote them, applied per
   statement before the containment checks, and reported rather than silent.
+- [ADR 0026](./0026-a-restore-outcome-has-one-durable-home.md) —
+  A restore signs out the browser watching it, so its outcome is recorded in the
+  existing transfer journal as counts and flags and read from there by the
+  screens, rather than carried in a response the operation destroys. One reader
+  composes the description; the inline message is demoted to a nicety.
 
 ## Further reading
 

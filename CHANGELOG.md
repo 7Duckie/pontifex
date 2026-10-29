@@ -14,7 +14,49 @@ v0.0.x decision log for the reasoning.
 
 ## [Unreleased]
 
+### Added
+
+- **The Overview screen now tells you what your last restore did.** A restore
+  replaces the users table, so it signs you out before the screen can report
+  anything — which meant the message it had prepared for you was simply lost,
+  and the entry count, the relink confirmation and everything else with it.
+  What happened is now written down as the restore finishes, and shown
+  afterwards: on the Overview whenever you look, and on the Restore screen
+  itself for the first fifteen minutes, which covers signing back in and
+  returning to it.
+
+  It records only counts — how many entries were written, how many database
+  rows a relink changed, how many percent signs were repaired, how many
+  symbolic links were skipped — and never a path, an address or anything from
+  your own content.
+
+- **A backup stopped by the pre-restore check now says which kind of stop it
+  was.** A damaged backup, a backup this build will not accept, and a backup
+  this server could not finish checking are three different situations calling
+  for three different responses, and all three end with your site unchanged.
+  They are no longer reported as one.
+
+- **Rollbacks are recorded in the transfer history**, so they appear in
+  `wp pontifex stats`'s recent-transfers list alongside backups and restores.
+  Previously a rollback left no trace there at all.
+
 ### Fixed
+
+- **`wp pontifex import` was not counting failed imports.** When an import
+  failed and the automatic recovery then succeeded — the ordinary case — the
+  failure was recorded and immediately thrown away. Recovery replays the safety
+  archive, which replaces the whole options table, and the record had been
+  written before that happened, so it went back to the state it had before the
+  import. `wp pontifex stats` has therefore been showing fewer failed imports
+  than actually occurred. The failure is now recorded after recovery has
+  finished.
+
+- **The attempted-restores figure could read lower than the successes and
+  failures beneath it**, which is arithmetically impossible and made the whole
+  panel hard to trust. A restore counts its attempt before it begins, so that a
+  run killed part-way still shows — and replaying the database could wipe that
+  count before the outcome was written. The figure is now topped up afterwards
+  where it needs to be.
 
 - **Restoring a backup damaged every value containing a percent sign, which
   broke your permalinks and silently threw away any plugin or theme setting
