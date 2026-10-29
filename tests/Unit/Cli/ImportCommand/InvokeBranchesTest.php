@@ -15,6 +15,7 @@ use DateTimeImmutable;
 use DateTimeZone;
 use Brain\Monkey\Functions;
 use Mockery;
+use Pontifex\Admin\RestoreOutcome;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\CipherException;
@@ -35,6 +36,7 @@ use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\ImportCommand;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\SigningKeys;
+use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\BuildCannotComply;
@@ -1410,7 +1412,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
 		$this->assertContains(
-			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			'Repaired 2 percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
 			$printed,
 			'The operator must be told, with the count, that the restore repaired the archive.'
 		);
@@ -1478,7 +1480,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $queries, 'An affected writer\'s archive must be repaired by the default wiring.' );
 		$this->assertContains(
-			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			'Repaired 2 percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
 			$printed
 		);
 	}
@@ -1793,6 +1795,7 @@ final class InvokeBranchesTest extends TestCase {
 		$mock = Mockery::mock( WordPressContext::class );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
+		$mock->shouldReceive( 'flush_cache' )->zeroOrMoreTimes();
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
 		// The shared single-runner lock: free by default so __invoke's new lock
 		// acquisition does not need a dedicated stub in every test. The named
@@ -1827,5 +1830,789 @@ final class InvokeBranchesTest extends TestCase {
 		$mock = Mockery::mock( SafetyArchiverInterface::class );
 		$mock->shouldReceive( 'create' )->once()->andReturn( '/var/www/html/wp-content/pontifex/rollback/safety.wpmig' );
 		return $mock;
+	}
+
+	// -----------------------------------------------------------------
+	// The durable record: what an import did is written to the transfer
+	// history (counts and flags only), for the screens that read it back.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A successful import records the entries it wrote and, with no relink, says so; the cache is flushed first.
+	 *
+	 * The replay leaves a stale option cache that can swallow a write into the
+	 * just-replaced wp_options, so the flush must come before the record. No
+	 * `recovery` key is written: a successful import ran no recovery, and an
+	 * absent key already reads as that.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_what_an_import_did_in_the_history_after_the_flush(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function ( $source, ?callable $on_entry = null ): void {
+				unset( $source );
+				if ( null !== $on_entry ) {
+					$on_entry( 1, 4 );
+				}
+			}
+		);
+
+		$events  = array();
+		$history = array();
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The history must be written after the cache flush, never before it.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'import', $history[0]['operation'] );
+		$this->assertSame( 'succeeded', $history[0]['outcome'] );
+		$this->assertSame(
+			array(
+				'entries'          => 4,
+				'relinked'         => false,
+				'rows_rewritten'   => 0,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+			),
+			$history[0]['details']
+		);
+	}
+
+	/**
+	 * With --new-url the record says a rewrite ran, and how many rows it changed.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_the_rows_a_new_url_rewrite_changed(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+
+		$url_migrator = Mockery::mock( UrlMigratorInterface::class );
+		$url_migrator->shouldReceive( 'source_url' )->andReturn( 'https://old.test' );
+		$url_migrator->shouldReceive( 'migrate' )->once()->andReturn( new RewriteReport( 1, array(), 1, 6, 1, 0 ) );
+
+		$events  = array();
+		$history = array();
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding(),
+			$url_migrator
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'     => true,
+				'new-url' => 'https://new.example',
+			)
+		);
+
+		$this->assertCount( 1, $history );
+		$this->assertTrue( $history[0]['details']['relinked'] );
+		$this->assertSame( 6, $history[0]['details']['rows_rewritten'] );
+	}
+
+	/**
+	 * A restore that repaired frozen markers records how many, read from the real engine's own tally.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_how_many_markers_the_restore_repaired(): void {
+		$m = self::frozen_marker();
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) )
+		);
+
+		$db           = new FakeDbAdapter();
+		$restore_root = sys_get_temp_dir() . '/pontifex-import-invoke-history-' . bin2hex( random_bytes( 8 ) );
+		$printed      = array();
+		$events       = array();
+		$history      = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = new ImportCommand(
+				$this->build_environment_mock(),
+				$this->build_history_capturing_context( $history, $events ),
+				self::build_real_restore_runner( $db, $restore_root ),
+				new NullLogger(),
+				new NullProgressBar(),
+				$this->build_safety_archiver_succeeding()
+			);
+
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 2, $history[0]['details']['repaired_markers'] );
+		$this->assertSame( 1, $history[0]['details']['entries'] );
+	}
+
+	/**
+	 * A failed import records the failure AFTER its recovery, flushed first, with the recovery's verdict.
+	 *
+	 * Recovery replays the safety archive, which replaces wp_options again, so a counter
+	 * or record written before it is wiped; this command used to lose both whenever a
+	 * recovery succeeded. The order of events is the claim under test: the forward
+	 * replay fails, the recovery replay runs, and only then the cache is flushed and the
+	 * history written. The runner is a double, so the recovery honestly reports a merge.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_a_failed_import_after_the_recovery_with_its_verdict(): void {
+		$safety_path = sys_get_temp_dir() . '/pontifex-safety-' . uniqid( '', true ) . '.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $safety_path, 'x' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$events  = array();
+		$history = array();
+		$replays = 0;
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+		$restore_runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays, &$events ): void {
+				++$replays;
+				$events[] = 1 === $replays ? 'forward-replay' : 'recovery-replay';
+				if ( 1 === $replays ) {
+					throw new ArchiveNotTrustworthy( 'simulated restore failure' );
+				}
+			}
+		);
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		try {
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the placeholder safety archive.
+			@unlink( $safety_path );
+		}
+
+		$this->assertSame(
+			array( 'forward-replay', 'recovery-replay', 'flush', 'history' ),
+			$events,
+			'The failure record must be written after the recovery has finished, and only after the cache flush.'
+		);
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'import', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['bytes'] );
+		$this->assertSame(
+			array(
+				'entries'          => 0,
+				'relinked'         => false,
+				'rows_rewritten'   => 0,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+				'recovery'         => RestoreOutcome::RECOVERY_MERGE,
+			),
+			$history[0]['details']
+		);
+	}
+
+	/**
+	 * A failed import whose recovery skipped a symbolic link records the link count and the links-only verdict.
+	 *
+	 * One REAL runner serves both the failing forward replay and the recovery (the
+	 * command reuses an injected runner for both), with the recovery archive carrying an
+	 * absolute-target link. The forward archive's database write is made to fail once, so
+	 * the recovery replay that follows is the one that skips the link.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_the_skipped_links_and_the_links_verdict_of_a_recovery(): void {
+		$m = self::frozen_marker();
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) )
+		);
+
+		$safety_path = sys_get_temp_dir() . '/pontifex-safety-' . uniqid( '', true ) . '.wpmig';
+		self::write_archive_to(
+			$safety_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) )
+		);
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$db = new FakeDbAdapter();
+		$db->fail_next_execute( 'simulated database failure' );
+		$restore_root = sys_get_temp_dir() . '/pontifex-import-invoke-links-' . bin2hex( random_bytes( 8 ) );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$events  = array();
+		$history = array();
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $restore_root, false, null, null, null, null, true ),
+			new DatabaseWriter( $db )
+		);
+
+		try {
+			$command = new ImportCommand(
+				$this->build_environment_mock(),
+				$this->build_history_capturing_context( $history, $events ),
+				$runner,
+				new NullLogger(),
+				new NullProgressBar(),
+				$safety_archiver
+			);
+
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the safety archive written above.
+			@unlink( $safety_path );
+		}
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 1, $history[0]['details']['skipped_links'], 'The links the recovery replay skipped are counted.' );
+		$this->assertSame( RestoreOutcome::RECOVERY_MERGE_LINKS, $history[0]['details']['recovery'] );
+	}
+
+	/**
+	 * A failed import with no safety archive ran no recovery, records none, and still flushes before it records.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_no_recovery_when_no_safety_archive_was_taken(): void {
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$events  = array();
+		$history = array();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'              => true,
+				'rollback-archive' => false,
+			)
+		);
+
+		$this->assertSame( array( 'flush', 'history' ), $events );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['details']['skipped_links'] );
+		$this->assertSame( RestoreOutcome::RECOVERY_NONE, $history[0]['details']['recovery'] );
+	}
+
+	/**
+	 * A recovery that cannot even open its safety archive is recorded as a failed recovery.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_a_failed_recovery(): void {
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'simulated restore failure' ) );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$events  = array();
+		$history = array();
+
+		// The default safety archiver double reports a path that does not exist on disk.
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertSame( array( 'flush', 'history' ), $events );
+		$this->assertCount( 1, $history );
+		$this->assertSame( RestoreOutcome::RECOVERY_FAILED, $history[0]['details']['recovery'] );
+	}
+
+	/**
+	 * A failing dry run changed nothing, so it flushes nothing and records nothing.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_nothing_for_a_failing_dry_run(): void {
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once()->andThrow( new ArchiveNotTrustworthy( 'would be refused' ) );
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$events  = array();
+		$history = array();
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_history_capturing_context( $history, $events ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'     => true,
+				'dry-run' => true,
+			)
+		);
+
+		$this->assertSame( array(), $events );
+		$this->assertSame( array(), $history );
+	}
+
+	/**
+	 * Build a symlink EntryPlan.
+	 *
+	 * @param string $path   Relative path of the link inside the archive.
+	 * @param string $target The target string recorded verbatim.
+	 * @return EntryPlan
+	 */
+	private static function symlink_plan( string $path, string $target ): EntryPlan {
+		$header = EntryHeader::for_symlink( $path, $target, 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $stream );
+	}
+
+	/**
+	 * A WordPressContext mock that records, in order, the cache flushes and the transfer-history writes.
+	 *
+	 * Only a write to the history option is captured; the counters' writes are
+	 * accepted and ignored.
+	 *
+	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' for each cache flush and 'history' for each history write, in the order they happen, beside any other events the test appends.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function build_history_capturing_context( array &$history, array &$events ) {
+		$mock = Mockery::mock( WordPressContext::class );
+		$mock->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) {
+				unset( $name );
+				return $fallback;
+			}
+		);
+		$mock->shouldReceive( 'flush_cache' )->andReturnUsing(
+			static function () use ( &$events ): void {
+				$events[] = 'flush';
+			}
+		);
+		$mock->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$history, &$events ): void {
+				if ( TransferHistory::OPTION === $name ) {
+					$events[] = 'history';
+					$history  = $value;
+				}
+			}
+		);
+		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		return $mock;
+	}
+
+	/**
+	 * A restore that repaired exactly one marker says "percent sign", not "percent signs".
+	 *
+	 * @return void
+	 */
+	public function test_invoke_uses_the_singular_when_a_restore_repaired_one_marker(): void {
+		$m = self::frozen_marker();
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname');\n" ) )
+		);
+
+		$db           = new FakeDbAdapter();
+		$restore_root = sys_get_temp_dir() . '/pontifex-import-invoke-singular-' . bin2hex( random_bytes( 8 ) );
+		$printed      = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = new ImportCommand(
+				$this->build_environment_mock(),
+				$this->build_wordpress_context_mock(),
+				self::build_real_restore_runner( $db, $restore_root ),
+				new NullLogger(),
+				new NullProgressBar(),
+				$this->build_safety_archiver_succeeding()
+			);
+
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertContains(
+			'Repaired 1 percent sign that an older version of Pontifex had written as a long marker when this backup was taken.',
+			$printed
+		);
+	}
+
+	// -----------------------------------------------------------------
+	// The attempt counter: counted before the work so a killed run still
+	// shows, and never left below succeeded plus failed by a replay that
+	// rebuilds wp_options. These tests drive a context that holds options
+	// like the real one, so a "replay" in the engine double really does
+	// replace them.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A successful import counts its attempt before the replay runs, and still has it counted after the replay wipes it.
+	 *
+	 * The early count is what makes a run killed mid-restore show as attempted. The
+	 * replay then rebuilds wp_options with the backup's own counters, which cannot
+	 * contain this run. The invariant asserted is the one `wp pontifex stats` and the
+	 * Overview rely on: attempted is never below succeeded plus failed.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_import_counts_the_attempt_a_replay_wipes(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+
+		$options   = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+		$at_replay = null;
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options, &$at_replay ): void {
+				$at_replay                        = $options['pontifex_import_stats']['attempted'];
+				$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_stateful_counters_context( $options ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertSame( 3, $at_replay, 'The attempt is counted before the replay runs, so a run killed part-way still shows as attempted.' );
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['succeeded'] );
+	}
+
+	/**
+	 * A backup carrying no counters at all still leaves a successful import with its one attempt.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_import_over_a_backup_with_no_counters_counts_one_attempt(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+
+		$options = array();
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options ): void {
+				$options = array();
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_stateful_counters_context( $options ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 1, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 1, $options['pontifex_import_stats']['succeeded'] );
+	}
+
+	/**
+	 * A failed import with no recovery to follow (no safety archive) still leaves the attempt covered.
+	 *
+	 * The forward replay cut over, wiping the early count, and nothing restored it.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_import_with_no_recovery_keeps_the_attempt_covered(): void {
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldNotReceive( 'create' );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options ): void {
+				$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+				throw new RuntimeException( 'simulated restore failure' );
+			}
+		);
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_stateful_counters_context( $options ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		$command(
+			array( $this->temp_archive_path ),
+			array(
+				'yes'              => true,
+				'rollback-archive' => false,
+			)
+		);
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * A failed import that was recovered does not count its attempt twice.
+	 *
+	 * The safety archive was taken after the early count, so replaying it restores
+	 * that count. Adding one more attempt here would double-count, which is why the
+	 * failure makes sure the attempt is covered rather than adding another.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_import_that_recovered_does_not_count_the_attempt_twice(): void {
+		$safety_path = sys_get_temp_dir() . '/pontifex-safety-' . uniqid( '', true ) . '.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $safety_path, 'x' );
+
+		$safety_archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$safety_archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+		$replays = 0;
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+		$restore_runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$options, &$replays ): void {
+				++$replays;
+				if ( 1 === $replays ) {
+					// The forward replay cut over: the backup's own counters, without this run.
+					$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+					throw new ArchiveNotTrustworthy( 'simulated restore failure' );
+				}
+				// The recovery replays the safety archive, taken after the early count, so it holds it.
+				$options['pontifex_import_stats'] = self::import_stats( 3, 1, 1 );
+			}
+		);
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_stateful_counters_context( $options ),
+			$restore_runner,
+			new NullLogger(),
+			new NullProgressBar(),
+			$safety_archiver
+		);
+
+		try {
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test cleanup of the placeholder safety archive.
+			@unlink( $safety_path );
+		}
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'], 'One run, one attempt: not counted again on top of the one the recovery restored.' );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * Assert the invariant `wp pontifex stats` and the Overview rely on: attempted is never below succeeded plus failed.
+	 *
+	 * @param array<string, int> $stats The stored import counters.
+	 * @return void
+	 */
+	private function assertAttemptsCovered( array $stats ): void {
+		$this->assertGreaterThanOrEqual(
+			$stats['succeeded'] + $stats['failed'],
+			$stats['attempted'],
+			'attempted must never be below succeeded plus failed.'
+		);
+	}
+
+	/**
+	 * A set of import counters.
+	 *
+	 * @param int $attempted How many runs were counted as attempted.
+	 * @param int $succeeded How many succeeded.
+	 * @param int $failed    How many failed.
+	 * @return array<string, int>
+	 */
+	private static function import_stats( int $attempted, int $succeeded, int $failed ): array {
+		return array(
+			'attempted'      => $attempted,
+			'succeeded'      => $succeeded,
+			'failed'         => $failed,
+			'bytes_imported' => 0,
+		);
+	}
+
+	/**
+	 * A WordPressContext mock that really holds options, so a "replay" in an engine double can replace them.
+	 *
+	 * @param array<string, mixed> $options Out-parameter. The stored options, by name; read and written through the context.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function build_stateful_counters_context( array &$options ) {
+		$mock = Mockery::mock( WordPressContext::class );
+		$mock->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) use ( &$options ) {
+				return $options[ $name ] ?? $fallback;
+			}
+		);
+		$mock->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$options ): void {
+				$options[ $name ] = $value;
+			}
+		);
+		$mock->shouldReceive( 'flush_cache' );
+		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
+		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$mock->shouldReceive( 'release_named_lock' );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'delete_transient' )->justReturn( true );
+		return $mock;
+	}
+
+	/**
+	 * A successful import of an archive with no database counts its one attempt once.
+	 *
+	 * Nothing is replayed, so wp_options is untouched and the early count is still
+	 * standing. Adding another attempt on top would count the run twice.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_import_of_an_archive_with_no_database_does_not_count_the_attempt_twice(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )->zeroOrMoreTimes();
+
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_stateful_counters_context( $options ),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'], 'One run, one attempt: nothing was replayed, so the early count was never lost.' );
+		$this->assertSame( 2, $options['pontifex_import_stats']['succeeded'] );
 	}
 }

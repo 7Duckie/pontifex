@@ -28,6 +28,7 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\NullProgressBar;
 use Pontifex\Cli\RollbackCommand;
+use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\HostCannotComply;
@@ -312,7 +313,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
 		$this->assertContains(
-			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			'Repaired 2 percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
 			$printed,
 			'The operator must be told, with the count, that the rollback repaired the safety archive.'
 		);
@@ -372,7 +373,7 @@ final class InvokeBranchesTest extends TestCase {
 
 		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $queries, 'An affected writer\'s archive must be repaired by the default wiring.' );
 		$this->assertContains(
-			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			'Repaired 2 percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
 			$printed
 		);
 	}
@@ -1146,5 +1147,332 @@ final class InvokeBranchesTest extends TestCase {
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
 		@rmdir( $path );
+	}
+
+	// -----------------------------------------------------------------
+	// The durable record: a rollback is written to the transfer history as
+	// its own operation kind, so it can be read back as the last thing that
+	// rewrote the site.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A successful rollback is recorded after the cache flush, with no relink and no recovery keys.
+	 *
+	 * The replay leaves a stale option cache that would swallow a write into the
+	 * just-replaced wp_options, so the flush must come first. The size recorded is the
+	 * safety archive's, the same figure the rollback counters hold.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_a_successful_rollback_in_the_history_after_the_flush(): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Giving the placeholder safety archive a known, non-zero size; the injected engine stands in for reading it.
+		file_put_contents( $this->temp_archive_path, 'x' );
+
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function ( $source, ?callable $on_entry = null ): void {
+				unset( $source );
+				if ( null !== $on_entry ) {
+					$on_entry( 1, 6 );
+				}
+			}
+		);
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$events  = array();
+		$history = array();
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->history_capturing_context( $events, $history ) );
+		$command( array(), array( 'yes' => true ) );
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The history must be written after the cache flush, never before it.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'rollback', $history[0]['operation'] );
+		$this->assertSame( 'succeeded', $history[0]['outcome'] );
+		$this->assertSame( 1, $history[0]['bytes'] );
+		$this->assertSame(
+			array(
+				'entries'          => 6,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+			),
+			$history[0]['details'],
+			'A rollback has no relink and no recovery of its own, so neither key is written.'
+		);
+	}
+
+	/**
+	 * A rollback records the links it skipped, read from the real engine's own ledger.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_how_many_symlinks_a_rollback_skipped(): void {
+		self::write_archive_with_plans(
+			$this->temp_archive_path,
+			array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) )
+		);
+
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_root   = sys_get_temp_dir() . '/pontifex-rollback-invoke-history-' . bin2hex( random_bytes( 8 ) );
+		$restore_runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $restore_root, false, null, null, null, null, true ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$printed = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		$events  = array();
+		$history = array();
+
+		try {
+			$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->history_capturing_context( $events, $history ) );
+			$command( array(), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 1, $history[0]['details']['skipped_links'] );
+	}
+
+	/**
+	 * A failed rollback is recorded as a failed rollback, with no recovery key.
+	 *
+	 * A rollback has no recovery of its own: a failure part-way may leave the site
+	 * partly rolled back, and the record does not pretend otherwise by naming one.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_records_a_failed_rollback_in_the_history(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andThrow( new HostCannotComply( 'the database refused the write' ) );
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$events  = array();
+		$history = array();
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->history_capturing_context( $events, $history ) );
+		$command( array(), array( 'yes' => true ) );
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The replay may have replaced wp_options, so the cache is flushed before the history is written.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'rollback', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['bytes'] );
+		$this->assertSame( array( 'entries' => 0 ), $history[0]['details'] );
+		$this->assertArrayNotHasKey( 'recovery', $history[0]['details'], 'A rollback has no recovery of its own, so no label is invented for one.' );
+	}
+
+	/**
+	 * A dry run changes nothing, so it records nothing — not in the counters, not in the history.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_dry_run_records_nothing_in_the_history(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'verify' )->once();
+		$restore_runner->shouldNotReceive( 'restore' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$events  = array();
+		$history = array();
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->history_capturing_context( $events, $history ) );
+		$command( array(), array( 'dry-run' => true ) );
+
+		$this->assertSame( array(), $events );
+		$this->assertSame( array(), $history );
+	}
+
+	/**
+	 * A WordPressContext mock that records, in order, the cache flushes and the transfer-history writes.
+	 *
+	 * Only a write to the history option is captured; the counters' writes are
+	 * accepted and ignored.
+	 *
+	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' for each cache flush and 'history' for each history write, in the order they happen.
+	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function history_capturing_context( array &$events, array &$history ) {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) {
+				unset( $name );
+				return $fallback;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' )->andReturnUsing(
+			static function () use ( &$events ): void {
+				$events[] = 'flush';
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$events, &$history ): void {
+				if ( TransferHistory::OPTION === $name ) {
+					$events[] = 'history';
+					$history  = $value;
+				}
+			}
+		);
+		return $context;
+	}
+
+	/**
+	 * A rollback that repaired exactly one marker says "percent sign", not "percent signs".
+	 *
+	 * @return void
+	 */
+	public function test_invoke_uses_the_singular_when_a_rollback_repaired_one_marker(): void {
+		$m = self::frozen_marker();
+		self::write_archive_with_plans(
+			$this->temp_archive_path,
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname');\n" ) )
+		);
+
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$db           = new FakeDbAdapter();
+		$restore_root = sys_get_temp_dir() . '/pontifex-rollback-invoke-singular-' . bin2hex( random_bytes( 8 ) );
+		$printed      = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = $this->build_command( $store, self::build_repairing_restore_runner( $db, $restore_root ), new NullLogger() );
+			$command( array(), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertContains(
+			'Repaired 1 percent sign that an older version of Pontifex had written as a long marker when this backup was taken.',
+			$printed
+		);
+	}
+
+	// -----------------------------------------------------------------
+	// The attempt counter. A rollback counts its attempt in the same write
+	// as its outcome, after the replay, so a replay that rebuilds wp_options
+	// cannot leave it behind: these tests pin that, so it stays true.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A successful rollback leaves attempted covering succeeded plus failed, even though the replay rebuilt the counters.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_rollback_keeps_the_attempt_covered(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$options        = array( 'pontifex_rollback_stats' => self::rollback_stats( 2, 1, 1 ) );
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options ): void {
+				$options['pontifex_rollback_stats'] = self::rollback_stats( 2, 1, 1 );
+			}
+		);
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->stateful_counters_context( $options ) );
+		$command( array(), array( 'yes' => true ) );
+
+		$stats = $options['pontifex_rollback_stats'];
+		$this->assertGreaterThanOrEqual( $stats['succeeded'] + $stats['failed'], $stats['attempted'] );
+		$this->assertSame( 3, $stats['attempted'] );
+		$this->assertSame( 2, $stats['succeeded'] );
+	}
+
+	/**
+	 * A failed rollback leaves attempted covering succeeded plus failed, even though the replay rebuilt the counters.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_rollback_keeps_the_attempt_covered(): void {
+		$store = Mockery::mock( RollbackStoreInterface::class );
+		$store->shouldReceive( 'most_recent' )->once()->andReturn( $this->temp_archive_path );
+
+		$options        = array( 'pontifex_rollback_stats' => self::rollback_stats( 2, 1, 1 ) );
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options ): void {
+				$options['pontifex_rollback_stats'] = self::rollback_stats( 2, 1, 1 );
+				throw new HostCannotComply( 'the database refused the write' );
+			}
+		);
+
+		$printed = array();
+		$wp_cli  = $this->mock_wp_cli_capturing_output( $printed );
+		$wp_cli->shouldReceive( 'halt' )->once()->with( 1 );
+
+		$command = $this->build_command( $store, $restore_runner, new NullLogger(), $this->stateful_counters_context( $options ) );
+		$command( array(), array( 'yes' => true ) );
+
+		$stats = $options['pontifex_rollback_stats'];
+		$this->assertGreaterThanOrEqual( $stats['succeeded'] + $stats['failed'], $stats['attempted'] );
+		$this->assertSame( 3, $stats['attempted'] );
+		$this->assertSame( 2, $stats['failed'] );
+	}
+
+	/**
+	 * A set of rollback counters.
+	 *
+	 * @param int $attempted How many runs were counted as attempted.
+	 * @param int $succeeded How many succeeded.
+	 * @param int $failed    How many failed.
+	 * @return array<string, int>
+	 */
+	private static function rollback_stats( int $attempted, int $succeeded, int $failed ): array {
+		return array(
+			'attempted'         => $attempted,
+			'succeeded'         => $succeeded,
+			'failed'            => $failed,
+			'bytes_rolled_back' => 0,
+		);
+	}
+
+	/**
+	 * A WordPressContext mock that really holds options, so a "replay" in an engine double can replace them.
+	 *
+	 * @param array<string, mixed> $options Out-parameter. The stored options, by name; read and written through the context.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function stateful_counters_context( array &$options ) {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) use ( &$options ) {
+				return $options[ $name ] ?? $fallback;
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$options ): void {
+				$options[ $name ] = $value;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' );
+		return $context;
 	}
 }

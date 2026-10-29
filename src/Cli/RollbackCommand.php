@@ -74,8 +74,9 @@ final class RollbackCommand {
 	/**
 	 * The wp_options key holding the rollback counters (read by the admin Overview).
 	 *
-	 * A rollback is an undo, not a transfer, so it is counted separately from the
-	 * import counters and is not added to the transfer history.
+	 * A rollback is an undo, not an import, so it is counted separately from the
+	 * import counters. It IS written to the transfer history, as a 'rollback'
+	 * operation, so the last thing that rewrote the site can always be read back.
 	 *
 	 * @var string
 	 */
@@ -335,13 +336,27 @@ final class RollbackCommand {
 
 				// The rollback replayed the database with raw SQL, so flush WordPress's
 				// stale option cache before recording, or the counter write is lost
-				// (see RestoreController for the full rationale).
+				// (see RestoreController for the full rationale). The history record is
+				// written after the same flush, beside the counters. A rollback has no
+				// relink and no recovery of its own, so those keys are not written.
 				$this->wordpress_context->flush_cache();
 				$this->bump_counters(
 					array(
 						'attempted'         => 1,
 						'succeeded'         => 1,
 						'bytes_rolled_back' => $this->archive_size( $archive_path ),
+					)
+				);
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'succeeded',
+					$this->archive_size( $archive_path ),
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entry_total,
+						'repaired_markers' => $restore_runner instanceof RestoreRunner ? $restore_runner->repaired_marker_count() : 0,
+						'skipped_links'    => $restore_runner instanceof RestoreRunner ? count( $restore_runner->skipped_symlinks() ) : 0,
 					)
 				);
 			}
@@ -354,11 +369,24 @@ final class RollbackCommand {
 				)
 			);
 			if ( ! $dry_run ) {
+				// A rollback that failed part-way may already have replaced wp_options, leaving
+				// the option cache holding pre-replay values, so flush before the counters and
+				// the history record are written, as the success path does.
+				$this->wordpress_context->flush_cache();
 				$this->bump_counters(
 					array(
 						'attempted' => 1,
 						'failed'    => 1,
 					)
+				);
+				// A rollback has no recovery of its own, so there is no `recovery` key.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array( 'entries' => 0 )
 				);
 			}
 			$failure = $error;
@@ -615,7 +643,12 @@ final class RollbackCommand {
 		WP_CLI::log(
 			sprintf(
 				/* translators: %d: the number of percent signs put back */
-				__( 'Repaired %d percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.', 'pontifex' ),
+				_n(
+					'Repaired %d percent sign that an older version of Pontifex had written as a long marker when this backup was taken.',
+					'Repaired %d percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
+					$repaired,
+					'pontifex'
+				),
 				$repaired
 			)
 		);

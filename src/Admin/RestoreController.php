@@ -108,6 +108,17 @@ final class RestoreController {
 	private const PROGRESS_THROTTLE_SECONDS = 0.3;
 
 	/**
+	 * How long, in seconds, after it was recorded the last restore or rollback is still offered to a reloaded Restore screen (15 minutes).
+	 *
+	 * Long enough to cover signing back in after a restore, which resets the
+	 * session and reloads the page; short enough that an old outcome can never sit
+	 * in the place a live result appears.
+	 *
+	 * @var int
+	 */
+	private const LAST_OUTCOME_WINDOW = 900;
+
+	/**
 	 * Gate outcome: the archive passed and the operation may proceed.
 	 *
 	 * @var string
@@ -244,8 +255,9 @@ final class RestoreController {
 	/**
 	 * The wp_options key holding the rollback counters (mirrors RollbackCommand).
 	 *
-	 * A rollback is an undo, not a transfer, so it is counted separately from the
-	 * import counters and stays out of the transfer history.
+	 * A rollback is an undo, not an import, so it is counted separately from the
+	 * import counters. It IS written to the transfer history, as a 'rollback'
+	 * operation, so the last thing that rewrote the site can always be read back.
 	 *
 	 * @var string
 	 */
@@ -454,11 +466,39 @@ final class RestoreController {
 
 			// Phase 1: verify the backup as a gate. A broken backup is refused before
 			// the safety archive or any write — the whole point of previewing first.
+			//
+			// The attempt is counted NOW, before any work, so a run that is killed part-way
+			// still shows as attempted. A replay later rebuilds wp_options and can wipe this
+			// bump, so every outcome that follows a replay makes sure the attempt is still
+			// covered (see bump_counters()'s $cover_attempts); a gate refusal, which replays
+			// nothing, leaves it standing.
 			$this->bump_counters( array( 'attempted' => 1 ) );
 			$gate = $this->verify_gate( $runner, $source, $size );
 			if ( self::GATE_OK !== $gate ) {
 				$this->bump_counters( array( 'failed' => 1 ) );
-				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
+				// A record that can prove nothing was written: the gate runs before the safety
+				// archive is taken and before any replay, so a gate verdict means the site is
+				// unchanged, and the record says WHICH verdict it was (damaged, refused or
+				// could not be checked), because the three call for three different responses.
+				// That is what lets a screen avoid calling a stopped restore a failure that may
+				// have left the site half-changed. No replay has happened, so there is no stale
+				// cache and no flush is needed; the pre-bump above also still stands.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array(
+						'entries'          => 0,
+						'relinked'         => false,
+						'rows_rewritten'   => 0,
+						'repaired_markers' => 0,
+						'skipped_links'    => 0,
+						'recovery'         => TransferHistory::RECOVERY_NONE,
+						'gate'             => self::gate_history_label( $gate ),
+					)
+				);
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
@@ -543,17 +583,40 @@ final class RestoreController {
 				}
 
 				$this->finish( $source );
-				// The pre-restore `attempted` bump was wiped when the replay replaced
-				// wp_options, so re-apply it here alongside the success, keeping the
-				// Overview figures consistent (attempted >= succeeded).
+				// The pre-restore `attempted` bump is wiped when the replay replaces
+				// wp_options (and is not, for a backup that carries no database, since
+				// nothing is replayed), so make sure the attempt is still covered
+				// alongside the success rather than blindly adding another — see
+				// bump_counters()'s $cover_attempts — keeping the Overview figures
+				// consistent (attempted >= succeeded + failed) in both cases.
 				$this->bump_counters(
 					array(
-						'attempted'      => 1,
 						'succeeded'      => 1,
 						'bytes_imported' => $size,
+					),
+					self::STATS_OPTION,
+					'bytes_imported',
+					true
+				);
+				// The record carries the facts the screen can no longer deliver itself: a
+				// restore replaces the users and sessions tables, so this request's own
+				// response is usually unreadable by the time it arrives. Written after the
+				// flush above, for the same reason the counters are. Counts and flags only.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'succeeded',
+					$size,
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entries,
+						'relinked'         => null !== $migration,
+						'rows_rewritten'   => null !== $migration ? $migration->rows_changed() : 0,
+						'repaired_markers' => $repaired,
+						'skipped_links'    => $runner instanceof RestoreRunner ? count( $runner->skipped_symlinks() ) : 0,
+						'recovery'         => TransferHistory::RECOVERY_NONE,
 					)
 				);
-				TransferHistory::record( $this->wordpress_context, 'import', 'succeeded', $size, gmdate( 'c' ) );
 
 				wp_send_json_success(
 					array(
@@ -561,10 +624,23 @@ final class RestoreController {
 						'entries'  => $entries,
 						'message'  => ( null !== $migration
 							? sprintf(
-								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten */
-								__( 'Restored and relinked — %1$d entries (%2$s) written, then the backup\'s links were rewritten to this site across %3$d database rows.', 'pontifex' ),
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable */
+								_n(
+									'Restored and relinked — %1$d entry (%2$s) written.',
+									'Restored and relinked — %1$d entries (%2$s) written.',
+									$entries,
+									'pontifex'
+								),
 								$entries,
-								$this->wordpress_context->format_size( $size ),
+								$this->wordpress_context->format_size( $size )
+							) . ' ' . sprintf(
+								/* translators: %d: the number of database rows the link rewrite changed */
+								_n(
+									'The backup\'s links were rewritten across %d database row.',
+									'The backup\'s links were rewritten across %d database rows.',
+									$migration->rows_changed(),
+									'pontifex'
+								),
 								$migration->rows_changed()
 							)
 							: sprintf(
@@ -590,8 +666,32 @@ final class RestoreController {
 			$skipped_symlinks = array();
 			$recovery         = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner, $skipped_symlinks ) : null;
 
-			$this->bump_counters( array( 'failed' => 1 ) );
-			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
+			// The pre-bump above survives a successful recovery (the safety archive was taken
+			// after it, so replaying that archive restores it), but not a forward replay that
+			// cut over with no recovery to follow, nor a recovery that failed; and a failure
+			// that struck before the pre-bump counted no attempt at all. So the failure also
+			// makes sure the attempt is covered, which changes nothing when it already is.
+			$this->bump_counters( array( 'failed' => 1 ), self::STATS_OPTION, 'bytes_imported', true );
+			// Written AFTER the recovery above, never before it: recovery replays the safety
+			// archive, which replaces wp_options again and would wipe an earlier record. A
+			// failed restore wrote nothing that was kept, so the counts are zero; the
+			// repaired-marker count is zero too, because whatever the forward replay repaired
+			// was reverted along with it. The links are the ones the RECOVERY replay skipped.
+			TransferHistory::record(
+				$this->wordpress_context,
+				TransferHistory::OPERATION_IMPORT,
+				'failed',
+				0,
+				gmdate( 'c' ),
+				array(
+					'entries'          => 0,
+					'relinked'         => false,
+					'rows_rewritten'   => 0,
+					'repaired_markers' => 0,
+					'skipped_links'    => count( $skipped_symlinks ),
+					'recovery'         => self::recovery_history_label( $recovery ),
+				)
+			);
 			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovery, $skipped_symlinks ) ), 500 );
 		}
 	}
@@ -787,7 +887,12 @@ final class RestoreController {
 
 		return ' ' . sprintf(
 			/* translators: %d: the number of percent signs put back */
-			__( 'Repaired %d percent sign(s) that an older version of Pontifex had written as a long marker.', 'pontifex' ),
+			_n(
+				'Repaired %d percent sign that an older version of Pontifex had written as a long marker.',
+				'Repaired %d percent signs that an older version of Pontifex had written as a long marker.',
+				$repaired,
+				'pontifex'
+			),
 			$repaired
 		);
 	}
@@ -798,9 +903,10 @@ final class RestoreController {
 	 * The `wp_ajax_pontifex_rollback` handler. Refuses without capability and
 	 * nonce, finds the most recent safety archive (a clear message when there is
 	 * none), verifies it, then replays it. No new safety archive is taken — the
-	 * same as `wp pontifex rollback`. A rollback is an undo, not a transfer, so the
-	 * import counters and transfer history are left untouched; instead it bumps its
-	 * own rollback counters so the Overview shows rollback activity.
+	 * same as `wp pontifex rollback`. A rollback is an undo, not an import, so the
+	 * import counters are left untouched; it bumps its own rollback counters so the
+	 * Overview shows rollback activity, and records itself in the transfer history
+	 * as a 'rollback' so the last thing to rewrite the site can be read back.
 	 *
 	 * @return void
 	 */
@@ -849,6 +955,20 @@ final class RestoreController {
 					self::ROLLBACK_STATS_OPTION,
 					'bytes_rolled_back'
 				);
+				// Nothing was written, so there is no cache to flush and nothing to count. The
+				// gate is the same verify_gate() restore() uses, so it yields the same three
+				// verdicts, and the record names which one stopped the rollback.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array(
+						'entries' => 0,
+						'gate'    => self::gate_history_label( $gate ),
+					)
+				);
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
@@ -894,7 +1014,10 @@ final class RestoreController {
 				// cache (see restore() for the full rationale) before anything reads it.
 				$this->wordpress_context->flush_cache();
 				// Record the rollback in its own counters — separate from the import
-				// transfer counters and history — so Overview shows rollback activity.
+				// counters — so Overview shows rollback activity, and in the transfer
+				// history beside them, after the flush above for the same reason. A
+				// rollback has no relink and no recovery of its own, so those keys are
+				// simply not written.
 				$this->bump_counters(
 					array(
 						'attempted'         => 1,
@@ -903,6 +1026,18 @@ final class RestoreController {
 					),
 					self::ROLLBACK_STATS_OPTION,
 					'bytes_rolled_back'
+				);
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'succeeded',
+					$size,
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entries,
+						'repaired_markers' => $repaired,
+						'skipped_links'    => count( $skipped_symlinks ),
+					)
 				);
 
 				$this->finish( $source );
@@ -922,6 +1057,10 @@ final class RestoreController {
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin rollback failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+			// A rollback that failed part-way may already have replaced wp_options, leaving the
+			// option cache holding pre-replay values, so flush before the counters and the
+			// history record are written (see restore() for the full rationale).
+			$this->wordpress_context->flush_cache();
 			$this->bump_counters(
 				array(
 					'attempted' => 1,
@@ -929,6 +1068,15 @@ final class RestoreController {
 				),
 				self::ROLLBACK_STATS_OPTION,
 				'bytes_rolled_back'
+			);
+			// A rollback has no recovery of its own, so there is no `recovery` key.
+			TransferHistory::record(
+				$this->wordpress_context,
+				TransferHistory::OPERATION_ROLLBACK,
+				'failed',
+				0,
+				gmdate( 'c' ),
+				array( 'entries' => 0 )
 			);
 			wp_send_json_error( array( 'message' => $this->rollback_failure_message() ), 500 );
 		}
@@ -954,6 +1102,14 @@ final class RestoreController {
 	 * restore or rollback runs. Returns the phase and the bytes processed against
 	 * the phase total, or the idle phase when none is recorded.
 	 *
+	 * When the phase is idle the response also carries a `last` key: null, or an
+	 * object with one `text` string describing the last restore or rollback while
+	 * it is still recent. That is what a reloaded page shows after a restore signed
+	 * the operator out, when the response to the request that ran it could not be
+	 * delivered. It is never sent while an operation is running, so it cannot sit
+	 * in the place a live result appears. It holds only counts, fixed labels and a
+	 * time, and is behind the same capability and nonce gate as the rest.
+	 *
 	 * @return void
 	 */
 	public function progress(): void {
@@ -966,12 +1122,54 @@ final class RestoreController {
 
 		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
 
-		wp_send_json_success(
-			array(
-				'phase'       => $phase,
-				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
-				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
-			)
+		$response = array(
+			'phase'       => $phase,
+			'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
+			'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
+		);
+		if ( self::PHASE_IDLE === $phase ) {
+			$response['last'] = $this->last_outcome();
+		}
+
+		wp_send_json_success( $response );
+	}
+
+	/**
+	 * The last restore or rollback, as one line of text, while it is still recent.
+	 *
+	 * Composed here in PHP, never in the page's script: the time it was recorded,
+	 * in the site's local time and in the same format the other admin screens use
+	 * (`wp_date( 'H:i \o\n d-m-Y' )`), followed by the sentence
+	 * {@see RestoreOutcome::summary()} writes. Null when nothing is recorded, when
+	 * the newest record is older than {@see self::LAST_OUTCOME_WINDOW}, or when the
+	 * record is too damaged to describe.
+	 *
+	 * @return array{text: string}|null The line, or null for nothing to show.
+	 */
+	private function last_outcome(): ?array {
+		$latest = RestoreOutcome::latest( $this->wordpress_context );
+		if ( null === $latest || ! $latest->is_recent( time(), self::LAST_OUTCOME_WINDOW ) ) {
+			return null;
+		}
+
+		$summary = $latest->summary();
+		if ( '' === $summary ) {
+			return null;
+		}
+
+		$recorded = strtotime( $latest->occurred_at() );
+		$when     = false !== $recorded ? wp_date( 'H:i \o\n d-m-Y', $recorded ) : false;
+		if ( false === $when ) {
+			return array( 'text' => $summary );
+		}
+
+		return array(
+			'text' => sprintf(
+				/* translators: 1: the time the last restore or rollback was recorded, e.g. "08:45 on 25-06-2026", 2: a sentence saying what it did */
+				__( '%1$s — %2$s', 'pontifex' ),
+				$when,
+				$summary
+			),
 		);
 	}
 
@@ -1565,6 +1763,54 @@ final class RestoreController {
 	}
 
 	/**
+	 * Translate this class's recovery outcome into the label the transfer history stores.
+	 *
+	 * The RECOVERY_* constants above are private and are not being widened, so the
+	 * durable record carries {@see TransferHistory}'s own canonical labels — that class
+	 * owns the stored vocabulary — and this is the one place the two meet. They hold
+	 * the same strings today; mapping through named constants, rather than handing the
+	 * value straight across, is what stops a later rename of either from silently
+	 * changing what is stored. Null (no recovery was attempted) and anything
+	 * unrecognised both map to {@see TransferHistory::RECOVERY_NONE}.
+	 *
+	 * @param string|null $recovery One of the RECOVERY_* constants, or null when no recovery was attempted.
+	 * @return string One of {@see TransferHistory}'s RECOVERY_* labels.
+	 */
+	private static function recovery_history_label( ?string $recovery ): string {
+		return match ( $recovery ) {
+			self::RECOVERY_PRECISE     => TransferHistory::RECOVERY_PRECISE,
+			self::RECOVERY_MERGE       => TransferHistory::RECOVERY_MERGE,
+			self::RECOVERY_MERGE_LINKS => TransferHistory::RECOVERY_MERGE_LINKS,
+			self::RECOVERY_FAILED      => TransferHistory::RECOVERY_FAILED,
+			default                    => TransferHistory::RECOVERY_NONE,
+		};
+	}
+
+	/**
+	 * Translate a verify-gate verdict into the label the transfer history stores.
+	 *
+	 * The GATE_* constants above are private, so the durable record carries
+	 * {@see TransferHistory}'s own canonical labels, and this is where the two meet,
+	 * exactly as {@see self::recovery_history_label()} does for recovery. The three
+	 * verdicts are kept apart on purpose — a damaged backup, an intact one a restore
+	 * will not accept, and a host that could not finish checking call for three
+	 * different responses — so the record keeps them apart too. GATE_OK is not a
+	 * verdict that stops anything and never reaches a record; it, and anything
+	 * unrecognised, map to {@see TransferHistory::GATE_NONE}.
+	 *
+	 * @param string $gate One of the GATE_* constants.
+	 * @return string One of {@see TransferHistory}'s GATE_* labels.
+	 */
+	private static function gate_history_label( string $gate ): string {
+		return match ( $gate ) {
+			self::GATE_BROKEN          => TransferHistory::GATE_BROKEN,
+			self::GATE_REFUSED         => TransferHistory::GATE_REFUSED,
+			self::GATE_COULD_NOT_CHECK => TransferHistory::GATE_COULD_NOT_CHECK,
+			default                    => TransferHistory::GATE_NONE,
+		};
+	}
+
+	/**
 	 * The message returned when a restore fails.
 	 *
 	 * The underlying error is recorded in the log; the operator sees a plain
@@ -1701,12 +1947,24 @@ final class RestoreController {
 	 * parameters so the same routine maintains both the import counters (default)
 	 * and the separate rollback counters.
 	 *
-	 * @param array<string, int> $delta     The amounts to add, keyed by counter name.
-	 * @param string             $option    The wp_options key to update. Defaults to the import counters.
-	 * @param string             $bytes_key The counter key holding the byte total. Defaults to bytes_imported.
+	 * With $cover_attempts true, the attempt counter is then raised, if it needs it,
+	 * to at least succeeded plus failed. A run counts its attempt before it does any
+	 * work, so that a run killed part-way still shows; but a database replay rebuilds
+	 * wp_options, which can wipe that early count, and the outcome that follows would
+	 * then leave `attempted` below `succeeded` plus `failed` — arithmetically
+	 * impossible, and enough to make the whole panel untrustworthy. Raising to a floor
+	 * rather than adding one more is deliberate: whether the early count survived
+	 * depends on what was replayed (a replay of the safety archive, taken after the
+	 * count, restores it; an archive with no database replays nothing), and adding one
+	 * blindly would double-count in exactly those cases.
+	 *
+	 * @param array<string, int> $delta          The amounts to add, keyed by counter name.
+	 * @param string             $option         The wp_options key to update. Defaults to the import counters.
+	 * @param string             $bytes_key      The counter key holding the byte total. Defaults to bytes_imported.
+	 * @param bool               $cover_attempts Whether to raise `attempted` to at least `succeeded` plus `failed` after the delta is applied. Default false.
 	 * @return void
 	 */
-	private function bump_counters( array $delta, string $option = self::STATS_OPTION, string $bytes_key = 'bytes_imported' ): void {
+	private function bump_counters( array $delta, string $option = self::STATS_OPTION, string $bytes_key = 'bytes_imported', bool $cover_attempts = false ): void {
 		$defaults = array(
 			'attempted' => 0,
 			'succeeded' => 0,
@@ -1720,6 +1978,10 @@ final class RestoreController {
 		$merged = array();
 		foreach ( array_keys( $defaults ) as $key ) {
 			$merged[ $key ] = $this->counter_int( $current, $key ) + $this->counter_int( $delta, $key );
+		}
+
+		if ( $cover_attempts ) {
+			$merged['attempted'] = max( $merged['attempted'], $merged['succeeded'] + $merged['failed'] );
 		}
 
 		$this->wordpress_context->save_option( $option, $merged );
