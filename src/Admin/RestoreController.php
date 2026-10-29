@@ -48,7 +48,10 @@ use Psr\Log\LoggerInterface;
  *  - {@see self::restore()} replays a chosen backup over the current site. It
  *    first verifies the backup (a preview gate — a broken backup is refused
  *    before anything is overwritten), then takes a pre-import safety archive, then
- *    restores. Same-URL only; cross-URL migration stays a CLI feature for now.
+ *    restores. A backup from another site can be relinked on the way in: the
+ *    screen's own checkbox rewrites the backup's recorded address to this site's,
+ *    which must be the address captured BEFORE the replay — see the note in
+ *    {@see self::restore()}'s phase 4.
  *  - {@see self::rollback()} restores the most recent safety archive — the undo
  *    for a destructive restore — after verifying it.
  *  - {@see self::progress()} returns the byte progress the running operation
@@ -468,12 +471,21 @@ final class RestoreController {
 				// For a relink restore, read the backup's own source URL before the
 				// restore consumes the stream; the rewrite runs on the restored database
 				// afterwards.
-				$migrator   = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
-				$source_url = '';
+				$migrator        = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
+				$source_url      = '';
+				$destination_url = '';
 				if ( null !== $migrator ) {
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream so source_url can re-read its provenance; not a WP_Filesystem operation.
 					rewind( $source );
 					$source_url = $migrator->source_url( $source );
+
+					// This site's own address, read HERE and nowhere later. The restore
+					// replays wp_options, so once it has run this site's recorded URL is the
+					// backup's, and flush_cache() below drops the cached copy of the correct
+					// value. Asking for it after the restore returns the archive's own URL,
+					// which turns the rewrite into migrate( A, A ): a no-op that reports
+					// success while the site carries on serving the old domain.
+					$destination_url = $this->wordpress_context->site_url();
 				}
 
 				// Phase 2: the pre-import safety archive (the undo), then phase 3: restore.
@@ -491,12 +503,29 @@ final class RestoreController {
 
 				// Phase 4 (relink only): rewrite the backup's own URL to this site's across
 				// the restored database, serialised-safe (ADR 0006). The target is always
-				// this destination — never a typed address — so a relinked site can only
-				// ever point at the address the operator is already looking at, and the
-				// site does not move, so no new login URL is needed.
-				$migration = null !== $migrator
-					? $migrator->migrate( $source_url, $this->wordpress_context->site_url() )
-					: null;
+				// this destination — never a typed address — and it is the address captured
+				// BEFORE the restore ($destination_url above), not one read now: the replay
+				// has just overwritten this site's recorded URL with the backup's, so asking
+				// the site for its address at this point would return the archive's own URL
+				// and the rewrite would change nothing. The site does not move, so no new
+				// login URL is needed.
+				//
+				// Two cases have nothing to rewrite and are skipped rather than run: a
+				// backup recording no source URL has nothing to rewrite FROM, and one whose
+				// recorded URL is already this site's has nothing to rewrite TO.
+				$migration = null;
+				if ( null !== $migrator ) {
+					if ( '' === $source_url ) {
+						$this->logger->info( 'Admin restore: the backup records no source URL, so there was nothing to relink and no rewrite was run.' );
+					} elseif ( ArchiveFacts::is_same_site( $source_url, $destination_url ) ) {
+						$this->logger->info(
+							'Admin restore: the backup was taken at this site\'s own address, so no rewrite was needed.',
+							array( 'site_url' => $destination_url )
+						);
+					} else {
+						$migration = $migrator->migrate( $source_url, $destination_url );
+					}
+				}
 
 				$this->finish( $source );
 				// The pre-restore `attempted` bump was wiped when the replay replaced

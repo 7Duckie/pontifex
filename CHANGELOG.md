@@ -16,6 +16,30 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **Ticking "this backup came from another site" on the Restore screen did
+  nothing, so a migrated site kept serving the old domain and sent you to a
+  login page on the old host.** The restore completed and the screen reported
+  "Restored and relinked", but the links in your database had not been
+  rewritten to your new address. They had been rewritten from the old address
+  to the old address.
+
+  The cause was the order of two reads. The address the links should be
+  rewritten *to* is this site's own, and Pontifex looked it up *after* the
+  restore had run. A restore replays the whole database, including the setting
+  that records the site's address, so by then this site's recorded address was
+  the backup's. Pontifex read it back, found the old domain, and replaced the
+  old domain with itself: nothing changed, and nothing said that nothing had.
+
+  This site's address is now read **before** anything is written, while it is
+  still the destination's own, and that is what the rewrite targets. A backup
+  whose recorded address is already this site's now skips the rewrite and
+  reports an ordinary restore, instead of a relink that did no work; the
+  reason is written to the Pontifex log.
+
+  **`wp pontifex import --new-url` was never affected.** It takes the address
+  you give it before the restore starts, so a command-line migration was
+  correct throughout. Only the Restore screen's checkbox was wrong.
+
 - **A site with an ordinary absolute symbolic link under `wp-content` could
   not be recovered after a failed restore, and the remedy the failure message
   named failed for the same reason.** An absolute link target — something like
