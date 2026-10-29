@@ -378,6 +378,22 @@ restore built itself. A semicolon outside a quoted span is refused. After a
 inside a matched `INSERT`'s `VALUES` — a scalar subquery and `LOAD_FILE()` —
 remain open by design and are documented rather than hidden.
 
+**Placeholder-marker repair** (ADR 0025): a chunk's payload is split into
+statements, each statement's leading table identifier is rewritten, and each
+`INSERT` then has any WordPress placeholder marker — a brace, 64 hexadecimal
+characters, a brace — replaced with the `%` it was written in place of. Only
+then does the containment check above run, so the statements validated are
+byte for byte the statements executed. `DROP` and `CREATE` are not repaired:
+`SHOW CREATE TABLE` output is copied verbatim and identifiers are built by
+doubling backticks, so only a row value can ever carry a marker. The repair
+applies only to archives whose recorded exporter is Pontifex at a version that
+wrote the marker, never to another writer's archive. The number of **percent
+signs** repaired — not values, since one value can hold several — is reported by
+`wp pontifex import`, `wp pontifex rollback` and the Restore screen, including
+its Rollback button; the automatic recovery replays repair without reporting, by
+decision. `verify` does not repair: it changes nothing, and answers for the
+archive as stored.
+
 ---
 
 ## 6. Integrity, encryption and signing

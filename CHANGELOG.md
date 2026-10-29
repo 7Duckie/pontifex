@@ -16,6 +16,45 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **Restoring a backup damaged every value containing a percent sign, which
+  broke your permalinks and silently threw away any plugin or theme setting
+  that happened to contain one.** A site whose permalinks were
+  `/%year%/%monthnum%/%day%/%postname%/` came back from a restore with every
+  link replaced by sixty-six characters of gibberish, and the restore reported
+  success. Checking the backup with `wp pontifex verify` called it sound,
+  correctly — the damage was in the data the backup carried, and every
+  fingerprint matched it.
+
+  WordPress's own escaping function, used when writing the database into a
+  backup, does not only make a value safe to store: it also swaps every percent
+  sign for a long marker of its own, and swaps it back when the statement runs.
+  That works because both halves happen in the same page request. Pontifex
+  wrote the escaped statement into the backup file, so the marker was frozen
+  into it, and at restore a different request removed a different marker and
+  left the frozen one behind as ordinary text.
+
+  Settings stored the way WordPress stores them — with each piece of text
+  recording its own length — fared worst. A setting reading `Hello %name%, you
+  are 50% done` came back far longer than its recorded length claimed, so
+  WordPress could no longer read it and **the setting reverted to nothing at
+  all**, with nothing reporting it.
+
+  Backups now record a plain percent sign, as they always should have.
+
+- **A restore repairs backups that were written with the damage above.** The
+  fix to the writing side cannot help a backup you already hold, because the
+  marker is inside the file. So a restore now puts the percent signs back,
+  and it tells you how many percent signs it repaired, both on the terminal and
+  on the Restore screen. It does this only for backups written by a Pontifex
+  version that had the defect, and never for an archive written by another
+  tool, where a value of that shape would be real data.
+
+  **A site that was already restored before this release stays damaged until
+  it is restored again.** The repair happens when a backup is replayed, so it
+  cannot reach a database on its own. If your permalinks or a plugin's
+  settings broke after a restore, restoring the same backup again now puts
+  them right.
+
 - **Ticking "this backup came from another site" on the Restore screen did
   nothing, so a migrated site kept serving the old domain and sent you to a
   login page on the old host.** The restore completed and the screen reported
