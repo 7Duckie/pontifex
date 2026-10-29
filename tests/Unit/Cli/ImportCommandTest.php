@@ -246,6 +246,7 @@ final class ImportCommandTest extends TestCase {
 		$mock = Mockery::mock( WordPressContext::class );
 		$mock->shouldReceive( 'option_value' )->andReturn( array() );
 		$mock->shouldReceive( 'save_option' )->zeroOrMoreTimes();
+		$mock->shouldReceive( 'flush_cache' )->zeroOrMoreTimes();
 		$mock->shouldReceive( 'format_size' )->andReturn( '0 B' );
 		$mock->shouldReceive( 'acquire_named_lock' )->andReturn( true );
 		$mock->shouldReceive( 'release_named_lock' );

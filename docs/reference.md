@@ -279,6 +279,15 @@ export's own upload — rather than a false "nothing was pruned".
 `doctor` reports environment readiness (no flags). `stats` takes `--format`.
 `diagnostics` takes `--output` and produces a redacted support bundle.
 
+`stats`'s recent-transfers list covers exports, imports and — since ADR 0026 —
+rollbacks, which previously left no trace in it. An import or rollback entry
+also carries a small set of counts describing what it did (entries written,
+rows a relink changed, percent signs repaired, symbolic links skipped, the
+recovery verdict, and the pre-restore check's verdict when it stopped there).
+Those counts are what the admin screens read, and the machine formats are
+unchanged: the detail is carried in the stored history, not added to the
+`--format` output.
+
 ---
 
 ## 3. Archive format
@@ -377,6 +386,22 @@ restore built itself. A semicolon outside a quoted span is refused. After a
 `CREATE`, the catalogue is asked what was actually built. Two read channels
 inside a matched `INSERT`'s `VALUES` — a scalar subquery and `LOAD_FILE()` —
 remain open by design and are documented rather than hidden.
+
+**Placeholder-marker repair** (ADR 0025): a chunk's payload is split into
+statements, each statement's leading table identifier is rewritten, and each
+`INSERT` then has any WordPress placeholder marker — a brace, 64 hexadecimal
+characters, a brace — replaced with the `%` it was written in place of. Only
+then does the containment check above run, so the statements validated are
+byte for byte the statements executed. `DROP` and `CREATE` are not repaired:
+`SHOW CREATE TABLE` output is copied verbatim and identifiers are built by
+doubling backticks, so only a row value can ever carry a marker. The repair
+applies only to archives whose recorded exporter is Pontifex at a version that
+wrote the marker, never to another writer's archive. The number of **percent
+signs** repaired — not values, since one value can hold several — is reported by
+`wp pontifex import`, `wp pontifex rollback` and the Restore screen, including
+its Rollback button; the automatic recovery replays repair without reporting, by
+decision. `verify` does not repair: it changes nothing, and answers for the
+archive as stored.
 
 ---
 

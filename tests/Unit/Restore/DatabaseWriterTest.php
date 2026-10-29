@@ -2973,6 +2973,461 @@ final class DatabaseWriterTest extends TestCase {
 		$writer->write_entry( self::db_chunk_result( 't', 1, "CREATE TABLE `t` (id INT);\n" ) );
 	}
 
+	// -----------------------------------------------------------------
+	// Placeholder-marker repair: archives written by Pontifex 1.1.0 or earlier.
+	//
+	// WordPress's wpdb::_real_escape() swaps every percent sign for a per-request
+	// marker (a brace, 64 lowercase hex digits, a brace) that wpdb::query() strips
+	// again as it runs. Those versions wrote the statement into the archive with
+	// the marker still in it, so a restore put the marker into the database as
+	// literal text. DatabaseWriter, constructed with the repair flag on, turns each
+	// marker back into a percent sign as it replays — see PlaceholderMarkerRepair,
+	// whose own tests cover the replacement and the version gate.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A marker as an affected export froze it into an archive.
+	 *
+	 * @return string A brace, 64 lowercase hexadecimal characters, a brace.
+	 */
+	private static function frozen_marker(): string {
+		return '{' . str_repeat( '0123456789abcdef', 4 ) . '}';
+	}
+
+	/**
+	 * Assert that a single-statement chunk is refused whole, with the repair ON, before anything executes.
+	 *
+	 * The repair-on sibling of {@see self::assert_single_statement_chunk_refused()}:
+	 * the containment checks must bite exactly as hard on a writer that is
+	 * repairing markers as on one that is not.
+	 *
+	 * @param string $sql The single SQL statement, terminated with ";\n".
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if write_entry() failed to throw (see the catch block below); never swallowed.
+	 */
+	private static function assert_single_statement_chunk_refused_with_repair_on( string $sql ): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+
+		try {
+			$writer->write_entry( self::db_chunk_result( 't', 1, $sql ) );
+			self::fail( 'write_entry() should have refused this statement with the repair on: ' . $sql );
+		} catch ( AssertionFailedError $bug ) {
+			// See test_failed_rename_leaves_staging_for_abort() above for why this
+			// rethrow must run before the RuntimeException catch below.
+			throw $bug;
+		} catch ( RuntimeException $refusal ) {
+			unset( $refusal ); // The refusal is expected; only its effect matters here.
+		}
+
+		self::assertSame( array(), $adapter->executed_statements(), 'A refused chunk must execute nothing.' );
+	}
+
+	/**
+	 * Run a short PHP script in a child process whose PCRE engine is made to fail every match.
+	 *
+	 * In a fresh process started with the JIT off and a backtrack limit of 1, any
+	 * pattern PHP compiles runs on the interpreter and fails on its first match.
+	 * It has to be a child process: PHP caches each compiled pattern with its JIT
+	 * decision, and a JIT-compiled pattern as simple as the marker's matched
+	 * happily with the backtrack limit at 1 when measured, so neither `ini_set()`
+	 * nor the order the tests ran in can be relied on to fail it in this process.
+	 *
+	 * @param string $body         PHP statements to run, after the autoloader is loaded. Must `echo` what the test asserts on, and may read $argv[2] onwards for the arguments below.
+	 * @param string ...$arguments Values handed to the script as $argv[2], $argv[3] and so on; $argv[1] is always the autoloader's path.
+	 * @return string Everything the child printed, standard error included.
+	 */
+	private static function run_with_failing_pcre_in_a_child_process( string $body, string ...$arguments ): string {
+		$script = 'require $argv[1];' . $body;
+		$output = array();
+		$status = 0;
+
+		$command = escapeshellarg( PHP_BINARY ) . ' -d pcre.jit=0 -d pcre.backtrack_limit=1 -r ' . escapeshellarg( $script ) . ' -- ' . escapeshellarg( dirname( __DIR__, 3 ) . '/vendor/autoload.php' );
+		foreach ( $arguments as $argument ) {
+			$command .= ' ' . escapeshellarg( $argument );
+		}
+
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec -- Starting a child PHP process is the only deterministic way to run without the PCRE JIT; the command is built from PHP_BINARY and values this test wrote, each passed through escapeshellarg(), with no external input.
+		exec( $command . ' 2>&1', $output, $status );
+		$printed = implode( "\n", $output );
+
+		self::assertSame( 0, $status, 'The child process must run cleanly; it printed: ' . $printed );
+
+		return $printed;
+	}
+
+	/**
+	 * With the repair on, a marker in an INSERT is executed as a literal percent sign.
+	 *
+	 * The shape of a real permalink setting, which is the first thing an affected
+	 * restore visibly breaks.
+	 *
+	 * @return void
+	 */
+	public function test_a_marker_in_an_insert_is_executed_as_a_literal_percent_sign_when_the_repair_is_on(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/{$m}postname{$m}/');\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$this->assertSame(
+			array( "INSERT INTO `pontifexstg_wp_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/%postname%/')" ),
+			$adapter->executed_statements()
+		);
+		$this->assertSame( 2, $writer->repaired_marker_count() );
+	}
+
+	/**
+	 * With the repair off — by default, or explicitly — the same chunk is executed untouched.
+	 *
+	 * A writer that is not told the archive is affected must not rewrite a byte
+	 * of it, or a current archive's data of this shape would be altered, and a
+	 * verify or a restore of a clean archive would stop meaning what it says.
+	 *
+	 * @return void
+	 */
+	public function test_the_same_chunk_is_executed_untouched_when_the_repair_is_off(): void {
+		$m   = self::frozen_marker();
+		$sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/{$m}postname{$m}/');\n";
+
+		$by_default = new FakeDbAdapter();
+		$default    = new DatabaseWriter( $by_default );
+		$default->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$explicit_off = new FakeDbAdapter();
+		$explicit     = new DatabaseWriter( $explicit_off, '', '', false );
+		$explicit->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$expected = array( "INSERT INTO `pontifexstg_wp_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/{$m}postname{$m}/')" );
+		$this->assertSame( $expected, $by_default->executed_statements(), 'The default must leave the statement exactly as the archive holds it.' );
+		$this->assertSame( $expected, $explicit_off->executed_statements(), 'An explicit false must leave the statement exactly as the archive holds it.' );
+		$this->assertSame( 0, $default->repaired_marker_count() );
+		$this->assertSame( 0, $explicit->repaired_marker_count() );
+	}
+
+	/**
+	 * A marker-shaped run of text in a CREATE TABLE statement is deliberately left alone.
+	 *
+	 * Only a row value can carry a marker. The exporter's CREATE text is copied
+	 * verbatim from SHOW CREATE TABLE and never passes through the escaping that
+	 * makes them, so a marker-shaped default or comment in a schema is real schema
+	 * text: repairing it could only ever be a false positive. Asserted rather than
+	 * left implicit, so that widening the repair to schema text has to be a
+	 * conscious change that fails this test first.
+	 *
+	 * @return void
+	 */
+	public function test_a_marker_shaped_value_in_a_create_tables_default_is_deliberately_left_alone(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "CREATE TABLE `t` (`ratio` varchar(80) DEFAULT '50{$m}') ENGINE=InnoDB COMMENT='{$m}';\n";
+
+		$writer->write_entry( self::db_chunk_result( 't', 1, $sql ) );
+
+		$this->assertSame(
+			array( "CREATE TABLE `pontifexstg_t` (`ratio` varchar(80) DEFAULT '50{$m}') ENGINE=InnoDB COMMENT='{$m}'" ),
+			$adapter->executed_statements(),
+			'Schema text must reach the database exactly as the archive holds it, even with the repair on.'
+		);
+		$this->assertSame( 0, $writer->repaired_marker_count(), 'Nothing in a schema statement is repaired, so nothing is counted.' );
+	}
+
+	/**
+	 * In a multi-statement chunk only the INSERT statements are repaired, and only the ones that carry a marker change.
+	 *
+	 * The CREATE at the head of the chunk holds a marker-shaped default and is left
+	 * exactly as it came; the INSERTs after it are repaired where they carry a
+	 * marker and untouched where they do not.
+	 *
+	 * @return void
+	 */
+	public function test_only_the_insert_statements_in_a_chunk_are_repaired(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "CREATE TABLE `wp_posts` (`id` int, `ratio` varchar(80) DEFAULT '{$m}');\n"
+				. "INSERT INTO `wp_posts` VALUES (1, 'plain');\n"
+				. "INSERT INTO `wp_posts` VALUES (2, '100{$m}');\n"
+				. "INSERT INTO `wp_posts` VALUES (3, '{$m}{$m}');\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 4, $sql ) );
+
+		$this->assertSame(
+			array(
+				"CREATE TABLE `pontifexstg_wp_posts` (`id` int, `ratio` varchar(80) DEFAULT '{$m}')",
+				"INSERT INTO `pontifexstg_wp_posts` VALUES (1, 'plain')",
+				"INSERT INTO `pontifexstg_wp_posts` VALUES (2, '100%')",
+				"INSERT INTO `pontifexstg_wp_posts` VALUES (3, '%%')",
+			),
+			$adapter->executed_statements()
+		);
+		$this->assertSame( 3, $writer->repaired_marker_count(), 'Only the INSERT markers are counted; the CREATE default is not.' );
+	}
+
+	/**
+	 * The repaired-marker count accumulates across chunks.
+	 *
+	 * @return void
+	 */
+	public function test_the_repaired_marker_count_accumulates_across_chunks(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+
+		$this->assertSame( 0, $writer->repaired_marker_count(), 'Nothing is repaired before anything is written.' );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('a{$m}');\n" ) );
+		$this->assertSame( 1, $writer->repaired_marker_count() );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 2, "INSERT INTO `wp_posts` VALUES ('b{$m}{$m}');\nINSERT INTO `wp_posts` VALUES ('c{$m}');\n" ) );
+		$this->assertSame( 4, $writer->repaired_marker_count() );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_posts', 1, "INSERT INTO `wp_posts` VALUES ('no marker here');\n", 1 ) );
+		$this->assertSame( 4, $writer->repaired_marker_count(), 'A chunk with nothing to repair must leave the total alone.' );
+	}
+
+	/**
+	 * Beginning a restore starts the tally from zero.
+	 *
+	 * The writer may be reused for another restore once the first closes, and the
+	 * count it reports must describe the restore in hand, not the one before it.
+	 *
+	 * @return void
+	 */
+	public function test_beginning_a_restore_starts_the_repaired_marker_count_again_from_zero(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+
+		$writer->begin_staging();
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('a{$m}{$m}');\n" ) );
+		$writer->commit_staged_tables();
+		$this->assertSame( 2, $writer->repaired_marker_count() );
+
+		$writer->begin_staging();
+		$this->assertSame( 0, $writer->repaired_marker_count(), 'A second restore must not inherit the first one\'s repairs.' );
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('b{$m}');\n" ) );
+		$this->assertSame( 1, $writer->repaired_marker_count() );
+	}
+
+	/**
+	 * A chunk with no marker passes through a repairing writer unchanged and counts nothing.
+	 *
+	 * The flag is the caller's judgement about the archive's version; a writer
+	 * told to repair must still touch only a real marker, never the braces and
+	 * percent signs that ordinary row data is full of.
+	 *
+	 * @return void
+	 */
+	public function test_a_clean_chunk_passes_through_a_repairing_writer_unchanged(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "INSERT INTO `wp_options` VALUES ('{\"key\": \"value\"}', 'LIKE 50%', 'a { color: red }');\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$this->assertSame(
+			array( "INSERT INTO `pontifexstg_wp_options` VALUES ('{\"key\": \"value\"}', 'LIKE 50%', 'a { color: red }')" ),
+			$adapter->executed_statements()
+		);
+		$this->assertSame( 0, $writer->repaired_marker_count() );
+	}
+
+	/**
+	 * A serialised value whose percent signs were frozen into markers unserialises again once repaired.
+	 *
+	 * The sharper half of the defect. A serialised string records its own byte
+	 * length, and that length was taken while the percent signs were still single
+	 * bytes; the markers made the text longer, so the recorded length no longer
+	 * described the value and the whole setting stopped unserialising — a plugin
+	 * silently reverting to its defaults, with nothing connecting it to the
+	 * restore. Replacing each marker with one percent sign restores the length.
+	 *
+	 * @return void
+	 */
+	public function test_a_serialised_value_unserialises_again_after_the_repair(): void {
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- Building the exact shape of a real WordPress option value, which is what this test is about.
+		$original = serialize( array( 'permalink_structure' => '/%year%/%postname%/' ) );
+		$frozen   = str_replace( '%', self::frozen_marker(), $original );
+
+		// Premise: the frozen text really is the corrupted form. The recorded length
+		// (s:NN:) was taken while each percent sign was one byte, so once the markers
+		// are in it no longer matches the text it describes — which is exactly what
+		// makes unserialize() refuse the value.
+		$this->assertSame( 1, preg_match( '/s:(\d+):"([^"]*)";\}\z/', $original, $clean_parts ) );
+		$this->assertSame( 1, preg_match( '/s:(\d+):"([^"]*)";\}\z/', $frozen, $frozen_parts ) );
+		$this->assertSame( (int) $clean_parts[1], strlen( $clean_parts[2] ), 'The original records its own length correctly.' );
+		$this->assertNotSame( (int) $frozen_parts[1], strlen( $frozen_parts[2] ), 'With the percent signs frozen into markers the recorded length no longer describes the value.' );
+
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "INSERT INTO `wp_options` (`option_value`) VALUES ('" . $frozen . "');\n";
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$executed = $adapter->executed_statements();
+		$start    = strpos( $executed[0], "('" );
+		$this->assertNotFalse( $start );
+		$value = substr( $executed[0], $start + 2, strrpos( $executed[0], "')" ) - $start - 2 );
+
+		$this->assertSame( $original, $value, 'The repaired bytes must be exactly the bytes before the corruption.' );
+		$this->assertSame(
+			array( 'permalink_structure' => '/%year%/%postname%/' ),
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize -- Asserting the repaired value unserialises again is the point of the test.
+			unserialize( $value )
+		);
+	}
+
+	/**
+	 * The repair and the cross-prefix rewrite apply to the same statement without disturbing each other.
+	 *
+	 * @return void
+	 */
+	public function test_the_repair_and_the_cross_prefix_rewrite_apply_to_the_same_statement(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, 'wp_', 'xyz_', true );
+		$sql     = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/{$m}postname{$m}/');\n";
+
+		$writer->write_entry( self::db_chunk_result( 'wp_options', 1, $sql ) );
+
+		$this->assertSame(
+			array( "INSERT INTO `pontifexstg_xyz_options` (`option_name`, `option_value`) VALUES ('permalink_structure', '/%postname%/')" ),
+			$adapter->executed_statements()
+		);
+		$this->assertSame( 2, $writer->repaired_marker_count() );
+	}
+
+	/**
+	 * An escaping backslash next to a marker survives the repair, so the statement still means what the export meant.
+	 *
+	 * The marker replaced a percent sign in the already-escaped text, so putting the
+	 * percent sign back reproduces what the escaping returned: an escaped quote or
+	 * an escaped backslash in front of it is untouched, and the quote the escaped
+	 * text carried still does not close the literal early.
+	 *
+	 * @return void
+	 */
+	public function test_escaping_next_to_a_marker_survives_the_repair(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "INSERT INTO `t` (`id`, `note`) VALUES (1, 'it\\'s {$m} and C:\\\\{$m}');\n";
+
+		$writer->write_entry( self::db_chunk_result( 't', 1, $sql ) );
+
+		$this->assertSame(
+			array( "INSERT INTO `pontifexstg_t` (`id`, `note`) VALUES (1, 'it\\'s % and C:\\\\%')" ),
+			$adapter->executed_statements()
+		);
+		$this->assertSame( 2, $writer->repaired_marker_count() );
+	}
+
+	/**
+	 * A repaired statement buys a stacked statement no cover: the whole chunk is refused before anything executes.
+	 *
+	 * The repair happens while the statements are being prepared, and every one is
+	 * checked before any one executes — so the benign, repaired INSERT first in this
+	 * chunk is not run ahead of the hostile UPDATE after it. Replacing a marker with
+	 * a percent sign cannot add a quote, a backslash or a semicolon, so it cannot
+	 * change what the checks conclude; this pins the ordering that makes that true
+	 * in practice (prepare, then validate everything, then execute).
+	 *
+	 * @return void
+	 * @throws AssertionFailedError Rethrown immediately if write_entry() failed to throw (see the catch block below); never swallowed.
+	 */
+	public function test_a_repaired_statement_buys_a_stacked_statement_no_cover(): void {
+		$m       = self::frozen_marker();
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter, '', '', true );
+		$sql     = "INSERT INTO `pontifexstg_t` VALUES ('50{$m}');\n"
+				. "UPDATE `wp_users` SET user_pass = 'x' WHERE ID = 1;\n";
+
+		try {
+			$writer->write_entry( self::db_chunk_result( 't', 2, $sql ) );
+			$this->fail( 'write_entry() should refuse a chunk carrying a trailing stacked statement, repaired or not.' );
+		} catch ( AssertionFailedError $bug ) {
+			// See test_failed_rename_leaves_staging_for_abort() above for why this
+			// rethrow must run before the RuntimeException catch below.
+			throw $bug;
+		} catch ( RuntimeException $refusal ) {
+			unset( $refusal ); // The refusal is expected; only its effect matters here.
+		}
+
+		$this->assertSame( array(), $adapter->executed_statements(), 'Neither statement may execute — including the repaired, legitimate-looking first one.' );
+	}
+
+	/**
+	 * A marker cannot be used to smuggle a second statement behind a sanctioned opening.
+	 *
+	 * Each of these carries a marker and a stacked statement after an otherwise
+	 * ordinary opening, for every separator that survives the ";\n" split; with the
+	 * repair on they must be refused exactly as without it.
+	 *
+	 * @return void
+	 */
+	public function test_a_marker_does_not_hide_a_stacked_statement_from_the_containment_check(): void {
+		$m       = self::frozen_marker();
+		$hostile = "UPDATE `wp_users` SET user_pass='x' WHERE ID=1";
+		foreach ( self::stacked_statement_separators() as $separator ) {
+			self::assert_single_statement_chunk_refused_with_repair_on( "INSERT INTO `pontifexstg_t` VALUES ('50{$m}')" . $separator . $hostile . ";\n" );
+			self::assert_single_statement_chunk_refused_with_repair_on( "CREATE TABLE `pontifexstg_t` (`a` varchar(8) DEFAULT '{$m}')" . $separator . $hostile . ";\n" );
+		}
+	}
+
+	/**
+	 * A marker does not turn a refused shape into an accepted one.
+	 *
+	 * @return void
+	 */
+	public function test_a_marker_does_not_make_an_unsanctioned_shape_acceptable(): void {
+		$m = self::frozen_marker();
+
+		self::assert_single_statement_chunk_refused_with_repair_on( "UPDATE `pontifexstg_t` SET note = '{$m}' WHERE ID = 1;\n" );
+		self::assert_single_statement_chunk_refused_with_repair_on( "DROP TABLE IF EXISTS `pontifexstg_t`{$m};\n" );
+		self::assert_single_statement_chunk_refused_with_repair_on( "INSERT INTO `pontifexstg_t` SELECT user_pass{$m} FROM `wp_users`;\n" );
+	}
+
+	/**
+	 * With the repair off no regular expression runs at all; with it on, an engine failure refuses the chunk whole.
+	 *
+	 * Both halves in a child process whose PCRE engine fails every match (see
+	 * {@see self::run_with_failing_pcre_in_a_child_process()}). A column-less
+	 * INSERT is used so that nothing else on the replay path runs a pattern: with
+	 * the repair off the chunk replays untouched, which can only be so if the
+	 * repair's own pattern was never run. With it on, the engine failure must
+	 * refuse the chunk before any statement executes, rather than replay a
+	 * statement nobody can say is repaired.
+	 *
+	 * @return void
+	 */
+	public function test_the_repair_runs_no_pattern_when_off_and_fails_closed_when_the_engine_fails_while_on(): void {
+		$sql = "INSERT INTO `t` VALUES ('50" . self::frozen_marker() . "');\n";
+
+		// $argv[2] is the SQL payload and $argv[3] is "1" to repair or "0" not to.
+		$body = '$adapter = new \\Pontifex\\Tests\\Unit\\Manifest\\Fakes\\FakeDbAdapter();'
+			. '$writer = new \\Pontifex\\Restore\\DatabaseWriter( $adapter, "", "", "1" === $argv[3] );'
+			. '$header = \\Pontifex\\Archive\\Format\\EntryHeader::for_db_chunk( 0, "t", 1, strlen( $argv[2] ), 0 );'
+			. 'try {'
+			. '$writer->write_entry( new \\Pontifex\\Archive\\Reader\\EntryReadResult( $header, $argv[2] ) );'
+			. 'echo "REPLAYED";'
+			. '} catch ( \\RuntimeException $failure ) {'
+			. 'echo "REFUSED:" . $failure->getMessage();'
+			. '}'
+			. 'echo "|EXECUTED:" . count( $adapter->executed_statements() );';
+
+		$off = self::run_with_failing_pcre_in_a_child_process( $body, $sql, '0' );
+		$this->assertSame( 'REPLAYED|EXECUTED:1', $off, 'With the repair off no pattern may run, so a failing engine must not matter.' );
+
+		$on = self::run_with_failing_pcre_in_a_child_process( $body, $sql, '1' );
+		$this->assertStringStartsWith( 'REFUSED:', $on, 'With the repair on, an engine failure must refuse the chunk.' );
+		$this->assertStringContainsString( 'regular-expression engine failed', $on );
+		$this->assertStringEndsWith( '|EXECUTED:0', $on, 'Nothing may execute when the repair could not be carried out.' );
+	}
+
 	/**
 	 * Open a php://memory stream holding the given bytes.
 	 *

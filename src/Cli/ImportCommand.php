@@ -35,6 +35,7 @@ use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Restore\SourceTablePrefix;
@@ -555,6 +556,10 @@ final class ImportCommand {
 				$this->print_dry_run_summary( $archive_path, $entry_total, $target_url );
 			} else {
 				$this->logger->info( 'Import started.', array( 'archive' => $archive_path ) );
+				// The attempt is counted NOW, before any work, so a run that is killed part-way
+				// still shows as attempted. A replay later rebuilds wp_options and can wipe this
+				// bump, so the outcome that follows a replay makes sure the attempt is still
+				// covered (see bump_counters()'s $cover_attempts).
 				$this->bump_counters( array( 'attempted' => 1 ) );
 
 				if ( ! $no_rollback ) {
@@ -565,8 +570,9 @@ final class ImportCommand {
 				$this->progress->finish();
 
 				// 6. With --new-url, migrate the restored database to the new URL.
+				$rows_rewritten = 0;
 				if ( null !== $url_migrator ) {
-					$this->run_migration( $url_migrator, $source_url, $target_url );
+					$rows_rewritten = $this->run_migration( $url_migrator, $source_url, $target_url );
 				}
 
 				$bytes_imported = $this->archive_size( $archive_path );
@@ -580,15 +586,37 @@ final class ImportCommand {
 					)
 				);
 
+				// The restore replayed the database with raw SQL, so WordPress's option cache
+				// still holds the pre-restore values. Flush before the counters and the history
+				// record are written, or the write can match zero rows in the just-replaced
+				// wp_options and be silently lost (see RestoreController for the full rationale).
+				$this->wordpress_context->flush_cache();
 				$this->bump_counters(
 					array(
 						'succeeded'      => 1,
 						'bytes_imported' => $bytes_imported,
+					),
+					true
+				);
+				// Counts and flags only. No `recovery` key: a successful import ran none, and
+				// an absent key already reads as "no recovery ran".
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'succeeded',
+					$bytes_imported,
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entry_total,
+						'relinked'         => null !== $url_migrator,
+						'rows_rewritten'   => $rows_rewritten,
+						'repaired_markers' => $restore_runner instanceof RestoreRunner ? $restore_runner->repaired_marker_count() : 0,
+						'skipped_links'    => $restore_runner instanceof RestoreRunner ? count( $restore_runner->skipped_symlinks() ) : 0,
 					)
 				);
-				TransferHistory::record( $this->wordpress_context, 'import', 'succeeded', $bytes_imported, gmdate( 'c' ) );
 
 				$this->print_summary( $archive_path, $entry_total, $bytes_imported );
+				$this->report_repaired_markers( $restore_runner );
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -598,10 +626,6 @@ final class ImportCommand {
 					'exception' => $error,
 				)
 			);
-			if ( ! $dry_run ) {
-				$this->bump_counters( array( 'failed' => 1 ) );
-				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			}
 
 			// Why it stopped, before what was done about it: the verdict names the
 			// failure, then the recovery warnings below report the site's state.
@@ -610,8 +634,11 @@ final class ImportCommand {
 			// If the safety archive was taken, the restore may have written part of the
 			// database, so replay it to return the site to its pre-import state before the
 			// command exits with the failure. When it was not taken the site was not changed.
+			// Both are declared here, not inside the block, so the failure record below can
+			// read them whether or not a safety archive was ever taken.
+			$skipped  = array();
+			$recovery = null;
 			if ( null !== $safety_path ) {
-				$skipped  = array();
 				$recovery = $this->recover_from_safety_archive( $safety_path, $allow_unsafe, $restore_runner, $skipped );
 				if ( self::RECOVERY_PRECISE === $recovery ) {
 					WP_CLI::warning( __( 'The import failed, so your site was automatically rolled back to its state before the import.', 'pontifex' ) );
@@ -626,6 +653,39 @@ final class ImportCommand {
 				} else {
 					WP_CLI::warning( __( 'The import failed and automatic recovery also failed — your site may be partially restored. Run `wp pontifex rollback`, or restore another backup.', 'pontifex' ) );
 				}
+			}
+
+			// The counter and the history record are written LAST, after the recovery, never
+			// before it. Recovery replays the safety archive, which replaces wp_options again,
+			// so anything written earlier is wiped along with the failed restore's leftovers:
+			// this command used to lose its failed counter and its history entry whenever a
+			// recovery succeeded. The cache is flushed first for the reason the success path
+			// flushes (the replay leaves it holding pre-replay values). The recovery label and
+			// the skipped-link count are the real ones, now that the recovery has happened.
+			if ( ! $dry_run ) {
+				$this->wordpress_context->flush_cache();
+				// A successful recovery restores the early attempt count (the safety archive
+				// was taken after it), but a forward replay that cut over with no recovery to
+				// follow, or a recovery that failed, does not; and a failure that struck before
+				// the early count (wiring the engine, say) counted no attempt at all. So the
+				// failure also makes sure the attempt is covered, which changes nothing when it
+				// already is.
+				$this->bump_counters( array( 'failed' => 1 ), true );
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array(
+						'entries'          => 0,
+						'relinked'         => false,
+						'rows_rewritten'   => 0,
+						'repaired_markers' => 0,
+						'skipped_links'    => count( $skipped ),
+						'recovery'         => self::recovery_history_label( $recovery ),
+					)
+				);
 			}
 
 			$failure = $error;
@@ -826,8 +886,15 @@ final class ImportCommand {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
+		// An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+		// place of every percent sign in its row values; the writer turns them back
+		// as it replays. Decided here from the archive's own recorded exporter, so
+		// the same archive is repaired whichever command restores it.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix, null, null, null, $replaying_safety_archive );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers );
 		return new RestoreRunner(
 			$entry_reader,
 			$file_writer,
@@ -1070,6 +1137,30 @@ final class ImportCommand {
 				count( $skipped_symlinks )
 			)
 		);
+	}
+
+	/**
+	 * Translate this class's recovery outcome into the label the transfer history stores.
+	 *
+	 * The RECOVERY_* constants above are private and are not being widened, so the
+	 * durable record carries {@see TransferHistory}'s own canonical labels — that
+	 * class owns the stored vocabulary — and this is the one place the two meet in
+	 * this class. They hold the same strings today; mapping through named constants,
+	 * rather than handing the value straight across, is what stops a later rename of
+	 * either from silently changing what is stored. Null (no recovery was attempted)
+	 * and anything unrecognised both map to {@see TransferHistory::RECOVERY_NONE}.
+	 *
+	 * @param string|null $recovery One of the RECOVERY_* constants, or null when no recovery was attempted.
+	 * @return string One of {@see TransferHistory}'s RECOVERY_* labels.
+	 */
+	private static function recovery_history_label( ?string $recovery ): string {
+		return match ( $recovery ) {
+			self::RECOVERY_PRECISE     => TransferHistory::RECOVERY_PRECISE,
+			self::RECOVERY_MERGE       => TransferHistory::RECOVERY_MERGE,
+			self::RECOVERY_MERGE_LINKS => TransferHistory::RECOVERY_MERGE_LINKS,
+			self::RECOVERY_FAILED      => TransferHistory::RECOVERY_FAILED,
+			default                    => TransferHistory::RECOVERY_NONE,
+		};
 	}
 
 	/**
@@ -1345,10 +1436,23 @@ final class ImportCommand {
 	 * merges the delta in, and writes it back. The arithmetic lives in
 	 * merge_counters so this method is only the I/O.
 	 *
-	 * @param array<string, int> $delta The amounts to add, keyed by counter name.
+	 * With $cover_attempts true, the attempt counter is then raised, if it needs
+	 * it, to at least succeeded plus failed. A run counts its attempt before it
+	 * does any work, so that a run killed part-way still shows; but a database
+	 * replay rebuilds wp_options, which can wipe that early count, and the outcome
+	 * that follows would then leave `attempted` below `succeeded` plus `failed` —
+	 * arithmetically impossible, and enough to make `wp pontifex stats` and the
+	 * Overview untrustworthy. Raising to a floor rather than adding one more is
+	 * deliberate: whether the early count survived depends on what was replayed (a
+	 * replay of the safety archive, taken after the count, restores it; an archive
+	 * with no database replays nothing), and adding one blindly would double-count
+	 * in exactly those cases.
+	 *
+	 * @param array<string, int> $delta          The amounts to add, keyed by counter name.
+	 * @param bool               $cover_attempts Whether to raise `attempted` to at least `succeeded` plus `failed` after the delta is applied. Default false.
 	 * @return void
 	 */
-	private function bump_counters( array $delta ): void {
+	private function bump_counters( array $delta, bool $cover_attempts = false ): void {
 		$current = $this->wordpress_context->option_value(
 			self::STATS_OPTION,
 			array(
@@ -1360,6 +1464,9 @@ final class ImportCommand {
 		);
 
 		$merged = self::merge_counters( is_array( $current ) ? $current : array(), $delta );
+		if ( $cover_attempts ) {
+			$merged['attempted'] = max( $merged['attempted'], $merged['succeeded'] + $merged['failed'] );
+		}
 		$this->wordpress_context->save_option( self::STATS_OPTION, $merged );
 	}
 
@@ -1421,10 +1528,10 @@ final class ImportCommand {
 	 * @param UrlMigratorInterface $url_migrator The migrator to run.
 	 * @param string               $source_url   The URL the archive was exported from.
 	 * @param string               $target_url   The new URL to migrate to.
-	 * @return void
+	 * @return int The number of database rows the rewrite changed.
 	 * @throws RuntimeException If the migration fails.
 	 */
-	private function run_migration( UrlMigratorInterface $url_migrator, string $source_url, string $target_url ): void {
+	private function run_migration( UrlMigratorInterface $url_migrator, string $source_url, string $target_url ): int {
 		$report = $url_migrator->migrate( $source_url, $target_url );
 
 		$this->logger->info(
@@ -1440,6 +1547,8 @@ final class ImportCommand {
 		);
 
 		$this->print_migration_summary( $source_url, $target_url, $report );
+
+		return $report->rows_changed();
 	}
 
 	/**
@@ -1472,6 +1581,47 @@ final class ImportCommand {
 				$report->rows_changed(),
 				count( $report->skipped_tables() ),
 				$report->skipped_values()
+			)
+		);
+	}
+
+	/**
+	 * Tell the operator, after their own restore, that an affected archive was repaired as it replayed.
+	 *
+	 * An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+	 * place of every percent sign in its row values, and the restore engine turns
+	 * them back as it replays (see {@see \Pontifex\Restore\PlaceholderMarkerRepair}).
+	 * That changes the bytes that reach the database, so it is never silent. It is
+	 * also never noise: nothing is printed when nothing was repaired, so an
+	 * ordinary restore of a current archive says nothing here, and nothing is
+	 * printed for a runner that is not the real engine (a test fake has no writer
+	 * to ask). Called only from the forward restore's success path — deliberately
+	 * not from the automatic recovery replay, where the messages are already
+	 * complex and a repair count is noise.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the completed restore.
+	 * @return void
+	 */
+	private function report_repaired_markers( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$repaired = $restore_runner->repaired_marker_count();
+		if ( $repaired < 1 ) {
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %d: the number of percent signs put back */
+				_n(
+					'Repaired %d percent sign that an older version of Pontifex had written as a long marker when this backup was taken.',
+					'Repaired %d percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
+					$repaired,
+					'pontifex'
+				),
+				$repaired
 			)
 		);
 	}

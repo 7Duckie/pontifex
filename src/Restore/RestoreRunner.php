@@ -279,6 +279,32 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	}
 
 	/**
+	 * How many frozen placeholder markers this run's DatabaseWriter has turned back into percent signs.
+	 *
+	 * Exposed for the same reason and to the same callers as
+	 * {@see self::skipped_symlinks()}: a command or controller that already holds
+	 * the wired runner can tell the operator, after a restore, that an archive
+	 * written by an affected version was repaired as it replayed (see
+	 * {@see PlaceholderMarkerRepair}). Deliberately NOT on
+	 * {@see RestoreRunnerInterface}, for the same reason: that contract is part of
+	 * the public API frozen at v1.0.0, and adding a method to an interface breaks
+	 * every implementer. A caller holding only the interface (a test fake, most
+	 * obviously) has nothing to ask — see each call site's own
+	 * `instanceof RestoreRunner` guard.
+	 *
+	 * Meaningful only after a restore() that completed. The tally is built as each
+	 * chunk's statements are prepared, before they execute, so a restore that
+	 * failed part-way can include a chunk that never ran; do not report it then.
+	 * Always zero unless the DatabaseWriter was built with the repair on, and zero
+	 * for an archive that held nothing to repair.
+	 *
+	 * @return int The number of markers replaced during the current restore. Each is one percent sign, so a single value holding several counts several times.
+	 */
+	public function repaired_marker_count(): int {
+		return $this->database_writer->repaired_marker_count();
+	}
+
+	/**
 	 * Read, verify, and write every entry from the archive stream.
 	 *
 	 * Opens an ArchiveReader around the source (which eagerly validates

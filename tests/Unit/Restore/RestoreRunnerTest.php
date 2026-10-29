@@ -1436,6 +1436,125 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------
+	// The repaired-marker count — what a command or controller reads to tell the
+	// operator that an archive written by an affected version was repaired.
+	// -------------------------------------------------------------------
+
+	/**
+	 * A frozen placeholder marker, as an affected export wrote it into an archive.
+	 *
+	 * @return string A brace, 64 lowercase hexadecimal characters, a brace.
+	 */
+	private static function frozen_marker(): string {
+		return '{' . str_repeat( '0123456789abcdef', 4 ) . '}';
+	}
+
+	/**
+	 * Build a RestoreRunner whose DatabaseWriter repairs frozen placeholder markers.
+	 *
+	 * @param FakeDbAdapter $db     The adapter the writer replays into.
+	 * @param bool          $repair Optional. Whether the writer repairs; default true.
+	 * @return RestoreRunner Ready to call restore() on.
+	 */
+	private function make_repairing_runner( FakeDbAdapter $db, bool $repair = true ): RestoreRunner {
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db, '', '', $repair )
+		);
+	}
+
+	/**
+	 * Before anything is restored, the runner reports nothing repaired.
+	 *
+	 * @return void
+	 */
+	public function test_the_repaired_marker_count_is_zero_before_any_restore(): void {
+		$this->assertSame( 0, $this->make_repairing_runner( new FakeDbAdapter() )->repaired_marker_count() );
+	}
+
+	/**
+	 * After restoring an archive written by an affected version, the runner reports every marker its writer repaired.
+	 *
+	 * The count is the writer's own, read through the runner, which is the only
+	 * object a command or controller holds. The statements that reached the
+	 * database prove the same markers really were turned back into percent signs.
+	 *
+	 * @return void
+	 */
+	public function test_it_reports_how_many_markers_the_restore_repaired(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_repairing_runner( $db );
+		$plans  = array(
+			self::db_chunk_plan( 'wp_options', 2, "CREATE TABLE `wp_options` (id INT);\nINSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ),
+			self::db_chunk_plan( 'wp_posts', 1, "INSERT INTO `wp_posts` VALUES ('100{$m}');\n" ),
+		);
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( 3, $runner->repaired_marker_count() );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements() );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_posts` VALUES ('100%')", $db->executed_statements() );
+	}
+
+	/**
+	 * A clean archive restored through a repairing writer reports nothing repaired.
+	 *
+	 * This is what stops the operator being told something was repaired after every
+	 * ordinary restore.
+	 *
+	 * @return void
+	 */
+	public function test_a_clean_archive_reports_nothing_repaired(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_repairing_runner( $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( 0, $runner->repaired_marker_count() );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements() );
+	}
+
+	/**
+	 * A runner whose writer is not repairing reports zero and leaves the markers exactly as the archive holds them.
+	 *
+	 * @return void
+	 */
+	public function test_a_runner_whose_writer_is_not_repairing_reports_zero(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_repairing_runner( $db, false );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('100{$m}');\n" ) );
+
+		$runner->restore( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( 0, $runner->repaired_marker_count() );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('100{$m}')", $db->executed_statements() );
+	}
+
+	/**
+	 * Verifying an archive repairs nothing and counts nothing.
+	 *
+	 * Verify writes nothing, so there is no replay to repair and nothing for the
+	 * operator to be told about.
+	 *
+	 * @return void
+	 */
+	public function test_verify_repairs_and_counts_nothing(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_repairing_runner( $db );
+		$plans  = array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('100{$m}');\n" ) );
+
+		$runner->verify( self::build_archive_stream( $plans ) );
+
+		$this->assertSame( 0, $runner->repaired_marker_count() );
+		$this->assertSame( array(), $db->executed_statements(), 'Verify must not replay anything.' );
+	}
+
+	// -------------------------------------------------------------------
 	// The disk-space preflight — restore() consults it, verify() never does
 	// -------------------------------------------------------------------
 
