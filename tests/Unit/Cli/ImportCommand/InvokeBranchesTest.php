@@ -9,21 +9,27 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\ImportCommand;
 
+require_once __DIR__ . '/../../Manifest/Fakes/WpdbStub.php';
+
 use DateTimeImmutable;
 use DateTimeZone;
 use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Crypto\SigningKeypair;
 use Pontifex\Archive\Format\ArchiveSignature;
 use Pontifex\Archive\Format\ByteOrder;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Header;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Cli\ImportCommand;
@@ -38,13 +44,18 @@ use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
+use Pontifex\Restore\DatabaseWriter;
+use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
+use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
+use wpdb;
 
 /**
  * Behavioural coverage of the genuine __invoke branches.
@@ -129,16 +140,18 @@ final class InvokeBranchesTest extends TestCase {
 	 * @param SigningContext|null $signing      Signing context, or null for an unsigned archive.
 	 * @param Scope|null          $scope        The scope to record, or null for a legacy (no-scope) archive.
 	 * @param string|null         $table_prefix The table prefix to record, or null for none.
+	 * @param EntryPlan[]         $plans        Optional. The entries to include; default none, an empty archive.
+	 * @param string              $exporter_version Optional. The Pontifex version to record as the writer; default '0.3.0', an affected version.
 	 * @return void
 	 */
-	private static function write_archive_to( string $path, ?SigningContext $signing, ?Scope $scope = null, ?string $table_prefix = null ): void {
+	private static function write_archive_to( string $path, ?SigningContext $signing, ?Scope $scope = null, ?string $table_prefix = null, array $plans = array(), string $exporter_version = '0.3.0' ): void {
 		$provenance = new Provenance(
 			'6.6.1',
 			'8.2.10',
 			'https://example.test',
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
-			new ExporterInfo( 'pontifex', '0.3.0' ),
+			new ExporterInfo( 'pontifex', $exporter_version ),
 			new DateTimeImmutable( '2026-06-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
 			null,
 			$table_prefix,
@@ -148,7 +161,7 @@ final class InvokeBranchesTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp source file for the command to read; WP_Filesystem is not bootstrapped in unit tests.
 		$destination = fopen( $path, 'w+b' );
 		$writer      = new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() );
-		$writer->write_archive( $provenance, array(), $destination, null, null, $signing );
+		$writer->write_archive( $provenance, $plans, $destination, null, null, $signing );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the test's own handle.
 		fclose( $destination );
 	}
@@ -1345,6 +1358,303 @@ final class InvokeBranchesTest extends TestCase {
 		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
 
 		$this->assertFalse( $held_at_halt, 'The lock must already be released by the time the command halts.' );
+	}
+
+	// -----------------------------------------------------------------
+	// The repair report: an archive written by an affected version is repaired as
+	// it replays, and the operator is told — but only when something was repaired.
+	// -----------------------------------------------------------------
+
+	/**
+	 * A restore that repaired frozen placeholder markers says so, with the count, in the terminal.
+	 *
+	 * The restore engine here is a REAL {@see RestoreRunner} over a repairing
+	 * {@see DatabaseWriter} and a {@see FakeDbAdapter}, because the fact under test is
+	 * the writer's own tally reaching the terminal through the runner — which a
+	 * {@see RestoreRunnerInterface} mock has no writer to produce. The import's
+	 * source archive carries one row whose two percent signs were frozen into
+	 * markers. The exact wording is asserted, and so is the database side: the
+	 * statement that reached the adapter has the percent signs back.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_reports_how_many_markers_a_restore_repaired(): void {
+		$m = self::frozen_marker();
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) )
+		);
+
+		$db           = new FakeDbAdapter();
+		$restore_root = sys_get_temp_dir() . '/pontifex-import-invoke-repair-' . bin2hex( random_bytes( 8 ) );
+		$printed      = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = new ImportCommand(
+				$this->build_environment_mock(),
+				$this->build_wordpress_context_mock(),
+				self::build_real_restore_runner( $db, $restore_root ),
+				new NullLogger(),
+				new NullProgressBar(),
+				$this->build_safety_archiver_succeeding()
+			);
+
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
+		$this->assertContains(
+			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			$printed,
+			'The operator must be told, with the count, that the restore repaired the archive.'
+		);
+	}
+
+	/**
+	 * A clean archive restores without a word about repairs — the message must not appear on every ordinary restore.
+	 *
+	 * The engine is the same real runner with the repair switched on, so the only
+	 * thing that can keep the line off the terminal is the zero count.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_prints_nothing_about_repairs_for_a_clean_archive(): void {
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) )
+		);
+
+		$db           = new FakeDbAdapter();
+		$restore_root = sys_get_temp_dir() . '/pontifex-import-invoke-clean-' . bin2hex( random_bytes( 8 ) );
+		$printed      = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = new ImportCommand(
+				$this->build_environment_mock(),
+				$this->build_wordpress_context_mock(),
+				self::build_real_restore_runner( $db, $restore_root ),
+				new NullLogger(),
+				new NullProgressBar(),
+				$this->build_safety_archiver_succeeding()
+			);
+
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $restore_root );
+		}
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The restore really ran.' );
+		$this->assertNull( self::index_of_line_containing( $printed, 'Repaired' ), 'A restore that repaired nothing must print nothing about repairs.' );
+		$this->assertNull( self::index_of_line_containing( $printed, 'marker' ), 'No mention of markers either.' );
+	}
+
+	/**
+	 * The command's own default wiring repairs an archive written by an affected version.
+	 *
+	 * Every test above injects a runner, which bypasses build_default_restore_runner()
+	 * and so proves nothing about the repair flag that method derives from the
+	 * archive's own provenance. This one injects none: an archive recording
+	 * Pontifex 1.0.3 as its writer, carrying a marker-bearing row, is imported
+	 * through the real wiring, and the statement the database received has the
+	 * percent signs back, with the operator told so.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_repairs_an_archive_written_by_an_affected_version(): void {
+		$queries = array();
+		$printed = array();
+
+		$this->run_through_default_wiring( '1.0.3', $queries, $printed );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $queries, 'An affected writer\'s archive must be repaired by the default wiring.' );
+		$this->assertContains(
+			'Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.',
+			$printed
+		);
+	}
+
+	/**
+	 * The command's own default wiring leaves an archive written after the fix exactly as it came.
+	 *
+	 * The same archive, recording a version after the boundary: the marker-shaped
+	 * text is real data there and must reach the database untouched, with nothing
+	 * said about repairs.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_leaves_an_archive_written_after_the_fix_untouched(): void {
+		$queries = array();
+		$printed = array();
+		$m       = self::frozen_marker();
+
+		$this->run_through_default_wiring( '1.1.1', $queries, $printed );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/{$m}postname{$m}/')", $queries, 'A current archive must reach the database exactly as written.' );
+		$this->assertNull( self::index_of_line_containing( $printed, 'Repaired' ) );
+	}
+
+	/**
+	 * A runner that is not the real engine reports nothing — it has no writer to ask.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_prints_nothing_about_repairs_when_the_engine_is_a_fake(): void {
+		$printed = array();
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		$command = new ImportCommand(
+			$this->build_environment_mock(),
+			$this->build_wordpress_context_mock(),
+			$this->build_restore_runner_mock_succeeding(),
+			new NullLogger(),
+			new NullProgressBar(),
+			$this->build_safety_archiver_succeeding()
+		);
+
+		$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+
+		$this->assertNull( self::index_of_line_containing( $printed, 'Repaired' ) );
+	}
+
+	/**
+	 * A frozen placeholder marker, as an affected export wrote it into an archive.
+	 *
+	 * @return string A brace, 64 lowercase hexadecimal characters, a brace.
+	 */
+	private static function frozen_marker(): string {
+		return '{' . str_repeat( '0123456789abcdef', 4 ) . '}';
+	}
+
+	/**
+	 * Build a db_chunk EntryPlan.
+	 *
+	 * @param string $table_name      Source table name.
+	 * @param int    $statement_count Number of statements in the chunk.
+	 * @param string $sql             SQL bytes, each statement terminated with a semicolon and a newline.
+	 * @return EntryPlan
+	 */
+	private static function db_chunk_plan( string $table_name, int $statement_count, string $sql ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( 0, $table_name, $statement_count, strlen( $sql ), 0 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+		fwrite( $stream, $sql );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $stream );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), $stream );
+	}
+
+	/**
+	 * Build a REAL RestoreRunner whose database writer repairs frozen markers, over a fake database.
+	 *
+	 * @param FakeDbAdapter $db           The adapter the writer replays into.
+	 * @param string        $restore_root The directory the file writer is rooted at; created on demand.
+	 * @return RestoreRunner
+	 */
+	private static function build_real_restore_runner( FakeDbAdapter $db, string $restore_root ): RestoreRunner {
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $restore_root, false, 'wp-content' ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+	}
+
+	/**
+	 * Import a marker-bearing archive through the command's OWN default wiring, recording what the database received.
+	 *
+	 * No runner is injected, so build_default_restore_runner() builds the real one,
+	 * over a wpdb whose query() records what it is given. The WordPress root is a
+	 * throw-away directory, removed afterwards.
+	 *
+	 * @param string             $exporter_version The Pontifex version the archive records as its writer.
+	 * @param array<int, string> $queries          Out-parameter. Filled with every statement the wpdb was asked to run, in order.
+	 * @param array<int, string> $printed          Out-parameter. Filled with every line the command printed, in order.
+	 * @return void
+	 */
+	private function run_through_default_wiring( string $exporter_version, array &$queries, array &$printed ): void {
+		$m = self::frozen_marker();
+		self::write_archive_to(
+			$this->temp_archive_path,
+			null,
+			Scope::content_only( array() ),
+			'wp_',
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) ),
+			$exporter_version
+		);
+
+		$root        = sys_get_temp_dir() . '/pontifex-import-wiring-' . bin2hex( random_bytes( 8 ) );
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->andReturnUsing(
+			static function ( string $name ): bool {
+				return 'PONTIFEX_PUBLIC_KEY' !== $name;
+			}
+		);
+		$environment->shouldReceive( 'constant_value' )->andReturnUsing(
+			static function ( string $name ) use ( $root ) {
+				return 'ABSPATH' === $name ? $root . '/' : $root . '/wp-content';
+			}
+		);
+		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
+
+		$wpdb = Mockery::mock( wpdb::class )->makePartial();
+		$wpdb->shouldReceive( 'query' )->andReturnUsing(
+			static function ( string $query ) use ( &$queries ) {
+				$queries[] = $query;
+				return 0;
+			}
+		);
+
+		$context = $this->build_wordpress_context_mock();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( $wpdb );
+		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
+
+		$this->mock_wp_cli_capturing_output( $printed );
+
+		try {
+			$command = new ImportCommand(
+				$environment,
+				$context,
+				null,
+				new NullLogger(),
+				new NullProgressBar(),
+				$this->build_safety_archiver_succeeding()
+			);
+			$command( array( $this->temp_archive_path ), array( 'yes' => true ) );
+		} finally {
+			self::rmtree( $root );
+		}
+	}
+
+	/**
+	 * Recursively delete a directory tree, if it exists.
+	 *
+	 * @param string $path Absolute path to remove.
+	 * @return void
+	 */
+	private static function rmtree( string $path ): void {
+		if ( is_link( $path ) || ! is_dir( $path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
+			@unlink( $path );
+			return;
+		}
+		foreach ( scandir( $path ) as $entry ) {
+			if ( '.' !== $entry && '..' !== $entry ) {
+				self::rmtree( $path . '/' . $entry );
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
+		@rmdir( $path );
 	}
 
 	/**

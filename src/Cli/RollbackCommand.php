@@ -28,6 +28,7 @@ use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Restore\SourceTablePrefix;
@@ -329,6 +330,7 @@ final class RollbackCommand {
 				);
 
 				$this->print_summary( $archive_path, $entry_total );
+				$this->report_repaired_markers( $restore_runner );
 				$this->report_skipped_symlinks( $restore_runner );
 
 				// The rollback replayed the database with raw SQL, so flush WordPress's
@@ -470,11 +472,18 @@ final class RollbackCommand {
 		$archive_reader = new ArchiveReader( $source );
 		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
 		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
+		// A safety archive written by Pontifex 1.1.0 or earlier carries a frozen
+		// marker in place of every percent sign in its row values, so a rollback
+		// replaying one must turn them back too — see PlaceholderMarkerRepair.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
 		// $replaying_safety_archive is true: `wp pontifex rollback` IS a safety-archive
 		// replay (this site's own undo, not a foreign archive), so an absolute symlink
 		// target is skipped rather than refused — see FileWriter::$replaying_safety_archive.
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), false, null, null, null, null, true );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers );
 		return new RestoreRunner(
 			$entry_reader,
 			$file_writer,
@@ -576,6 +585,39 @@ final class RollbackCommand {
 	private function print_summary( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
 			sprintf( /* translators: 1: number of entries restored, 2: the archive path */ __( 'Rolled back %1$d entries from %2$s', 'pontifex' ), $entry_count, $archive_path )
+		);
+	}
+
+	/**
+	 * Tell the operator that a safety archive written by an affected version was repaired as it replayed.
+	 *
+	 * An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+	 * place of every percent sign in its row values, and the restore engine turns
+	 * them back as it replays (see {@see \Pontifex\Restore\PlaceholderMarkerRepair}).
+	 * A rollback is a command the operator runs deliberately, and what it puts
+	 * back into the database differs from the archive's bytes, so it is never
+	 * silent — and never noise: nothing is printed when nothing was repaired, or
+	 * for a runner that is not the real engine (a test fake has no writer to ask).
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the completed replay.
+	 * @return void
+	 */
+	private function report_repaired_markers( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$repaired = $restore_runner->repaired_marker_count();
+		if ( $repaired < 1 ) {
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %d: the number of percent signs put back */
+				__( 'Repaired %d percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.', 'pontifex' ),
+				$repaired
+			)
 		);
 	}
 

@@ -27,6 +27,7 @@ use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
@@ -494,6 +495,20 @@ final class RestoreController {
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size );
 
+				// A backup written by an affected version carries a frozen marker in place
+				// of every percent sign in its row values, and the replay turns them back
+				// (see PlaceholderMarkerRepair). That changes what reached the database, so
+				// it is logged here and said on the screen below — never silent, and never
+				// mentioned when nothing was repaired. Only a real RestoreRunner has a
+				// writer to ask; a test fake reports none.
+				$repaired = $runner instanceof RestoreRunner ? $runner->repaired_marker_count() : 0;
+				if ( $repaired > 0 ) {
+					$this->logger->info(
+						'Admin restore: repaired percent signs that an older version of Pontifex had written as a long marker.',
+						array( 'repaired_markers' => $repaired )
+					);
+				}
+
 				// The restore replayed the database with raw SQL, so WordPress's option
 				// cache still holds the pre-restore values. Flush before recording, or the
 				// post-restore counter write reads/writes stale cached state and is
@@ -544,7 +559,7 @@ final class RestoreController {
 					array(
 						'restored' => true,
 						'entries'  => $entries,
-						'message'  => null !== $migration
+						'message'  => ( null !== $migration
 							? sprintf(
 								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten */
 								__( 'Restored and relinked — %1$d entries (%2$s) written, then the backup\'s links were rewritten to this site across %3$d database rows.', 'pontifex' ),
@@ -558,7 +573,8 @@ final class RestoreController {
 								$entries,
 								$this->wordpress_context->format_size( $size ),
 								basename( (string) $path )
-							),
+							)
+						) . self::repaired_markers_note( $repaired ),
 					)
 				);
 			}
@@ -750,6 +766,33 @@ final class RestoreController {
 	}
 
 	/**
+	 * A plain-text sentence saying frozen placeholder markers were repaired, or '' when none were.
+	 *
+	 * Appended onto the success message of {@see self::restore()} and
+	 * {@see self::rollback()}, for the same reason {@see self::skipped_symlinks_caveat()}
+	 * is: the screen shows that message VERBATIM as the only surface an operator
+	 * sees, so this is the only way it can say what the replay changed. Returned
+	 * with a leading space so a caller can simply concatenate it onto a base
+	 * message that ends without trailing whitespace, and as an empty string when
+	 * nothing was repaired so an ordinary restore's message is exactly what it
+	 * always was.
+	 *
+	 * @param int $repaired How many markers the replay turned back into percent signs.
+	 * @return string
+	 */
+	private static function repaired_markers_note( int $repaired ): string {
+		if ( $repaired < 1 ) {
+			return '';
+		}
+
+		return ' ' . sprintf(
+			/* translators: %d: the number of percent signs put back */
+			__( 'Repaired %d percent sign(s) that an older version of Pontifex had written as a long marker.', 'pontifex' ),
+			$repaired
+		);
+	}
+
+	/**
 	 * Restore the most recent safety archive over the current site (the undo).
 	 *
 	 * The `wp_ajax_pontifex_rollback` handler. Refuses without capability and
@@ -820,6 +863,17 @@ final class RestoreController {
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
 
+				// A safety archive written by an affected version is repaired as it
+				// replays, exactly as a restore is (see restore() above), and an operator
+				// who clicked Roll back is told so on the screen as well as in the log.
+				$repaired = $runner instanceof RestoreRunner ? $runner->repaired_marker_count() : 0;
+				if ( $repaired > 0 ) {
+					$this->logger->info(
+						'Admin rollback: repaired percent signs that an older version of Pontifex had written as a long marker.',
+						array( 'repaired_markers' => $repaired )
+					);
+				}
+
 				// The replay ran with $replaying_safety_archive true, so an absolute-target
 				// symlink the site had before is skipped rather than refused — see
 				// FileWriter::$replaying_safety_archive. A rollback makes no claim to a
@@ -861,7 +915,7 @@ final class RestoreController {
 							/* translators: %d: number of entries restored from the safety archive */
 							__( 'Rolled back — %d entries restored from the most recent safety archive. Your last restore has been undone.', 'pontifex' ),
 							$entries
-						) . self::skipped_symlinks_caveat( $skipped_symlinks ),
+						) . self::skipped_symlinks_caveat( $skipped_symlinks ) . self::repaired_markers_note( $repaired ),
 					)
 				);
 			}
@@ -1275,10 +1329,18 @@ final class RestoreController {
 		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
 		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
 
+		// An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+		// place of every percent sign in its row values; the writer turns them back
+		// as it replays. Decided here from the archive's own recorded exporter, so
+		// the forward restore, a rollback and a failed restore's recovery replay all
+		// repair the archive they are given.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
 		return new RestoreRunner(
 			$entry_reader,
 			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix, null, null, null, $replaying_safety_archive ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix ),
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers ),
 			null,
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);

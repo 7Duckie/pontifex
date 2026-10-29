@@ -46,8 +46,9 @@ use Pontifex\Manifest\SqlSpanScanner;
  * Public API:
  *
  *  - {@see DatabaseWriter::__construct()} — takes the destination
- *    DatabaseAdapter and the optional source/destination prefixes for
- *    a cross-prefix restore.
+ *    DatabaseAdapter, the optional source/destination prefixes for
+ *    a cross-prefix restore, and the optional flag that turns on the
+ *    placeholder-marker repair described below.
  *  - {@see DatabaseWriter::begin_staging()} — reset for a new restore
  *    and sweep leftover staging tables from a crashed earlier run.
  *  - {@see DatabaseWriter::write_entry()} — replay one db_chunk entry
@@ -59,12 +60,30 @@ use Pontifex\Manifest\SqlSpanScanner;
  *    cut-over, then a best-effort drop of the parked old tables.
  *  - {@see DatabaseWriter::abort_staging()} — best-effort drop of the
  *    staging tables after a failure; the live tables were never touched.
+ *  - {@see DatabaseWriter::repaired_marker_count()} — how many
+ *    placeholder markers the repair has turned back into percent signs.
  *
  * The writer carries per-restore state (the tables it has staged), so
  * a restore must be bracketed by begin_staging() and either
  * commit_staged_tables() or abort_staging(); {@see RestoreRunner}
  * drives that sequence. It may be reused for another restore after
  * either bracket closes.
+ *
+ * Placeholder-marker repair:
+ *
+ * An archive written by Pontifex 1.1.0 or earlier carries a 66-character
+ * marker wherever a `%` in a row value should be — see
+ * {@see PlaceholderMarkerRepair} for the cause and for the honest trade-off
+ * the repair makes. When the writer is constructed with the repair flag on,
+ * each INSERT statement has its markers turned back into `%` as it is prepared
+ * (any other statement is left exactly as it came, because only a row value can
+ * carry one): in the same per-statement step as the staging rewrite, after the
+ * payload has been split, never over the whole payload before it. That placement is
+ * what keeps the guarantee in the verification list below intact — the
+ * array of statements that is checked is, byte for byte, the array that
+ * then executes, so the repair cannot hand the database anything the checks
+ * did not see. With the flag off a statement is returned untouched and no
+ * regular expression runs at all.
  *
  * Statement splitting:
  *
@@ -224,6 +243,27 @@ final class DatabaseWriter {
 	private array $staged_tables = array();
 
 	/**
+	 * Whether archived statements have their placeholder markers turned back into percent signs.
+	 *
+	 * Set by the caller from the archive's own provenance, via
+	 * {@see PlaceholderMarkerRepair::is_needed_for()}; false leaves every
+	 * statement exactly as the archive holds it.
+	 *
+	 * @var bool
+	 */
+	private bool $repair_placeholder_markers;
+
+	/**
+	 * How many placeholder markers have been turned back into percent signs this restore.
+	 *
+	 * Reset by {@see self::begin_staging()}, so a writer reused for a second
+	 * restore does not report the first one's repairs as its own.
+	 *
+	 * @var int
+	 */
+	private int $repaired_marker_count = 0;
+
+	/**
 	 * Construct a DatabaseWriter that executes statements via $adapter.
 	 *
 	 * When the source and destination prefixes are both non-empty and differ, the
@@ -233,14 +273,22 @@ final class DatabaseWriter {
 	 * complete (ADR 0008). When they are equal or either is empty, the destination
 	 * name is the archive's own and only the staging prefix is applied.
 	 *
-	 * @param DatabaseAdapter $adapter       The destination database adapter.
-	 * @param string          $source_prefix Optional. The prefix recorded in the archive; default '' (no rewrite).
-	 * @param string          $dest_prefix   Optional. The destination site's prefix; default '' (no rewrite).
+	 * When $repair_placeholder_markers is true, every statement also has its
+	 * placeholder markers turned back into percent signs as it replays (see
+	 * {@see PlaceholderMarkerRepair}). The caller decides, from the archive's own
+	 * provenance, whether the archive was written by an affected version; this
+	 * class does not look.
+	 *
+	 * @param DatabaseAdapter $adapter                    The destination database adapter.
+	 * @param string          $source_prefix              Optional. The prefix recorded in the archive; default '' (no rewrite).
+	 * @param string          $dest_prefix                Optional. The destination site's prefix; default '' (no rewrite).
+	 * @param bool            $repair_placeholder_markers Optional. True when the archive was written by a version that froze placeholder markers into its SQL; default false (statements are replayed untouched).
 	 */
-	public function __construct( DatabaseAdapter $adapter, string $source_prefix = '', string $dest_prefix = '' ) {
-		$this->adapter       = $adapter;
-		$this->source_prefix = $source_prefix;
-		$this->dest_prefix   = $dest_prefix;
+	public function __construct( DatabaseAdapter $adapter, string $source_prefix = '', string $dest_prefix = '', bool $repair_placeholder_markers = false ) {
+		$this->adapter                    = $adapter;
+		$this->source_prefix              = $source_prefix;
+		$this->dest_prefix                = $dest_prefix;
+		$this->repair_placeholder_markers = $repair_placeholder_markers;
 	}
 
 	/**
@@ -279,7 +327,8 @@ final class DatabaseWriter {
 	 * They are inert but occupy disk and would collide with this run's staging
 	 * names, so they are dropped here. The sweep is best-effort: a table that
 	 * cannot be listed or dropped is left for a later run, never a reason to
-	 * refuse a restore.
+	 * refuse a restore. The tally of repaired placeholder markers starts again
+	 * from zero here too, so it always describes the restore now beginning.
 	 *
 	 * When the archive's character set is given, the connection is switched to
 	 * it for the replay's duration (and back on commit or abort), so the SQL's
@@ -341,7 +390,8 @@ final class DatabaseWriter {
 	 * @throws RuntimeException If the charset is malformed, or the server refuses it.
 	 */
 	public function begin_staging( string $source_charset = '' ): void {
-		$this->staged_tables = array();
+		$this->staged_tables         = array();
+		$this->repaired_marker_count = 0;
 		if ( '' !== $source_charset ) {
 			if ( 1 !== preg_match( '/^[A-Za-z0-9_]+$/', $source_charset ) ) {
 				throw new RuntimeException(
@@ -418,14 +468,16 @@ final class DatabaseWriter {
 	 * Resolves the chunk's destination table name (applying the cross-prefix
 	 * rewrite when active), refuses a name that would not fit MySQL's limit once
 	 * staged, rewrites the payload's table identifier to the staging name, then
-	 * splits the payload into individual SQL statements, verifies the statement
-	 * count matches the recorded header, and executes each statement in order
-	 * against the adapter. The live table of the same name is never touched.
+	 * splits the payload into individual SQL statements (turning any frozen
+	 * placeholder markers in each back into percent signs when the repair is on),
+	 * verifies the statement count matches the recorded header, and executes each
+	 * statement in order against the adapter. The live table of the same name is
+	 * never touched.
 	 *
 	 * @param EntryReadResult $result A decoded entry whose header is a db_chunk.
 	 * @throws InvalidArgumentException If $result is not a db_chunk entry.
 	 * @throws ArchiveNotTrustworthy    If the destination table name does not begin with the prefix this restore is targeting — the live database's own prefix, or, during a cross-prefix restore, the destination prefix this writer was constructed with — it would belong to a different WordPress installation, never this one.
-	 * @throws RuntimeException         If the chunk has no table name, the staged name would be over-long, statement_count disagrees with the parsed count, a statement fails the shape/containment checks, the object a CREATE built is not an ordinary local table or already held rows the moment it existed (ADR 0019), or any adapter call fails.
+	 * @throws RuntimeException         If the chunk has no table name, the staged name would be over-long, statement_count disagrees with the parsed count, a statement fails the shape/containment checks, the object a CREATE built is not an ordinary local table or already held rows the moment it existed (ADR 0019), the placeholder-marker repair's regular-expression engine fails, or any adapter call fails.
 	 */
 	public function write_entry( EntryReadResult $result ): void {
 		$header = $result->header();
@@ -524,9 +576,19 @@ final class DatabaseWriter {
 		// the classic serialised-length corruption this project defends against
 		// properly elsewhere, reintroduced by the restore itself. Silent, too —
 		// hashes still matched and verify still reported sound.
+		//
+		// The placeholder-marker repair rides this same per-statement chain, on the
+		// same footing: the payload is split first and each statement is then
+		// transformed on its own, so every change made to a statement is made in
+		// this one step, ahead of the count check and the shape checks below. That
+		// is what keeps the array those checks validate byte for byte the array that
+		// then executes — nothing is repaired after validation, so nothing reaches
+		// the database that the checks did not see. Replacing a marker with a single
+		// percent sign cannot add a quote, a backslash, a semicolon or a statement
+		// boundary, so it cannot change what those checks conclude.
 		$staged_table   = self::STAGING_PREFIX . $dest_table;
 		$statements     = array_map(
-			fn ( string $statement ): string => $this->rewrite_leading_table_identifier( $source_table, $staged_table, $statement ),
+			fn ( string $statement ): string => $this->repair_markers_in( $this->rewrite_leading_table_identifier( $source_table, $staged_table, $statement ) ),
 			self::split_statements( $result->payload() )
 		);
 		$declared_count = (int) $header->statement_count();
@@ -1023,6 +1085,21 @@ final class DatabaseWriter {
 	}
 
 	/**
+	 * How many placeholder markers have been turned back into percent signs this restore.
+	 *
+	 * The running total across every chunk written since {@see self::begin_staging()}.
+	 * It is counted as a chunk's statements are prepared, before they execute, so
+	 * after a restore that failed part-way it can include a chunk that never ran;
+	 * read it only after a restore that completed. Always zero when the repair is
+	 * off, because no statement is inspected.
+	 *
+	 * @return int The number of markers replaced so far.
+	 */
+	public function repaired_marker_count(): int {
+		return $this->repaired_marker_count;
+	}
+
+	/**
 	 * Resolve a chunk's destination table name, applying the cross-prefix rewrite.
 	 *
 	 * @param string $source_table The table name recorded in the entry header.
@@ -1111,6 +1188,30 @@ final class DatabaseWriter {
 		}
 
 		return substr_replace( $statement, $to, $at, strlen( $from ) );
+	}
+
+	/**
+	 * Turn one statement's frozen placeholder markers back into percent signs, when the repair is on.
+	 *
+	 * With the repair off the statement is returned as it came, and no regular
+	 * expression runs at all. With it on, the statement is handed to
+	 * {@see PlaceholderMarkerRepair::repair()}, which changes only an INSERT: a
+	 * CREATE TABLE, whose text the exporter copies straight from SHOW CREATE TABLE
+	 * and which therefore cannot carry a marker, is deliberately left alone, so a
+	 * marker-shaped default or comment in a schema stays exactly as written. The
+	 * number of markers replaced is added to the running tally
+	 * {@see self::repaired_marker_count()} reports.
+	 *
+	 * @param string $statement One statement from the chunk's decoded SQL.
+	 * @return string The statement, repaired when the repair is on.
+	 * @throws RuntimeException If the repair is on and the regular-expression engine fails, so the statement cannot be known to be repaired.
+	 */
+	private function repair_markers_in( string $statement ): string {
+		if ( ! $this->repair_placeholder_markers ) {
+			return $statement;
+		}
+
+		return PlaceholderMarkerRepair::repair( $statement, $this->repaired_marker_count );
 	}
 
 	/**

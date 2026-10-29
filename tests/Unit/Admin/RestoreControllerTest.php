@@ -1323,6 +1323,210 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertSame( 2, $this->json['data']['entries'] );
 	}
 
+	// -------------------------------------------------------------------------
+	// The repair report: a backup written by an affected version is repaired as it
+	// replays, and the screen says so — but only when something was repaired.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A restore that repaired frozen placeholder markers says so on the screen and in the log.
+	 *
+	 * The engine is a REAL {@see RestoreRunner} over a repairing {@see DatabaseWriter}
+	 * and a {@see FakeDbAdapter}, because the fact under test is the writer's own
+	 * tally reaching the screen through the runner, which a {@see RestoreRunnerInterface}
+	 * double has no writer to produce. The sentence is appended to the success
+	 * message, the existing wording before it is untouched, and the statement that
+	 * reached the adapter has the percent signs back.
+	 *
+	 * @return void
+	 */
+	public function test_restore_says_how_many_markers_it_repaired(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldReceive( 'info' )->once()->with(
+			Mockery::on(
+				static function ( $message ): bool {
+					return is_string( $message ) && str_contains( $message, 'Admin restore: repaired percent signs' );
+				}
+			),
+			array( 'repaired_markers' => 2 )
+		);
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$message = $this->json['data']['message'];
+		$this->assertStringStartsWith( 'Restored — 1 entries (', $message, 'The existing wording is untouched.' );
+		$this->assertStringContainsString( ' written from pontifex-backup-20260101T000000Z.wpmig. Your site now matches that backup.', $message );
+		$this->assertStringEndsWith( ' Your site now matches that backup. Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker.', $message, 'The sentence is appended after the existing message.' );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
+	}
+
+	/**
+	 * A relinked restore carries the same sentence — it is appended to both success messages, not only one.
+	 *
+	 * @return void
+	 */
+	public function test_a_relinked_restore_says_how_many_markers_it_repaired(): void {
+		$m     = self::frozen_marker();
+		$calls = array();
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('100{$m}');\n" ) ),
+			new FakeDbAdapter(),
+			null,
+			$this->recording_migrator( 'https://old-site.example', $calls )
+		);
+
+		$this->assertCount( 1, $calls, 'The relink ran, so this is the relinked wording.' );
+		$message = $this->json['data']['message'];
+		$this->assertStringStartsWith( 'Restored and relinked — ', $message );
+		$this->assertStringEndsWith( ' Repaired 1 percent sign(s) that an older version of Pontifex had written as a long marker.', $message );
+	}
+
+	/**
+	 * A clean backup restores with exactly the message it always had — nothing is appended or logged on an ordinary restore.
+	 *
+	 * The engine is the same real runner with the repair switched on, so the only
+	 * thing that can keep the sentence off the screen is the zero count.
+	 *
+	 * @return void
+	 */
+	public function test_restore_of_a_clean_backup_says_nothing_about_repairs(): void {
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldNotReceive( 'info' );
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['restored'] );
+		$message = $this->json['data']['message'];
+		$this->assertStringEndsWith( ' written from pontifex-backup-20260101T000000Z.wpmig. Your site now matches that backup.', $message, 'An ordinary restore\'s message must be exactly what it always was.' );
+		$this->assertStringNotContainsString( 'Repaired', $message );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The restore really ran.' );
+	}
+
+	/**
+	 * A rollback that repaired frozen placeholder markers says so on the screen and in the log.
+	 *
+	 * A rollback replays a safety archive, and one written by an affected version
+	 * carries the markers just as a backup does. The sentence follows the existing
+	 * message, and any skipped-symlink caveat, unchanged.
+	 *
+	 * The row holds ONE value with four percent signs in it, and the sentence says
+	 * four percent signs. That is the case that proves the wording honest: the figure
+	 * is exactly what was counted, markers put back, and the sentence says
+	 * percent signs rather than values, because a message that said "4 values" here
+	 * would claim four things where one thing was changed.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_says_how_many_markers_it_repaired(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldReceive( 'info' )->once()->with(
+			Mockery::on(
+				static function ( $message ): bool {
+					return is_string( $message ) && str_contains( $message, 'Admin rollback: repaired percent signs' );
+				}
+			),
+			array( 'repaired_markers' => 4 )
+		);
+
+		$this->run_rollback_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}year{$m}/{$m}postname{$m}/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertSame(
+			'Rolled back — 1 entries restored from the most recent safety archive. Your last restore has been undone. Repaired 4 percent sign(s) that an older version of Pontifex had written as a long marker.',
+			$this->json['data']['message']
+		);
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%year%/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
+	}
+
+	/**
+	 * A clean safety archive rolls back with exactly the message it always had.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_of_a_clean_safety_archive_says_nothing_about_repairs(): void {
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldNotReceive( 'info' );
+
+		$this->run_rollback_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertSame(
+			'Rolled back — 1 entries restored from the most recent safety archive. Your last restore has been undone.',
+			$this->json['data']['message'],
+			'An ordinary rollback\'s message must be exactly what it always was.'
+		);
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The rollback really ran.' );
+	}
+
+	/**
+	 * The controller's own default wiring repairs a backup written by an affected version.
+	 *
+	 * Every test above injects a runner, which bypasses default_restore_runner()
+	 * and so proves nothing about the repair flag that method derives from the
+	 * archive's own provenance. This one injects none: a safety archive recording
+	 * Pontifex 1.0.3 as its writer, carrying a marker-bearing row, is rolled back
+	 * through the real wiring, and the statement the database received has the
+	 * percent signs back.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_repairs_an_archive_written_by_an_affected_version(): void {
+		$queries = array();
+
+		$this->run_rollback_through_default_wiring( '1.0.3', $queries );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $queries, 'An affected writer\'s archive must be repaired by the default wiring.' );
+		$this->assertStringEndsWith( ' Repaired 2 percent sign(s) that an older version of Pontifex had written as a long marker.', $this->json['data']['message'] );
+	}
+
+	/**
+	 * The controller's own default wiring leaves a backup written after the fix exactly as it came.
+	 *
+	 * The same archive, recording a version after the boundary: the marker-shaped
+	 * text is real data there and must reach the database untouched, with nothing
+	 * said about repairs.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_leaves_an_archive_written_after_the_fix_untouched(): void {
+		$queries = array();
+		$m       = self::frozen_marker();
+
+		$this->run_rollback_through_default_wiring( '1.1.1', $queries );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/{$m}postname{$m}/')", $queries, 'A current archive must reach the database exactly as written.' );
+		$this->assertStringNotContainsString( 'Repaired', $this->json['data']['message'] );
+	}
+
 	/**
 	 * The rollback handler's OWN default wiring builds its runner in replay mode.
 	 *
@@ -1920,6 +2124,175 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * A frozen placeholder marker, as an affected export wrote it into an archive.
+	 *
+	 * @return string A brace, 64 lowercase hexadecimal characters, a brace.
+	 */
+	private static function frozen_marker(): string {
+		return '{' . str_repeat( '0123456789abcdef', 4 ) . '}';
+	}
+
+	/**
+	 * Build a db_chunk EntryPlan.
+	 *
+	 * @param string $table_name      Source table name.
+	 * @param int    $statement_count Number of statements in the chunk.
+	 * @param string $sql             SQL bytes, each statement terminated with a semicolon and a newline.
+	 * @return EntryPlan
+	 */
+	private static function db_chunk_plan( string $table_name, int $statement_count, string $sql ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( 0, $table_name, $statement_count, strlen( $sql ), 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) );
+	}
+
+	/**
+	 * Run restore() over a content-only backup carrying the given entries, with a REAL runner whose writer repairs frozen markers.
+	 *
+	 * Leaves the JSON response in $this->json. The runner's file writer is rooted
+	 * under $this->base so tearDown() cleans it up, and the database half is the
+	 * given fake, so a test can read back what reached it.
+	 *
+	 * @param EntryPlan[]               $plans    The entries the backup carries.
+	 * @param FakeDbAdapter             $db       The adapter the runner's writer replays into.
+	 * @param LoggerInterface|null      $logger   Optional logger; a NullLogger by default.
+	 * @param UrlMigratorInterface|null $migrator Optional. When given, the relink box is ticked and this migrator handles it.
+	 * @return void
+	 */
+	private function run_restore_over_real_runner( array $plans, FakeDbAdapter $db, ?LoggerInterface $logger = null, ?UrlMigratorInterface $migrator = null ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans( $store->directory() . '/' . $name, $plans );
+		$_POST['file'] = $name;
+		if ( null !== $migrator ) {
+			$_POST['migrate'] = '1';
+		}
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, 'wp-content' ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->context(),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			$logger ?? new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'], $_POST['migrate'] );
+		}
+	}
+
+	/**
+	 * Run rollback() over a safety archive carrying the given entries, with a REAL runner whose writer repairs frozen markers.
+	 *
+	 * Leaves the JSON response in $this->json. The runner's file writer is built in
+	 * safety-archive replay mode, as production's own rollback wiring builds it.
+	 *
+	 * @param EntryPlan[]          $plans  The entries the safety archive carries.
+	 * @param FakeDbAdapter        $db     The adapter the runner's writer replays into.
+	 * @param LoggerInterface|null $logger Optional logger; a NullLogger by default.
+	 * @return void
+	 */
+	private function run_rollback_over_real_runner( array $plans, FakeDbAdapter $db, ?LoggerInterface $logger = null ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-repair.wpmig';
+		$this->write_archive_with_plans( $archive_path, $plans );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, null, null, null, null, true ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$this->controller( $runner, null, $rollback, $logger )->rollback();
+	}
+
+	/**
+	 * Roll back a marker-bearing safety archive through the controller's OWN default wiring, recording the queries the database received.
+	 *
+	 * No runner is injected, so default_restore_runner() builds the real one, over a
+	 * wpdb whose query() records what it is given. Leaves the JSON response in
+	 * $this->json.
+	 *
+	 * @param string             $exporter_version The Pontifex version the archive records as its writer.
+	 * @param array<int, string> $queries          Out-parameter. Filled with every statement the wpdb was asked to run, in order.
+	 * @return void
+	 */
+	private function run_rollback_through_default_wiring( string $exporter_version, array &$queries ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$m            = self::frozen_marker();
+		$archive_path = $this->base . '/pre-import-rollback-wiring.wpmig';
+		$this->write_archive_with_plans(
+			$archive_path,
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) ),
+			$exporter_version
+		);
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$wordpress_root = $this->base . '/wp-root';
+		$environment    = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->andReturnUsing(
+			static function ( string $name ) use ( $wordpress_root ) {
+				return 'ABSPATH' === $name ? $wordpress_root . '/' : $wordpress_root . '/wp-content';
+			}
+		);
+		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
+
+		$wpdb = Mockery::mock( wpdb::class )->makePartial();
+		$wpdb->shouldReceive( 'query' )->andReturnUsing(
+			static function ( string $query ) use ( &$queries ) {
+				$queries[] = $query;
+				return 0;
+			}
+		);
+
+		$context = $this->context();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( $wpdb );
+		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
+
+		$controller = new RestoreController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			null, // No injected runner: this is the point.
+			null
+		);
+
+		$controller->rollback();
+	}
+
+	/**
 	 * A SafetyArchiver double whose create() reports progress and returns a path.
 	 *
 	 * @return SafetyArchiverInterface&\Mockery\MockInterface
@@ -2049,11 +2422,12 @@ final class RestoreControllerTest extends TestCase {
 	 * and its precise-revert companion, which replay the archive through a real
 	 * {@see RestoreRunner}/{@see FileWriter}, not an injected double.
 	 *
-	 * @param string      $path  Absolute path to write the archive to.
-	 * @param EntryPlan[] $plans The plans to include.
+	 * @param string      $path             Absolute path to write the archive to.
+	 * @param EntryPlan[] $plans            The plans to include.
+	 * @param string      $exporter_version Optional. The Pontifex version to record as the writer; default '0.1.0', an affected version.
 	 * @return void
 	 */
-	private function write_archive_with_plans( string $path, array $plans ): void {
+	private function write_archive_with_plans( string $path, array $plans, string $exporter_version = '0.1.0' ): void {
 		if ( ! is_dir( dirname( $path ) ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the temp fixture directory the archive is written into.
 			mkdir( dirname( $path ), 0o755, true );
@@ -2064,7 +2438,7 @@ final class RestoreControllerTest extends TestCase {
 			$this->fail( 'Could not open the fixture archive for writing.' );
 		}
 		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
-			->write_archive( $this->sample_provenance( Scope::content_only( array() ) ), $plans, $dest );
+			->write_archive( $this->sample_provenance( Scope::content_only( array() ), $exporter_version ), $plans, $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
 		fclose( $dest );
 	}
@@ -2219,17 +2593,18 @@ final class RestoreControllerTest extends TestCase {
 	/**
 	 * Build a Provenance with realistic but arbitrary field values for the fixture.
 	 *
-	 * @param Scope|null $scope The scope to record, or null for a legacy archive.
+	 * @param Scope|null $scope            The scope to record, or null for a legacy archive.
+	 * @param string     $exporter_version Optional. The Pontifex version to record as the writer; default '0.1.0', an affected version.
 	 * @return Provenance
 	 */
-	private function sample_provenance( ?Scope $scope ): Provenance {
+	private function sample_provenance( ?Scope $scope, string $exporter_version = '0.1.0' ): Provenance {
 		return new Provenance(
 			'6.6.1',
 			'8.2.10',
 			'https://example.test',
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
-			new ExporterInfo( 'pontifex', '0.1.0' ),
+			new ExporterInfo( 'pontifex', $exporter_version ),
 			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
 			null,
 			'wp_',

@@ -35,6 +35,7 @@ use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Restore\SourceTablePrefix;
@@ -589,6 +590,7 @@ final class ImportCommand {
 				TransferHistory::record( $this->wordpress_context, 'import', 'succeeded', $bytes_imported, gmdate( 'c' ) );
 
 				$this->print_summary( $archive_path, $entry_total, $bytes_imported );
+				$this->report_repaired_markers( $restore_runner );
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error(
@@ -826,8 +828,15 @@ final class ImportCommand {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream resource; not a WP_Filesystem operation.
 		rewind( $source );
 
+		// An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+		// place of every percent sign in its row values; the writer turns them back
+		// as it replays. Decided here from the archive's own recorded exporter, so
+		// the same archive is repaired whichever command restores it.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
 		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), $allow_unsafe_symlinks, $required_prefix, null, null, null, $replaying_safety_archive );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers );
 		return new RestoreRunner(
 			$entry_reader,
 			$file_writer,
@@ -1472,6 +1481,42 @@ final class ImportCommand {
 				$report->rows_changed(),
 				count( $report->skipped_tables() ),
 				$report->skipped_values()
+			)
+		);
+	}
+
+	/**
+	 * Tell the operator, after their own restore, that an affected archive was repaired as it replayed.
+	 *
+	 * An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+	 * place of every percent sign in its row values, and the restore engine turns
+	 * them back as it replays (see {@see \Pontifex\Restore\PlaceholderMarkerRepair}).
+	 * That changes the bytes that reach the database, so it is never silent. It is
+	 * also never noise: nothing is printed when nothing was repaired, so an
+	 * ordinary restore of a current archive says nothing here, and nothing is
+	 * printed for a runner that is not the real engine (a test fake has no writer
+	 * to ask). Called only from the forward restore's success path — deliberately
+	 * not from the automatic recovery replay, where the messages are already
+	 * complex and a repair count is noise.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the completed restore.
+	 * @return void
+	 */
+	private function report_repaired_markers( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$repaired = $restore_runner->repaired_marker_count();
+		if ( $repaired < 1 ) {
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %d: the number of percent signs put back */
+				__( 'Repaired %d percent sign(s) that an older version of Pontifex had written as a long marker when this backup was taken.', 'pontifex' ),
+				$repaired
 			)
 		);
 	}
