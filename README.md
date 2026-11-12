@@ -10,7 +10,7 @@ current site first by default, so it can be rolled back with one command.
 Drive it from WP-CLI (`wp pontifex …`) or from the admin screens under
 **Pontifex** in wp-admin, for sites without shell access.
 
-**Status: v1.1.0, released.** The public API is
+**Status: v1.2.0, released.** The public API is
 frozen (a breaking change now needs a major version), and the `.wpmig`
 specification is locked at specification version 1.1: a v1.1 archive stays
 readable by every future Pontifex, and a change the specification cannot
@@ -166,11 +166,12 @@ private vulnerability reporting.
 
 ## Roadmap
 
-v0.1.0 through v1.1.0 have shipped — round-trip baseline, verification and
+v0.1.0 through v1.2.0 have shipped — round-trip baseline, verification and
 rollback, cross-URL migration, encryption and signing, observability, the
 admin interface, resumable and scheduled exports, selective content, offsite
 destinations, the v1.0.0 stable surface, the v1.0.1 to v1.0.3 security and
-correctness patches, and the v1.1.0 agreement between verifying and restoring.
+correctness patches, the v1.1.0 agreement between verifying and restoring, and the v1.2.0
+repair of the percent-sign corruption a restore used to cause.
 
 Not yet committed to a release: push/pull host-to-host transports, multisite
 support, and a standalone Go reader for `.wpmig`.

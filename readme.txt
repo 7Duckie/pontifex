@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.2
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.2.0 =
+* The data-loss release. Fixed: restoring a backup damaged every value that contained a percent sign. Your permalink structure came back as sixty-six characters of gibberish between each slash, and any plugin or theme setting holding a percent sign stopped being readable and reverted to nothing at all, silently, while the restore reported success and verifying the backup correctly called it sound. WordPress's own escaping swaps each percent sign for a marker belonging to one page request, and Pontifex froze that marker into the backup file; a restore in a different request then left it in your database as ordinary text. Backups are now written correctly, and restoring a backup that already carries the damage repairs it as it replays and tells you how many percent signs it put back. A site restored before this release stays damaged until it is restored again. Fixed: ticking "this backup came from another site" on the Restore screen did nothing, so a migrated site kept serving the old address and sent you to a login page on the old host; the address is now read before the restore overwrites it. Added: the Overview screen tells you what your last restore actually did, because a restore replaces the table holding your login session and signs you out before the screen can report anything. Fixed: recovery after a failed restore ran without the lock that stops a second backup or restore starting, so another process could write the same tables while your site was being put back. Fixed: `wp pontifex import` never recorded a failed import that recovered successfully, so the failure count has been wrong in every release. Fixed: a backup stopped by the pre-restore check now says whether it was damaged, refused, or simply could not be checked here, rather than reporting all three as a failure. Changed: `wp pontifex import --url` is renamed to `--new-url`, because WP-CLI reserves `--url` for itself and consumed it before Pontifex ever saw it, which meant the documented way to move a site to a new address silently did nothing; the old flag now stops with an error naming the new one.
+
 = 1.1.0 =
 * Verifying a backup now checks whether a restore would accept it, not only whether the file is undamaged, and answers with one of three verdicts. Sound means intact and restorable. Broken means damaged. Refused is new and means the backup is NOT damaged — every fingerprint matched — but a restore will not accept it, because it would place a symbolic link outside your site or its contents contradict what it says it holds; keep such a file, do not restore it, and find out where it came from, because Pontifex never produces one. A server that has no room to restore is reported beside the verdict and never as the verdict, because a full disk is not a damaged backup. Fixed: a failed import, export or rollback re-raised the failure into WordPress's fatal handler, so you saw a page of PHP internals and "There has been a critical error on this website" instead of an explanation; all three now say what went wrong and what to do. Fixed: `import --dry-run` ran fewer checks than the import it claimed to rehearse, and now runs all of them. Fixed: the admin Restore screen refuses a backup it will not accept before making the safety copy rather than after, saving minutes of work and a second copy of your site on disk. Also: messages no longer begin with the name of Pontifex's own internal code, which meant nothing to anyone outside the project; that detail goes to the log instead, which now records the exact file and line. No breaking changes.
 
@@ -157,6 +160,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.2.0 =
+Restoring a backup damaged every value holding a percent sign, breaking permalinks and silently resetting plugin settings. Fixed, and restoring an affected backup repairs it. The "came from another site" box now rewrites the links. "wp pontifex import --url" is renamed to "--new-url".
 
 = 1.1.0 =
 Verifying a backup now also checks whether a restore would accept it, and answers sound, broken, or refused — refused meaning intact but unsafe. A failed import, export or rollback explains itself instead of printing a crash. Messages no longer name Pontifex internals.
