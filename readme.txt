@@ -2,7 +2,7 @@
 Contributors: 7duckie
 Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 8.2
 Stable tag: 1.1.0
 License: GPLv2 or later
