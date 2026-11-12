@@ -2805,6 +2805,177 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * The site lock is held across the recovery replay and only released once it has finished.
+	 *
+	 * Recovery rebuilds every table from the safety archive. If the lock were freed
+	 * first, a second process could start writing the same tables mid-replay. The
+	 * order of events is the claim: both replays, then the one release, then the
+	 * history write; and the lock is released exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_holds_the_lock_until_the_recovery_replay_has_finished(): void {
+		$events  = array();
+		$history = array();
+		$replays = 0;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays, &$events ): void {
+				++$replays;
+				$events[] = 1 === $replays ? 'forward-replay' : 'recovery-replay';
+				if ( 1 === $replays ) {
+					throw new RuntimeException( 'replay failed mid-restore' );
+				}
+			}
+		);
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->history_capturing_context( $events, $history, true ) );
+
+		$this->assertSame(
+			array( 'forward-replay', 'recovery-replay', 'flush', 'lock-release', 'history' ),
+			$events,
+			'The lock must stay held through the recovery replay and be released exactly once, after it.'
+		);
+	}
+
+	/**
+	 * The lock is still held while recovery deletes the files the failed restore created.
+	 *
+	 * Removing those files is the last and most destructive step of recovery, so a
+	 * second process must not be able to take the lock before it is done. A real
+	 * runner writes a file during the failed forward restore; at the instant the lock
+	 * is released that file must already be gone, and the release must come after the
+	 * recovery replay's cache flush.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_holds_the_lock_until_the_created_files_are_removed(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$created = $this->base . '/wp-root/wp-content/created-by-failed-restore.txt';
+		$db      = new FakeDbAdapter();
+		$db->fail_after_executes( 0, 'forward replay failed after the files were written' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans(
+			$store->directory() . '/' . $name,
+			array(
+				self::file_plan( 'wp-content/created-by-failed-restore.txt', 'new' ),
+				self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ),
+			)
+		);
+		$_POST['file'] = $name;
+
+		// An empty but valid safety archive: the recovery replay has nothing to put back.
+		$safety_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans( $safety_path, array() );
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$present_at_release = array();
+		$events             = array();
+		$history            = array();
+		$context            = $this->history_capturing_context(
+			$events,
+			$history,
+			true,
+			static function () use ( &$present_at_release, $created ): void {
+				$present_at_release[] = file_exists( $created );
+			}
+		);
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, 'wp-content' ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertSame( array( 'flush', 'lock-release', 'history' ), $events, 'The lock is released once, after the recovery replay.' );
+		$this->assertSame( array( false ), $present_at_release, 'The file the failed restore created must already be removed when the lock is released.' );
+		$this->assertSame( RestoreOutcome::RECOVERY_PRECISE, $history[0]['details']['recovery'], 'A real runner with a ledger reports a precise revert, which proves the cleanup ran.' );
+	}
+
+	/**
+	 * A failure before any safety archive was taken still releases the lock, and replays nothing.
+	 *
+	 * Recovery never runs on this branch, so none of its own exits free the lock;
+	 * the release after the catch block's recovery step is the only one there is.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_that_failed_before_the_safety_archive_still_releases_the_lock(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'no disk space' ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->never();
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history, true ),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertSame( array( 'lock-release', 'history' ), $events, 'With no recovery to protect, the lock is released exactly once and nothing is replayed.' );
+	}
+
+	/**
 	 * A restore that fails before the safety archive is taken ran no recovery, and records none.
 	 *
 	 * @return void
@@ -3358,9 +3529,11 @@ final class RestoreControllerTest extends TestCase {
 	 *
 	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' for each cache flush and 'history' for each history write, in the order they happen.
 	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @param bool                             $record_lock_release When true, each release of the named operation lock is also recorded in $events as 'lock-release'; off by default so the tests that assert the exact flush and history order are unaffected.
+	 * @param callable|null                    $on_lock_release Optional. Called each time the named lock is released, so a test can inspect the world at that exact moment.
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
-	private function history_capturing_context( array &$events, array &$history ) {
+	private function history_capturing_context( array &$events, array &$history, bool $record_lock_release = false, ?callable $on_lock_release = null ) {
 		$context = Mockery::mock( WordPressContext::class );
 		$context->shouldReceive( 'format_size' )->andReturnUsing(
 			static function ( int $bytes ): string {
@@ -3388,7 +3561,16 @@ final class RestoreControllerTest extends TestCase {
 		);
 		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
 		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
-		$context->shouldReceive( 'release_named_lock' );
+		$context->shouldReceive( 'release_named_lock' )->andReturnUsing(
+			static function () use ( &$events, $record_lock_release, $on_lock_release ): void {
+				if ( $record_lock_release ) {
+					$events[] = 'lock-release';
+				}
+				if ( null !== $on_lock_release ) {
+					$on_lock_release();
+				}
+			}
+		);
 		return $context;
 	}
 

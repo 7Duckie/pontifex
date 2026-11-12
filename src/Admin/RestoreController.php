@@ -656,7 +656,10 @@ final class RestoreController {
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin restore failed.', array( 'exception' => $error ) );
-			$this->finish( is_resource( $source ) ? $source : null );
+			// The lock is KEPT here: recovery below replays the safety archive, which rebuilds
+			// every table, and must not run with the site unlocked. It is released explicitly
+			// once recovery has finished.
+			$this->finish( is_resource( $source ) ? $source : null, true );
 
 			// If the safety archive was taken, the restore may have written part of the
 			// database, so replay it to return the site to its pre-restore state. When it was
@@ -665,6 +668,12 @@ final class RestoreController {
 			// whether the file-tree cleanup that goes with it could be proven complete.
 			$skipped_symlinks = array();
 			$recovery         = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner, $skipped_symlinks ) : null;
+
+			// Unconditional, because recovery only ran on one of the two branches above, and
+			// only some of its own exits free the lock. release() is idempotent, so on the
+			// paths that already freed it this does nothing; on the branch where no safety
+			// archive was taken it is the only release there is.
+			$this->lock->release();
 
 			// The pre-bump above survives a successful recovery (the safety archive was taken
 			// after it, so replaying that archive restores it), but not a forward replay that
@@ -722,6 +731,10 @@ final class RestoreController {
 	 * because the recovered tree is then not proven to match the site's prior
 	 * state.
 	 *
+	 * Every exit here closes the archive stream and clears progress but KEEPS the site-wide
+	 * operation lock ({@see self::finish()}'s $keep_lock): the lock must cover the whole of recovery,
+	 * file cleanup included, and the caller releases it once this method has returned.
+	 *
 	 * @param string                      $path             The absolute path of the safety archive to replay.
 	 * @param RestoreRunnerInterface|null $forward_runner   The engine that ran the failed forward restore, or null if the restore never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
 	 * @param array<string, string>       $skipped_symlinks Out-parameter. On return it holds every symbolic link the replay skipped, as entry path => the raw absolute target recorded in the archive, and is empty when nothing was skipped. It is written on every return path that got as far as the replay, so a caller can rely on it after any outcome other than the early {@see self::RECOVERY_FAILED} returns.
@@ -742,7 +755,7 @@ final class RestoreController {
 			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source, true );
 
 			if ( self::GATE_OK !== $this->verify_gate( $recovery_runner, $source, $size ) ) {
-				$this->finish( $source );
+				$this->finish( $source, true );
 				return self::RECOVERY_FAILED;
 			}
 
@@ -768,7 +781,7 @@ final class RestoreController {
 			}
 
 			if ( ! $forward_runner instanceof RestoreRunner ) {
-				$this->finish( $source );
+				$this->finish( $source, true );
 				return self::RECOVERY_MERGE;
 			}
 
@@ -777,7 +790,7 @@ final class RestoreController {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream to read its manifest for the preserved-paths set; not a WP_Filesystem operation.
 			rewind( $source );
 			$preserved_paths = self::declared_content_paths( ( new ArchiveReader( $source ) )->manifest() );
-			$this->finish( $source );
+			$this->finish( $source, true );
 
 			$cleanup = $forward_runner->remove_created_paths( $preserved_paths );
 			if ( array() !== $cleanup->failed_paths() ) {
@@ -799,7 +812,7 @@ final class RestoreController {
 			return array() === $skipped_symlinks ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE_LINKS;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
-			$this->finish( is_resource( $source ) ? $source : null );
+			$this->finish( is_resource( $source ) ? $source : null, true );
 			return self::RECOVERY_FAILED;
 		}
 	}
@@ -1706,11 +1719,22 @@ final class RestoreController {
 	/**
 	 * Release the lock, clear progress, and close the archive stream.
 	 *
-	 * @param resource|null $source The open archive stream to close, or null.
+	 * This frees the SITE-WIDE operation lock, which is what stops a second restore,
+	 * a `wp pontifex import`, a scheduled backup or a rollback from writing the same
+	 * tables. A caller that still has destructive work to do after calling this —
+	 * replaying a safety archive, which rebuilds every table and swaps them in —
+	 * must pass $keep_lock as true, hold the lock until that work is finished, and
+	 * release it itself afterwards. Releasing first and replaying second leaves the
+	 * replay running with nothing to stop another process starting on the same tables.
+	 *
+	 * @param resource|null $source    The open archive stream to close, or null.
+	 * @param bool          $keep_lock True to leave the operation lock held, because the caller has more destructive work to do and will release it; false (the default) to release it.
 	 * @return void
 	 */
-	private function finish( $source ): void {
-		$this->lock->release();
+	private function finish( $source, bool $keep_lock = false ): void {
+		if ( ! $keep_lock ) {
+			$this->lock->release();
+		}
 		$this->clear_progress();
 		if ( is_resource( $source ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this request; not a WP_Filesystem operation.
