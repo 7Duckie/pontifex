@@ -162,7 +162,7 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 == Upgrade Notice ==
 
 = 1.2.0 =
-Restoring a backup damaged every value holding a percent sign, breaking permalinks and silently resetting plugin settings. Fixed, and restoring an affected backup repairs it. The "came from another site" box now rewrites the links. "wp pontifex import --url" is renamed to "--new-url".
+Restoring a backup damaged every value holding a percent sign, breaking permalinks and silently resetting plugin settings. Fixed, and restoring an affected backup repairs it. The came-from-another-site box now rewrites links. The import --url flag is renamed to --new-url.
 
 = 1.1.0 =
 Verifying a backup now also checks whether a restore would accept it, and answers sound, broken, or refused — refused meaning intact but unsafe. A failed import, export or rollback explains itself instead of printing a crash. Messages no longer name Pontifex internals.
