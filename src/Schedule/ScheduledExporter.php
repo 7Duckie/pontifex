@@ -21,6 +21,7 @@ use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ResumableExportRunner;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
+use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
@@ -137,18 +138,22 @@ final class ScheduledExporter {
 
 		try {
 			$this->backup_store->ensure_directory();
-			// The scheduled backup applies the same exclusions the operator configured,
-			// on top of the curated defaults, so a scheduled run matches a manual one
-			// rather than silently differing.
-			$exclusions = ExclusionRules::from_array(
-				array_merge( ExclusionRules::default_v010()->patterns(), $schedule->exclusions() )
-			);
-			$path       = $this->backup_store->next_backup_path( new DateTimeImmutable() );
-			$options    = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
+			// The scheduled backup applies the same exclusions the operator
+			// configured, on top of the curated defaults, so a scheduled run
+			// matches a manual one rather than silently differing. Each list
+			// keeps its own kind scope (see ExclusionPattern), the same as
+			// ExportCommand::build_exclusion_rules(): the curated defaults stay
+			// untagged, the schedule's file patterns are scoped to files,
+			// directories, and symlinks, and its table patterns are scoped to
+			// bare table names — so a file pattern can never reach a database
+			// table it was never meant to touch.
+			$exclusion_rules = self::build_exclusion_rules( $schedule );
+			$path            = $this->backup_store->next_backup_path( new DateTimeImmutable() );
+			$options         = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusion_rules->patterns() ) );
 
 			$content_dir = rtrim( dirname( $this->backup_store->directory(), 2 ), '/' );
 			$runner      = new ResumableExportRunner( $this->environment, $this->wordpress_context, $this->job_store );
-			$job         = $runner->start( $options, $content_dir, 'wp-content', $exclusions->patterns(), time() );
+			$job         = $runner->start( $options, $content_dir, 'wp-content', $exclusion_rules->entries(), time() );
 
 			// Mark the job schedule-originated so completion prunes to retention.
 			$payload             = $job->payload();
@@ -176,6 +181,38 @@ final class ScheduledExporter {
 	 */
 	private function operation_lock(): OperationLock {
 		return new OperationLock( $this->wordpress_context, $this->job_store );
+	}
+
+	/**
+	 * Combine the curated defaults and the schedule's own file and table
+	 * patterns into one ExclusionRules, mirroring
+	 * {@see \Pontifex\Cli\ExportCommand::build_exclusion_rules()}.
+	 *
+	 * The curated defaults come first, untagged — matched against every
+	 * entry kind, exactly as before. Then the schedule's file patterns
+	 * ({@see Schedule::exclusions()}), scoped to files, directories, and
+	 * symlinks. Then the schedule's table patterns
+	 * ({@see Schedule::table_exclusions()}), scoped to database chunks
+	 * (bare table names). Keeping the three lists separate, rather than
+	 * merging them into one untagged list, is what stops a file pattern
+	 * from reaching a database table it was never meant to touch. Pure
+	 * function: no I/O.
+	 *
+	 * @param Schedule $schedule The stored schedule.
+	 * @return ExclusionRules A rule set combining all three, each with its own scope.
+	 */
+	private static function build_exclusion_rules( Schedule $schedule ): ExclusionRules {
+		$entries = array();
+		foreach ( ExclusionRules::default_v010()->patterns() as $pattern ) {
+			$entries[] = ExclusionPattern::untagged( $pattern );
+		}
+		foreach ( $schedule->exclusions() as $pattern ) {
+			$entries[] = ExclusionPattern::operator_file( $pattern );
+		}
+		foreach ( $schedule->table_exclusions() as $pattern ) {
+			$entries[] = ExclusionPattern::operator_table( $pattern );
+		}
+		return ExclusionRules::from_tagged_patterns( $entries );
 	}
 
 	/**

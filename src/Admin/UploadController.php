@@ -343,8 +343,7 @@ final class UploadController {
 	 * @return void
 	 */
 	private function refuse_if_no_room( int $total ): void {
-		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be disabled by the host; the guard is best-effort and its failure must not block the upload.
-		$free = @disk_free_space( $this->store->uploads_directory() );
+		$free = $this->environment->disk_free_space( $this->store->uploads_directory() );
 		if ( false !== $free && $total > $free ) {
 			wp_send_json_error(
 				array( 'message' => __( 'There is not enough disk space to store this backup.', 'pontifex' ) ),

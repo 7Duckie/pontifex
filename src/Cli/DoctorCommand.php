@@ -532,7 +532,7 @@ final class DoctorCommand {
 				'Free disk space (wp-content)',
 				'(unavailable)',
 				self::STATUS_WARN,
-				'Could not read disk space; open_basedir or permission restriction likely.'
+				'Could not read disk space; disk_free_space() may be disabled on this host, or blocked by open_basedir or permissions.'
 			);
 		}
 

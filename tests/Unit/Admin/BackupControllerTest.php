@@ -169,6 +169,111 @@ final class BackupControllerTest extends TestCase {
 		$this->assertSame( 0600, fileperms( $backups[0] ) & 0777, 'A backup must be owner read/write only.' );
 	}
 
+	// -------------------------------------------------------------------------
+	// Exclusions summary (the exclusion match counts, as a display sentence).
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The create() success response carries the exclusions summary sentence,
+	 * built server-side and ready for the browser to display as-is.
+	 *
+	 * The fake manifest builder never actually excludes anything (it returns
+	 * its plans regardless of the rules it is handed), so every one of
+	 * Pontifex's curated defaults reports a count of 0 here — and, per
+	 * {@see \Pontifex\Admin\BackupController::build_exclusions_summary()},
+	 * a zero count is exactly as worth showing as a non-zero one, so the
+	 * default pattern still appears in the sentence.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_the_exclusions_summary_in_the_success_response(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$this->controller( $this->manifest_builder_returning( array( $this->file_plan( 'wp-content/note.txt', "x\n" ) ) ) )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertArrayHasKey( 'exclusions_summary', $this->json['data'] );
+		$this->assertIsString( $this->json['data']['exclusions_summary'] );
+		$this->assertStringStartsWith( 'Exclusions: ', $this->json['data']['exclusions_summary'] );
+		$this->assertStringContainsString(
+			'wp-content/pontifex/**',
+			$this->json['data']['exclusions_summary'],
+			'A curated default must appear in the sentence even though the fake builder never excludes anything with it.'
+		);
+	}
+
+	/**
+	 * The finished sentence format: "Exclusions: pattern (count), pattern
+	 * (count)." — every pattern included, even one whose count is 0.
+	 *
+	 * Exercised directly against the private static helper (as
+	 * {@see self::test_a_percent_sign_in_an_exclusion_pattern_is_preserved()}
+	 * already does for strip_control_characters()), since the full create()
+	 * flow above has no seam to make the fake builder report a genuine,
+	 * non-zero exclusion count.
+	 *
+	 * @return void
+	 */
+	public function test_build_exclusions_summary_formats_every_pattern_including_zero_counts(): void {
+		$method = new \ReflectionMethod( BackupController::class, 'build_exclusions_summary' );
+
+		$summary = $method->invoke(
+			null,
+			array(
+				array(
+					'pattern' => 'wp-content/cache/**',
+					'count'   => 1,
+				),
+				array(
+					'pattern' => 'wp_actionscheduler_*',
+					'count'   => 0,
+				),
+			)
+		);
+
+		$this->assertSame( 'Exclusions: wp-content/cache/** (1), wp_actionscheduler_* (0).', $summary );
+	}
+
+	/**
+	 * No patterns means no sentence: an empty string, not a translated
+	 * "Exclusions: ." with nothing to list. This is the shape create()
+	 * sends when there is nothing to report.
+	 *
+	 * @return void
+	 */
+	public function test_build_exclusions_summary_returns_empty_string_for_no_patterns(): void {
+		$method = new \ReflectionMethod( BackupController::class, 'build_exclusions_summary' );
+
+		$this->assertSame( '', $method->invoke( null, array() ) );
+	}
+
+	/**
+	 * An element that is not shaped like {pattern: string, count: int} is
+	 * skipped rather than fataling — the counts here have round-tripped
+	 * through a job payload, so a malformed element must degrade quietly.
+	 *
+	 * @return void
+	 */
+	public function test_build_exclusions_summary_skips_malformed_elements(): void {
+		$method = new \ReflectionMethod( BackupController::class, 'build_exclusions_summary' );
+
+		$summary = $method->invoke(
+			null,
+			array(
+				'not-an-array',
+				array( 'pattern' => 'wp-content/cache/**' ), // Missing 'count': skipped.
+				array(
+					'pattern' => 'wp-content/pontifex/**',
+					'count'   => 2,
+				), // The one well-shaped element.
+			)
+		);
+
+		$this->assertSame( 'Exclusions: wp-content/pontifex/** (2).', $summary );
+	}
+
 	/**
 	 * A pre-existing files_changed / media_type_unresolved total survives an
 	 * admin backup's bump, and this run's own contribution is added onto it.
@@ -1046,6 +1151,182 @@ final class BackupControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// Table exclusions.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A table-box pattern only reaches a database chunk, and the existing
+	 * file-box pattern only reaches a file — the kind-scoping ExclusionPattern
+	 * enforces, proven through the two lists build_exclusion_rules() actually
+	 * combines.
+	 *
+	 * This is the test that must fail if the table box's patterns were ever
+	 * built with ExclusionPattern::operator_file() instead of operator_table():
+	 * with that mistake, a table-box pattern would no longer apply to
+	 * EntryHeader::KIND_DB_CHUNK at all, and the first assertion below would
+	 * fail. (Verified by making exactly that change and confirming the failure,
+	 * per the brief's drill, then reverting it.)
+	 *
+	 * @return void
+	 */
+	public function test_build_exclusion_rules_keeps_file_and_table_patterns_apart(): void {
+		$method = new \ReflectionMethod( BackupController::class, 'build_exclusion_rules' );
+		$rules  = $method->invoke( null, array( 'wp_myplugin_log' ), array( 'wp_actionscheduler_log' ) );
+
+		$this->assertTrue( $rules->matches( 'wp_actionscheduler_log', EntryHeader::KIND_DB_CHUNK ), 'A table-box pattern must exclude the matching table.' );
+		$this->assertFalse( $rules->matches( 'wp_actionscheduler_log', EntryHeader::KIND_FILE ), 'A table-box pattern must not exclude a file path spelled the same way.' );
+
+		$this->assertTrue( $rules->matches( 'wp_myplugin_log', EntryHeader::KIND_FILE ), 'The existing exclusions-box pattern still excludes files, unchanged (parts A and B1).' );
+		$this->assertFalse( $rules->matches( 'wp_myplugin_log', EntryHeader::KIND_DB_CHUNK ), 'The existing exclusions-box pattern still must not reach a database table (parts A and B1).' );
+	}
+
+	/**
+	 * The operator's extra table patterns are applied and recorded in the archive scope.
+	 *
+	 * Mirrors {@see self::test_create_applies_user_exclusions()} for the new
+	 * table-exclusions box: the submitted patterns are appended to the curated
+	 * defaults and travel into the content-only scope, so a destination reading
+	 * the archive's provenance can see exactly what table pattern was left out.
+	 *
+	 * @return void
+	 */
+	public function test_create_applies_user_table_exclusions(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_textarea_field' )->returnArg();
+
+		$_POST['table_exclusions'] = "wp_myplugin_log\n# a comment\nwp_actionscheduler_*";
+
+		try {
+			$this->controller( $this->manifest_builder_returning( array( $this->file_plan( 'wp-content/note.txt', "x\n" ) ) ) )->create();
+		} finally {
+			unset( $_POST['table_exclusions'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+
+		$backups = ( new BackupStore( $this->base ) )->backups();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Reading the just-written backup's provenance back in a unit test.
+		$source = fopen( $backups[0], 'rb' );
+		try {
+			$scope = ( new ArchiveReader( $source ) )->provenance()->scope();
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened above.
+			fclose( $source );
+		}
+
+		$this->assertNotNull( $scope );
+		$excluded = $scope->excluded_paths();
+		$this->assertContains( 'wp_myplugin_log', $excluded, 'The user table pattern is recorded in the scope.' );
+		$this->assertContains( 'wp_actionscheduler_*', $excluded, 'A glob table pattern is recorded in the scope too.' );
+		$this->assertContains( 'wp-content/pontifex/**', $excluded, 'The curated defaults still apply alongside the table patterns.' );
+		$this->assertNotContains( '# a comment', $excluded, 'Comment lines are dropped, not treated as patterns.' );
+	}
+
+	/**
+	 * A malformed regex in the table-exclusions box is refused at the submit
+	 * boundary, with a message naming the table box rather than the file box.
+	 *
+	 * @return void
+	 */
+	public function test_create_refuses_an_invalid_table_exclusion_pattern(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_textarea_field' )->returnArg();
+
+		$_POST['table_exclusions'] = '/[unclosed(class/';
+
+		try {
+			$this->controller( $this->manifest_builder_returning( array() ) )->create();
+			$this->fail( 'create() should refuse a malformed table exclusion pattern.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['table_exclusions'] );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 400, $this->json['status'] );
+		$this->assertStringContainsString( 'table exclusion pattern', $this->json['data']['message'], 'The refusal must name the table box, not the file box.' );
+		$this->assertSame( array(), ( new BackupStore( $this->base ) )->backups(), 'No backup may be written when a pattern is refused.' );
+	}
+
+	/**
+	 * A percent sign followed by two hex digits survives the new table-exclusions
+	 * reader unmangled — the same v1.0.3 regression {@see self::test_a_percent_sign_in_an_exclusion_pattern_is_preserved()}
+	 * guards against for the file-exclusions box, now proven for the new reader too.
+	 *
+	 * @return void
+	 */
+	public function test_a_percent_sign_in_a_table_exclusion_pattern_is_preserved(): void {
+		Functions\when( 'wp_unslash' )->returnArg();
+
+		$_POST['table_exclusions'] = "wp_actionscheduler_%2Flog\n# a comment\nwp_myplugin_%41%42_cache";
+
+		$method = new \ReflectionMethod( BackupController::class, 'read_user_table_exclusions' );
+		try {
+			$patterns = $method->invoke( $this->controller() );
+		} finally {
+			unset( $_POST['table_exclusions'] );
+		}
+
+		$this->assertSame(
+			array( 'wp_actionscheduler_%2Flog', 'wp_myplugin_%41%42_cache' ),
+			$patterns,
+			'Percent-encoded-looking bytes in a table pattern must survive byte for byte, exactly as the file-exclusions reader already preserves them.'
+		);
+	}
+
+	/**
+	 * Saving a schedule persists both the file and table exclusion lists.
+	 *
+	 * @return void
+	 */
+	public function test_save_schedule_persists_both_exclusion_lists(): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_text_field' )->returnArg();
+		// wp_clear_scheduled_hook is already stubbed for the whole file in setUp.
+		Functions\expect( 'wp_schedule_event' )->once()->with( Mockery::type( 'int' ), 'daily', \Pontifex\Schedule\ScheduleStore::CRON_HOOK );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'save_option' )
+			->once()
+			->with(
+				\Pontifex\Schedule\ScheduleStore::OPTION,
+				array(
+					'enabled'          => true,
+					'frequency'        => 'daily',
+					'hour'             => 3,
+					'retention'        => 2,
+					'exclusions'       => array( 'custom-thing/**' ),
+					'table_exclusions' => array( 'wp_actionscheduler_log' ),
+				)
+			);
+		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );
+
+		$_POST['enabled']          = '1';
+		$_POST['frequency']        = 'daily';
+		$_POST['hour']             = '3';
+		$_POST['retention']        = '2';
+		$_POST['exclusions']       = 'custom-thing/**';
+		$_POST['table_exclusions'] = 'wp_actionscheduler_log';
+
+		try {
+			$controller->save_schedule();
+		} finally {
+			unset( $_POST['enabled'], $_POST['frequency'], $_POST['hour'], $_POST['retention'], $_POST['exclusions'], $_POST['table_exclusions'] );
+		}
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['enabled'] );
+	}
+
+	// -------------------------------------------------------------------------
 	// Progress honesty around a live job.
 	// -------------------------------------------------------------------------
 
@@ -1347,11 +1628,12 @@ final class BackupControllerTest extends TestCase {
 			->with(
 				\Pontifex\Schedule\ScheduleStore::OPTION,
 				array(
-					'enabled'    => true,
-					'frequency'  => 'daily',
-					'hour'       => 3,
-					'retention'  => 2,
-					'exclusions' => array(),
+					'enabled'          => true,
+					'frequency'        => 'daily',
+					'hour'             => 3,
+					'retention'        => 2,
+					'exclusions'       => array(),
+					'table_exclusions' => array(),
 				)
 			);
 		$controller = new BackupController( $this->environment_mock(), $context, new BackupStore( $this->base ), new NullLogger() );

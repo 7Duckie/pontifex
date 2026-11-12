@@ -95,7 +95,7 @@ final class SnapshotConsistencyTest extends TestCase {
 
 		// The snapshot dump sees the database as it stood when the snapshot opened.
 		$this->assertSame( 1, $snapshot_adapter->row_count( self::TABLE ), 'The snapshot must not see the concurrent insert.' );
-		$snapshot_sql = $snapshot_adapter->dump_table_rows( self::TABLE, 0, 10 );
+		$snapshot_sql = $snapshot_adapter->dump_table_rows( self::TABLE, 0, 10 )->sql();
 		$this->assertStringContainsString( 'before-snapshot', $snapshot_sql );
 		$this->assertStringNotContainsString( 'after-snapshot', $snapshot_sql, 'A row inserted mid-export must not leak into the snapshot dump.' );
 

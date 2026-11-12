@@ -22,10 +22,11 @@ use Pontifex\WordPress\WordPressContext;
  *
  * The read-only summary an operator sees first: which plugin version is running,
  * the local transfer counters (how many backups/restores have run and whether
- * they worked), the most recent transfers, and the pre-import safety archives on
- * disk. It performs no destructive action and writes nothing — it only reads the
- * state the CLI already records (the wp_options counters and {@see TransferHistory})
- * and the rollback directory ({@see RollbackStoreInterface}).
+ * they worked), what the last restore or rollback did, the most recent transfers,
+ * and the pre-import safety archives on disk. It performs no destructive action
+ * and writes nothing — it only reads the state the CLI already records (the
+ * wp_options counters and {@see TransferHistory}, the last of them through
+ * {@see RestoreOutcome}) and the rollback directory ({@see RollbackStoreInterface}).
  *
  * The data-gathering methods ({@see self::stats_rows()}, {@see self::history_rows()},
  * {@see self::archive_rows()}) are pure given a context and store, so they are
@@ -131,7 +132,7 @@ final class OverviewPage {
 
 		echo '<section class="pontifex-section">';
 		printf( '<h2 class="pontifex-section-title">%s</h2>', esc_html__( 'Transfer activity', 'pontifex' ) );
-		$this->render_activity( $this->stats_rows() );
+		$this->render_activity( $this->stats_rows(), $this->last_outcome_row() );
 		echo '</section>';
 
 		echo '<section class="pontifex-section">';
@@ -150,9 +151,9 @@ final class OverviewPage {
 	/**
 	 * Build the three activity rows: export, import, and rollback.
 	 *
-	 * Rollbacks are counted separately from imports: a rollback is an undo, not a
-	 * transfer, so it has its own counters and stays out of the recent-transfers
-	 * history below.
+	 * Rollbacks are counted separately from imports: a rollback is an undo, not an
+	 * import, so it has its own counters. It is still recorded in the recent-transfers
+	 * history below, as a `rollback`, like every other operation.
 	 *
 	 * @return array<int, array<string, int|string>> One row per operation.
 	 */
@@ -161,6 +162,43 @@ final class OverviewPage {
 			$this->operation_row( __( 'Backups (export)', 'pontifex' ), self::EXPORT_STATS_OPTION, 'bytes_exported' ),
 			$this->operation_row( __( 'Restores (import)', 'pontifex' ), self::IMPORT_STATS_OPTION, 'bytes_imported' ),
 			$this->operation_row( __( 'Rollbacks', 'pontifex' ), self::ROLLBACK_STATS_OPTION, 'bytes_rolled_back' ),
+		);
+	}
+
+	/**
+	 * Build the row saying what the last restore or rollback did, or null when there is nothing to say.
+	 *
+	 * Unlike the Restore screen, which offers the last outcome only while it is
+	 * recent, this is a status screen: "what did my last restore do" is worth
+	 * answering whenever it is asked, so there is no recency bound. The label comes
+	 * from the operation that was recorded ("Last restore" or "Last rollback"),
+	 * because the sentence {@see RestoreOutcome::summary()} writes says "Rolled
+	 * back …" for a rollback and would read wrong under a "Last restore" label.
+	 * Null when no restore or rollback has been recorded, and when the newest record
+	 * is too damaged to describe.
+	 *
+	 * @return array{operation: string, text: string, when: string}|null The row, or null for nothing to show.
+	 */
+	public function last_outcome_row(): ?array {
+		$latest = RestoreOutcome::latest( $this->context );
+		if ( null === $latest ) {
+			return null;
+		}
+
+		$summary = $latest->summary();
+		if ( '' === $summary ) {
+			return null;
+		}
+
+		$recorded = strtotime( $latest->occurred_at() );
+		$when     = false !== $recorded ? wp_date( 'H:i \o\n d-m-Y', $recorded ) : false;
+
+		return array(
+			'operation' => RestoreOutcome::OPERATION_ROLLBACK === $latest->operation()
+				? __( 'Last rollback', 'pontifex' )
+				: __( 'Last restore', 'pontifex' ),
+			'text'      => $summary,
+			'when'      => false !== $when ? $when : '(unknown)',
 		);
 	}
 
@@ -224,12 +262,17 @@ final class OverviewPage {
 	}
 
 	/**
-	 * Render the transfer-activity rows as typographic figures.
+	 * Render the transfer-activity rows as typographic figures, then the last outcome if there is one.
 	 *
-	 * @param array<int, array<string, int|string>> $rows The activity rows.
+	 * The last outcome is one more stat in the same grid, in the same markup: its
+	 * label in the operation slot, the sentence in the line slot and the time in the
+	 * muted note slot. Nothing is rendered for it when there is no record.
+	 *
+	 * @param array<int, array<string, int|string>>                     $rows The activity rows.
+	 * @param array{operation: string, text: string, when: string}|null $last The last restore or rollback, or null for none.
 	 * @return void
 	 */
-	private function render_activity( array $rows ): void {
+	private function render_activity( array $rows, ?array $last = null ): void {
 		echo '<div class="pontifex-stat-grid">';
 		foreach ( $rows as $row ) {
 			printf(
@@ -252,6 +295,16 @@ final class OverviewPage {
 						(string) $row['size']
 					)
 				)
+			);
+		}
+		if ( null !== $last ) {
+			printf(
+				'<div class="pontifex-stat"><span class="pontifex-stat-operation">%s</span>'
+				. '<span class="pontifex-stat-line">%s</span>'
+				. '<span class="pontifex-stat-size">%s</span></div>',
+				esc_html( $last['operation'] ),
+				esc_html( $last['text'] ),
+				esc_html( $last['when'] )
 			);
 		}
 		echo '</div>';

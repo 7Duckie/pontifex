@@ -81,6 +81,86 @@
         </properties>
     </rule>
 
+    <!--
+        WordPress-Extra does not include WordPress.DB.DirectDatabaseQuery,
+        which flags database access that bypasses the WordPress API.
+        Plugin Check does include it, so this is the same gap as
+        ValidatedSanitizedInput above. Pontifex's shipped code trips it
+        nowhere — the places it would are already carrying exact-sniff
+        `phpcs:ignore` comments written for Plugin Check. The integration
+        suite creates and drops its own fixture tables, which produces 59
+        findings that describe the test harness rather than the plugin;
+        `tests/` is excluded because Plugin Check never looks at it, since
+        it inspects the built package, not the source tree.
+    -->
+    <rule ref="WordPress.DB.DirectDatabaseQuery">
+        <exclude-pattern>tests/*</exclude-pattern>
+    </rule>
+
+    <!--
+        WordPress-Extra does not include WordPress.DB.SlowDBQuery either,
+        and Plugin Check runs it unmodified. No exclusions: Pontifex is
+        clean everywhere today.
+    -->
+    <rule ref="WordPress.DB.SlowDBQuery"/>
+
+    <!--
+        Squiz.PHP.DiscouragedFunctions is not part of WordPress-Extra, and
+        Plugin Check runs it with its own list of forbidden functions, not
+        the sniff's PHPCS default (error_log, print_r, var_dump — which
+        has nothing to do with what Plugin Check checks for). The
+        properties block below is not optional: leaving it out would go
+        green while checking for the wrong functions entirely, so it is
+        replaced with Plugin Check's own list. `tests/` is excluded
+        because five unit tests call `ini_set()` as legitimate test setup.
+    -->
+    <rule ref="Squiz.PHP.DiscouragedFunctions">
+        <exclude-pattern>tests/*</exclude-pattern>
+        <properties>
+            <property name="forbiddenFunctions" type="array">
+                <element key="set_time_limit" value="null"/>
+                <element key="ini_set" value="null"/>
+                <element key="ini_alter" value="null"/>
+                <element key="dl" value="null"/>
+            </property>
+        </properties>
+    </rule>
+
+    <!--
+        Generic.PHP.ForbiddenFunctions is already active via WordPress-
+        Extra, but only with the PHPCS default list of `sizeof` and
+        `delete`. Plugin Check runs the same sniff with fourteen further
+        entries, so the full, explicit sixteen-entry list is declared
+        here rather than reached for with `extend="true"`: extend only
+        merges with a value a ruleset has already set for the property,
+        never with the sniff's own built-in default, so because
+        WordPress-Extra never sets this property itself, `extend="true"`
+        would start from an empty array and silently drop `sizeof` and
+        `delete` — weakening the gate while appearing to strengthen it.
+    -->
+    <rule ref="Generic.PHP.ForbiddenFunctions">
+        <properties>
+            <property name="forbiddenFunctions" type="array">
+                <element key="sizeof" value="count"/>
+                <element key="delete" value="unset"/>
+                <element key="move_uploaded_file" value="null"/>
+                <element key="passthru" value="null"/>
+                <element key="proc_open" value="null"/>
+                <element key="create_function" value="null"/>
+                <element key="eval" value="null"/>
+                <element key="str_rot13" value="null"/>
+                <element key="_cleanup_header_comment" value="null"/>
+                <element key="_get_plugin_data_markup_translate" value="null"/>
+                <element key="_transition_post_status" value="null"/>
+                <element key="_wp_post_revision_fields" value="null"/>
+                <element key="do_shortcode_tag" value="null"/>
+                <element key="get_post_type_labels" value="null"/>
+                <element key="wp_get_sidebars_widgets" value="null"/>
+                <element key="wp_get_widget_defaults" value="null"/>
+            </property>
+        </properties>
+    </rule>
+
     <!-- Minimum PHP version for compatibility sniffs. -->
     <config name="testVersion" value="8.1-"/>
 </ruleset>

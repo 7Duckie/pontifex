@@ -1,6 +1,8 @@
 # 0021 — restore: confine a symlink by the target the kernel will reach, decided before the first byte is written
 
-- **Status:** Accepted, 2026-07-29. Implemented and shipped in v0.9.5.
+- **Status:** Accepted, 2026-07-29. Implemented and shipped in v0.9.5. Amended
+  2026-10-28 (replaying this site's own safety archive skips an absolute target
+  rather than refusing it — see Amendment).
 - **Deciders:** 7Duckie (security hardening, restore symlink confinement).
 
 ## Context
@@ -360,7 +362,9 @@ separately; the ninth moves an existing check earlier.
 - **Absolute targets stay refused, unchanged.** This matches Python's
   `AbsoluteLinkError` and costs nothing known: an absolute target in a
   migratable archive encodes the source server's paths and is almost always
-  wrong on the destination anyway.
+  wrong on the destination anyway. *Amended 2026-10-28: true of every forward
+  restore, and no longer true of a replay of this site's own safety archive,
+  which skips such a target instead of refusing it — see Amendment below.*
 - **The containment root is the site root, and the target must be a strict
   descendant of it.** A resolved target equal to the site root, or above it, is
   refused — the site root itself for Python's stated reason (a link that *is*
@@ -559,6 +563,53 @@ the reason the containment root is the site root rather than the content root.
   swapping between the check and the use cannot be reproduced. What *can* be
   reproduced is the resolution itself, which is where the archive-controlled
   attack lives; the residual is a race against a local attacker, below.
+
+## Amendment — 2026-10-28: a safety-archive replay skips an absolute target rather than refusing it
+
+The decision above refuses an absolute link target outright, for a reason that
+holds only of the input it was written about: an archive that did not come from
+this site. An absolute target in *someone else's* archive is not confined to
+this site at all, and refusing it costs nothing, because it encodes the source
+server's paths and is almost certainly wrong here anyway.
+
+A **safety archive** is not that input. It is this site's own state, written by
+this site minutes earlier, immediately before the restore it exists to undo.
+Applying the refusal to it inverted the rule's purpose. A site with an ordinary
+absolute link under `wp-content` — `wp-content/uploads/media` pointing at
+`/mnt/shared/media`, a common hosting arrangement — therefore held safety
+archives that none of its own recovery paths could replay. After a failed
+restore the operator was told automatic recovery had also failed; running
+`wp pontifex rollback`, the remedy that very message names, refused with
+"this safety archive cannot be trusted" and added that there was no second copy
+of it. Pontifex called its own intact undo untrustworthy and then told the
+operator they had nothing else. On the admin screens there was no override at
+all. Both halves were reproduced on a real site before anything was changed.
+
+**Amended decision:** replaying a safety archive — automatic recovery after a
+failed restore or import, `wp pontifex rollback`, and the admin Rollback button
+— **skips** a link whose recorded target is an absolute path, completes the rest
+of the replay, and names every link it skipped. The confinement preflight and
+the per-entry write agree on the decision, so a link the preflight skips is
+never created later by the walk.
+
+Skipping is sound here for the reason the rest of this decision is not needed
+here: a restore only ever overwrites and creates, and never deletes, so a link
+that existed before the failed operation is still on disk unless that operation
+overwrote it. Where it was overwritten, the operator is told which one to look
+at rather than left with a refusal.
+
+**What this amendment does not change.** A forward restore of any archive still
+refuses an absolute target exactly as before, which is the case this decision
+was written about. A *relative* target that resolves outside the containment
+root is still refused even during a replay. `--allow-unsafe-symlinks` is
+untouched: it still never waives an absolute target, and the skip is not driven
+by it — which is why the admin screens, which cannot set that flag, are
+nonetheless able to recover.
+
+**What it costs.** A recovery that skipped a link can no longer claim to have
+put the site back exactly, so it reports a *merge* instead, which is the honest
+verdict and the same one ADR 0024 already uses when a recovery cannot account
+for everything it created.
 
 ## What this does not cover
 

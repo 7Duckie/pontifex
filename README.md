@@ -10,7 +10,7 @@ current site first by default, so it can be rolled back with one command.
 Drive it from WP-CLI (`wp pontifex …`) or from the admin screens under
 **Pontifex** in wp-admin, for sites without shell access.
 
-**Status: v1.1.0, released.** The public API is
+**Status: v1.2.0, released.** The public API is
 frozen (a breaking change now needs a major version), and the `.wpmig`
 specification is locked at specification version 1.1: a v1.1 archive stays
 readable by every future Pontifex, and a change the specification cannot
@@ -87,7 +87,7 @@ wp pontifex import /path/to/site.wpmig --dry-run
 wp pontifex import /path/to/site.wpmig
 
 # Move a site to a new address (serialised-data-safe)
-wp pontifex import /path/to/site.wpmig --url=https://new-site.example
+wp pontifex import /path/to/site.wpmig --new-url=https://new-site.example
 
 # Undo the most recent import
 wp pontifex rollback
@@ -108,7 +108,7 @@ A full walkthrough, including the admin screens, is in
 | Command | What it does |
 |---|---|
 | `export` | Pack the site into a `.wpmig`. Content-only by default; `--whole-site`, `--files-only`, `--db-only` change the scope; `--exclude` / `--exclude-table` / `--exclude-file` narrow it. `--encrypt` (AES-256-GCM, Argon2id), `--sign`, `--resumable`, `--destination`. |
-| `import` | Restore an archive, taking a safety archive first. `--url` migrates to a new address; `--dry-run` writes nothing; `--public-key` makes the signature mandatory. |
+| `import` | Restore an archive, taking a safety archive first. `--new-url` migrates to a new address; `--dry-run` writes nothing; `--public-key` makes the signature mandatory. |
 | `verify` | Check an archive's integrity without restoring. `--list` prints its contents. |
 | `rollback` | Undo the most recent import from its safety archive. |
 | `doctor` | Read-only environment audit — memory, execution time, symbolic-link support, disk space, database version. |
@@ -158,18 +158,20 @@ That gives you WordPress on `http://localhost:8910` with Pontifex active.
 The integration suite runs against a second wp-env configuration
 (`.wp-env.tests.json`, port 8911) —
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) has the exact commands,
-the commit conventions, and the quality gates.
+the commit conventions, and the quality gates. `composer check:plugin` runs
+Plugin Check — the wordpress.org listing gate — against the built package.
 
 Security reports: [`.github/SECURITY.md`](.github/SECURITY.md), via GitHub's
 private vulnerability reporting.
 
 ## Roadmap
 
-v0.1.0 through v1.1.0 have shipped — round-trip baseline, verification and
+v0.1.0 through v1.2.0 have shipped — round-trip baseline, verification and
 rollback, cross-URL migration, encryption and signing, observability, the
 admin interface, resumable and scheduled exports, selective content, offsite
 destinations, the v1.0.0 stable surface, the v1.0.1 to v1.0.3 security and
-correctness patches, and the v1.1.0 agreement between verifying and restoring.
+correctness patches, the v1.1.0 agreement between verifying and restoring, and the v1.2.0
+repair of the percent-sign corruption a restore used to cause.
 
 Not yet committed to a release: push/pull host-to-host transports, multisite
 support, and a standalone Go reader for `.wpmig`.

@@ -136,7 +136,7 @@ final class ResumableExportIntegrationTest extends TestCase {
 
 		// The db_chunk's SQL is the real WpdbAdapter dump of the scratch table.
 		$adapter = new WpdbAdapter( $wpdb );
-		$db_sql  = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 );
+		$db_sql  = $adapter->dump_table_schema( $this->scratch_table ) . $adapter->dump_table_rows( $this->scratch_table, 0, 100 )->sql();
 
 		$output    = $this->work_dir . '/out.wpmig';
 		$jobs_root = $this->work_dir;

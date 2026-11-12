@@ -213,4 +213,47 @@ final class StatsCommandTest extends TestCase {
 		$this->assertSame( '(unknown)', $rows[0]['outcome'] );
 		$this->assertSame( '0 bytes', $rows[0]['size'] );
 	}
+
+	/**
+	 * A rollback entry renders as a row of its own, with the operation passed through unmapped.
+	 *
+	 * The rolling history now carries a third operation kind. The recent-transfers
+	 * rows print whatever operation string was recorded, so a rollback shows as
+	 * `rollback`, and the `details` array it carries is not a column and is ignored.
+	 *
+	 * @return void
+	 */
+	public function test_build_recent_rows_renders_a_rollback_entry(): void {
+		$command = $this->build_command( $this->context_with_echoing_format_size() );
+
+		$history = array(
+			array(
+				'at'        => '2026-10-29T09:00:00+00:00',
+				'operation' => 'import',
+				'outcome'   => 'succeeded',
+				'bytes'     => 4096,
+			),
+			array(
+				'at'        => '2026-10-29T10:00:00+00:00',
+				'operation' => 'rollback',
+				'outcome'   => 'succeeded',
+				'bytes'     => 2048,
+				'details'   => array( 'entries' => 9 ),
+			),
+		);
+
+		$rows = $this->invoke_private( $command, 'build_recent_rows', $history );
+
+		$this->assertCount( 2, $rows );
+		$this->assertSame(
+			array(
+				'when'      => '2026-10-29T10:00:00+00:00',
+				'operation' => 'rollback',
+				'outcome'   => 'succeeded',
+				'size'      => '2048 bytes',
+			),
+			$rows[0]
+		);
+		$this->assertSame( 'import', $rows[1]['operation'] );
+	}
 }

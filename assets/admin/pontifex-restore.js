@@ -601,10 +601,21 @@
 	 * screen. The final verdict was addressed to the request that started the
 	 * operation, so on completion this can only say it finished and point at
 	 * where the outcome is recorded.
+	 *
+	 * When nothing is running, the server may still hold a recent outcome (it
+	 * sends `last`): that is the page the operator lands on after a restore reset
+	 * their session and they signed back in, with nothing to re-attach to. The
+	 * sentence arrives already composed, so it is only shown, as plain text.
 	 */
 	function reattachIfRunning() {
 		request( 'pontifex_restore_progress' ).then( function ( res ) {
-			if ( ! res || ! res.success || ! res.data || 'idle' === res.data.phase ) {
+			if ( ! res || ! res.success || ! res.data ) {
+				return;
+			}
+			if ( 'idle' === res.data.phase ) {
+				if ( res.data.last && 'string' === typeof res.data.last.text ) {
+					setText( 'pontifex-restore-result', res.data.last.text );
+				}
 				return;
 			}
 			setControlsEnabled( false );

@@ -68,9 +68,11 @@ final class RewriteReport {
 	 *
 	 * These are values whose raw bytes hold the search string yet the
 	 * replacer returned them untouched — serialised data carrying a
-	 * non-allowlisted object, a value that would not round-trip, or
-	 * corrupt serialised bytes. A non-zero count is the operator's cue to
-	 * review them, or to widen the allowlist via the
+	 * non-allowlisted object, a value that would not round-trip, corrupt
+	 * serialised bytes, or a value abandoned for exceeding the replacer's
+	 * walk bounds (a cyclic reference, or nesting far beyond anything
+	 * ordinary WordPress data produces). A non-zero count is the operator's
+	 * cue to review them, or to widen the allowlist via the
 	 * `pontifex_serialized_classes` filter if the classes are trusted.
 	 *
 	 * @var int

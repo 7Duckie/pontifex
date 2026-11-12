@@ -21,7 +21,17 @@ use Pontifex\Archive\Format\EntryHeader;
  *     treated as PCRE regular expressions. The pattern is passed to
  *     preg_match() whole, with its leading and trailing slashes kept
  *     as the PCRE delimiters, and no modifiers are added.
- *     Example: "/\.tmp$/" matches any path ending in ".tmp".
+ *     Example: "/\.tmp$/" matches any path ending in ".tmp". Where in
+ *     the path it is allowed to match depends on how the pattern was
+ *     tagged (see {@see ExclusionPattern}): an untagged pattern (the
+ *     constructor, {@see self::from_array()}, and the curated defaults)
+ *     matches anywhere in the path, exactly as before; an operator
+ *     pattern ({@see self::from_tagged_patterns()} via
+ *     {@see ExclusionPattern::operator_file()} or
+ *     {@see ExclusionPattern::operator_table()}) is anchored to the
+ *     start of the path, so "/log/" no longer matches "blogmap.php".
+ *     This only changes regex patterns; the other three shapes below
+ *     are already anchored by their own semantics.
  *  2. **Directory-tree patterns** — patterns ending with "/**" match
  *     the directory itself AND every path beneath it. Example:
  *     "wp-content/cache/**" matches "wp-content/cache",
@@ -53,17 +63,35 @@ use Pontifex\Archive\Format\EntryHeader;
  * existing signature):
  *
  *  - {@see ExclusionRules::__construct()} — patterns array; validates
- *    that every element is a string.
+ *    that every element is a string. Every pattern built this way is
+ *    untagged (see {@see ExclusionPattern::untagged()}): matched against
+ *    every entry kind, with an unanchored regex — the original,
+ *    unchanged behaviour.
  *  - {@see ExclusionRules::none()} — empty rule set; excludes nothing.
  *  - {@see ExclusionRules::default_v010()} — Pontifex's curated default
  *    exclusion list for v0.1.0 (Pontifex's own working dir and the
- *    WordPress core cache directory).
+ *    WordPress core cache directory). Untagged, like the constructor.
  *  - {@see ExclusionRules::from_array()} — explicit factory equivalent
  *    to the constructor; documented for callers who prefer factory
- *    methods over direct construction.
+ *    methods over direct construction. Untagged, like the constructor.
+ *  - {@see ExclusionRules::from_tagged_patterns()} — builds a rule set
+ *    from explicitly tagged {@see ExclusionPattern} entries, each
+ *    carrying its own kind scope and anchoring. This is how a caller
+ *    combines Pontifex's own untagged defaults with an operator's own
+ *    file and table patterns without the two lists losing what kind of
+ *    thing each pattern was ever meant to match. A later entry that an
+ *    earlier entry already completely covers ({@see ExclusionPattern::covers()})
+ *    is dropped, so an operator pattern identical to a curated default
+ *    is not silently shadowed by it and left reporting a false zero in
+ *    {@see self::match_counts()}.
  *  - {@see ExclusionRules::matches()} — true if the path should be
- *    excluded; false otherwise.
- *  - {@see ExclusionRules::patterns()} — read-only patterns view.
+ *    excluded; false otherwise. A pattern whose scope does not cover the
+ *    given kind is skipped, never evaluated.
+ *  - {@see ExclusionRules::patterns()} — read-only patterns view (the
+ *    raw pattern text only, in construction order — scope and anchoring
+ *    are not part of this view).
+ *  - {@see ExclusionRules::match_counts()} — how many times each pattern
+ *    has excluded something, in the same order as {@see self::patterns()}.
  *
  * Default-vs-user-control philosophy: {@see ExclusionRules::default_v010()}
  * returns a deliberately small, defensible list — three categories of
@@ -83,34 +111,50 @@ use Pontifex\Archive\Format\EntryHeader;
 final class ExclusionRules {
 
 	/**
-	 * The patterns this rule set was constructed with.
+	 * The patterns this rule set was constructed with, each tagged with its
+	 * kind scope and anchoring.
 	 *
-	 * Stored verbatim in construction order. Pattern-type detection
-	 * happens lazily on each call to matches().
+	 * Stored in construction order. Pattern-type detection happens lazily
+	 * on each call to matches().
 	 *
-	 * @var string[]
+	 * @var ExclusionPattern[]
 	 */
-	private array $patterns;
+	private array $entries;
+
+	/**
+	 * How many times each entry (by its index in $entries) has excluded something.
+	 *
+	 * @var array<int, int>
+	 */
+	private array $match_counts;
 
 	/**
 	 * Construct an ExclusionRules with an explicit list of patterns.
 	 *
-	 * Most callers should prefer one of the named factories:
+	 * Every pattern built this way is untagged (see
+	 * {@see ExclusionPattern::untagged()}): matched against every entry
+	 * kind, with an unanchored regex — unchanged from before tagging
+	 * existed. Most callers should prefer one of the named factories:
 	 * {@see ExclusionRules::none()}, {@see ExclusionRules::default_v010()},
-	 * or {@see ExclusionRules::from_array()}.
+	 * or {@see ExclusionRules::from_array()}. A caller that needs to give
+	 * some patterns a narrower scope wants {@see ExclusionRules::from_tagged_patterns()}
+	 * instead.
 	 *
 	 * @param string[] $patterns Patterns to match against relative paths.
 	 * @throws InvalidArgumentException If any element of $patterns is not a string.
 	 */
 	public function __construct( array $patterns = array() ) {
+		$entries = array();
 		foreach ( $patterns as $i => $pattern ) {
 			if ( ! is_string( $pattern ) ) {
 				throw new InvalidArgumentException(
 					sprintf( 'Patterns[%d] must be a string.', (int) $i )
 				);
 			}
+			$entries[] = ExclusionPattern::untagged( $pattern );
 		}
-		$this->patterns = $patterns;
+		$this->entries      = $entries;
+		$this->match_counts = array_fill( 0, count( $entries ), 0 );
 	}
 
 	/**
@@ -189,12 +233,72 @@ final class ExclusionRules {
 	}
 
 	/**
+	 * Build a rule set from explicitly tagged patterns.
+	 *
+	 * Unlike {@see self::from_array()}, each pattern here says which
+	 * entry kind it may match and whether a regex-shaped pattern is
+	 * anchored to the start of the name (see {@see ExclusionPattern}).
+	 * This is how a caller keeps Pontifex's own untagged defaults
+	 * matching exactly as before while giving an operator's own file and
+	 * table patterns their own, narrower behaviour — see
+	 * {@see \Pontifex\Cli\ExportCommand::build_exclusion_rules()} for the
+	 * caller that does this.
+	 *
+	 * Before the rule set is built, a later entry that an earlier entry
+	 * already completely covers ({@see ExclusionPattern::covers()}) is
+	 * dropped, keeping the first occurrence and leaving every other
+	 * entry's order and count untouched. This closes a real defect: an
+	 * operator's own pattern can be textually identical to one of
+	 * Pontifex's curated defaults (`--exclude='wp-content/cache/**'`,
+	 * say), and without de-duplication the default — tested first —
+	 * would take every match, leaving the operator's own, functioning
+	 * pattern reporting a permanent 0 in {@see self::match_counts()}.
+	 * De-duplication is never done on pattern text alone: the same text
+	 * given once as a file pattern and once as a table pattern is two
+	 * genuinely different rules (a `wp_comments` file and a `wp_comments`
+	 * table), and both are kept — see {@see ExclusionPattern::covers()}
+	 * for the exact rule.
+	 *
+	 * @param ExclusionPattern[] $entries The tagged patterns, in match order.
+	 * @return self A rule set built from the tagged patterns, with any entry a preceding one fully covers removed.
+	 * @throws InvalidArgumentException If any element of $entries is not an ExclusionPattern.
+	 */
+	public static function from_tagged_patterns( array $entries ): self {
+		foreach ( $entries as $i => $entry ) {
+			if ( ! $entry instanceof ExclusionPattern ) {
+				throw new InvalidArgumentException(
+					sprintf( 'Entries[%d] must be an ExclusionPattern.', (int) $i )
+				);
+			}
+		}
+
+		$deduplicated = array();
+		foreach ( $entries as $entry ) {
+			$already_covered = false;
+			foreach ( $deduplicated as $kept ) {
+				if ( $kept->covers( $entry ) ) {
+					$already_covered = true;
+					break;
+				}
+			}
+			if ( ! $already_covered ) {
+				$deduplicated[] = $entry;
+			}
+		}
+
+		$rules               = new self();
+		$rules->entries      = array_values( $deduplicated );
+		$rules->match_counts = array_fill( 0, count( $rules->entries ), 0 );
+		return $rules;
+	}
+
+	/**
 	 * Decide whether the given path should be excluded from the archive.
 	 *
 	 * Iterates the patterns in construction order; returns true on
-	 * the first match. Each pattern is dispatched to one of four
-	 * matchers based on its shape (regex, directory-tree, glob, or
-	 * exact-string).
+	 * the first match whose scope covers $kind. Each pattern is
+	 * dispatched to one of four matchers based on its shape (regex,
+	 * directory-tree, glob, or exact-string).
 	 *
 	 * @param string $relative_path Path relative to the scan root.
 	 * @param string $kind          One of the EntryHeader::KIND_* constants.
@@ -218,8 +322,12 @@ final class ExclusionRules {
 			);
 		}
 
-		foreach ( $this->patterns as $pattern ) {
-			if ( self::pattern_matches( $pattern, $relative_path ) ) {
+		foreach ( $this->entries as $index => $entry ) {
+			if ( ! $entry->applies_to_kind( $kind ) ) {
+				continue;
+			}
+			if ( self::pattern_matches( $entry->pattern(), $relative_path, $entry->is_anchored() ) ) {
+				++$this->match_counts[ $index ];
 				return true;
 			}
 		}
@@ -229,10 +337,55 @@ final class ExclusionRules {
 	/**
 	 * Return the configured patterns (read-only view).
 	 *
+	 * Raw pattern text only, in construction order — an entry's kind
+	 * scope and anchoring are not part of this view; see
+	 * {@see ExclusionPattern} for those.
+	 *
 	 * @return string[] The patterns, in construction order.
 	 */
 	public function patterns(): array {
-		return $this->patterns;
+		return array_map(
+			static fn ( ExclusionPattern $entry ): string => $entry->pattern(),
+			$this->entries
+		);
+	}
+
+	/**
+	 * Return the tagged pattern entries (read-only view), in construction order.
+	 *
+	 * Unlike {@see self::patterns()}, each entry carries its own kind scope
+	 * and anchoring — see {@see ExclusionPattern}. This is what lets a
+	 * caller that built a rule set from tagged patterns (an export, a
+	 * scheduled backup) hand that same tagging on to a second consumer —
+	 * a resumable job's persisted payload, say — without regenerating the
+	 * tags from scratch or losing them along the way.
+	 *
+	 * @return ExclusionPattern[] The tagged patterns, in construction order.
+	 */
+	public function entries(): array {
+		return $this->entries;
+	}
+
+	/**
+	 * Return how many times each pattern has excluded something.
+	 *
+	 * One entry per pattern, in the same order as {@see self::patterns()},
+	 * so the two can be zipped together. A pattern that never matched
+	 * reports 0, not an absent entry — the point is to make a pattern
+	 * that quietly matched nothing exactly as visible as one that matched
+	 * something it should not have.
+	 *
+	 * @return array<int, array{pattern: string, count: int}> One entry per pattern.
+	 */
+	public function match_counts(): array {
+		$counts = array();
+		foreach ( $this->entries as $index => $entry ) {
+			$counts[] = array(
+				'pattern' => $entry->pattern(),
+				'count'   => $this->match_counts[ $index ],
+			);
+		}
+		return $counts;
 	}
 
 	/**
@@ -240,9 +393,10 @@ final class ExclusionRules {
 	 *
 	 * @param string $pattern       The pattern to interpret.
 	 * @param string $relative_path The path to test.
+	 * @param bool   $anchored      True to anchor a regex-shaped pattern to the start of $relative_path.
 	 * @return bool True if the pattern matches the path.
 	 */
-	private static function pattern_matches( string $pattern, string $relative_path ): bool {
+	private static function pattern_matches( string $pattern, string $relative_path, bool $anchored ): bool {
 		// Empty patterns never match anything; defensive against malformed config.
 		if ( '' === $pattern ) {
 			return false;
@@ -251,7 +405,7 @@ final class ExclusionRules {
 		// Regex: starts AND ends with "/".
 		// Must be at least 2 chars (so "/" alone is exact-string, not malformed regex).
 		if ( strlen( $pattern ) >= 2 && '/' === $pattern[0] && '/' === $pattern[ strlen( $pattern ) - 1 ] ) {
-			return self::regex_matches( $pattern, $relative_path );
+			return self::regex_matches( $pattern, $relative_path, $anchored );
 		}
 
 		// Directory-tree: ends with "/**". Matches the directory and everything beneath it.
@@ -276,21 +430,35 @@ final class ExclusionRules {
 	 * match-time so the user sees the error rather than the pattern
 	 * silently failing to match.
 	 *
+	 * $anchored does not rewrite the pattern text (which would risk
+	 * interacting badly with alternation, groups, or a pattern's own
+	 * anchors) — it asks preg_match() where its match began, via
+	 * PREG_OFFSET_CAPTURE, and only accepts a match starting at offset 0.
+	 * A pattern that already anchors itself with "^" is unaffected: its
+	 * own match already starts at 0.
+	 *
 	 * @param string $pattern       The PCRE pattern including its / delimiters.
 	 * @param string $relative_path The path to test.
+	 * @param bool   $anchored      True to require the match to start at offset 0 of $relative_path.
 	 * @return bool True if the regex matches.
 	 * @throws InvalidArgumentException If the pattern is not a valid PCRE expression.
 	 */
-	private static function regex_matches( string $pattern, string $relative_path ): bool {
+	private static function regex_matches( string $pattern, string $relative_path, bool $anchored ): bool {
 		// phpcs:ignore Generic.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.NoSilencedErrors.Discouraged -- preg_match emits a warning on invalid patterns; we trap it and rethrow with a clearer message.
-		$result = @preg_match( $pattern, $relative_path );
+		$result = @preg_match( $pattern, $relative_path, $matches, PREG_OFFSET_CAPTURE );
 		if ( false === $result ) {
 			throw new InvalidArgumentException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $pattern reported verbatim in exception message for diagnostic context; not HTML output.
 				sprintf( 'Pattern "%s" is not a valid regular expression.', $pattern )
 			);
 		}
-		return 1 === $result;
+		if ( 1 !== $result ) {
+			return false;
+		}
+		if ( ! $anchored ) {
+			return true;
+		}
+		return 0 === $matches[0][1];
 	}
 
 	/**

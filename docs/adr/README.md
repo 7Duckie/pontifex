@@ -138,6 +138,21 @@ What follows from this choice — positive, negative, and neutral?
   refuses; a dry run answers for the restore and runs all of them, including
   the one that writes. Refused, cannot-restore-here and could-not-tell are
   three separate outcomes, because each calls for a different response.
+- [ADR 0024](./0024-recovery-reverts-by-ledger.md) —
+  Recovery after a failed import removes what the restore added, by a ledger
+  of what it created rather than by differencing against the safety archive —
+  a difference would delete the uploads, caches and logs a live site writes
+  during the restore. Makes an existing promise true instead of downgrading it.
+- [ADR 0025](./0025-repairing-placeholder-markers-at-replay.md) —
+  The export stops writing WordPress's placeholder marker into the archive in
+  place of every percent sign, and a restore repairs the archives already
+  carrying it — gated on the exporter version that wrote them, applied per
+  statement before the containment checks, and reported rather than silent.
+- [ADR 0026](./0026-a-restore-outcome-has-one-durable-home.md) —
+  A restore signs out the browser watching it, so its outcome is recorded in the
+  existing transfer journal as counts and flags and read from there by the
+  screens, rather than carried in a response the operation destroys. One reader
+  composes the description; the inline message is demoted to a nicety.
 
 ## Further reading
 

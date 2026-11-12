@@ -25,6 +25,20 @@ if ( ! class_exists( 'wpdb' ) ) {
 	class wpdb {
 
 		/**
+		 * The marker the stub swaps in for a percent sign, in the real wpdb's shape.
+		 *
+		 * The real wpdb escapes a value by replacing every percent sign with a
+		 * per-request marker: an opening brace, sixty-four hexadecimal
+		 * characters, a closing brace. It is held here, once, so that
+		 * _real_escape() and remove_placeholder_escape() cannot drift apart.
+		 * Private on purpose: the real wpdb has no such constant, so a test that
+		 * reached for it would pass here and fail against the real class.
+		 *
+		 * @var string
+		 */
+		private const PLACEHOLDER_ESCAPE = '{0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}';
+
+		/**
 		 * Table prefix used by the real wpdb to scope queries to one site.
 		 *
 		 * @var string
@@ -111,11 +125,24 @@ if ( ! class_exists( 'wpdb' ) ) {
 		/**
 		 * Stub for the real wpdb::_real_escape(). Replaced via PHPUnit mock in tests.
 		 *
+		 * Like the real method, it ends by replacing every percent sign with the
+		 * placeholder marker, which only remove_placeholder_escape() takes out again.
+		 *
 		 * @param string $value Raw value to escape.
-		 * @return string Escaped value; the stub doubles single quotes.
+		 * @return string Escaped value; the stub doubles single quotes and marks every percent sign.
 		 */
 		public function _real_escape( string $value ): string {
-			return str_replace( "'", "''", $value );
+			return str_replace( '%', self::PLACEHOLDER_ESCAPE, str_replace( "'", "''", $value ) );
+		}
+
+		/**
+		 * Stub for the real wpdb::remove_placeholder_escape(). Replaced via PHPUnit mock in tests.
+		 *
+		 * @param string $query SQL text that may carry the placeholder marker.
+		 * @return string The text with every marker turned back into a percent sign.
+		 */
+		public function remove_placeholder_escape( string $query ): string {
+			return str_replace( self::PLACEHOLDER_ESCAPE, '%', $query );
 		}
 
 		/**

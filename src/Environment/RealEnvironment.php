@@ -59,14 +59,21 @@ final class RealEnvironment implements Environment {
 	/**
 	 * Return free disk space available at the given path, in bytes.
 	 *
-	 * Returns false if the value cannot be read (typically due to
-	 * open_basedir restrictions or insufficient permissions).
+	 * Returns false if the value cannot be read: either the
+	 * disk_free_space() function is disabled on this host (commonly via
+	 * disable_functions), or open_basedir restrictions or insufficient
+	 * permissions prevent reading it.
 	 *
 	 * @param string $path Absolute filesystem path.
 	 * @return float|false Bytes available, or false on failure.
 	 */
 	public function disk_free_space( string $path ): float|false {
-		return disk_free_space( $path );
+		if ( ! function_exists( 'disk_free_space' ) ) {
+			return false;
+		}
+
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disk_free_space can be restricted by the host (e.g. open_basedir); the guard is best-effort and its failure must not block the caller.
+		return @disk_free_space( $path );
 	}
 
 	/**

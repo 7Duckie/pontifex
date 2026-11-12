@@ -25,6 +25,7 @@ use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Enforces the format's headline promise: byte-identical output from identical inputs.
@@ -181,7 +182,10 @@ final class ConformanceTest extends TestCase {
 	 *
 	 * The compatibility contract the specification promises third parties:
 	 * a higher MAJOR means structural changes this reader cannot interpret,
-	 * so it refuses rather than misreads.
+	 * so it refuses rather than misreads. Refused as HostCannotComply, not a
+	 * bare RuntimeException: the archive was very probably written by a newer
+	 * Pontifex and would open cleanly there, so this is a fact about THIS
+	 * installation, not evidence the archive is damaged.
 	 *
 	 * @return void
 	 */
@@ -192,7 +196,7 @@ final class ConformanceTest extends TestCase {
 		$bytes[8] = "\x00";
 		$bytes[9] = "\x02";
 
-		$this->expectException( RuntimeException::class );
+		$this->expectException( HostCannotComply::class );
 		$this->expectExceptionMessage( 'major version' );
 
 		new ArchiveReader( self::memory_stream( $bytes ) );

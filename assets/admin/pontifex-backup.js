@@ -329,7 +329,14 @@
 		}, 1000 );
 
 		var exclusionsField = document.getElementById( 'pontifex-backup-exclusions' );
-		var extra = exclusionsField ? { exclusions: exclusionsField.value } : undefined;
+		var tableExclusionsField = document.getElementById( 'pontifex-backup-table-exclusions' );
+		var extra = {};
+		if ( exclusionsField ) {
+			extra.exclusions = exclusionsField.value;
+		}
+		if ( tableExclusionsField ) {
+			extra.table_exclusions = tableExclusionsField.value;
+		}
 		request( 'pontifex_create_backup', extra ).then( function ( res ) {
 			window.clearInterval( poll );
 			if ( res && res.success && res.data && res.data.cancelled ) {
@@ -344,6 +351,11 @@
 					created = cfg.strings.created
 						.replace( '%1$s', formatBytes( res.data.bytes ) )
 						.replace( '%2$s', formatBytes( res.data.source_bytes ) );
+				}
+				// The sentence itself is built server-side (BackupController); this
+				// only ever concatenates the finished string onto the notice.
+				if ( res.data && res.data.exclusions_summary ) {
+					created = created + ' — ' + res.data.exclusions_summary;
 				}
 				// Reloading while the browser reports itself offline would land on
 				// the browser's own error page and destroy this screen — and the
@@ -424,6 +436,7 @@
 			var hour = document.getElementById( 'pontifex-schedule-hour' );
 			var retention = document.getElementById( 'pontifex-schedule-retention' );
 			var exclusions = document.getElementById( 'pontifex-schedule-exclusions' );
+			var tableExclusions = document.getElementById( 'pontifex-schedule-table-exclusions' );
 			button.disabled = true;
 			setText( 'pontifex-schedule-result', '' );
 			request( 'pontifex_save_schedule', {
@@ -431,7 +444,8 @@
 				frequency: frequency ? frequency.value : '',
 				hour: hour ? hour.value : '',
 				retention: retention ? retention.value : '',
-				exclusions: exclusions ? exclusions.value : ''
+				exclusions: exclusions ? exclusions.value : '',
+				table_exclusions: tableExclusions ? tableExclusions.value : ''
 			} ).then( function ( res ) {
 				button.disabled = false;
 				if ( res && res.success && res.data ) {

@@ -185,7 +185,20 @@ final class RestorePreflight {
 
 		$checks_run[] = self::CHECK_FREE_SPACE;
 		try {
-			$this->file_writer->assert_free_space_for( $manifest->entries() );
+			$measured = $this->file_writer->assert_free_space_for(
+				$manifest->entries(),
+				$this->declared_file_sizes( $archive_source, $manifest )
+			);
+			if ( ! $measured ) {
+				// Not a refusal of any kind — the reading itself could not be taken
+				// (e.g. disk_free_space() restricted or disabled on this host), so
+				// the check has nothing to report either way. Written to the bucket
+				// directly, in the same shape $record() produces above, rather than
+				// manufacturing a throw: nothing here decided the archive is bad or
+				// that this host cannot comply, only that the question could not be
+				// answered.
+				$inconclusive[ self::CHECK_FREE_SPACE ] = 'Whether the destination has enough free disk space could not be established on this host.';
+			}
 		} catch ( Throwable $refusal ) {
 			$record( self::CHECK_FREE_SPACE, $refusal );
 		}
@@ -273,12 +286,74 @@ final class RestorePreflight {
 	/**
 	 * Establish the destination has room for this restore.
 	 *
-	 * @param ArchiveManifest $manifest The archive's manifest.
+	 * Reads every file entry's DECODED size from the archive first (see
+	 * {@see self::declared_file_sizes()}) and weighs that, not the entry's
+	 * stored/compressed size, against the free space this host reports.
+	 * The bool {@see FileWriter::assert_free_space_for()} returns is
+	 * deliberately ignored here, exactly as before that return value existed:
+	 * every caller of this method has already decided to write, so an
+	 * unmeasurable reading is not this method's business to report — it
+	 * proceeds either way, the same posture {@see RestoreRunner::restore()}
+	 * and the import dry run have always taken. {@see self::read_only_report()}
+	 * is the caller that reads the bool, because it can afford to say
+	 * "I don't know" instead of writing anyway.
+	 *
+	 * @param resource        $archive_source A seekable, readable stream containing the archive.
+	 * @param ArchiveManifest $manifest       The archive's manifest.
 	 * @return void
 	 * @throws \Pontifex\Exception\HostCannotComply If the destination lacks the free space this restore needs.
 	 */
-	public function assert_free_space_for( ArchiveManifest $manifest ): void {
-		$this->file_writer->assert_free_space_for( $manifest->entries() );
+	public function assert_free_space_for( $archive_source, ArchiveManifest $manifest ): void {
+		$this->file_writer->assert_free_space_for(
+			$manifest->entries(),
+			$this->declared_file_sizes( $archive_source, $manifest )
+		);
+	}
+
+	/**
+	 * Read every file entry's DECODED byte size, so the free-space check weighs what a restore actually writes.
+	 *
+	 * {@see FileWriter} has no archive stream of its own — it only ever sees
+	 * manifest entries, and {@see ManifestEntry::length()} is the entry's
+	 * STORED size (the compressed payload plus its own record overhead), not
+	 * the size a restore will actually write to disk. Only the caller, which
+	 * holds both the archive stream and an {@see EntryReader}, can answer
+	 * "how many bytes will this entry actually be once restored" — the same
+	 * reasoning that already put {@see self::declared_symlink_targets()} here
+	 * rather than in FileWriter.
+	 *
+	 * Reads only each file entry's HEADER, via {@see EntryReader::peek_header()}
+	 * — a seek plus a small, fixed read, never the entry's payload — and takes
+	 * {@see \Pontifex\Archive\Format\EntryHeader::estimated_bytes()} from it,
+	 * the same accessor the safety-archive preflight already uses for the
+	 * same purpose. db_chunk and directory/symlink entries are skipped: the
+	 * free-space check only ever weighs file entries (a db_chunk goes to
+	 * MySQL, possibly on a different volume, and directories/symlinks cost
+	 * nothing worth measuring), so their sizes are never read.
+	 *
+	 * @param resource        $archive_source A seekable, readable stream containing the archive.
+	 * @param ArchiveManifest $manifest       The archive's already-decoded manifest.
+	 * @return array<string, int> Each file entry's decoded byte size, keyed by its manifest path.
+	 * @throws \Pontifex\Exception\ArchiveNotTrustworthy If a file entry's header cannot be read or is malformed.
+	 */
+	private function declared_file_sizes( $archive_source, ArchiveManifest $manifest ): array {
+		$sizes = array();
+
+		foreach ( $manifest->entries() as $manifest_entry ) {
+			if ( ! $manifest_entry->is_file() ) {
+				continue;
+			}
+
+			$path = $manifest_entry->path();
+			if ( null === $path ) {
+				continue;
+			}
+
+			$header         = $this->entry_reader->peek_header( $archive_source, $manifest_entry );
+			$sizes[ $path ] = $header->estimated_bytes();
+		}
+
+		return $sizes;
 	}
 
 	/**

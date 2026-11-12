@@ -9,36 +9,53 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Admin;
 
+require_once __DIR__ . '/../Manifest/Fakes/WpdbStub.php';
+
 use Brain\Monkey\Functions;
 use DateTimeImmutable;
 use DateTimeZone;
 use Mockery;
 use Pontifex\Admin\BackupStore;
 use Pontifex\Admin\RestoreController;
+use Pontifex\Admin\RestoreOutcome;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\Cipher;
 use Pontifex\Archive\Crypto\EncryptionContext;
 use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
+use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
+use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Migrate\RewriteReport;
 use Pontifex\Migrate\UrlMigratorInterface;
+use Pontifex\Restore\DatabaseWriter;
+use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiverInterface;
 use Pontifex\Tests\TestCase;
+use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use ReflectionClassConstant;
+use ReflectionMethod;
 use RuntimeException;
+use wpdb;
 
 /**
  * Covers the controller's authorisation gates, the restore and rollback flows,
@@ -240,6 +257,120 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * The relink rewrites to the address this site had BEFORE the restore replaced it.
+	 *
+	 * The restore replays the database, wp_options included, so the moment it has run
+	 * this site's recorded URL is the backup's. A controller that asks for its own
+	 * address afterwards is handed the archive's URL and calls migrate( old, old ): a
+	 * rewrite that changes nothing, reported as a success, with the site carrying on
+	 * serving the old domain. A context whose site_url() is a constant cannot express
+	 * that, so here it answers with this site's address until the fake restore has run
+	 * and with the backup's address after it, as a real site does.
+	 *
+	 * @return void
+	 */
+	public function test_relink_rewrites_to_the_address_captured_before_the_restore_replaced_it(): void {
+		$restored = false;
+		$context  = $this->context(
+			static function () use ( &$restored ): string {
+				return $restored ? 'https://old-site.example' : 'https://this-site.test';
+			}
+		);
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$restored ): void {
+				$restored = true;
+			}
+		);
+
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://old-site.example', $calls );
+
+		$this->run_relink_restore( $context, $migrator, $runner );
+
+		$this->assertSame(
+			array( array( 'https://old-site.example', 'https://this-site.test' ) ),
+			$calls,
+			'The target must be this site\'s address from before the restore, not the backup\'s own address read back after it.'
+		);
+		$this->assertTrue( $this->json['success'] );
+		$this->assertStringContainsString( 'relinked', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup from another site still runs the rewrite and reports it.
+	 *
+	 * The counterpart to the same-site and no-source-URL cases below: the guard that
+	 * skips those must not switch the feature off for the backup it exists for.
+	 *
+	 * @return void
+	 */
+	public function test_relink_still_runs_and_is_reported_for_a_backup_from_another_site(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://old-site.example', $calls );
+
+		$this->run_relink_restore( $this->context(), $migrator );
+
+		$this->assertSame( array( array( 'https://old-site.example', 'https://this-site.test' ) ), $calls );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertStringStartsWith( 'Restored and relinked — ', $this->json['data']['message'] );
+		$this->assertStringContainsString( '7 database rows', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup taken at this site's own address skips the rewrite and reports a plain restore.
+	 *
+	 * The comparison is the one the preview hint uses, so a difference of case or a
+	 * trailing slash does not make the same site look like another. With nothing to
+	 * rewrite, the response must not claim a relink that did no work, and the skip is
+	 * logged so the reason can be traced.
+	 *
+	 * @return void
+	 */
+	public function test_relink_is_skipped_when_the_backup_is_from_this_same_site(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( 'https://This-Site.test/', $calls );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once();
+
+		$this->run_relink_restore( $this->context(), $migrator, null, $logger );
+
+		$this->assertSame( array(), $calls, 'A backup from this same site has nothing to rewrite.' );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$this->assertStringStartsWith( 'Restored — ', $this->json['data']['message'] );
+		$this->assertStringNotContainsString( 'relinked', $this->json['data']['message'] );
+	}
+
+	/**
+	 * A backup recording no source URL skips the rewrite rather than rewriting from nothing.
+	 *
+	 * The rewriter refuses an empty search term by throwing, and by this point the
+	 * database has already been replaced, so that throw would roll back a restore that
+	 * had in fact succeeded. The migrator double stands in for any implementation that
+	 * reports an empty source URL.
+	 *
+	 * @return void
+	 */
+	public function test_relink_is_skipped_when_the_backup_records_no_source_url(): void {
+		$calls    = array();
+		$migrator = $this->recording_migrator( '', $calls );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->once();
+
+		$this->run_relink_restore( $this->context(), $migrator, null, $logger );
+
+		$this->assertSame( array(), $calls, 'There is nothing to rewrite from, so no rewrite may be attempted.' );
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$this->assertStringStartsWith( 'Restored — ', $this->json['data']['message'] );
+	}
+
+	/**
 	 * Without the migrate flag, an ordinary restore never touches the migrator.
 	 *
 	 * The default — the box unticked — must leave the link rewriter untouched, so an
@@ -422,11 +553,178 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * A HostCannotComply from the verify gate is reported as "could not
+	 * check", never as broken, and the safety archive is never taken.
+	 *
+	 * This host, not the backup, is what stopped verification — a low
+	 * memory_limit unable to buffer a db_chunk it must decode whole is the
+	 * case that keeps happening in practice, and WordPress's own default is
+	 * 40 MB. Nothing was learned about the backup either way, so the message
+	 * must not say "broken", and must not imply the operator should discard
+	 * the file.
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_could_not_check_for_a_host_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new HostCannotComply( 'Entry declares 41943040 decoded bytes, exceeding the 10485760-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		// The safety archive must never be taken when the backup could not be checked.
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A could-not-check outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['restored'] );
+		$this->assertFalse( $this->json['data']['refused'] );
+		$this->assertTrue( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A could-not-check outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * The same HostCannotComply outcome, reported through rollback()'s own gate.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_reports_could_not_check_for_a_host_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new HostCannotComply( 'Not enough free disk space for a safety archive.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->controller( $runner, null, $rollback )->rollback();
+
+		$this->assertTrue( $this->json['success'], 'A could-not-check outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['rolled_back'] );
+		$this->assertFalse( $this->json['data']['refused'] );
+		$this->assertTrue( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A could-not-check outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * A BuildCannotComply from the verify gate is reported as "refused", never
+	 * as broken or could-not-check, and the safety archive is never taken.
+	 *
+	 * The archive is sound and this host is fine; a ceiling compiled into
+	 * every build of Pontifex is what stopped the walk on an entry too large
+	 * to process. That is GATE_REFUSED's own meaning — intact, but a restore
+	 * will not accept it — so this must not fall into GATE_BROKEN (which
+	 * would send the operator to fetch a fresh copy no build would accept
+	 * either) or GATE_COULD_NOT_CHECK (which implies a server fix exists).
+	 *
+	 * @return void
+	 */
+	public function test_restore_reports_refused_for_a_build_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		// The safety archive must never be taken for a refused backup.
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		try {
+			$this->controller( $runner, $archiver )->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertTrue( $this->json['success'], 'A refused outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['restored'] );
+		$this->assertTrue( $this->json['data']['refused'] );
+		$this->assertFalse( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A refused outcome must never use the word "broken".' );
+	}
+
+	/**
+	 * The same BuildCannotComply outcome, reported through rollback()'s own gate.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_reports_refused_for_a_build_that_cannot_comply(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new BuildCannotComply( 'Entry "wp-content/uploads/2024/huge-video.mov" declares 2200000000 decoded bytes, exceeding the 2147483648-byte budget for this restore.' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->controller( $runner, null, $rollback )->rollback();
+
+		$this->assertTrue( $this->json['success'], 'A refused outcome is reported as a JSON success.' );
+		$this->assertFalse( $this->json['data']['rolled_back'] );
+		$this->assertTrue( $this->json['data']['refused'] );
+		$this->assertFalse( $this->json['data']['could_not_check'] );
+		$this->assertStringNotContainsStringIgnoringCase( 'broken', $this->json['data']['message'], 'A refused outcome must never use the word "broken".' );
+	}
+
+	/**
 	 * A restore that fails mid-replay is automatically rolled back to its prior state.
 	 *
 	 * The safety archive is taken, the replay then fails, and the failure handler replays
 	 * that safety archive to recover the site — reported as an automatic rollback rather
 	 * than a bare failure.
+	 *
+	 * The injected engine is a {@see RestoreRunnerInterface} mock, not a real
+	 * {@see \Pontifex\Restore\RestoreRunner} — so it has no creation ledger to consult,
+	 * and recovery honestly reports a MERGE rather than a precise revert (see
+	 * {@see \Pontifex\Restore\FileWriter::remove_created_paths()} and
+	 * RestoreController's own RECOVERY_* constants). Both outcomes share the phrase
+	 * "rolled back to its state before the restore", asserted below; the PRECISE
+	 * wording needs the real engine, exercised at the RestoreRunner/FileWriter level in
+	 * {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}.
 	 *
 	 * @return void
 	 */
@@ -475,7 +773,7 @@ final class RestoreControllerTest extends TestCase {
 
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 500, $this->json['status'] );
-		$this->assertStringContainsString( 'automatically rolled back', $this->json['data']['message'] );
+		$this->assertStringContainsString( 'rolled back to its state before the restore', $this->json['data']['message'] );
 	}
 
 	/**
@@ -522,6 +820,128 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertFalse( $this->json['success'] );
 		$this->assertSame( 500, $this->json['status'] );
 		$this->assertStringContainsString( 'automatic recovery also failed', $this->json['data']['message'] );
+	}
+
+	/**
+	 * Recovery reports the links outcome, never a precise revert, when the replay skips an absolute-target symlink.
+	 *
+	 * The forward runner here has written nothing, so the file cleanup is provably
+	 * complete and the skipped link is the ONLY gap. That used to be reported as
+	 * RECOVERY_MERGE, whose message asserts a cleanup that "could not be confirmed
+	 * complete" — false in this case. The expectation changed to
+	 * RECOVERY_MERGE_LINKS deliberately, with that message split; it is not a test
+	 * bent to fit the code.
+	 *
+	 * Exercised directly via reflection on the private method — not through the
+	 * full restore()/ajax flow — with two REAL {@see RestoreRunner} instances
+	 * (real FileWriter, real EntryReader; a {@see FakeDbAdapter} for the
+	 * database half, exactly as {@see \Pontifex\Tests\Unit\Restore\RecoveryCreationLedgerTest}
+	 * does). The recovery runner's FileWriter is built with
+	 * $replaying_safety_archive true, matching production's own
+	 * default_restore_runner( null, $source, true ) call for this leg, and is
+	 * injected via the constructor so default_restore_runner() itself is never
+	 * reached — no WordPress wiring beyond the environment()/context() doubles
+	 * this file already uses is needed. The forward runner is a second, freshly
+	 * built RestoreRunner that has written nothing, so its own cleanup is
+	 * always a precise revert on its own — isolating the outcome under test to
+	 * whether the replay skipped a symlink.
+	 *
+	 * @return void
+	 */
+	public function test_recovery_reports_merge_links_when_only_a_symlink_is_skipped(): void {
+		$safety_path = $this->base . '/pre-import-rollback-symlink-skipped.wpmig';
+		$this->write_archive_with_plans( $safety_path, array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) ) );
+
+		$outcome = $this->invoke_recovery_from_safety_archive( $safety_path );
+
+		$this->assertSame( self::recovery_merge_links_constant(), $outcome, 'A skipped symlink on a recovery whose cleanup was complete must be reported as the links outcome, never a precise revert and never the unconfirmed-cleanup merge.' );
+	}
+
+	/**
+	 * Recovery still reports a precise revert when nothing was skipped (false-positive guard).
+	 *
+	 * @return void
+	 */
+	public function test_recovery_still_reports_precise_when_nothing_is_skipped(): void {
+		$safety_path = $this->base . '/pre-import-rollback-nothing-skipped.wpmig';
+		$this->write_archive_with_plans( $safety_path, array( self::file_plan( 'wp-content/original.txt', 'ORIGINAL CONTENT' ) ) );
+
+		$outcome = $this->invoke_recovery_from_safety_archive( $safety_path );
+
+		$this->assertSame( self::recovery_precise_constant(), $outcome, 'A clean replay that skipped nothing must not be downgraded to a merge.' );
+	}
+
+	/**
+	 * A links-only merge names the skipped link and does not claim the file cleanup is unconfirmed.
+	 *
+	 * The cleanup WAS provably complete here, so sending the operator to the log for
+	 * stray paths would be false advice about something that never happened. What
+	 * the operator needs is the link itself — its path and the target it should
+	 * point at, so they can check it.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_a_links_only_merge_names_the_skipped_link(): void {
+		$message = $this->invoke_failure_message(
+			self::recovery_merge_links_constant(),
+			array( 'wp-content/uploads/media' => '/mnt/shared/media' )
+		);
+
+		$this->assertStringContainsString( 'rolled back to its state before the restore', $message );
+		$this->assertStringContainsString( 'file cleanup completed', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/media -> /mnt/shared/media', $message, 'The skipped link must be named, path and recorded target, in the operator-visible message.' );
+		$this->assertStringNotContainsString( 'could not be confirmed complete', $message, 'A cleanup that was provably complete must not be described as unconfirmed.' );
+		$this->assertStringNotContainsString( 'check the Pontifex log for which paths', $message, 'There are no stray paths to look for, so the message must not send the operator looking.' );
+	}
+
+	/**
+	 * A merge with an unconfirmed cleanup names the skipped link too, and keeps its own cleanup sentence.
+	 *
+	 * Both causes apply at once here, so both get said: the cleanup could not be
+	 * confirmed AND a link was not re-created. Dropping either would leave the
+	 * operator with half the picture.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_an_unconfirmed_cleanup_also_names_a_skipped_link(): void {
+		$message = $this->invoke_failure_message(
+			self::recovery_merge_constant(),
+			array( 'wp-content/uploads/media' => '/mnt/shared/media' )
+		);
+
+		$this->assertStringContainsString( 'could not be confirmed complete', $message, 'The cleanup sentence is still true and must stay.' );
+		$this->assertStringContainsString( 'wp-content/uploads/media -> /mnt/shared/media', $message, 'The skipped link must be named as well.' );
+	}
+
+	/**
+	 * A merge with an unconfirmed cleanup and no skipped link says exactly what it always said.
+	 *
+	 * The caveat helper returns an empty string for an empty array, so nothing —
+	 * not even a trailing space — may be appended to the long-standing message.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_an_unconfirmed_cleanup_without_links_is_unchanged(): void {
+		$this->assertSame(
+			'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.',
+			$this->invoke_failure_message( self::recovery_merge_constant() )
+		);
+	}
+
+	/**
+	 * The precise-revert message is unchanged, and ignores any skipped links it is handed.
+	 *
+	 * A precise revert and a skipped link cannot both be true — recovery downgrades
+	 * the one to the other — so this branch has no use for the array; it must not
+	 * start naming links just because one was passed in.
+	 *
+	 * @return void
+	 */
+	public function test_failure_message_for_a_precise_revert_is_unchanged(): void {
+		$expected = 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.';
+
+		$this->assertSame( $expected, $this->invoke_failure_message( self::recovery_precise_constant() ) );
+		$this->assertSame( $expected, $this->invoke_failure_message( self::recovery_precise_constant(), array( 'wp-content/uploads/media' => '/mnt/shared/media' ) ) );
 	}
 
 	/**
@@ -903,6 +1323,273 @@ final class RestoreControllerTest extends TestCase {
 		$this->assertTrue( $this->json['success'] );
 		$this->assertTrue( $this->json['data']['rolled_back'] );
 		$this->assertSame( 2, $this->json['data']['entries'] );
+	}
+
+	// -------------------------------------------------------------------------
+	// The repair report: a backup written by an affected version is repaired as it
+	// replays, and the screen says so — but only when something was repaired.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A restore that repaired frozen placeholder markers says so on the screen and in the log.
+	 *
+	 * The engine is a REAL {@see RestoreRunner} over a repairing {@see DatabaseWriter}
+	 * and a {@see FakeDbAdapter}, because the fact under test is the writer's own
+	 * tally reaching the screen through the runner, which a {@see RestoreRunnerInterface}
+	 * double has no writer to produce. The sentence is appended to the success
+	 * message, the existing wording before it is untouched, and the statement that
+	 * reached the adapter has the percent signs back.
+	 *
+	 * @return void
+	 */
+	public function test_restore_says_how_many_markers_it_repaired(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldReceive( 'info' )->once()->with(
+			Mockery::on(
+				static function ( $message ): bool {
+					return is_string( $message ) && str_contains( $message, 'Admin restore: repaired percent signs' );
+				}
+			),
+			array( 'repaired_markers' => 2 )
+		);
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['restored'] );
+		$message = $this->json['data']['message'];
+		$this->assertStringStartsWith( 'Restored — 1 entries (', $message, 'The existing wording is untouched.' );
+		$this->assertStringContainsString( ' written from pontifex-backup-20260101T000000Z.wpmig. Your site now matches that backup.', $message );
+		$this->assertStringEndsWith( ' Your site now matches that backup. Repaired 2 percent signs that an older version of Pontifex had written as a long marker.', $message, 'The sentence is appended after the existing message.' );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
+	}
+
+	/**
+	 * A relinked restore carries the same sentence — it is appended to both success messages, not only one.
+	 *
+	 * @return void
+	 */
+	public function test_a_relinked_restore_says_how_many_markers_it_repaired(): void {
+		$m     = self::frozen_marker();
+		$calls = array();
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('100{$m}');\n" ) ),
+			new FakeDbAdapter(),
+			null,
+			$this->recording_migrator( 'https://old-site.example', $calls )
+		);
+
+		$this->assertCount( 1, $calls, 'The relink ran, so this is the relinked wording.' );
+		$message = $this->json['data']['message'];
+		$this->assertStringStartsWith( 'Restored and relinked — ', $message );
+		$this->assertStringEndsWith( ' Repaired 1 percent sign that an older version of Pontifex had written as a long marker.', $message );
+	}
+
+	/**
+	 * A clean backup restores with exactly the message it always had — nothing is appended or logged on an ordinary restore.
+	 *
+	 * The engine is the same real runner with the repair switched on, so the only
+	 * thing that can keep the sentence off the screen is the zero count.
+	 *
+	 * @return void
+	 */
+	public function test_restore_of_a_clean_backup_says_nothing_about_repairs(): void {
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldNotReceive( 'info' );
+
+		$this->run_restore_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['restored'] );
+		$message = $this->json['data']['message'];
+		$this->assertStringEndsWith( ' written from pontifex-backup-20260101T000000Z.wpmig. Your site now matches that backup.', $message, 'An ordinary restore\'s message must be exactly what it always was.' );
+		$this->assertStringNotContainsString( 'Repaired', $message );
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The restore really ran.' );
+	}
+
+	/**
+	 * A rollback that repaired frozen placeholder markers says so on the screen and in the log.
+	 *
+	 * A rollback replays a safety archive, and one written by an affected version
+	 * carries the markers just as a backup does. The sentence follows the existing
+	 * message, and any skipped-symlink caveat, unchanged.
+	 *
+	 * The row holds ONE value with four percent signs in it, and the sentence says
+	 * four percent signs. That is the case that proves the wording honest: the figure
+	 * is exactly what was counted, markers put back, and the sentence says
+	 * percent signs rather than values, because a message that said "4 values" here
+	 * would claim four things where one thing was changed.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_says_how_many_markers_it_repaired(): void {
+		$m      = self::frozen_marker();
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldReceive( 'info' )->once()->with(
+			Mockery::on(
+				static function ( $message ): bool {
+					return is_string( $message ) && str_contains( $message, 'Admin rollback: repaired percent signs' );
+				}
+			),
+			array( 'repaired_markers' => 4 )
+		);
+
+		$this->run_rollback_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}year{$m}/{$m}postname{$m}/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertSame(
+			'Rolled back — 1 entries restored from the most recent safety archive. Your last restore has been undone. Repaired 4 percent signs that an older version of Pontifex had written as a long marker.',
+			$this->json['data']['message']
+		);
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%year%/%postname%/')", $db->executed_statements(), 'The repaired statement is what reached the database.' );
+	}
+
+	/**
+	 * A clean safety archive rolls back with exactly the message it always had.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_of_a_clean_safety_archive_says_nothing_about_repairs(): void {
+		$db     = new FakeDbAdapter();
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldIgnoreMissing();
+		$logger->shouldNotReceive( 'info' );
+
+		$this->run_rollback_over_real_runner(
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/%postname%/');\n" ) ),
+			$db,
+			$logger
+		);
+
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertSame(
+			'Rolled back — 1 entries restored from the most recent safety archive. Your last restore has been undone.',
+			$this->json['data']['message'],
+			'An ordinary rollback\'s message must be exactly what it always was.'
+		);
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $db->executed_statements(), 'The rollback really ran.' );
+	}
+
+	/**
+	 * The controller's own default wiring repairs a backup written by an affected version.
+	 *
+	 * Every test above injects a runner, which bypasses default_restore_runner()
+	 * and so proves nothing about the repair flag that method derives from the
+	 * archive's own provenance. This one injects none: a safety archive recording
+	 * Pontifex 1.0.3 as its writer, carrying a marker-bearing row, is rolled back
+	 * through the real wiring, and the statement the database received has the
+	 * percent signs back.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_repairs_an_archive_written_by_an_affected_version(): void {
+		$queries = array();
+
+		$this->run_rollback_through_default_wiring( '1.0.3', $queries );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/%postname%/')", $queries, 'An affected writer\'s archive must be repaired by the default wiring.' );
+		$this->assertStringEndsWith( ' Repaired 2 percent signs that an older version of Pontifex had written as a long marker.', $this->json['data']['message'] );
+	}
+
+	/**
+	 * The controller's own default wiring leaves a backup written after the fix exactly as it came.
+	 *
+	 * The same archive, recording a version after the boundary: the marker-shaped
+	 * text is real data there and must reach the database untouched, with nothing
+	 * said about repairs.
+	 *
+	 * @return void
+	 */
+	public function test_default_wiring_leaves_an_archive_written_after_the_fix_untouched(): void {
+		$queries = array();
+		$m       = self::frozen_marker();
+
+		$this->run_rollback_through_default_wiring( '1.1.1', $queries );
+
+		$this->assertContains( "INSERT INTO `pontifexstg_wp_options` VALUES ('/{$m}postname{$m}/')", $queries, 'A current archive must reach the database exactly as written.' );
+		$this->assertStringNotContainsString( 'Repaired', $this->json['data']['message'] );
+	}
+
+	/**
+	 * The rollback handler's OWN default wiring builds its runner in replay mode.
+	 *
+	 * Every other rollback test in this file injects a RestoreRunner (mock or
+	 * real), which bypasses default_restore_runner() entirely and so proves
+	 * nothing about the $replaying_safety_archive argument rollback() itself
+	 * passes at its call site. This test injects NO runner, so rollback() must
+	 * build its own via default_restore_runner( null, $source, true ) — the
+	 * exact call this test exists to prove. It uses a real ArchiveWriter-built
+	 * safety archive declaring an absolute-target symlink and a real
+	 * RestoreRunner/FileWriter underneath (a FakeDbAdapter stands in for the
+	 * database half, and a WpdbStub satisfies WordPressContext::wpdb_instance()'s
+	 * type, exactly as {@see \Pontifex\Tests\Unit\Manifest\WpdbAdapterTest} does):
+	 * if replay mode were NOT wired through, the symlink's absolute target would
+	 * be refused and the rollback would report a failure instead of the success
+	 * asserted below.
+	 *
+	 * @return void
+	 */
+	public function test_rollback_builds_its_own_runner_in_replay_mode(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-symlink.wpmig';
+		$this->write_archive_with_plans( $archive_path, array( self::symlink_plan( 'wp-content/uploads/media', '/mnt/shared/media' ) ) );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$wordpress_root = $this->base . '/wp-root';
+		$environment    = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->andReturnUsing(
+			function ( string $name ) use ( $wordpress_root ) {
+				return 'ABSPATH' === $name ? $wordpress_root . '/' : $wordpress_root . '/wp-content';
+			}
+		);
+		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
+
+		$context = $this->context();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( new wpdb() );
+		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
+
+		$controller = new RestoreController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			null, // No injected runner: this is the point of the test.
+			null
+		);
+
+		$controller->rollback();
+
+		$this->assertTrue( $this->json['success'], 'An absolute-target symlink must not make the rollback fail when replay mode is correctly wired.' );
+		$this->assertTrue( $this->json['data']['rolled_back'] );
+		$this->assertStringContainsString( 'wp-content/uploads/media', $this->json['data']['message'], 'The skipped link must be named in the operator-visible message.' );
+		$this->assertStringContainsString( '/mnt/shared/media', $this->json['data']['message'] );
 	}
 
 	/**
@@ -1335,9 +2022,10 @@ final class RestoreControllerTest extends TestCase {
 	/**
 	 * A WordPressContext mock that formats sizes and stores counters/history.
 	 *
+	 * @param callable|null $site_url Optional. Answers every site_url() call, so a test can make the address change as the restore runs; by default it is always https://this-site.test.
 	 * @return WordPressContext&\Mockery\MockInterface
 	 */
-	private function context() {
+	private function context( ?callable $site_url = null ) {
 		$context = Mockery::mock( WordPressContext::class );
 		$context->shouldReceive( 'format_size' )->andReturnUsing(
 			static function ( int $bytes ): string {
@@ -1352,10 +2040,258 @@ final class RestoreControllerTest extends TestCase {
 		);
 		$context->shouldReceive( 'save_option' );
 		$context->shouldReceive( 'flush_cache' );
-		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
+		$context->shouldReceive( 'site_url' )->andReturnUsing(
+			$site_url ?? static function (): string {
+				return 'https://this-site.test';
+			}
+		);
 		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
 		$context->shouldReceive( 'release_named_lock' );
 		return $context;
+	}
+
+	/**
+	 * Run restore() with the relink box ticked, over a sound content-only backup.
+	 *
+	 * Leaves the JSON response in $this->json. The restore engine is a double, so
+	 * nothing is written; the context, migrator and, optionally, the engine and logger
+	 * are the parts the relink tests vary.
+	 *
+	 * @param WordPressContext            $context  The context the controller reads this site's address from.
+	 * @param UrlMigratorInterface        $migrator The migrator double.
+	 * @param RestoreRunnerInterface|null $runner   Optional engine; by default one that verifies and restores without doing anything.
+	 * @param LoggerInterface|null        $logger   Optional logger; a NullLogger by default.
+	 * @return void
+	 */
+	private function run_relink_restore(
+		WordPressContext $context,
+		UrlMigratorInterface $migrator,
+		?RestoreRunnerInterface $runner = null,
+		?LoggerInterface $logger = null
+	): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		if ( null === $runner ) {
+			$runner = Mockery::mock( RestoreRunnerInterface::class );
+			$runner->shouldReceive( 'verify' )->once();
+			$runner->shouldReceive( 'restore' )->once();
+		}
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file']    = $name;
+		$_POST['migrate'] = '1';
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			$logger ?? new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'], $_POST['migrate'] );
+		}
+	}
+
+	/**
+	 * A migrator double that reports the given source URL and records every migrate() call.
+	 *
+	 * @param string                         $source_url The URL source_url() reports.
+	 * @param array<int, array<int, string>> $calls      Out-parameter. Filled with one array( old URL, new URL ) per migrate() call.
+	 * @return UrlMigratorInterface&\Mockery\MockInterface
+	 */
+	private function recording_migrator( string $source_url, array &$calls ) {
+		$migrator = Mockery::mock( UrlMigratorInterface::class );
+		$migrator->shouldReceive( 'source_url' )->once()->andReturn( $source_url );
+		$migrator->shouldReceive( 'migrate' )->andReturnUsing(
+			static function ( string $old_url, string $new_url ) use ( &$calls ): RewriteReport {
+				$calls[] = array( $old_url, $new_url );
+				return new RewriteReport( 3, array(), 10, 7, 7, 0 );
+			}
+		);
+		return $migrator;
+	}
+
+	/**
+	 * A frozen placeholder marker, as an affected export wrote it into an archive.
+	 *
+	 * @return string A brace, 64 lowercase hexadecimal characters, a brace.
+	 */
+	private static function frozen_marker(): string {
+		return '{' . str_repeat( '0123456789abcdef', 4 ) . '}';
+	}
+
+	/**
+	 * Build a db_chunk EntryPlan.
+	 *
+	 * @param string $table_name      Source table name.
+	 * @param int    $statement_count Number of statements in the chunk.
+	 * @param string $sql             SQL bytes, each statement terminated with a semicolon and a newline.
+	 * @return EntryPlan
+	 */
+	private static function db_chunk_plan( string $table_name, int $statement_count, string $sql ): EntryPlan {
+		$header = EntryHeader::for_db_chunk( 0, $table_name, $statement_count, strlen( $sql ), 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $sql ) );
+	}
+
+	/**
+	 * Run restore() over a content-only backup carrying the given entries, with a REAL runner whose writer repairs frozen markers.
+	 *
+	 * Leaves the JSON response in $this->json. The runner's file writer is rooted
+	 * under $this->base so tearDown() cleans it up, and the database half is the
+	 * given fake, so a test can read back what reached it.
+	 *
+	 * @param EntryPlan[]               $plans    The entries the backup carries.
+	 * @param FakeDbAdapter             $db       The adapter the runner's writer replays into.
+	 * @param LoggerInterface|null      $logger   Optional logger; a NullLogger by default.
+	 * @param UrlMigratorInterface|null $migrator Optional. When given, the relink box is ticked and this migrator handles it.
+	 * @return void
+	 */
+	private function run_restore_over_real_runner( array $plans, FakeDbAdapter $db, ?LoggerInterface $logger = null, ?UrlMigratorInterface $migrator = null ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans( $store->directory() . '/' . $name, $plans );
+		$_POST['file'] = $name;
+		if ( null !== $migrator ) {
+			$_POST['migrate'] = '1';
+		}
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, 'wp-content' ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->context(),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			$logger ?? new NullLogger(),
+			$runner,
+			$this->safety_archiver_double(),
+			$migrator
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'], $_POST['migrate'] );
+		}
+	}
+
+	/**
+	 * Run rollback() over a safety archive carrying the given entries, with a REAL runner whose writer repairs frozen markers.
+	 *
+	 * Leaves the JSON response in $this->json. The runner's file writer is built in
+	 * safety-archive replay mode, as production's own rollback wiring builds it.
+	 *
+	 * @param EntryPlan[]          $plans  The entries the safety archive carries.
+	 * @param FakeDbAdapter        $db     The adapter the runner's writer replays into.
+	 * @param LoggerInterface|null $logger Optional logger; a NullLogger by default.
+	 * @return void
+	 */
+	private function run_rollback_over_real_runner( array $plans, FakeDbAdapter $db, ?LoggerInterface $logger = null ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-repair.wpmig';
+		$this->write_archive_with_plans( $archive_path, $plans );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, null, null, null, null, true ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$this->controller( $runner, null, $rollback, $logger )->rollback();
+	}
+
+	/**
+	 * Roll back a marker-bearing safety archive through the controller's OWN default wiring, recording the queries the database received.
+	 *
+	 * No runner is injected, so default_restore_runner() builds the real one, over a
+	 * wpdb whose query() records what it is given. Leaves the JSON response in
+	 * $this->json.
+	 *
+	 * @param string             $exporter_version The Pontifex version the archive records as its writer.
+	 * @param array<int, string> $queries          Out-parameter. Filled with every statement the wpdb was asked to run, in order.
+	 * @return void
+	 */
+	private function run_rollback_through_default_wiring( string $exporter_version, array &$queries ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$m            = self::frozen_marker();
+		$archive_path = $this->base . '/pre-import-rollback-wiring.wpmig';
+		$this->write_archive_with_plans(
+			$archive_path,
+			array( self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES ('/{$m}postname{$m}/');\n" ) ),
+			$exporter_version
+		);
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$wordpress_root = $this->base . '/wp-root';
+		$environment    = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->andReturn( true );
+		$environment->shouldReceive( 'constant_value' )->andReturnUsing(
+			static function ( string $name ) use ( $wordpress_root ) {
+				return 'ABSPATH' === $name ? $wordpress_root . '/' : $wordpress_root . '/wp-content';
+			}
+		);
+		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
+
+		$wpdb = Mockery::mock( wpdb::class )->makePartial();
+		$wpdb->shouldReceive( 'query' )->andReturnUsing(
+			static function ( string $query ) use ( &$queries ) {
+				$queries[] = $query;
+				return 0;
+			}
+		);
+
+		$context = $this->context();
+		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( $wpdb );
+		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
+
+		$controller = new RestoreController(
+			$environment,
+			$context,
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			null, // No injected runner: this is the point.
+			null
+		);
+
+		$controller->rollback();
 	}
 
 	/**
@@ -1481,6 +2417,156 @@ final class RestoreControllerTest extends TestCase {
 	}
 
 	/**
+	 * Write a valid, unencrypted, content-only archive carrying the given entries.
+	 *
+	 * Unlike {@see self::write_archive_with_scope()}, this carries real entries —
+	 * needed for {@see self::test_recovery_reports_merge_when_a_symlink_is_skipped()}
+	 * and its precise-revert companion, which replay the archive through a real
+	 * {@see RestoreRunner}/{@see FileWriter}, not an injected double.
+	 *
+	 * @param string      $path             Absolute path to write the archive to.
+	 * @param EntryPlan[] $plans            The plans to include.
+	 * @param string      $exporter_version Optional. The Pontifex version to record as the writer; default '0.1.0', an affected version.
+	 * @return void
+	 */
+	private function write_archive_with_plans( string $path, array $plans, string $exporter_version = '0.1.0' ): void {
+		if ( ! is_dir( dirname( $path ) ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Creating the temp fixture directory the archive is written into.
+			mkdir( dirname( $path ), 0o755, true );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opening a temp fixture archive for writing.
+		$dest = fopen( $path, 'w+b' );
+		if ( false === $dest ) {
+			$this->fail( 'Could not open the fixture archive for writing.' );
+		}
+		( new ArchiveWriter( new EntryWriter( CodecRegistry::with_defaults() ), new FooterWriter() ) )
+			->write_archive( $this->sample_provenance( Scope::content_only( array() ), $exporter_version ), $plans, $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the temp fixture archive.
+		fclose( $dest );
+	}
+
+	/**
+	 * Build a file EntryPlan.
+	 *
+	 * @param string $path     Relative path inside the archive.
+	 * @param string $contents File contents.
+	 * @return EntryPlan
+	 */
+	private static function file_plan( string $path, string $contents ): EntryPlan {
+		$header = EntryHeader::for_file( $path, strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream( $contents ) );
+	}
+
+	/**
+	 * Build a symlink EntryPlan.
+	 *
+	 * @param string $path   Relative path of the link inside the archive.
+	 * @param string $target The target string recorded verbatim.
+	 * @return EntryPlan
+	 */
+	private static function symlink_plan( string $path, string $target ): EntryPlan {
+		$header = EntryHeader::for_symlink( $path, $target, 0 );
+		return new EntryPlan( $header, RawCodec::ID, str_repeat( "\0", EntryWriter::NONCE_SIZE ), self::memory_stream() );
+	}
+
+	/**
+	 * Open a php://memory stream, optionally pre-filled and rewound.
+	 *
+	 * @param string $contents Optional initial contents.
+	 * @return resource
+	 * @throws RuntimeException If php://memory cannot be opened.
+	 */
+	private static function memory_stream( string $contents = '' ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+		$stream = fopen( 'php://memory', 'r+b' );
+		if ( false === $stream ) {
+			throw new RuntimeException( 'Could not open php://memory.' );
+		}
+		if ( '' !== $contents ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource, not a filesystem path.
+			fwrite( $stream, $contents );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+			rewind( $stream );
+		}
+		return $stream;
+	}
+
+	/**
+	 * Build a controller wired with a real recovery runner, and invoke recover_from_safety_archive() on it.
+	 *
+	 * The recovery runner's FileWriter is built with $replaying_safety_archive
+	 * true — matching production's own default_restore_runner( null, $source, true )
+	 * call for this exact leg — rooted under $this->base so
+	 * {@see self::tearDown()} cleans it up, and injected via
+	 * {@see self::controller()} so default_restore_runner() itself is never
+	 * reached. The forward runner is a second, freshly built RestoreRunner that
+	 * has written nothing, so remove_created_paths() on it is always a precise
+	 * revert on its own — isolating the outcome to whether the replay skipped a
+	 * symlink.
+	 *
+	 * @param string $safety_path Absolute path of the real safety archive to replay.
+	 * @return string One of RestoreController's own RECOVERY_* constants.
+	 */
+	private function invoke_recovery_from_safety_archive( string $safety_path ): string {
+		$this->stub_transients();
+
+		$recovery_runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/recovery-root', false, null, null, null, null, true ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+		$forward_runner  = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/forward-root' ),
+			new DatabaseWriter( new FakeDbAdapter() )
+		);
+
+		$controller = $this->controller( $recovery_runner );
+
+		$method = new ReflectionMethod( RestoreController::class, 'recover_from_safety_archive' );
+		return (string) $method->invoke( $controller, $safety_path, $forward_runner );
+	}
+
+	/**
+	 * RestoreController::RECOVERY_MERGE, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_merge_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_MERGE' ) )->getValue();
+	}
+
+	/**
+	 * RestoreController::RECOVERY_PRECISE, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_precise_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_PRECISE' ) )->getValue();
+	}
+
+	/**
+	 * RestoreController::RECOVERY_MERGE_LINKS, read via reflection (a private constant).
+	 *
+	 * @return string
+	 */
+	private static function recovery_merge_links_constant(): string {
+		return (string) ( new ReflectionClassConstant( RestoreController::class, 'RECOVERY_MERGE_LINKS' ) )->getValue();
+	}
+
+	/**
+	 * Invoke the controller's private failure_message() with the given recovery outcome and skipped links.
+	 *
+	 * @param string|null           $recovery         One of RestoreController's own RECOVERY_* constants, or null for no recovery attempted.
+	 * @param array<string, string> $skipped_symlinks Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 * @return string The operator-visible failure message.
+	 */
+	private function invoke_failure_message( ?string $recovery, array $skipped_symlinks = array() ): string {
+		$method = new ReflectionMethod( RestoreController::class, 'failure_message' );
+		return (string) $method->invoke( $this->controller(), new RuntimeException( 'replay failed mid-restore' ), $recovery, $skipped_symlinks );
+	}
+
+	/**
 	 * Write a valid, empty, encrypted archive to the given path.
 	 *
 	 * For {@see self::test_preview_suppresses_the_hint_for_an_encrypted_backup()}:
@@ -1509,17 +2595,18 @@ final class RestoreControllerTest extends TestCase {
 	/**
 	 * Build a Provenance with realistic but arbitrary field values for the fixture.
 	 *
-	 * @param Scope|null $scope The scope to record, or null for a legacy archive.
+	 * @param Scope|null $scope            The scope to record, or null for a legacy archive.
+	 * @param string     $exporter_version Optional. The Pontifex version to record as the writer; default '0.1.0', an affected version.
 	 * @return Provenance
 	 */
-	private function sample_provenance( ?Scope $scope ): Provenance {
+	private function sample_provenance( ?Scope $scope, string $exporter_version = '0.1.0' ): Provenance {
 		return new Provenance(
 			'6.6.1',
 			'8.2.10',
 			'https://example.test',
 			'utf8mb4',
 			'utf8mb4_unicode_520_ci',
-			new ExporterInfo( 'pontifex', '0.1.0' ),
+			new ExporterInfo( 'pontifex', $exporter_version ),
 			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
 			null,
 			'wp_',
@@ -1551,5 +2638,1555 @@ final class RestoreControllerTest extends TestCase {
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.PHP.NoSilencedErrors.Discouraged -- Test fixture teardown.
 		@rmdir( $path );
+	}
+
+	// -------------------------------------------------------------------------
+	// The durable record: what a restore or rollback did is written to the
+	// transfer history, because the response that would carry it is usually
+	// unreadable once the users and sessions tables have been replaced.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A successful restore records what it did, and does so after the cache flush.
+	 *
+	 * The replay leaves a stale option cache that would swallow a write into the
+	 * just-replaced wp_options, so the flush must come first. Recording nothing
+	 * about the restore's own content: the details are counts and flags only.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_restore_records_what_it_did_after_the_cache_flush(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function ( $source, ?callable $on_entry, ?callable $on_bytes ): void {
+				unset( $source, $on_bytes );
+				if ( null !== $on_entry ) {
+					$on_entry( 3, 3 );
+				}
+			}
+		);
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$this->safety_archiver_double()
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The history must be written after the cache flush, never before it.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'import', $history[0]['operation'] );
+		$this->assertSame( 'succeeded', $history[0]['outcome'] );
+		$this->assertSame(
+			array(
+				'entries'          => 3,
+				'relinked'         => false,
+				'rows_rewritten'   => 0,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+				'recovery'         => '',
+			),
+			$history[0]['details']
+		);
+	}
+
+	/**
+	 * A relinked restore records that the rewrite ran and how many rows it changed.
+	 *
+	 * @return void
+	 */
+	public function test_a_relinked_restore_records_the_rows_it_rewrote(): void {
+		$events  = array();
+		$history = array();
+		$calls   = array();
+
+		$this->run_relink_restore(
+			$this->history_capturing_context( $events, $history ),
+			$this->recording_migrator( 'https://old.test', $calls )
+		);
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'succeeded', $history[0]['outcome'] );
+		$this->assertTrue( $history[0]['details']['relinked'] );
+		$this->assertSame( 7, $history[0]['details']['rows_rewritten'], 'The row count is the rewrite report\'s changed rows.' );
+	}
+
+	/**
+	 * A restore that fails and is recovered records the failure, the recovery verdict, and does so AFTER the recovery.
+	 *
+	 * Recovery replays the safety archive, which replaces wp_options again, so a
+	 * record written before it would be wiped. The order of events is the claim
+	 * under test: the forward replay, then the recovery replay and its flush, and
+	 * only then the history write. The forward runner here is a double, so the
+	 * recovery honestly reports a merge rather than a precise revert.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_records_the_recovery_verdict_after_the_recovery(): void {
+		$events  = array();
+		$history = array();
+		$replays = 0;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays, &$events ): void {
+				++$replays;
+				$events[] = 1 === $replays ? 'forward-replay' : 'recovery-replay';
+				if ( 1 === $replays ) {
+					throw new RuntimeException( 'replay failed mid-restore' );
+				}
+			}
+		);
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->history_capturing_context( $events, $history ) );
+
+		$this->assertSame( array( 'forward-replay', 'recovery-replay', 'flush', 'history' ), $events, 'The history must be written after the recovery has finished, never before it.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'import', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['bytes'] );
+		$this->assertSame(
+			array(
+				'entries'          => 0,
+				'relinked'         => false,
+				'rows_rewritten'   => 0,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+				'recovery'         => RestoreOutcome::RECOVERY_MERGE,
+			),
+			$history[0]['details']
+		);
+	}
+
+	/**
+	 * A restore whose recovery also fails records that, so the page can say the site may be partly restored.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_whose_recovery_also_failed_records_that(): void {
+		$events  = array();
+		$history = array();
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andThrow( new RuntimeException( 'replay failed' ) );
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->history_capturing_context( $events, $history ) );
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( RestoreOutcome::RECOVERY_FAILED, $history[0]['details']['recovery'] );
+	}
+
+	/**
+	 * The site lock is held across the recovery replay and only released once it has finished.
+	 *
+	 * Recovery rebuilds every table from the safety archive. If the lock were freed
+	 * first, a second process could start writing the same tables mid-replay. The
+	 * order of events is the claim: both replays, then the one release, then the
+	 * history write; and the lock is released exactly once.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_holds_the_lock_until_the_recovery_replay_has_finished(): void {
+		$events  = array();
+		$history = array();
+		$replays = 0;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$replays, &$events ): void {
+				++$replays;
+				$events[] = 1 === $replays ? 'forward-replay' : 'recovery-replay';
+				if ( 1 === $replays ) {
+					throw new RuntimeException( 'replay failed mid-restore' );
+				}
+			}
+		);
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->history_capturing_context( $events, $history, true ) );
+
+		$this->assertSame(
+			array( 'forward-replay', 'recovery-replay', 'flush', 'lock-release', 'history' ),
+			$events,
+			'The lock must stay held through the recovery replay and be released exactly once, after it.'
+		);
+	}
+
+	/**
+	 * The lock is still held while recovery deletes the files the failed restore created.
+	 *
+	 * Removing those files is the last and most destructive step of recovery, so a
+	 * second process must not be able to take the lock before it is done. A real
+	 * runner writes a file during the failed forward restore; at the instant the lock
+	 * is released that file must already be gone, and the release must come after the
+	 * recovery replay's cache flush.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_holds_the_lock_until_the_created_files_are_removed(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$created = $this->base . '/wp-root/wp-content/created-by-failed-restore.txt';
+		$db      = new FakeDbAdapter();
+		$db->fail_after_executes( 0, 'forward replay failed after the files were written' );
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans(
+			$store->directory() . '/' . $name,
+			array(
+				self::file_plan( 'wp-content/created-by-failed-restore.txt', 'new' ),
+				self::db_chunk_plan( 'wp_options', 1, "INSERT INTO `wp_options` VALUES (1);\n" ),
+			)
+		);
+		$_POST['file'] = $name;
+
+		// An empty but valid safety archive: the recovery replay has nothing to put back.
+		$safety_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		$this->write_archive_with_plans( $safety_path, array() );
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$present_at_release = array();
+		$events             = array();
+		$history            = array();
+		$context            = $this->history_capturing_context(
+			$events,
+			$history,
+			true,
+			static function () use ( &$present_at_release, $created ): void {
+				$present_at_release[] = file_exists( $created );
+			}
+		);
+
+		$runner = new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->base . '/wp-root', false, 'wp-content' ),
+			new DatabaseWriter( $db, '', '', true )
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertSame( array( 'flush', 'lock-release', 'history' ), $events, 'The lock is released once, after the recovery replay.' );
+		$this->assertSame( array( false ), $present_at_release, 'The file the failed restore created must already be removed when the lock is released.' );
+		$this->assertSame( RestoreOutcome::RECOVERY_PRECISE, $history[0]['details']['recovery'], 'A real runner with a ledger reports a precise revert, which proves the cleanup ran.' );
+	}
+
+	/**
+	 * A failure before any safety archive was taken still releases the lock, and replays nothing.
+	 *
+	 * Recovery never runs on this branch, so none of its own exits free the lock;
+	 * the release after the catch block's recovery step is the only one there is.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_that_failed_before_the_safety_archive_still_releases_the_lock(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'no disk space' ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->never();
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history, true ),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertSame( array( 'lock-release', 'history' ), $events, 'With no recovery to protect, the lock is released exactly once and nothing is replayed.' );
+	}
+
+	/**
+	 * A restore that fails before the safety archive is taken ran no recovery, and records none.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_that_failed_before_the_safety_archive_records_no_recovery(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'no disk space' ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->never();
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( RestoreOutcome::RECOVERY_NONE, $history[0]['details']['recovery'] );
+		$this->assertSame( 0, $history[0]['details']['entries'] );
+	}
+
+	/**
+	 * The relinked message agrees with its counts at one and at several, and no longer claims the target is "this site".
+	 *
+	 * The message carries two counts — entries restored and database rows rewritten —
+	 * so it is two plural-aware sentences. A CLI rewrite can target an address that is
+	 * not this site, so the sentence says what was rewritten, not where to.
+	 *
+	 * @return void
+	 */
+	public function test_the_relinked_message_agrees_with_its_counts(): void {
+		$cases = array(
+			array( 1, 1, 'Restored and relinked — 1 entry (', ' written. The backup\'s links were rewritten across 1 database row.' ),
+			array( 3, 7, 'Restored and relinked — 3 entries (', ' written. The backup\'s links were rewritten across 7 database rows.' ),
+			array( 1, 7, 'Restored and relinked — 1 entry (', ' written. The backup\'s links were rewritten across 7 database rows.' ),
+			array( 3, 1, 'Restored and relinked — 3 entries (', ' written. The backup\'s links were rewritten across 1 database row.' ),
+		);
+
+		foreach ( $cases as $case ) {
+			$entries = $case[0];
+			$rows    = $case[1];
+
+			$runner = Mockery::mock( RestoreRunnerInterface::class );
+			$runner->shouldReceive( 'verify' )->once();
+			$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+				static function ( $source, ?callable $on_entry, ?callable $on_bytes ) use ( $entries ): void {
+					unset( $source, $on_bytes );
+					if ( null !== $on_entry ) {
+						$on_entry( $entries, $entries );
+					}
+				}
+			);
+
+			$migrator = Mockery::mock( UrlMigratorInterface::class );
+			$migrator->shouldReceive( 'source_url' )->once()->andReturn( 'https://old.test' );
+			$migrator->shouldReceive( 'migrate' )->once()->andReturn( new RewriteReport( 1, array(), $rows, $rows, $rows, 0 ) );
+
+			$this->run_relink_restore( $this->context(), $migrator, $runner );
+
+			$message = $this->json['data']['message'];
+			$this->assertStringStartsWith( $case[2], $message, $entries . ' entries, ' . $rows . ' rows' );
+			$this->assertStringEndsWith( $case[3], $message, $entries . ' entries, ' . $rows . ' rows' );
+			$this->assertStringNotContainsString( 'to this site', $message );
+			$this->assertSame( $entries, $this->json['data']['entries'] );
+		}
+	}
+
+	/**
+	 * A restore stopped at the verify gate by a damaged backup records the `broken` gate and nothing else odd.
+	 *
+	 * The gate runs before the safety archive is taken and before any replay, so a gate
+	 * verdict is itself the proof that nothing was changed, and the record says WHICH
+	 * verdict stopped it. No cache flush is needed: nothing was replayed.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_stopped_by_a_damaged_backup_records_the_broken_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_restore( new RuntimeException( 'entry 2 hash mismatch' ), $events, $history );
+
+		$this->assertSame( array( 'history' ), $events, 'Nothing was replayed, so there is nothing to flush.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'import', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['bytes'] );
+		$this->assertSame(
+			array(
+				'entries'          => 0,
+				'relinked'         => false,
+				'rows_rewritten'   => 0,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+				'recovery'         => '',
+				'gate'             => 'broken',
+			),
+			$history[0]['details']
+		);
+		$this->assertSame( 'The backup is damaged, so nothing was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * An intact archive a build will not process is recorded as the `refused` gate, not as damaged.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_refused_by_the_build_records_the_refused_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_restore( new BuildCannotComply( 'An entry is larger than this build will process.' ), $events, $history );
+
+		$this->assertSame( 'refused', $history[0]['details']['gate'] );
+		$this->assertSame( 'The backup was refused before anything was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * A host that could not finish verifying is recorded as the `could_not_check` gate, never as damaged or refused.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_the_host_could_not_check_records_the_could_not_check_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_restore( new HostCannotComply( 'Not enough memory to verify.' ), $events, $history );
+
+		$this->assertSame( 'could_not_check', $history[0]['details']['gate'] );
+		$this->assertSame( 'The backup could not be checked here, so nothing was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * The controller's private recovery labels map onto the stored vocabulary, and agree with it by value.
+	 *
+	 * The controller's names are private and are not being widened; the stored
+	 * vocabulary is defined once, on TransferHistory. The two sets are deliberately
+	 * separate and deliberately equal. If either is ever renamed this fails, rather
+	 * than every stored record quietly changing its meaning.
+	 *
+	 * @return void
+	 */
+	public function test_every_recovery_label_maps_to_the_history_vocabulary(): void {
+		$method = new ReflectionMethod( RestoreController::class, 'recovery_history_label' );
+
+		foreach ( array( 'RECOVERY_PRECISE', 'RECOVERY_MERGE', 'RECOVERY_MERGE_LINKS', 'RECOVERY_FAILED' ) as $name ) {
+			$internal  = (string) ( new ReflectionClassConstant( RestoreController::class, $name ) )->getValue();
+			$canonical = (string) ( new ReflectionClassConstant( TransferHistory::class, $name ) )->getValue();
+
+			$this->assertSame( $canonical, $method->invoke( null, $internal ), $name . ' must map to the stored label of the same name.' );
+			$this->assertSame( $internal, $canonical, $name . ' must hold the same value in both places.' );
+		}
+
+		$this->assertSame( TransferHistory::RECOVERY_NONE, $method->invoke( null, null ), 'No recovery attempted maps to none.' );
+		$this->assertSame( TransferHistory::RECOVERY_NONE, $method->invoke( null, 'something else' ), 'An unrecognised value maps to none, never to a verdict.' );
+	}
+
+	/**
+	 * The controller's private gate verdicts map onto the stored vocabulary, one to one, and agree with it by value.
+	 *
+	 * The three verdicts must stay three: collapsing any two is the mistake this
+	 * mapping exists to prevent.
+	 *
+	 * @return void
+	 */
+	public function test_every_gate_verdict_maps_to_the_history_vocabulary(): void {
+		$method = new ReflectionMethod( RestoreController::class, 'gate_history_label' );
+		$seen   = array();
+
+		foreach ( array( 'GATE_BROKEN', 'GATE_REFUSED', 'GATE_COULD_NOT_CHECK' ) as $name ) {
+			$internal  = (string) ( new ReflectionClassConstant( RestoreController::class, $name ) )->getValue();
+			$canonical = (string) ( new ReflectionClassConstant( TransferHistory::class, $name ) )->getValue();
+			$mapped    = $method->invoke( null, $internal );
+
+			$this->assertSame( $canonical, $mapped, $name . ' must map to the stored label of the same name.' );
+			$this->assertSame( $internal, $canonical, $name . ' must hold the same value in both places.' );
+			$seen[] = $mapped;
+		}
+
+		$this->assertCount( 3, array_unique( $seen ), 'The three verdicts must stay three distinct labels.' );
+
+		$ok = (string) ( new ReflectionClassConstant( RestoreController::class, 'GATE_OK' ) )->getValue();
+		$this->assertSame( TransferHistory::GATE_NONE, $method->invoke( null, $ok ), 'A passing gate stops nothing, so it maps to none.' );
+		$this->assertSame( TransferHistory::GATE_NONE, $method->invoke( null, 'something else' ), 'An unrecognised value maps to none, never to a verdict.' );
+	}
+
+	/**
+	 * A successful rollback is recorded as a rollback, after the cache flush, with no relink and no recovery keys.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_rollback_is_recorded_after_the_cache_flush(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function ( $source, ?callable $on_entry, ?callable $on_bytes ): void {
+				unset( $source, $on_bytes );
+				if ( null !== $on_entry ) {
+					$on_entry( 2, 2 );
+				}
+			}
+		);
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			$runner,
+			null
+		);
+
+		$controller->rollback();
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The history must be written after the cache flush, never before it.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'rollback', $history[0]['operation'] );
+		$this->assertSame( 'succeeded', $history[0]['outcome'] );
+		$this->assertSame( 1, $history[0]['bytes'], 'The safety archive\'s size, as the rollback counters record it.' );
+		$this->assertSame(
+			array(
+				'entries'          => 2,
+				'repaired_markers' => 0,
+				'skipped_links'    => 0,
+			),
+			$history[0]['details'],
+			'A rollback has no relink and no recovery of its own, so neither key is written.'
+		);
+	}
+
+	/**
+	 * A rollback stopped at its gate by a damaged safety archive is recorded as the `broken` gate, with nothing flushed.
+	 *
+	 * The rollback uses the same verify gate as restore(), so it speaks the same three
+	 * verdicts and the record names which one stopped it.
+	 *
+	 * @return void
+	 */
+	public function test_a_rollback_stopped_by_a_damaged_safety_archive_records_the_broken_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_rollback( new RuntimeException( 'did not verify' ), $events, $history );
+
+		$this->assertFalse( $this->json['data']['rolled_back'] );
+		$this->assertSame( array( 'history' ), $events, 'Nothing was written, so there is nothing to flush.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'rollback', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( 0, $history[0]['bytes'] );
+		$this->assertSame(
+			array(
+				'entries' => 0,
+				'gate'    => 'broken',
+			),
+			$history[0]['details']
+		);
+		$this->assertSame( 'The safety archive is damaged, so nothing was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * A rollback whose safety archive a build will not process is recorded as the `refused` gate.
+	 *
+	 * @return void
+	 */
+	public function test_a_rollback_refused_by_the_build_records_the_refused_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_rollback( new BuildCannotComply( 'An entry is larger than this build will process.' ), $events, $history );
+
+		$this->assertSame( 'refused', $history[0]['details']['gate'] );
+		$this->assertSame( 'The safety archive was refused before anything was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * A rollback the host could not finish verifying is recorded as the `could_not_check` gate.
+	 *
+	 * @return void
+	 */
+	public function test_a_rollback_the_host_could_not_check_records_the_could_not_check_gate(): void {
+		$events  = array();
+		$history = array();
+
+		$this->run_gate_refused_rollback( new HostCannotComply( 'Not enough memory to verify.' ), $events, $history );
+
+		$this->assertSame( 'could_not_check', $history[0]['details']['gate'] );
+		$this->assertSame( 'The safety archive could not be checked here, so nothing was changed.', $this->read_back( $history )->summary() );
+	}
+
+	/**
+	 * A rollback that fails part-way is recorded as a failed rollback, with no recovery key.
+	 *
+	 * @return void
+	 */
+	public function test_a_rollback_that_fails_part_way_is_recorded_as_failed_with_no_recovery_key(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+		mkdir( $this->base, 0o755, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andThrow( new RuntimeException( 'replay failed' ) );
+
+		$events  = array();
+		$history = array();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			$runner,
+			null
+		);
+
+		try {
+			$controller->rollback();
+			$this->fail( 'rollback() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertSame( array( 'flush', 'history' ), $events, 'The replay may have replaced wp_options, so the cache is flushed before the history is written.' );
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'rollback', $history[0]['operation'] );
+		$this->assertSame( 'failed', $history[0]['outcome'] );
+		$this->assertSame( array( 'entries' => 0 ), $history[0]['details'] );
+		$this->assertArrayNotHasKey( 'recovery', $history[0]['details'], 'A rollback has no recovery of its own, so no label is invented for one.' );
+		$this->assertArrayNotHasKey( 'gate', $history[0]['details'], 'A rollback that failed part-way was not stopped at the gate, and cannot prove nothing was written.' );
+	}
+
+	/**
+	 * Run rollback() so that the verify gate stops the safety archive, and capture what was recorded.
+	 *
+	 * @param \Throwable                       $cause   What the verify walk raises.
+	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' and 'history' in the order they happen.
+	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @return void
+	 */
+	private function run_gate_refused_rollback( \Throwable $cause, array &$events, array &$history ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		if ( ! is_dir( $this->base ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+			mkdir( $this->base, 0o755, true );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( $cause );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			$runner,
+			null
+		);
+
+		$controller->rollback();
+	}
+
+	/**
+	 * Read the latest restore or rollback back out of a captured history, as a screen would.
+	 *
+	 * @param array<int, array<string, mixed>> $history The history as it was last saved.
+	 * @return RestoreOutcome
+	 */
+	private function read_back( array $history ): RestoreOutcome {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->with( TransferHistory::OPTION, array() )->andReturn( $history );
+
+		$latest = RestoreOutcome::latest( $context );
+		$this->assertInstanceOf( RestoreOutcome::class, $latest );
+		return $latest;
+	}
+
+	/**
+	 * Run restore() so that the verify gate stops the backup, and capture what was recorded.
+	 *
+	 * The safety archive must never be taken and the replay must never run: that is
+	 * what makes a gate verdict one that provably wrote nothing.
+	 *
+	 * @param \Throwable                       $cause   What the verify walk raises.
+	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' and 'history' in the order they happen.
+	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @return void
+	 */
+	private function run_gate_refused_restore( \Throwable $cause, array &$events, array &$history ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( $cause );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->history_capturing_context( $events, $history ),
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+		} finally {
+			unset( $_POST['file'] );
+		}
+	}
+
+	/**
+	 * Run restore() so that the forward replay fails after a safety archive was taken, over a given context.
+	 *
+	 * The caller supplies the engine, so it decides how the recovery replay behaves.
+	 * Leaves the JSON response in $this->json; the expected halt is swallowed.
+	 *
+	 * @param RestoreRunnerInterface $runner  The engine that verifies and replays.
+	 * @param WordPressContext       $context The context the controller records through.
+	 * @return void
+	 */
+	private function run_failing_restore_with_safety_archive( RestoreRunnerInterface $runner, WordPressContext $context ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		$this->write_plain_archive( $store->directory() . '/' . $name );
+		$_POST['file'] = $name;
+
+		// The safety archive the restore takes; recovery replays it, so it must exist.
+		$safety_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $safety_path, 'x' );
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andReturn( $safety_path );
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+			$this->fail( 'restore() should have halted with a JSON error.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+	}
+
+	/**
+	 * A WordPressContext mock that records, in order, the cache flushes and the transfer-history writes.
+	 *
+	 * Everything else the controller asks of the context is answered as the shared
+	 * {@see self::context()} answers it. Only a write to the history option is captured;
+	 * the counters' writes are accepted and ignored.
+	 *
+	 * @param array<int, string>               $events  Out-parameter. Receives 'flush' for each cache flush and 'history' for each history write, in the order they happen.
+	 * @param array<int, array<string, mixed>> $history Out-parameter. Receives the history as it was last saved.
+	 * @param bool                             $record_lock_release When true, each release of the named operation lock is also recorded in $events as 'lock-release'; off by default so the tests that assert the exact flush and history order are unaffected.
+	 * @param callable|null                    $on_lock_release Optional. Called each time the named lock is released, so a test can inspect the world at that exact moment.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function history_capturing_context( array &$events, array &$history, bool $record_lock_release = false, ?callable $on_lock_release = null ) {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'format_size' )->andReturnUsing(
+			static function ( int $bytes ): string {
+				return $bytes . ' B';
+			}
+		);
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) {
+				unset( $name );
+				return $fallback;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' )->andReturnUsing(
+			static function () use ( &$events ): void {
+				$events[] = 'flush';
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$events, &$history ): void {
+				if ( TransferHistory::OPTION === $name ) {
+					$events[] = 'history';
+					$history  = $value;
+				}
+			}
+		);
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->andReturnUsing(
+			static function () use ( &$events, $record_lock_release, $on_lock_release ): void {
+				if ( $record_lock_release ) {
+					$events[] = 'lock-release';
+				}
+				if ( null !== $on_lock_release ) {
+					$on_lock_release();
+				}
+			}
+		);
+		return $context;
+	}
+
+	// -------------------------------------------------------------------------
+	// The attempt counter: counted before the work so a killed run still shows,
+	// and never left below succeeded plus failed by a replay that rebuilds
+	// wp_options. These tests drive a context that holds options like the real
+	// one, so a "replay" in the engine double really does replace them.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A successful restore counts its attempt before the replay runs, and still has it counted after the replay wipes it.
+	 *
+	 * The early count is what makes a run killed mid-restore show as attempted. The
+	 * replay then rebuilds wp_options with the backup's own counters, which cannot
+	 * contain this run. The invariant asserted is the one the Overview relies on:
+	 * attempted is never below succeeded plus failed.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_restore_counts_the_attempt_a_replay_wipes(): void {
+		$options   = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+		$at_replay = null;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options, &$at_replay ): void {
+				$at_replay                        = $options['pontifex_import_stats']['attempted'];
+				$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+			}
+		);
+
+		$this->run_restore_over_context( $runner, $this->safety_archiver_double(), $this->stateful_counters_context( $options ) );
+
+		$this->assertSame( 3, $at_replay, 'The attempt is counted before the replay runs, so a run killed part-way still shows as attempted.' );
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['succeeded'] );
+	}
+
+	/**
+	 * A restore that fails, whose recovery then also fails, still leaves the attempt covered.
+	 *
+	 * The forward replay cut over (wiping the early count), and the recovery that
+	 * would have restored it did not complete.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_with_a_failed_recovery_keeps_the_attempt_covered(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+		$replays = 0;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$options, &$replays ): void {
+				++$replays;
+				if ( 1 === $replays ) {
+					$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+				}
+				throw new RuntimeException( 'replay failed' );
+			}
+		);
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->stateful_counters_context( $options ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * A restore that fails and is recovered does not count its attempt twice.
+	 *
+	 * The safety archive was taken after the early count, so replaying it restores
+	 * that count. Adding one more attempt here would double-count, which is why the
+	 * failure makes sure the attempt is covered rather than adding another.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_restore_that_recovered_does_not_count_the_attempt_twice(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+		$replays = 0;
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->twice();
+		$runner->shouldReceive( 'restore' )->twice()->andReturnUsing(
+			static function () use ( &$options, &$replays ): void {
+				++$replays;
+				if ( 1 === $replays ) {
+					// The forward replay cut over: the backup's own counters, without this run.
+					$options['pontifex_import_stats'] = self::import_stats( 2, 1, 1 );
+					throw new RuntimeException( 'replay failed mid-restore' );
+				}
+				// The recovery replays the safety archive, taken after the early count, so it holds it.
+				$options['pontifex_import_stats'] = self::import_stats( 3, 1, 1 );
+			}
+		);
+
+		$this->run_failing_restore_with_safety_archive( $runner, $this->stateful_counters_context( $options ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'], 'One run, one attempt: not counted again on top of the one the recovery restored.' );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * A restore that fails before anything was replayed keeps exactly the one attempt it counted.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_that_failed_before_any_replay_keeps_exactly_one_attempt(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->once()->andThrow( new RuntimeException( 'no disk space' ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->run_restore_over_context( $runner, $archiver, $this->stateful_counters_context( $options ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * A restore that fails before it counted its attempt at all is still never left with a failure and no attempt.
+	 *
+	 * An archive that cannot even be read fails ahead of the early count, so the failure
+	 * is the first the counters hear of the run.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_that_failed_before_counting_its_attempt_is_still_covered(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->never();
+		$runner->shouldReceive( 'restore' )->never();
+
+		$this->run_restore_over_context( $runner, null, $this->stateful_counters_context( $options ), 'this is not an archive' );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+	}
+
+	/**
+	 * A restore stopped at the gate leaves the early count standing: nothing was replayed to wipe it.
+	 *
+	 * @return void
+	 */
+	public function test_a_restore_stopped_at_the_gate_keeps_its_early_attempt(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once()->andThrow( new RuntimeException( 'entry 2 hash mismatch' ) );
+		$runner->shouldReceive( 'restore' )->never();
+
+		$archiver = Mockery::mock( SafetyArchiverInterface::class );
+		$archiver->shouldReceive( 'create' )->never();
+
+		$this->run_restore_over_context( $runner, $archiver, $this->stateful_counters_context( $options ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'] );
+		$this->assertSame( 2, $options['pontifex_import_stats']['failed'] );
+	}
+
+	/**
+	 * Assert the invariant the Overview and `wp pontifex stats` rely on: attempted is never below succeeded plus failed.
+	 *
+	 * @param array<string, int> $stats The stored import counters.
+	 * @return void
+	 */
+	private function assertAttemptsCovered( array $stats ): void {
+		$this->assertGreaterThanOrEqual(
+			$stats['succeeded'] + $stats['failed'],
+			$stats['attempted'],
+			'attempted must never be below succeeded plus failed.'
+		);
+	}
+
+	/**
+	 * A set of import counters.
+	 *
+	 * @param int $attempted How many runs were counted as attempted.
+	 * @param int $succeeded How many succeeded.
+	 * @param int $failed    How many failed.
+	 * @return array<string, int>
+	 */
+	private static function import_stats( int $attempted, int $succeeded, int $failed ): array {
+		return array(
+			'attempted'      => $attempted,
+			'succeeded'      => $succeeded,
+			'failed'         => $failed,
+			'bytes_imported' => 0,
+		);
+	}
+
+	/**
+	 * Run restore() over a given context, swallowing the JSON halt a failure ends in.
+	 *
+	 * @param RestoreRunnerInterface       $runner      The engine double.
+	 * @param SafetyArchiverInterface|null $archiver    The archiver double, or null when the run never reaches it.
+	 * @param WordPressContext             $context     The context the controller counts and records through.
+	 * @param string|null                  $raw_archive Optional. Bytes to write as the backup instead of a valid archive.
+	 * @return void
+	 */
+	private function run_restore_over_context( RestoreRunnerInterface $runner, ?SafetyArchiverInterface $archiver, WordPressContext $context, ?string $raw_archive = null ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_file_name' )->returnArg();
+
+		$store = new BackupStore( $this->base );
+		$store->ensure_directory();
+		$name = 'pontifex-backup-20260101T000000Z.wpmig';
+		if ( null === $raw_archive ) {
+			$this->write_plain_archive( $store->directory() . '/' . $name );
+		} else {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a deliberately unreadable backup.
+			file_put_contents( $store->directory() . '/' . $name, $raw_archive );
+		}
+		$_POST['file'] = $name;
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger(),
+			$runner,
+			$archiver
+		);
+
+		try {
+			$controller->restore();
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		} finally {
+			unset( $_POST['file'] );
+		}
+	}
+
+	/**
+	 * A WordPressContext mock that really holds options, so a "replay" in an engine double can replace them.
+	 *
+	 * @param array<string, mixed> $options Out-parameter. The stored options, by name; read and written through the context.
+	 * @return WordPressContext&\Mockery\MockInterface
+	 */
+	private function stateful_counters_context( array &$options ) {
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'format_size' )->andReturnUsing(
+			static function ( int $bytes ): string {
+				return $bytes . ' B';
+			}
+		);
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) use ( &$options ) {
+				return $options[ $name ] ?? $fallback;
+			}
+		);
+		$context->shouldReceive( 'save_option' )->andReturnUsing(
+			static function ( string $name, $value ) use ( &$options ): void {
+				$options[ $name ] = $value;
+			}
+		);
+		$context->shouldReceive( 'flush_cache' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://this-site.test' );
+		$context->shouldReceive( 'acquire_named_lock' )->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' );
+		return $context;
+	}
+
+	/**
+	 * A successful admin rollback leaves attempted covering succeeded plus failed, even though the replay rebuilt the counters.
+	 *
+	 * A rollback counts its attempt in the same write as its outcome, after the replay,
+	 * so there is no early count for the replay to wipe. Pinned so it stays that way.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_rollback_keeps_the_attempt_covered(): void {
+		$options = array( 'pontifex_rollback_stats' => self::rollback_stats( 2, 1, 1 ) );
+
+		$this->run_rollback_over_counters( $options, false );
+
+		$stats = $options['pontifex_rollback_stats'];
+		$this->assertGreaterThanOrEqual( $stats['succeeded'] + $stats['failed'], $stats['attempted'] );
+		$this->assertSame( 3, $stats['attempted'] );
+		$this->assertSame( 2, $stats['succeeded'] );
+	}
+
+	/**
+	 * A failed admin rollback leaves attempted covering succeeded plus failed, even though the replay rebuilt the counters.
+	 *
+	 * @return void
+	 */
+	public function test_a_failed_rollback_keeps_the_attempt_covered(): void {
+		$options = array( 'pontifex_rollback_stats' => self::rollback_stats( 2, 1, 1 ) );
+
+		$this->run_rollback_over_counters( $options, true );
+
+		$stats = $options['pontifex_rollback_stats'];
+		$this->assertGreaterThanOrEqual( $stats['succeeded'] + $stats['failed'], $stats['attempted'] );
+		$this->assertSame( 3, $stats['attempted'] );
+		$this->assertSame( 2, $stats['failed'] );
+	}
+
+	/**
+	 * Run rollback() over a context that holds options, with a replay that rebuilds the rollback counters.
+	 *
+	 * @param array<string, mixed> $options Out-parameter. The stored options.
+	 * @param bool                 $fail    Whether the replay should fail after rebuilding them.
+	 * @return void
+	 */
+	private function run_rollback_over_counters( array &$options, bool $fail ): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$archive_path = $this->base . '/pre-import-rollback-20260101T000000Z.wpmig';
+		if ( ! is_dir( $this->base ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- Seeding a temp directory for the placeholder safety archive.
+			mkdir( $this->base, 0o755, true );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Seeding a placeholder safety archive; the injected engine stands in for reading it.
+		file_put_contents( $archive_path, 'x' );
+
+		$rollback = Mockery::mock( RollbackStoreInterface::class );
+		$rollback->shouldReceive( 'most_recent' )->once()->andReturn( $archive_path );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once()->andReturnUsing(
+			static function () use ( &$options, $fail ): void {
+				$options['pontifex_rollback_stats'] = self::rollback_stats( 2, 1, 1 );
+				if ( $fail ) {
+					throw new RuntimeException( 'replay failed' );
+				}
+			}
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$this->stateful_counters_context( $options ),
+			new BackupStore( $this->base ),
+			$rollback,
+			new NullLogger(),
+			$runner,
+			null
+		);
+
+		try {
+			$controller->rollback();
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * A set of rollback counters.
+	 *
+	 * @param int $attempted How many runs were counted as attempted.
+	 * @param int $succeeded How many succeeded.
+	 * @param int $failed    How many failed.
+	 * @return array<string, int>
+	 */
+	private static function rollback_stats( int $attempted, int $succeeded, int $failed ): array {
+		return array(
+			'attempted'         => $attempted,
+			'succeeded'         => $succeeded,
+			'failed'            => $failed,
+			'bytes_rolled_back' => 0,
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// progress(): when nothing is running it carries the last outcome, while it
+	// is recent, for a page that reloads after a restore reset the session.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Idle, with a recent restore recorded, the response carries its text: the time, then the sentence.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_carries_a_recent_restore(): void {
+		$recorded = time() - 60;
+		$history  = array(
+			self::history_entry( 'import', 'succeeded', $recorded, array( 'entries' => 120 ) ),
+		);
+
+		$this->run_progress( $history, false );
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( 'idle', $this->json['data']['phase'] );
+		$this->assertSame(
+			array( 'text' => gmdate( 'H:i \\o\\n d-m-Y', $recorded ) . ' — Restored 120 entries.' ),
+			$this->json['data']['last']
+		);
+	}
+
+	/**
+	 * A rollback is carried the same way, in its own words.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_carries_a_recent_rollback(): void {
+		$recorded = time() - 60;
+		$history  = array(
+			self::history_entry( 'rollback', 'succeeded', $recorded, array( 'entries' => 9 ) ),
+		);
+
+		$this->run_progress( $history, false );
+
+		$this->assertSame( gmdate( 'H:i \\o\\n d-m-Y', $recorded ) . ' — Rolled back 9 entries.', $this->json['data']['last']['text'] );
+	}
+
+	/**
+	 * A record just inside the fifteen-minute window is carried; one just outside is not.
+	 *
+	 * The window is long enough to cover signing back in after a restore, and short
+	 * enough that an old outcome can never sit where a live result appears.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_honours_the_fifteen_minute_window(): void {
+		$inside  = array( self::history_entry( 'import', 'succeeded', time() - 895, array( 'entries' => 1 ) ) );
+		$outside = array( self::history_entry( 'import', 'succeeded', time() - 905, array( 'entries' => 1 ) ) );
+
+		$this->run_progress( $inside, false );
+		$this->assertIsArray( $this->json['data']['last'], 'A record 895 seconds old is inside the window.' );
+
+		$this->run_progress( $outside, false );
+		$this->assertNull( $this->json['data']['last'], 'A record 905 seconds old is outside the window.' );
+	}
+
+	/**
+	 * Idle with nothing recorded, the key is present and null.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_with_no_record_carries_null(): void {
+		$this->run_progress( array(), false );
+
+		$this->assertSame( 'idle', $this->json['data']['phase'] );
+		$this->assertArrayHasKey( 'last', $this->json['data'] );
+		$this->assertNull( $this->json['data']['last'] );
+	}
+
+	/**
+	 * A history of only exports has no restore to carry.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_ignores_exports(): void {
+		$this->run_progress( array( self::history_entry( 'export', 'succeeded', time() - 60 ) ), false );
+
+		$this->assertNull( $this->json['data']['last'] );
+	}
+
+	/**
+	 * A record whose time cannot be read is never recent, and a record that cannot be described carries nothing.
+	 *
+	 * @return void
+	 */
+	public function test_progress_when_idle_carries_nothing_for_a_damaged_record(): void {
+		$unreadable_time       = self::history_entry( 'import', 'succeeded', time() - 60, array( 'entries' => 1 ) );
+		$unreadable_time['at'] = 'not a time';
+		$unrecognised_outcome  = self::history_entry( 'import', 'weird', time() - 60, array( 'entries' => 1 ) );
+
+		$this->run_progress( array( $unreadable_time ), false );
+		$this->assertNull( $this->json['data']['last'] );
+
+		$this->run_progress( array( $unrecognised_outcome ), false );
+		$this->assertNull( $this->json['data']['last'] );
+	}
+
+	/**
+	 * While an operation is running, no `last` key is sent at all — even with a recent record on file.
+	 *
+	 * @return void
+	 */
+	public function test_progress_while_running_never_carries_the_last_outcome(): void {
+		$history = array( self::history_entry( 'import', 'succeeded', time() - 60, array( 'entries' => 120 ) ) );
+
+		$this->run_progress( $history, true );
+
+		$this->assertSame( 'restoring', $this->json['data']['phase'] );
+		$this->assertSame( 5, $this->json['data']['bytes_done'] );
+		$this->assertSame( 10, $this->json['data']['bytes_total'] );
+		$this->assertArrayNotHasKey( 'last', $this->json['data'] );
+	}
+
+	/**
+	 * An unauthorised caller is refused before anything is read.
+	 *
+	 * @return void
+	 */
+	public function test_progress_refuses_an_unauthorised_caller_without_reading_the_history(): void {
+		Functions\when( 'current_user_can' )->justReturn( false );
+		$this->stub_json();
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldNotReceive( 'option_value' );
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
+		);
+
+		try {
+			$controller->progress();
+			$this->fail( 'progress() should refuse without the capability.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 403, $this->json['status'] );
+	}
+
+	/**
+	 * A successful restore of an archive with no database counts its one attempt once.
+	 *
+	 * Nothing is replayed, so wp_options is untouched and the early count is still
+	 * standing. Adding another attempt on top would count the run twice.
+	 *
+	 * @return void
+	 */
+	public function test_a_successful_restore_of_an_archive_with_no_database_does_not_count_the_attempt_twice(): void {
+		$options = array( 'pontifex_import_stats' => self::import_stats( 2, 1, 1 ) );
+
+		$runner = Mockery::mock( RestoreRunnerInterface::class );
+		$runner->shouldReceive( 'verify' )->once();
+		$runner->shouldReceive( 'restore' )->once();
+
+		$this->run_restore_over_context( $runner, $this->safety_archiver_double(), $this->stateful_counters_context( $options ) );
+
+		$this->assertAttemptsCovered( $options['pontifex_import_stats'] );
+		$this->assertSame( 3, $options['pontifex_import_stats']['attempted'], 'One run, one attempt: nothing was replayed, so the early count was never lost.' );
+		$this->assertSame( 2, $options['pontifex_import_stats']['succeeded'] );
+	}
+
+	/**
+	 * Call progress() over a given history, and capture the response.
+	 *
+	 * @param array<int, array<string, mixed>> $history The stored transfer history, oldest first.
+	 * @param bool                             $running Whether an operation is mid-run, i.e. the progress transient is set.
+	 * @return void
+	 */
+	private function run_progress( array $history, bool $running ): void {
+		$this->authorise();
+		$this->stub_json();
+		Functions\when( 'get_transient' )->justReturn(
+			$running
+				? array(
+					'phase'       => 'restoring',
+					'bytes_done'  => 5,
+					'bytes_total' => 10,
+				)
+				: false
+		);
+		Functions\when( 'wp_date' )->alias(
+			static function ( string $format, int $timestamp ): string {
+				return gmdate( $format, $timestamp );
+			}
+		);
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->andReturnUsing(
+			static function ( string $name, $fallback = false ) use ( $history ) {
+				return TransferHistory::OPTION === $name ? $history : $fallback;
+			}
+		);
+
+		$controller = new RestoreController(
+			$this->environment(),
+			$context,
+			new BackupStore( $this->base ),
+			Mockery::mock( RollbackStoreInterface::class ),
+			new NullLogger()
+		);
+		$controller->progress();
+	}
+
+	/**
+	 * One stored history entry, as TransferHistory::record() writes it.
+	 *
+	 * @param string                    $operation 'export', 'import' or 'rollback'.
+	 * @param string                    $outcome   'succeeded' or 'failed'.
+	 * @param int                       $recorded  The Unix time it was recorded.
+	 * @param array<string, mixed>|null $details   Optional. The details to store.
+	 * @return array<string, mixed>
+	 */
+	private static function history_entry( string $operation, string $outcome, int $recorded, ?array $details = null ): array {
+		$entry = array(
+			'at'        => gmdate( 'c', $recorded ),
+			'operation' => $operation,
+			'outcome'   => $outcome,
+			'bytes'     => 0,
+		);
+
+		if ( null !== $details ) {
+			$entry['details'] = $details;
+		}
+
+		return $entry;
 	}
 }
