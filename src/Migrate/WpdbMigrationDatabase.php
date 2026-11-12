@@ -134,6 +134,16 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	/**
 	 * Read a batch of rows from a table as associative arrays.
 	 *
+	 * A table with a usable single-column primary key ({@see self::primary_key()})
+	 * is windowed by keyset — the same pure-index-seek approach
+	 * {@see \Pontifex\Manifest\WpdbAdapter::dump_table_rows()} uses for exports —
+	 * so $offset stops costing a server-side scan of every row before it once the
+	 * walk is past the first batch. A table with a composite or absent primary
+	 * key keeps today's LIMIT/OFFSET windowing; in practice
+	 * {@see \Pontifex\Migrate\DatabaseRewriter::walk()} already skips such a
+	 * table entirely rather than call this method on it, but the fallback stays
+	 * correct for a direct caller (a test, a future consumer of this interface).
+	 *
 	 * @param string $table  Fully-prefixed table name.
 	 * @param int    $offset 0-based starting row.
 	 * @param int    $limit  Maximum rows to read.
@@ -141,6 +151,97 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	 * @throws RuntimeException If the SELECT fails.
 	 */
 	public function read_rows( string $table, int $offset, int $limit ): array {
+		$primary_key = $this->cached_primary_key( $table );
+
+		if ( null !== $primary_key ) {
+			return $this->read_rows_by_keyset( $table, $primary_key, $offset, $limit );
+		}
+
+		return $this->read_rows_by_offset( $table, $offset, $limit );
+	}
+
+	/**
+	 * Per-table keyset cursor: the last-read row's primary-key value.
+	 *
+	 * Reset to unset whenever $offset is 0 — the start of a fresh walk for
+	 * that table, which {@see DatabaseRewriter::walk()} always begins at
+	 * offset 0 — so a table walked more than once on the same adapter
+	 * instance (a dry-run scan() followed by a real rewrite(), or a test)
+	 * starts its cursor over rather than inheriting a stale value from an
+	 * earlier walk.
+	 *
+	 * @var array<string, int|string>
+	 */
+	private array $row_cursors = array();
+
+	/**
+	 * Read a row window keyed off the table's single-column primary key.
+	 *
+	 * Builds `WHERE pk > cursor ORDER BY pk LIMIT $limit` once a cursor is on
+	 * record for this table, and no WHERE at all for the first window
+	 * ($offset 0, which also resets the cursor). Every identifier is
+	 * backtick-escaped; the cursor value is bound through $wpdb->prepare(),
+	 * never string-concatenated.
+	 *
+	 * @param string $table       Fully-prefixed table name.
+	 * @param string $primary_key The table's single-column primary key.
+	 * @param int    $offset      0-based starting row; only used to detect the first window (0) and reset the cursor.
+	 * @param int    $limit       Maximum rows to read.
+	 * @return array<int, array<string, mixed>> The rows, each a column => value map.
+	 * @throws RuntimeException If the SELECT fails.
+	 */
+	private function read_rows_by_keyset( string $table, string $primary_key, int $offset, int $limit ): array {
+		if ( 0 === $offset ) {
+			unset( $this->row_cursors[ $table ] );
+		}
+
+		$order_clause     = $this->order_by_clause( $table );
+		$escaped_key      = str_replace( '`', '``', $primary_key );
+		$where_clause     = '';
+		$args             = array( $table );
+		$has_prior_cursor = array_key_exists( $table, $this->row_cursors );
+
+		if ( $has_prior_cursor ) {
+			$where_clause = ' WHERE `' . $escaped_key . '` > %s';
+			$args[]       = (string) $this->row_cursors[ $table ];
+		}
+
+		$args[] = $limit;
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $where_clause and $order_clause are built from cached_primary_key()'s SHOW KEYS result, with the identifier backtick-escaped; every value placeholder is still resolved by $wpdb->prepare() below. The sniff cannot count placeholders against a runtime-sized ...$args spread, so it always reports one fewer than the query actually needs.
+		$sql = $this->wpdb->prepare( 'SELECT * FROM %i' . $where_clause . $order_clause . ' LIMIT %d', ...$args );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is the direct return value of $wpdb->prepare() on the line above; the taint analysis cannot see the preparation (or the backtick-escaped identifier) across the assignment.
+		$raw = $this->wpdb->get_results( $sql, ARRAY_A );
+
+		if ( '' !== $this->wpdb->last_error ) {
+			$last_error = (string) $this->wpdb->last_error;
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $table and $wpdb->last_error reported verbatim for diagnostic context; exception path, not HTML output.
+			throw new RuntimeException( sprintf( 'Row read failed for "%s" offset=%d limit=%d: %s', $table, $offset, $limit, $last_error ) );
+		}
+
+		$rows = is_array( $raw ) ? array_values( $raw ) : array();
+
+		if ( array() !== $rows ) {
+			$last_row                    = $rows[ count( $rows ) - 1 ];
+			$cursor_value                = $last_row[ $primary_key ] ?? null;
+			$this->row_cursors[ $table ] = is_int( $cursor_value ) || is_string( $cursor_value ) ? $cursor_value : (string) $cursor_value;
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Read a row window by today's LIMIT/OFFSET pagination.
+	 *
+	 * Used for a table with no usable single-column primary key.
+	 *
+	 * @param string $table  Fully-prefixed table name.
+	 * @param int    $offset 0-based starting row.
+	 * @param int    $limit  Maximum rows to read.
+	 * @return array<int, array<string, mixed>> The rows, each a column => value map.
+	 * @throws RuntimeException If the SELECT fails.
+	 */
+	private function read_rows_by_offset( string $table, int $offset, int $limit ): array {
 		// Without an ORDER BY, MySQL guarantees no row order, so consecutive
 		// OFFSET windows can overlap or leave gaps — a row that silently never
 		// gets its URLs rewritten. Mirrors the export dump's ordering fix; the
@@ -182,12 +283,36 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	 */
 	private function order_by_clause( string $table ): string {
 		if ( ! isset( $this->order_clauses[ $table ] ) ) {
-			$key                           = $this->primary_key( $table );
+			$key                           = $this->cached_primary_key( $table );
 			$this->order_clauses[ $table ] = null === $key
 				? ''
 				: ' ORDER BY `' . str_replace( '`', '``', $key ) . '`';
 		}
 		return $this->order_clauses[ $table ];
+	}
+
+	/**
+	 * The table's single-column primary key, resolved once and cached for the adapter's life.
+	 *
+	 * @var array<string, string|null>
+	 */
+	private array $primary_keys = array();
+
+	/**
+	 * Resolve {@see self::primary_key()} once per table, sharing the answer
+	 * between {@see self::order_by_clause()} and {@see self::read_rows()} so
+	 * SHOW KEYS runs at most once per table on this adapter instance
+	 * regardless of how many batches a table's walk takes.
+	 *
+	 * @param string $table Fully-prefixed table name.
+	 * @return string|null The primary-key column, or null if absent or composite.
+	 * @throws RuntimeException If the keys cannot be inspected.
+	 */
+	private function cached_primary_key( string $table ): ?string {
+		if ( ! array_key_exists( $table, $this->primary_keys ) ) {
+			$this->primary_keys[ $table ] = $this->primary_key( $table );
+		}
+		return $this->primary_keys[ $table ];
 	}
 
 	/**

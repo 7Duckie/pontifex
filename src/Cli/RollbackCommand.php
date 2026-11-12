@@ -14,6 +14,7 @@ use Throwable;
 use WP_CLI;
 use Psr\Log\LoggerInterface;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
@@ -27,8 +28,10 @@ use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStore;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\WordPress\RealWordPressContext;
@@ -71,8 +74,9 @@ final class RollbackCommand {
 	/**
 	 * The wp_options key holding the rollback counters (read by the admin Overview).
 	 *
-	 * A rollback is an undo, not a transfer, so it is counted separately from the
-	 * import counters and is not added to the transfer history.
+	 * A rollback is an undo, not an import, so it is counted separately from the
+	 * import counters. It IS written to the transfer history, as a 'rollback'
+	 * operation, so the last thing that rewrote the site can always be read back.
 	 *
 	 * @var string
 	 */
@@ -253,7 +257,7 @@ final class RollbackCommand {
 
 		// 4. Open the safety archive and wire the restore engine.
 		$source         = $this->open_source( $archive_path );
-		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner();
+		$restore_runner = $this->restore_runner ?? $this->build_default_restore_runner( $source );
 
 		// 4a. Single-runner lock: acquire only now, after every exit-prone step above
 		// (finding the safety archive, the confirmation prompt, opening the archive)
@@ -327,16 +331,32 @@ final class RollbackCommand {
 				);
 
 				$this->print_summary( $archive_path, $entry_total );
+				$this->report_repaired_markers( $restore_runner );
+				$this->report_skipped_symlinks( $restore_runner );
 
 				// The rollback replayed the database with raw SQL, so flush WordPress's
 				// stale option cache before recording, or the counter write is lost
-				// (see RestoreController for the full rationale).
+				// (see RestoreController for the full rationale). The history record is
+				// written after the same flush, beside the counters. A rollback has no
+				// relink and no recovery of its own, so those keys are not written.
 				$this->wordpress_context->flush_cache();
 				$this->bump_counters(
 					array(
 						'attempted'         => 1,
 						'succeeded'         => 1,
 						'bytes_rolled_back' => $this->archive_size( $archive_path ),
+					)
+				);
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'succeeded',
+					$this->archive_size( $archive_path ),
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entry_total,
+						'repaired_markers' => $restore_runner instanceof RestoreRunner ? $restore_runner->repaired_marker_count() : 0,
+						'skipped_links'    => $restore_runner instanceof RestoreRunner ? count( $restore_runner->skipped_symlinks() ) : 0,
 					)
 				);
 			}
@@ -349,11 +369,24 @@ final class RollbackCommand {
 				)
 			);
 			if ( ! $dry_run ) {
+				// A rollback that failed part-way may already have replaced wp_options, leaving
+				// the option cache holding pre-replay values, so flush before the counters and
+				// the history record are written, as the success path does.
+				$this->wordpress_context->flush_cache();
 				$this->bump_counters(
 					array(
 						'attempted' => 1,
 						'failed'    => 1,
 					)
+				);
+				// A rollback has no recovery of its own, so there is no `recovery` key.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array( 'entries' => 0 )
 				);
 			}
 			$failure = $error;
@@ -445,21 +478,69 @@ final class RollbackCommand {
 	 *
 	 * Identical to ImportCommand's wiring: an EntryReader with the v0.1.0
 	 * default codecs, a FileWriter rooted at the WordPress installation, and a
-	 * DatabaseWriter over the real $wpdb.
+	 * DatabaseWriter over the real $wpdb, wired with both table prefixes the
+	 * same way — the source prefix from the archive's own provenance when it
+	 * carries one, or derived from its table names via
+	 * {@see SourceTablePrefix::resolve()} when it does not. A safety archive is
+	 * written by this site, so in the ordinary case its recorded (or derived)
+	 * prefix already agrees with the destination and this is a no-op — but
+	 * leaving a restore path unwired is how these gaps start, and consistency
+	 * costs nothing here. This command's own $this->logger is passed through
+	 * as the runner's optional sixth argument, so the few things RestoreRunner
+	 * itself still only mentions in passing — a directory mode that could not
+	 * be restored, temp artefacts an interrupted earlier restore left behind
+	 * and this run swept up — reach the real per-transfer log file instead of
+	 * the NullLogger a caller that passes nothing would silently get.
 	 *
+	 * @param resource $source The open, seekable safety-archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
 	 * @return RestoreRunner
 	 */
-	private function build_default_restore_runner(): RestoreRunner {
-		$entry_reader    = new EntryReader( CodecRegistry::with_defaults() );
-		$file_writer     = new FileWriter( $this->resolve_wordpress_root() );
-		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) );
+	private function build_default_restore_runner( $source ): RestoreRunner {
+		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader = new ArchiveReader( $source );
+		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
+		// A safety archive written by Pontifex 1.1.0 or earlier carries a frozen
+		// marker in place of every percent sign in its row values, so a rollback
+		// replaying one must turn them back too — see PlaceholderMarkerRepair.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
+		// $replaying_safety_archive is true: `wp pontifex rollback` IS a safety-archive
+		// replay (this site's own undo, not a foreign archive), so an absolute symlink
+		// target is skipped rather than refused — see FileWriter::$replaying_safety_archive.
+		$file_writer     = new FileWriter( $this->resolve_wordpress_root(), false, null, null, null, null, true );
+		$database_writer = new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers );
 		return new RestoreRunner(
 			$entry_reader,
 			$file_writer,
 			$database_writer,
 			null,
-			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
+			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) ),
+			$this->logger
 		);
+	}
+
+	/**
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see SourceTablePrefix::resolve()} instead. Returns the
+	 * prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**
@@ -532,6 +613,103 @@ final class RollbackCommand {
 	private function print_summary( string $archive_path, int $entry_count ): void {
 		WP_CLI::log(
 			sprintf( /* translators: 1: number of entries restored, 2: the archive path */ __( 'Rolled back %1$d entries from %2$s', 'pontifex' ), $entry_count, $archive_path )
+		);
+	}
+
+	/**
+	 * Tell the operator that a safety archive written by an affected version was repaired as it replayed.
+	 *
+	 * An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+	 * place of every percent sign in its row values, and the restore engine turns
+	 * them back as it replays (see {@see \Pontifex\Restore\PlaceholderMarkerRepair}).
+	 * A rollback is a command the operator runs deliberately, and what it puts
+	 * back into the database differs from the archive's bytes, so it is never
+	 * silent — and never noise: nothing is printed when nothing was repaired, or
+	 * for a runner that is not the real engine (a test fake has no writer to ask).
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the completed replay.
+	 * @return void
+	 */
+	private function report_repaired_markers( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$repaired = $restore_runner->repaired_marker_count();
+		if ( $repaired < 1 ) {
+			return;
+		}
+
+		WP_CLI::log(
+			sprintf(
+				/* translators: %d: the number of percent signs put back */
+				_n(
+					'Repaired %d percent sign that an older version of Pontifex had written as a long marker when this backup was taken.',
+					'Repaired %d percent signs that an older version of Pontifex had written as a long marker when this backup was taken.',
+					$repaired,
+					'pontifex'
+				),
+				$repaired
+			)
+		);
+	}
+
+	/**
+	 * Warn, in the log AND in the terminal, about every symbolic link this rollback could not re-create.
+	 *
+	 * A rollback replays a safety archive, so an absolute-target symlink is
+	 * skipped rather than refused (see {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive})
+	 * — but `wp pontifex rollback` makes no claim to a precise revert to begin
+	 * with; it is deliberately additive, with no creation ledger of its own
+	 * (ADR 0024), so there is no PRECISE/MERGE verdict to downgrade here, unlike
+	 * ImportCommand's and RestoreController's own recovery handlers. The one
+	 * obligation left is honesty: naming what was not re-created, not merely
+	 * logging it, because an operator running this from a terminal must see it
+	 * without going to the log — the same reasoning ExportCommand's own
+	 * {@see \Pontifex\Cli\ExportCommand::print_changed_file_warnings()} already
+	 * applies to a changed-file list, whose two-tier shape (one warning per
+	 * item, then one summary warning) this mirrors.
+	 *
+	 * @param RestoreRunnerInterface $restore_runner The engine that ran the replay; only a real {@see RestoreRunner} has a FileWriter to ask, so a test fake is silently skipped rather than reporting a false "nothing skipped".
+	 * @return void
+	 */
+	private function report_skipped_symlinks( RestoreRunnerInterface $restore_runner ): void {
+		if ( ! $restore_runner instanceof RestoreRunner ) {
+			return;
+		}
+
+		$skipped_symlinks = $restore_runner->skipped_symlinks();
+		if ( array() === $skipped_symlinks ) {
+			return;
+		}
+
+		$this->logger->warning(
+			'Rollback: some symbolic links could not be re-created because their recorded targets are absolute paths.',
+			array( 'skipped_symlinks' => $skipped_symlinks )
+		);
+
+		foreach ( $skipped_symlinks as $entry_path => $target ) {
+			WP_CLI::warning(
+				sprintf(
+					/* translators: 1: the symlink's path inside the site, 2: its recorded target */
+					__( '%1$s could not be re-created: its recorded target, %2$s, is an absolute path.', 'pontifex' ),
+					$entry_path,
+					$target
+				)
+			);
+		}
+
+		WP_CLI::warning(
+			sprintf(
+				/* translators: %d: number of symbolic links that could not be re-created */
+				_n(
+					'%d symbolic link could not be re-created; the rest of the rollback completed.',
+					'%d symbolic links could not be re-created; the rest of the rollback completed.',
+					count( $skipped_symlinks ),
+					'pontifex'
+				),
+				count( $skipped_symlinks )
+			)
 		);
 	}
 

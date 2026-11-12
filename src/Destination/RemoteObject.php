@@ -14,10 +14,18 @@ namespace Pontifex\Destination;
  *
  * A listing returns these so a caller can present, pull, or prune remote
  * archives without holding open a connection. The {@see $name} is the remote
- * basename (for example `pontifex-2026-07-13-030000.wpmig`); retention orders
- * by that name — the export writer stamps it with a sortable UTC timestamp —
- * rather than by a remote modification time, which a server clock or a re-upload
- * can make unreliable. The size is best-effort, for display only.
+ * basename (for example `pontifex-backup-20260813T030000Z.wpmig`). Retention
+ * used to order by that name alone — the export writer stamps it with a
+ * sortable UTC timestamp — but a name is untrusted, self-reported data: a
+ * killed upload can leave a partial file under the canonical name, and a
+ * hand-set clock can mint a future-dated one, and neither is distinguishable
+ * from a genuine archive by name alone. {@see $modification_time} carries
+ * what the destination itself reports the file's mtime to be, so retention
+ * can order by real age instead (mirroring
+ * {@see \Pontifex\Admin\BackupStore::compare_by_age()}). Both the size and
+ * the modification time are best-effort: a destination that cannot or will
+ * not report one degrades to its own "-1, unknown" sentinel rather than
+ * failing the whole listing.
  */
 final class RemoteObject {
 
@@ -36,14 +44,24 @@ final class RemoteObject {
 	private int $size;
 
 	/**
+	 * The archive's modification time as a Unix timestamp, or -1 when the
+	 * destination did not report one.
+	 *
+	 * @var int
+	 */
+	private int $modification_time;
+
+	/**
 	 * Construct a remote-object description.
 	 *
-	 * @param string $name The remote basename.
-	 * @param int    $size The size in bytes, or -1 if unknown.
+	 * @param string $name              The remote basename.
+	 * @param int    $size              The size in bytes, or -1 if unknown.
+	 * @param int    $modification_time The modification time as a Unix timestamp, or -1 if unknown.
 	 */
-	public function __construct( string $name, int $size = -1 ) {
-		$this->name = $name;
-		$this->size = $size;
+	public function __construct( string $name, int $size = -1, int $modification_time = -1 ) {
+		$this->name              = $name;
+		$this->size              = $size;
+		$this->modification_time = $modification_time;
 	}
 
 	/**
@@ -62,5 +80,15 @@ final class RemoteObject {
 	 */
 	public function size(): int {
 		return $this->size;
+	}
+
+	/**
+	 * The modification time as a Unix timestamp, or -1 when the destination
+	 * did not report one.
+	 *
+	 * @return int
+	 */
+	public function modification_time(): int {
+		return $this->modification_time;
 	}
 }

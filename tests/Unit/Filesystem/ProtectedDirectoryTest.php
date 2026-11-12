@@ -127,6 +127,176 @@ final class ProtectedDirectoryTest extends TestCase {
 		$this->assertFalse( $result );
 	}
 
+	/**
+	 * An empty `.htaccess` — the shape a full disk leaves behind on first
+	 * creation — is repaired to the full guard.
+	 *
+	 * @return void
+	 */
+	public function test_repairs_an_empty_htaccess(): void {
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$this->put( $dir . '/.htaccess', '' );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertStringContainsString( 'Require all denied', $this->read( $dir . '/.htaccess' ) );
+		$this->assertStringContainsString( 'Deny from all', $this->read( $dir . '/.htaccess' ) );
+	}
+
+	/**
+	 * An empty `index.php` is repaired to the full guard.
+	 *
+	 * @return void
+	 */
+	public function test_repairs_an_empty_index_php(): void {
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$this->put( $dir . '/index.php', '' );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertStringContainsString( 'Silence is golden', $this->read( $dir . '/index.php' ) );
+	}
+
+	/**
+	 * A `.htaccess` truncated part-way through — the shape a write cut short
+	 * by a full disk leaves behind once some bytes did land — is repaired to
+	 * the full guard.
+	 *
+	 * The truncated fixture is built from a fresh `ensure()` call in another
+	 * directory, so the expected bytes cannot drift from the real constant.
+	 *
+	 * @return void
+	 */
+	public function test_repairs_a_truncated_htaccess(): void {
+		$reference_dir = $this->temp_dir . '/reference';
+		ProtectedDirectory::ensure( $reference_dir, 0700 );
+		$full_guard = $this->read( $reference_dir . '/.htaccess' );
+		$truncated  = substr( $full_guard, 0, 40 );
+
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$this->put( $dir . '/.htaccess', $truncated );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertSame( $full_guard, $this->read( $dir . '/.htaccess' ) );
+	}
+
+	/**
+	 * A guard file longer than the real one is left untouched: it cannot be a
+	 * prefix of our content, so it is not a partial write of ours to repair.
+	 *
+	 * @return void
+	 */
+	public function test_does_not_touch_a_guard_longer_than_the_real_one(): void {
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$longer = str_repeat( 'x', 10000 );
+		$this->put( $dir . '/.htaccess', $longer );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertSame( $longer, $this->read( $dir . '/.htaccess' ) );
+	}
+
+	/**
+	 * Repair is idempotent: calling `ensure()` a second time over an already
+	 * -repaired guard leaves it unchanged.
+	 *
+	 * @return void
+	 */
+	public function test_repair_is_idempotent(): void {
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$this->put( $dir . '/.htaccess', '' );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+		$after_first = $this->read( $dir . '/.htaccess' );
+		ProtectedDirectory::ensure( $dir, 0700 );
+		$after_second = $this->read( $dir . '/.htaccess' );
+
+		$this->assertStringContainsString( 'Require all denied', $after_first );
+		$this->assertSame( $after_first, $after_second );
+	}
+
+	/**
+	 * All four guard files in the `pontifex`/`logs` pair are repaired by one
+	 * `ensure()` call: the target directory's two guards and its `pontifex`
+	 * parent's two guards.
+	 *
+	 * @return void
+	 */
+	public function test_repairs_all_four_guards(): void {
+		$dir = $this->temp_dir . '/pontifex/logs';
+		$this->make_dir( $dir );
+		$this->put( $dir . '/.htaccess', '' );
+		$this->put( $dir . '/index.php', '' );
+		$this->put( $this->temp_dir . '/pontifex/.htaccess', '' );
+		$this->put( $this->temp_dir . '/pontifex/index.php', '' );
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertStringContainsString( 'Require all denied', $this->read( $dir . '/.htaccess' ) );
+		$this->assertStringContainsString( 'Silence is golden', $this->read( $dir . '/index.php' ) );
+		$this->assertStringContainsString( 'Require all denied', $this->read( $this->temp_dir . '/pontifex/.htaccess' ) );
+		$this->assertStringContainsString( 'Silence is golden', $this->read( $this->temp_dir . '/pontifex/index.php' ) );
+	}
+
+	/**
+	 * A guard path that is a symbolic link is never written through: the link
+	 * target is left exactly as it was.
+	 *
+	 * @return void
+	 */
+	public function test_does_not_write_through_a_symlink(): void {
+		if ( ! function_exists( 'symlink' ) ) {
+			self::markTestSkipped( 'symlink() is not available in this environment.' );
+		}
+
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$canary = $this->temp_dir . '/canary.txt';
+		$this->put( $canary, 'canary contents' );
+
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Environments that refuse symlink creation (e.g. no privilege on Windows) are handled by the skip check below.
+		$linked = @symlink( $canary, $dir . '/.htaccess' );
+		if ( ! $linked ) {
+			self::markTestSkipped( 'This environment cannot create symlinks.' );
+		}
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertSame( 'canary contents', $this->read( $canary ) );
+	}
+
+	/**
+	 * A guard path that is a dangling symbolic link (its target does not
+	 * exist) is never written through either: the target is not created.
+	 *
+	 * @return void
+	 */
+	public function test_does_not_create_the_target_of_a_dangling_symlink(): void {
+		if ( ! function_exists( 'symlink' ) ) {
+			self::markTestSkipped( 'symlink() is not available in this environment.' );
+		}
+
+		$dir = $this->temp_dir . '/logs';
+		$this->make_dir( $dir );
+		$target = $this->temp_dir . '/nowhere.txt';
+
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Environments that refuse symlink creation (e.g. no privilege on Windows) are handled by the skip check below.
+		$linked = @symlink( $target, $dir . '/.htaccess' );
+		if ( ! $linked ) {
+			self::markTestSkipped( 'This environment cannot create symlinks.' );
+		}
+
+		ProtectedDirectory::ensure( $dir, 0700 );
+
+		$this->assertFileDoesNotExist( $target );
+	}
+
 	// -------------------------------------------------------------------------
 	// Test helpers.
 	// -------------------------------------------------------------------------
@@ -174,6 +344,18 @@ final class ProtectedDirectoryTest extends TestCase {
 	 * @return void
 	 */
 	private function remove_tree( string $path ): void {
+		if ( is_link( $path ) ) {
+			// Checked ahead of is_file()/is_dir(): both are false for a broken
+			// symlink (one whose target does not exist), so without this check
+			// such a link would fall through untouched and the rmdir() below
+			// would then fail on its non-empty parent. unlink() removes the link
+			// entry itself, never its target, so this still only ever removes
+			// paths inside the unique directory setUp() reserved.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a fixture the test created in the system temp path.
+			unlink( $path );
+			return;
+		}
+
 		if ( is_file( $path ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- Test cleanup of a fixture the test created in the system temp path.
 			unlink( $path );

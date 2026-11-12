@@ -18,9 +18,11 @@ use Pontifex\Destination\RemoteObject;
  *
  * Lets {@see \Pontifex\Destination\DestinationRetention} be exercised
  * without a network connection. Tests construct it with the remote names it
- * should report, optionally arrange for list() to throw, and optionally name
- * archives whose delete() should fail — so the best-effort swallow behaviour
- * is provable.
+ * should report, optionally arrange for list() to throw, optionally name
+ * archives whose delete() should fail — so the best-effort-but-reported
+ * failure behaviour is provable — and optionally give one or more names a
+ * modification time other than the "-1, unknown" default, so the real-age
+ * ordering can be exercised independently of what the names themselves say.
  */
 final class FakeDestinationAdapter implements DestinationAdapter {
 
@@ -55,13 +57,15 @@ final class FakeDestinationAdapter implements DestinationAdapter {
 	/**
 	 * Construct a fake destination adapter.
 	 *
-	 * @param array<int, string> $names           The remote archive names list() should report.
-	 * @param bool               $list_throws     Whether list() should throw a DestinationException.
-	 * @param array<int, string> $delete_failures Remote names whose delete() call should throw.
+	 * @param array<int, string> $names               The remote archive names list() should report.
+	 * @param bool               $list_throws         Whether list() should throw a DestinationException.
+	 * @param array<int, string> $delete_failures      Remote names whose delete() call should throw.
+	 * @param array<string, int> $modification_times   Modification times, keyed by name; a name absent
+	 *                                                  here reports RemoteObject's own -1 "unknown" default.
 	 */
-	public function __construct( array $names, bool $list_throws = false, array $delete_failures = array() ) {
+	public function __construct( array $names, bool $list_throws = false, array $delete_failures = array(), array $modification_times = array() ) {
 		$this->objects         = array_map(
-			static fn ( string $name ): RemoteObject => new RemoteObject( $name, 100 ),
+			static fn ( string $name ): RemoteObject => new RemoteObject( $name, 100, $modification_times[ $name ] ?? -1 ),
 			$names
 		);
 		$this->list_throws     = $list_throws;

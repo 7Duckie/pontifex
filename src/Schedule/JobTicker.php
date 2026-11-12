@@ -36,8 +36,10 @@ use Psr\Log\LoggerInterface;
  * Completion bookkeeping lives here because completion can happen here:
  * the archive is chmod-restricted like every stored backup, the export
  * counters and transfer history are updated, and a schedule-originated
- * backup prunes the store to its retention count — deleting from the
- * oldest, never below the newest {@see Schedule::MIN_RETENTION}.
+ * backup is recorded in {@see ScheduledBackups} and prunes the SCHEDULER's
+ * OWN backups to its retention count — deleting from the oldest, never a
+ * hand-made backup, and never below the newest
+ * {@see Schedule::MIN_RETENTION}.
  */
 final class JobTicker {
 
@@ -362,11 +364,12 @@ final class JobTicker {
 	 * @return void
 	 */
 	private function finalise( string $job_id ): void {
-		$job     = $this->job_store->get( $job_id );
-		$payload = null !== $job ? $job->payload() : array();
-		$output  = isset( $payload['output'] ) ? (string) $payload['output'] : '';
+		$job           = $this->job_store->get( $job_id );
+		$payload       = null !== $job ? $job->payload() : array();
+		$output        = isset( $payload['output'] ) ? (string) $payload['output'] : '';
+		$output_exists = '' !== $output && is_file( $output );
 
-		if ( '' !== $output && is_file( $output ) ) {
+		if ( $output_exists ) {
 			// The store's convention for every archive it holds: owner-only.
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.PHP.NoSilencedErrors.Discouraged -- Restricting the finished archive like every stored backup; best-effort.
 			@chmod( $output, 0600 );
@@ -375,6 +378,8 @@ final class JobTicker {
 		$bytes_written         = isset( $payload['bytes_written'] ) ? (int) $payload['bytes_written'] : 0;
 		$files_changed         = isset( $payload['files_changed'] ) ? (int) $payload['files_changed'] : 0;
 		$media_type_unresolved = isset( $payload['media_type_unresolved'] ) ? (int) $payload['media_type_unresolved'] : 0;
+		// Absent on a job started before this counter existed (back-compat).
+		$exclusion_matches = isset( $payload['exclusion_matches'] ) ? (array) $payload['exclusion_matches'] : array();
 		$this->job_store->delete( $job_id );
 		$this->release_holder_if_backup();
 
@@ -393,10 +398,17 @@ final class JobTicker {
 				'output'                => $output,
 				'bytes'                 => $bytes_written,
 				'media_type_unresolved' => $media_type_unresolved,
+				'exclusion_matches'     => $exclusion_matches,
 			)
 		);
 
 		if ( ! empty( $payload['schedule'] ) ) {
+			// Record this backup as one the SCHEDULER wrote, before pruning runs,
+			// so retention can tell it apart from a hand-made backup carrying the
+			// exact same generated name — see ScheduledBackups's class docblock.
+			if ( $output_exists ) {
+				( new ScheduledBackups( $this->wordpress_context ) )->record( basename( $output ) );
+			}
 			$this->prune_to_retention();
 		}
 	}
@@ -428,19 +440,43 @@ final class JobTicker {
 	}
 
 	/**
-	 * Prune the backup store to the schedule's retention count, oldest first.
+	 * Prune the SCHEDULER's OWN backups to the schedule's retention count, oldest first.
+	 *
+	 * Retention must never touch a hand-made backup — from the admin Backup
+	 * screen or `wp pontifex export` — because it is indistinguishable from a
+	 * scheduled one by name alone. {@see ScheduledBackups} is the ledger that
+	 * makes the distinction: only a filename it recorded is a candidate for
+	 * pruning here, so "keep $retention" means "keep this many of the
+	 * schedule's own backups", and a hand-made backup neither gets deleted nor
+	 * eats one of those slots.
 	 *
 	 * @return void
 	 */
 	private function prune_to_retention(): void {
 		$retention = ( new ScheduleStore( $this->wordpress_context ) )->load()->retention();
-		$paths     = $this->backup_store->backups();
-		if ( count( $paths ) <= $retention ) {
+
+		// backups() is already ordered oldest-first by modification time (see
+		// BackupStore::compare_by_age()); recorded() self-heals the ledger
+		// against that same real listing, so filtering the ordered list down
+		// to only the recorded names keeps that ordering intact rather than
+		// re-deriving it.
+		$on_disk  = $this->backup_store->backups();
+		$recorded = ( new ScheduledBackups( $this->wordpress_context ) )->recorded( array_map( 'basename', $on_disk ) );
+		if ( array() === $recorded ) {
 			return;
 		}
-		// backups() lists paths sorted ascending — the timestamped names make that
-		// oldest-first — so everything before the newest $retention goes.
-		foreach ( array_slice( $paths, 0, count( $paths ) - $retention ) as $path ) {
+
+		$scheduled = array_values(
+			array_filter(
+				$on_disk,
+				static fn ( string $path ): bool => in_array( basename( $path ), $recorded, true )
+			)
+		);
+		if ( count( $scheduled ) <= $retention ) {
+			return;
+		}
+
+		foreach ( array_slice( $scheduled, 0, count( $scheduled ) - $retention ) as $path ) {
 			$filename = basename( (string) $path );
 			if ( $this->backup_store->delete( $filename ) ) {
 				$this->logger->info( 'Retention pruned an old scheduled backup.', array( 'filename' => $filename ) );

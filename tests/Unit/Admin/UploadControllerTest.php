@@ -239,6 +239,67 @@ final class UploadControllerTest extends TestCase {
 	}
 
 	// -------------------------------------------------------------------------
+	// The free-space guard (refuse_if_no_room()).
+	// -------------------------------------------------------------------------
+
+	/**
+	 * An upload proceeds when the environment cannot determine free space.
+	 *
+	 * "Cannot tell" must never be treated as "not enough" — that would block an
+	 * upload that could otherwise have succeeded, over a host limitation (disabled
+	 * or restricted disk_free_space()) that has nothing to do with the upload itself.
+	 *
+	 * @return void
+	 */
+	public function test_upload_proceeds_when_free_space_cannot_be_determined(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes();
+		$this->set_request( 'nospace1', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		$environment->shouldReceive( 'disk_free_space' )->andReturn( false );
+
+		$this->controller( $environment )->chunk();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertTrue( $this->json['data']['done'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertNotNull( $store->resolve( $this->json['data']['filename'] ), 'An upload proceeds when free space cannot be determined.' );
+	}
+
+	/**
+	 * An upload is refused with 507 when the declared total exceeds reported free space.
+	 *
+	 * @return void
+	 */
+	public function test_refuses_an_upload_that_would_exceed_free_space(): void {
+		$this->prepare_request();
+		$bytes = $this->archive_bytes();
+		$this->set_request( 'toobig12', 0, strlen( $bytes ) );
+		$this->set_chunk( $bytes );
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		$environment->shouldReceive( 'disk_free_space' )->andReturn( (float) ( strlen( $bytes ) - 1 ) );
+
+		try {
+			$this->controller( $environment )->chunk();
+			$this->fail( 'chunk() should refuse an upload that would exceed free space.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertSame( 'pontifex-json-halt', $error->getMessage() );
+		}
+
+		$this->assertFalse( $this->json['success'] );
+		$this->assertSame( 507, $this->json['status'] );
+
+		$store = new BackupStore( $this->base );
+		$this->assertSame( array(), $store->backups(), 'Nothing is stored when there is not enough room.' );
+	}
+
+	// -------------------------------------------------------------------------
 	// Signature enforcement on the upload path (ADR 0020).
 	// -------------------------------------------------------------------------
 
@@ -260,6 +321,7 @@ final class UploadControllerTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
 		$environment->shouldNotReceive( 'constant_value' );
+		$environment->shouldReceive( 'disk_free_space' )->andReturn( false )->byDefault();
 
 		$this->controller( $environment )->chunk();
 
@@ -453,6 +515,7 @@ final class UploadControllerTest extends TestCase {
 		$environment = Mockery::mock( Environment::class );
 		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( true );
 		$environment->shouldReceive( 'constant_value' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( $key_path );
+		$environment->shouldReceive( 'disk_free_space' )->andReturn( false )->byDefault();
 		return $environment;
 	}
 
@@ -485,6 +548,7 @@ final class UploadControllerTest extends TestCase {
 		if ( null === $environment ) {
 			$environment = Mockery::mock( Environment::class );
 			$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+			$environment->shouldReceive( 'disk_free_space' )->andReturn( false )->byDefault();
 		}
 
 		// The genuine-upload guard is seamed so the test's fixture files (which are not

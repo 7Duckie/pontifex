@@ -57,9 +57,9 @@ Creates a backup.
 | `--whole-site` | Include WordPress core as well as `wp-content`. |
 | `--files-only` | Files only, no database. |
 | `--db-only` | Database only, no files. |
-| `--exclude=<patterns>` | Comma-separated glob patterns to omit. |
-| `--exclude-table=<patterns>` | Comma-separated table patterns to omit. |
-| `--exclude-file=<path>` | Read exclusion patterns from a file. |
+| `--exclude=<patterns>` | Comma-separated patterns matched against files, directories, and symlinks — never a database table. |
+| `--exclude-table=<patterns>` | Comma-separated patterns matched against bare database table names — never a file. |
+| `--exclude-file=<path>` | Read file-scoped exclusion patterns from a file (same matching as `--exclude`). |
 | `--no-defaults` | Drop the curated default exclusions. |
 | `--encrypt` | AES-256-GCM, prompting twice for a passphrase. |
 | `--passphrase-stdin` | Read the passphrase from stdin. Implies `--encrypt`. |
@@ -72,6 +72,24 @@ Creates a backup.
 `--whole-site`, `--files-only` and `--db-only` are mutually exclusive.
 `--resumable` and `--resume` cannot be combined, and neither works with
 encryption — the derived key exists for one run and is never stored.
+
+Of the four pattern shapes `ExclusionRules` recognises — exact path, glob
+(`*.log`), directory tree (`path/**`), and regex (`/…/`) — only a
+regex-shaped pattern given to `--exclude`, `--exclude-file`, or
+`--exclude-table` is anchored to the start of the name; the other three
+shapes are already anchored by their own semantics, so they are unaffected.
+A regex written to match a suffix — `/\.log$/`, say — now matches nothing,
+because its match no longer starts at position 0; replace it with the glob
+`*.log`. Pontifex's own curated defaults, including the `.git` regex, are
+untagged and keep matching at any depth, exactly as before. Every surface
+that runs a backup — this command's own summary, a resumable export, the
+Backup screen's completion notice, and the log line a cron-driven scheduled
+backup writes — reports how many entries each active pattern excluded,
+defaults included, so a pattern that matched nothing reports `0` rather
+than being silently absent from the list. A directory-tree pattern such as
+`wp-content/cache/**` counts as one match no matter how many files it
+removed, because the scanner never descends into a directory it has
+already pruned.
 
 A refused or failed export prints a verdict rather than propagating the
 exception: which of the three kinds of refusal it was (ADR 0022 — the archive
@@ -98,7 +116,7 @@ Restores an archive over the current site.
 |---|---|
 | `--yes` | Skip the confirmation prompt. |
 | `--dry-run` | Validate without writing. Skips the lock and the safety archive. |
-| `--url=<new-url>` | Rewrite the site address during restore. |
+| `--new-url=<new-url>` | Rewrite the site address during restore. |
 | `--whole-site` | Permit writing outside `wp-content`, including core and `wp-config.php`. |
 | `--allow-unsafe-symlinks` | Disable symlink target confinement. |
 | `--no-rollback-archive` | Skip the pre-restore safety archive — **and the automatic recovery, and any future rollback**. |
@@ -130,21 +148,54 @@ refusal, because claiming a refusal would assert an intent that was not there.
 
 Verify checks structure, the entry-count ceiling, and per-entry hashes, then
 runs every restore preflight that writes nothing: scope-versus-manifest,
-symlink target confinement, and free space. Three outcomes, distinguished by
-exit code and wording:
+symlink target confinement, and free space.
+
+It applies the same structural checks and the same size budgets a restore
+applies, on the same terms: the record must leave room for the fields that
+follow its header; the codec id in the manifest must match the one in the
+record; the encryption family must be one this build knows; the compression
+codec must be registered; no single entry may declare more than
+`max_entry_bytes`; and the running total may not exceed the archive's own
+`max_total_for_archive` budget. Four outcomes, distinguished by exit code and
+wording:
 
 | Outcome | Exit | Meaning |
 |---|---|---|
 | Sound | 0 | Undamaged, and a restore would accept it. |
-| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, or contents contradicting the recorded scope. |
+| Refused | 1 | Undamaged, but a restore will not accept it — an escaping symlink, contents contradicting the recorded scope, or an entry larger than this build of Pontifex will restore. |
 | Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
+| Could not check | 2 | This host stopped the check before it reached a verdict — commonly too little memory. Not a statement about the archive either way. |
 
 A finding against the **host** — no free space — is reported as a warning
 alongside a sound verdict, never as the verdict: a full disk is not a damaged
-backup. The host symlink-capability probe is not run, because establishing it
-requires creating a link; use `doctor`, or `import --dry-run` for a specific
-archive. Verify does not decode payloads, so it still does not test a
-passphrase.
+backup. That is the shape for a host problem discovered *after* verification
+has already reached a sound conclusion. A host problem that instead stops the
+check before it reaches any conclusion — too little memory to hold a `db_chunk`
+it must decode whole is the case seen in practice, and WordPress's own default
+`memory_limit` is 40 MB — is not folded into that warning, and it is not
+reported as broken either: nothing was learned about the archive one way or
+the other, so it is its own outcome, **could not check**, exit code 2. A
+script gating on this command should treat 2 as "unknown", not as "bad"
+alongside exit 1. The host symlink-capability probe is not run, because
+establishing it requires creating a link; use `doctor`, or `import --dry-run`
+for a specific archive. Verify does not decode payloads, so it still does not
+test a passphrase.
+
+**What the size budgets can and cannot establish here.** A restore counts each
+entry's actual decoded size as it decodes it. Verify decodes nothing, so it
+counts the size each entry's header *declares*. For a file entry that declared
+size is dependable — `EntryWriter` corrects it to the bytes actually captured,
+and `EntryReader` refuses any file whose decoded size contradicts its header.
+For a `db_chunk` it is a prediction (`DatabaseScanner` sizes a chunk as
+rows-per-chunk × the server's own `Avg_row_length`), and it overstates: measured
+on a stock WordPress database, the declared total ran 3.8× the actual. Counting
+those predictions would let verify refuse archives a restore accepts, so
+`db_chunk` entries are excluded from the running archive total — they are still
+measured against the per-entry ceiling, and a restore still totals them for
+real. Two consequences follow, and both are deliberate. A database-only archive
+gets no archive-total check from verify, only from the restore. And an entry
+whose header *understates* its true decoded size passes verification and is
+caught only when a restore decodes it.
 
 Because confinement is resolved against this site's own root, a verification is
 a statement about an archive **and** a destination. See
@@ -179,7 +230,8 @@ Generates an Ed25519 keypair. Flags: `--secret-key=<path>`,
 | `--frequency=<daily\|weekly>` | Required for `set`. |
 | `--hour=<0-23>` | Required for `set`. **UTC**, not site time. |
 | `--retention=<count>` | How many scheduled backups to keep. Refused below 1. |
-| `--exclude=<patterns>` | Exclusions the scheduled backup inherits. |
+| `--exclude=<patterns>` | File-scoped exclusions the scheduled backup inherits (files, directories, and symlinks — never a table). Passed with no value at all, `set` is refused rather than silently clearing the stored list; pass `--exclude=` (empty) to clear it deliberately. |
+| `--exclude-table=<patterns>` | Table-scoped exclusions the scheduled backup inherits (bare table names — never a file). Same no-value-refused, `--exclude-table=` (empty)-to-clear behaviour as `--exclude`. |
 
 ### `wp pontifex destination <add\|remove\|list\|test\|archives\|pull\|prune> [name]`
 
@@ -201,10 +253,40 @@ Credentials are never passed as a flag value — only the environment variable's
 name is. `test`, `archives`, `pull` and `prune` open a connection; `list` and
 `doctor` do not.
 
+`pull` downloads to `<output>.part` and renames it into place only once the
+transfer has finished and its size matches what the destination reports. An
+interrupted download therefore never occupies the requested output path, so
+retrying to the same `--output` works rather than being refused by the previous
+attempt's own fragment. The `.part` name is fixed rather than unique, so a retry
+overwrites the leftover instead of accumulating them; a `.part` file beside a
+backup is a download that did not finish, and is safe to delete.
+
+`prune` orders archives oldest-first by their real modification time at the
+destination, never by name — a name is self-reported data (a killed upload can
+leave a partial file under the canonical name; a hand-set clock can mint a
+future-dated one) and neither is trustworthy as a proxy for age. A future
+modification time is treated as the oldest thing at the destination and
+pruned first; a modification time the destination did not report at all is
+treated as current, so it is never mistaken for the oldest. Only names
+matching Pontifex's own generated shape (`pontifex-backup-<UTC>.wpmig`) are
+ever counted or deleted; anything else sharing the directory is left alone.
+A prune that could not delete everything it needed to reports the failure —
+via `WP_CLI::error()` for `wp pontifex destination prune`, or a warning after
+export's own upload — rather than a false "nothing was pruned".
+
 ### `wp pontifex doctor` / `stats` / `diagnostics`
 
 `doctor` reports environment readiness (no flags). `stats` takes `--format`.
 `diagnostics` takes `--output` and produces a redacted support bundle.
+
+`stats`'s recent-transfers list covers exports, imports and — since ADR 0026 —
+rollbacks, which previously left no trace in it. An import or rollback entry
+also carries a small set of counts describing what it did (entries written,
+rows a relink changed, percent signs repaired, symbolic links skipped, the
+recovery verdict, and the pre-restore check's verdict when it stopped there).
+Those counts are what the admin screens read, and the machine formats are
+unchanged: the detail is carried in the stored history, not added to the
+`--format` output.
 
 ---
 
@@ -269,8 +351,9 @@ open archive (header, footer, manifest, provenance, signature)
 assert scope consistent with manifest
 resolve every declared symlink target
 assert host can create symlinks where they will land
+sweep temp files left by a crashed earlier restore
 assert sufficient free disk space
-──────────────────────────── nothing written above this line ────────────────
+──────── nothing belonging to the archive has been applied above this line ────────
 begin database staging
 walk entries:  files → FileWriter (LIVE)   db chunks → staging tables
 finalise prefix rewrite
@@ -303,6 +386,22 @@ restore built itself. A semicolon outside a quoted span is refused. After a
 `CREATE`, the catalogue is asked what was actually built. Two read channels
 inside a matched `INSERT`'s `VALUES` — a scalar subquery and `LOAD_FILE()` —
 remain open by design and are documented rather than hidden.
+
+**Placeholder-marker repair** (ADR 0025): a chunk's payload is split into
+statements, each statement's leading table identifier is rewritten, and each
+`INSERT` then has any WordPress placeholder marker — a brace, 64 hexadecimal
+characters, a brace — replaced with the `%` it was written in place of. Only
+then does the containment check above run, so the statements validated are
+byte for byte the statements executed. `DROP` and `CREATE` are not repaired:
+`SHOW CREATE TABLE` output is copied verbatim and identifiers are built by
+doubling backticks, so only a row value can ever carry a marker. The repair
+applies only to archives whose recorded exporter is Pontifex at a version that
+wrote the marker, never to another writer's archive. The number of **percent
+signs** repaired — not values, since one value can hold several — is reported by
+`wp pontifex import`, `wp pontifex rollback` and the Restore screen, including
+its Rollback button; the automatic recovery replays repair without reporting, by
+decision. `verify` does not repair: it changes nothing, and answers for the
+archive as stored.
 
 ---
 
@@ -379,7 +478,21 @@ Host keys are pinned and verified **before** authentication, so credentials
 never reach an unverified server. Comparison is constant-time. Credentials
 come from a named environment variable, never a flag value.
 
-Retention keeps the newest N with a floor that never prunes to nothing.
+An upload writes to a temporary remote name first (`<archive>.wpmig.part`)
+and renames it into place only once the transfer has completed and the
+destination's own reported size matches the local file. A killed or
+part-failed upload therefore never leaves a fragment under the archive's real
+name — the temporary name does not match `.wpmig` at all, so listing and
+retention never see it as a backup in the first place. If a file already sits
+at the final name (re-running an export to the same `--output`, or two sites
+sharing one destination), it is removed immediately before the rename that
+replaces it — never earlier, and only once the new upload is verified — so
+the destination is briefly without a file for one rename rather than holding
+a part-written one for the whole transfer.
+
+Retention keeps the newest N with a floor that never prunes to nothing,
+ordered by each archive's real modification time at the destination rather
+than its name (see the `prune` action above for the full ordering rule).
 `doctor` grades every destination without connecting.
 
 The architecture test `NoNetworkOutsideDestinationTest` fails the build if any

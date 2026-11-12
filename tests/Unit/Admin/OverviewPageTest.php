@@ -223,4 +223,235 @@ final class OverviewPageTest extends TestCase {
 		$this->assertStringContainsString( 'Transfer activity', $output );
 		$this->assertStringContainsString( '0.5.0', $output );
 	}
+
+	/**
+	 * A stored history entry, as TransferHistory::record() writes it.
+	 *
+	 * @param string                    $operation 'export', 'import' or 'rollback'.
+	 * @param string                    $outcome   'succeeded' or 'failed'.
+	 * @param string                    $at        The recorded ISO-8601 timestamp.
+	 * @param array<string, mixed>|null $details   Optional. The details to store.
+	 * @return array<string, mixed>
+	 */
+	private static function history_entry( string $operation, string $outcome, string $at, ?array $details = null ): array {
+		$entry = array(
+			'at'        => $at,
+			'operation' => $operation,
+			'outcome'   => $outcome,
+			'bytes'     => 0,
+		);
+
+		if ( null !== $details ) {
+			$entry['details'] = $details;
+		}
+
+		return $entry;
+	}
+
+	/**
+	 * Stub wp_date to UTC, so the formatted time is deterministic.
+	 *
+	 * @return void
+	 */
+	private function stub_wp_date(): void {
+		Functions\when( 'wp_date' )->alias(
+			static function ( string $format, int $timestamp ): string {
+				return gmdate( $format, $timestamp );
+			}
+		);
+	}
+
+	/**
+	 * A restore on record becomes a "Last restore" row: the sentence, and the time in the project's usual format.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_describes_a_restore(): void {
+		$this->stub_wp_date();
+		$history = array(
+			self::history_entry( 'import', 'succeeded', '2026-10-29T10:42:00+00:00', array( 'entries' => 4 ) ),
+		);
+		$page    = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $history ) ), $this->store_with( array() ), '1.1.0' );
+
+		$row = $page->last_outcome_row();
+
+		$this->assertSame(
+			array(
+				'operation' => 'Last restore',
+				'text'      => 'Restored 4 entries.',
+				'when'      => '10:42 on 29-10-2026',
+			),
+			$row
+		);
+	}
+
+	/**
+	 * A rollback on record becomes a "Last rollback" row — the label follows the operation, so it never contradicts the sentence.
+	 *
+	 * The sentence for a rollback says "Rolled back …", which would read wrong under
+	 * a "Last restore" label.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_describes_a_rollback_under_its_own_label(): void {
+		$this->stub_wp_date();
+		$history = array(
+			self::history_entry( 'rollback', 'succeeded', '2026-10-29T10:42:00+00:00', array( 'entries' => 2 ) ),
+		);
+		$page    = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $history ) ), $this->store_with( array() ), '1.1.0' );
+
+		$row = $page->last_outcome_row();
+
+		$this->assertIsArray( $row );
+		$this->assertSame( 'Last rollback', $row['operation'] );
+		$this->assertSame( 'Rolled back 2 entries.', $row['text'] );
+	}
+
+	/**
+	 * Whichever of an import and a rollback happened last decides the row.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_follows_whichever_happened_last(): void {
+		$this->stub_wp_date();
+
+		$rollback_last = array(
+			self::history_entry( 'import', 'succeeded', '2026-10-29T09:00:00+00:00', array( 'entries' => 4 ) ),
+			self::history_entry( 'rollback', 'succeeded', '2026-10-29T10:00:00+00:00', array( 'entries' => 2 ) ),
+		);
+		$import_last   = array(
+			self::history_entry( 'rollback', 'succeeded', '2026-10-29T09:00:00+00:00', array( 'entries' => 2 ) ),
+			self::history_entry( 'import', 'succeeded', '2026-10-29T10:00:00+00:00', array( 'entries' => 4 ) ),
+			self::history_entry( 'export', 'succeeded', '2026-10-29T11:00:00+00:00' ),
+		);
+
+		$first  = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $rollback_last ) ), $this->store_with( array() ), '1.1.0' );
+		$second = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $import_last ) ), $this->store_with( array() ), '1.1.0' );
+
+		$this->assertSame( 'Last rollback', $first->last_outcome_row()['operation'] ?? null );
+		$this->assertSame( 'Last restore', $second->last_outcome_row()['operation'] ?? null, 'A newer export is stepped over.' );
+	}
+
+	/**
+	 * With no restore or rollback on record there is nothing to show — and exports alone are not a restore.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_is_null_with_no_record(): void {
+		$none        = new OverviewPage( $this->context_with( array() ), $this->store_with( array() ), '1.1.0' );
+		$only_export = new OverviewPage(
+			$this->context_with( array( 'pontifex_transfer_history' => array( self::history_entry( 'export', 'succeeded', '2026-10-29T10:00:00+00:00' ) ) ) ),
+			$this->store_with( array() ),
+			'1.1.0'
+		);
+
+		$this->assertNull( $none->last_outcome_row() );
+		$this->assertNull( $only_export->last_outcome_row() );
+	}
+
+	/**
+	 * The Overview is a status screen: an old record is still shown, with no recency bound.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_has_no_recency_bound(): void {
+		$this->stub_wp_date();
+		$history = array( self::history_entry( 'import', 'failed', '2019-01-02T03:04:00+00:00', array( 'gate' => 'broken' ) ) );
+		$page    = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $history ) ), $this->store_with( array() ), '1.1.0' );
+
+		$row = $page->last_outcome_row();
+
+		$this->assertIsArray( $row );
+		$this->assertSame( 'The backup is damaged, so nothing was changed.', $row['text'] );
+		$this->assertSame( '03:04 on 02-01-2019', $row['when'] );
+	}
+
+	/**
+	 * A record whose time cannot be read still shows, with a placeholder; one that cannot be described shows nothing.
+	 *
+	 * @return void
+	 */
+	public function test_last_outcome_row_tolerates_a_damaged_record(): void {
+		$this->stub_wp_date();
+
+		$unreadable_time = new OverviewPage(
+			$this->context_with( array( 'pontifex_transfer_history' => array( self::history_entry( 'import', 'succeeded', 'not a time', array( 'entries' => 1 ) ) ) ) ),
+			$this->store_with( array() ),
+			'1.1.0'
+		);
+		$unrecognised    = new OverviewPage(
+			$this->context_with( array( 'pontifex_transfer_history' => array( self::history_entry( 'import', 'weird', '2026-10-29T10:00:00+00:00', array( 'entries' => 1 ) ) ) ) ),
+			$this->store_with( array() ),
+			'1.1.0'
+		);
+
+		$row = $unreadable_time->last_outcome_row();
+		$this->assertIsArray( $row );
+		$this->assertSame( '(unknown)', $row['when'] );
+		$this->assertNull( $unrecognised->last_outcome_row() );
+	}
+
+	/**
+	 * The rendered screen carries the last outcome as one more stat, under the right label, and nothing when there is none.
+	 *
+	 * @return void
+	 */
+	public function test_render_shows_the_last_outcome_only_when_there_is_one(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		$this->stub_wp_date();
+
+		$with = new OverviewPage(
+			$this->context_with( array( 'pontifex_transfer_history' => array( self::history_entry( 'rollback', 'succeeded', '2026-10-29T10:42:00+00:00', array( 'entries' => 2 ) ) ) ) ),
+			$this->store_with( array() ),
+			'1.1.0'
+		);
+		$none = new OverviewPage( $this->context_with( array() ), $this->store_with( array() ), '1.1.0' );
+
+		ob_start();
+		$with->render();
+		$shown = (string) ob_get_clean();
+
+		ob_start();
+		$none->render();
+		$absent = (string) ob_get_clean();
+
+		$this->assertStringContainsString( '<span class="pontifex-stat-operation">Last rollback</span>', $shown );
+		$this->assertStringContainsString( '<span class="pontifex-stat-line">Rolled back 2 entries.</span>', $shown );
+		$this->assertStringContainsString( '<span class="pontifex-stat-size">10:42 on 29-10-2026</span>', $shown );
+		$this->assertStringNotContainsString( 'Last restore', $shown );
+		$this->assertStringNotContainsString( 'Last rollback', $absent );
+		$this->assertStringNotContainsString( 'Last restore', $absent );
+	}
+
+	/**
+	 * The sentence is escaped at the point of output, like every other dynamic value on the screen.
+	 *
+	 * The sentence is built from counts and fixed labels, so nothing hostile can reach it
+	 * through the record; this pins that the page still escapes it rather than trusting that.
+	 *
+	 * @return void
+	 */
+	public function test_render_escapes_the_last_outcome(): void {
+		Functions\when( 'current_user_can' )->justReturn( true );
+		$this->stub_wp_date();
+		Functions\when( 'esc_html' )->alias(
+			static function ( string $text ): string {
+				return htmlspecialchars( $text, ENT_QUOTES );
+			}
+		);
+
+		$details = array(
+			'entries'        => 1,
+			'relinked'       => true,
+			'rows_rewritten' => 2,
+		);
+		$history = array( self::history_entry( 'import', 'succeeded', '2026-10-29T10:42:00+00:00', $details ) );
+		$page    = new OverviewPage( $this->context_with( array( 'pontifex_transfer_history' => $history ) ), $this->store_with( array() ), '1.1.0' );
+
+		ob_start();
+		$page->render();
+		$output = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'The backup&#039;s links were rewritten across 2 database rows.', $output );
+	}
 }

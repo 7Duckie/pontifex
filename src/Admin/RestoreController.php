@@ -12,11 +12,14 @@ namespace Pontifex\Admin;
 use RuntimeException;
 use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Cli\TransferHistory;
 use Pontifex\Environment\Environment;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Job\JobStore;
 use Pontifex\Lock\OperationLock;
 use Pontifex\Manifest\WpdbAdapter;
@@ -24,9 +27,11 @@ use Pontifex\Migrate\UrlMigrator;
 use Pontifex\Migrate\UrlMigratorInterface;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
+use Pontifex\Restore\PlaceholderMarkerRepair;
 use Pontifex\Restore\PreflightReport;
 use Pontifex\Restore\RestoreRunner;
 use Pontifex\Restore\RestoreRunnerInterface;
+use Pontifex\Restore\SourceTablePrefix;
 use Pontifex\Rollback\RollbackStoreInterface;
 use Pontifex\Rollback\SafetyArchiver;
 use Pontifex\Rollback\SafetyArchiverInterface;
@@ -44,7 +49,10 @@ use Psr\Log\LoggerInterface;
  *  - {@see self::restore()} replays a chosen backup over the current site. It
  *    first verifies the backup (a preview gate — a broken backup is refused
  *    before anything is overwritten), then takes a pre-import safety archive, then
- *    restores. Same-URL only; cross-URL migration stays a CLI feature for now.
+ *    restores. A backup from another site can be relinked on the way in: the
+ *    screen's own checkbox rewrites the backup's recorded address to this site's,
+ *    which must be the address captured BEFORE the replay — see the note in
+ *    {@see self::restore()}'s phase 4.
  *  - {@see self::rollback()} restores the most recent safety archive — the undo
  *    for a destructive restore — after verifying it.
  *  - {@see self::progress()} returns the byte progress the running operation
@@ -100,6 +108,17 @@ final class RestoreController {
 	private const PROGRESS_THROTTLE_SECONDS = 0.3;
 
 	/**
+	 * How long, in seconds, after it was recorded the last restore or rollback is still offered to a reloaded Restore screen (15 minutes).
+	 *
+	 * Long enough to cover signing back in after a restore, which resets the
+	 * session and reloads the page; short enough that an old outcome can never sit
+	 * in the place a live result appears.
+	 *
+	 * @var int
+	 */
+	private const LAST_OUTCOME_WINDOW = 900;
+
+	/**
 	 * Gate outcome: the archive passed and the operation may proceed.
 	 *
 	 * @var string
@@ -125,6 +144,71 @@ final class RestoreController {
 	 * @var string
 	 */
 	private const GATE_REFUSED = 'refused';
+
+	/**
+	 * Gate outcome: this host stopped verification before it could reach a verdict at all.
+	 *
+	 * Kept apart from {@see self::GATE_BROKEN} for the same reason
+	 * {@see self::GATE_REFUSED} is — the three outcomes call for three different
+	 * responses from whoever reads them. BROKEN means the verify walk ran to
+	 * completion and an entry failed it; REFUSED means the walk ran to
+	 * completion, every hash matched, and the archive should still not be
+	 * restored. This outcome means the walk never reached either answer: this
+	 * host — commonly too little memory, WordPress's own 40 MB default among
+	 * them — stopped it first, so nothing whatsoever was learned about the
+	 * archive. Reporting that as BROKEN is exactly the message capable of
+	 * talking somebody out of a backup that has never actually failed
+	 * anything; the archive should be kept as it is, and the fix belongs to
+	 * this host, not to a fresh export.
+	 *
+	 * @var string
+	 */
+	private const GATE_COULD_NOT_CHECK = 'could_not_check';
+
+	/**
+	 * Recovery outcome: every path the failed restore created was accounted for and undone.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_PRECISE = 'precise';
+
+	/**
+	 * Recovery outcome: the site was rolled back, but the file-tree cleanup could
+	 * not be confirmed complete (the creation ledger was capped, or a removal failed).
+	 *
+	 * When the cleanup WAS provably complete and the only thing standing between
+	 * the recovery and a precise revert is a skipped symbolic link, the outcome is
+	 * {@see self::RECOVERY_MERGE_LINKS} instead.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE = 'merge';
+
+	/**
+	 * Recovery outcome: the site was rolled back and the file-tree cleanup WAS provably
+	 * complete, but the replay skipped one or more symbolic links whose recorded targets
+	 * are absolute paths, so the tree still cannot be proven to match the site's prior state.
+	 *
+	 * Distinct from {@see self::RECOVERY_MERGE}, whose message asserts a cleanup that could
+	 * not be confirmed — an assertion that is false in this case, and one that would send
+	 * the operator looking in the log for paths that were never left behind.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_MERGE_LINKS = 'merge_links';
+
+	/**
+	 * Recovery outcome: recovery was attempted and did not complete at all.
+	 *
+	 * Kept distinct from "recovery was never attempted" (the ternary at this
+	 * class's one call site supplies null for that instead) — the two demand
+	 * different messages: one says the site was never touched, the other says
+	 * it may be left part-restored. Collapsing them very nearly happened
+	 * during this feature's own review; see {@see self::failure_message()}.
+	 *
+	 * @var string
+	 */
+	private const RECOVERY_FAILED = 'failed';
 
 	/**
 	 * Progress phase: verifying the chosen archive before anything is written.
@@ -171,8 +255,9 @@ final class RestoreController {
 	/**
 	 * The wp_options key holding the rollback counters (mirrors RollbackCommand).
 	 *
-	 * A rollback is an undo, not a transfer, so it is counted separately from the
-	 * import counters and stays out of the transfer history.
+	 * A rollback is an undo, not an import, so it is counted separately from the
+	 * import counters. It IS written to the transfer history, as a 'rollback'
+	 * operation, so the last thing that rewrote the site can always be read back.
 	 *
 	 * @var string
 	 */
@@ -339,6 +424,12 @@ final class RestoreController {
 		// recover the site if the restore then fails part-written. Null until it is taken,
 		// so a failure before that point knows the site was not yet changed.
 		$safety_path = null;
+		// The restore engine actually used for this request's forward restore, once wired
+		// below. The failure handler needs THIS instance, not a freshly-built one, to
+		// consult the creation ledger its own FileWriter kept — a second instance would
+		// have an empty ledger and nothing to undo. Null only if an exception strikes
+		// before it is wired, in which case the restore itself never started.
+		$runner = null;
 		try {
 			$source = $this->open_source( (string) $path );
 
@@ -371,35 +462,71 @@ final class RestoreController {
 			rewind( $source );
 			// A content-only restore restricts the file writer to the wp-content tree — the
 			// write-boundary backstop behind the scope gate above.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content' );
+			$runner = $this->restore_runner ?? $this->default_restore_runner( 'wp-content', $source );
 
 			// Phase 1: verify the backup as a gate. A broken backup is refused before
 			// the safety archive or any write — the whole point of previewing first.
+			//
+			// The attempt is counted NOW, before any work, so a run that is killed part-way
+			// still shows as attempted. A replay later rebuilds wp_options and can wipe this
+			// bump, so every outcome that follows a replay makes sure the attempt is still
+			// covered (see bump_counters()'s $cover_attempts); a gate refusal, which replays
+			// nothing, leaves it standing.
 			$this->bump_counters( array( 'attempted' => 1 ) );
 			$gate = $this->verify_gate( $runner, $source, $size );
 			if ( self::GATE_OK !== $gate ) {
 				$this->bump_counters( array( 'failed' => 1 ) );
-				TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
+				// A record that can prove nothing was written: the gate runs before the safety
+				// archive is taken and before any replay, so a gate verdict means the site is
+				// unchanged, and the record says WHICH verdict it was (damaged, refused or
+				// could not be checked), because the three call for three different responses.
+				// That is what lets a screen avoid calling a stopped restore a failure that may
+				// have left the site half-changed. No replay has happened, so there is no stale
+				// cache and no flush is needed; the pre-bump above also still stands.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array(
+						'entries'          => 0,
+						'relinked'         => false,
+						'rows_rewritten'   => 0,
+						'repaired_markers' => 0,
+						'skipped_links'    => 0,
+						'recovery'         => TransferHistory::RECOVERY_NONE,
+						'gate'             => self::gate_history_label( $gate ),
+					)
+				);
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'restored' => false,
-						'refused'  => self::GATE_REFUSED === $gate,
-						'message'  => self::GATE_REFUSED === $gate
-							? __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: it would place a symbolic link outside your site, or its contents contradict what it says it holds. Nothing was restored. Pontifex never produces a backup like this — keep the file, do not restore it, and find out where it came from. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' ),
+						'restored'        => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->restore_gate_failure_message( $gate ),
 					)
 				);
 			} else {
 				// For a relink restore, read the backup's own source URL before the
 				// restore consumes the stream; the rewrite runs on the restored database
 				// afterwards.
-				$migrator   = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
-				$source_url = '';
+				$migrator        = $migrate ? ( $this->url_migrator ?? new UrlMigrator( $this->wordpress_context ) ) : null;
+				$source_url      = '';
+				$destination_url = '';
 				if ( null !== $migrator ) {
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream so source_url can re-read its provenance; not a WP_Filesystem operation.
 					rewind( $source );
 					$source_url = $migrator->source_url( $source );
+
+					// This site's own address, read HERE and nowhere later. The restore
+					// replays wp_options, so once it has run this site's recorded URL is the
+					// backup's, and flush_cache() below drops the cached copy of the correct
+					// value. Asking for it after the restore returns the archive's own URL,
+					// which turns the rewrite into migrate( A, A ): a no-op that reports
+					// success while the site carries on serving the old domain.
+					$destination_url = $this->wordpress_context->site_url();
 				}
 
 				// Phase 2: the pre-import safety archive (the undo), then phase 3: restore.
@@ -407,6 +534,20 @@ final class RestoreController {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the restore walk re-reads it; not a WP_Filesystem operation.
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size );
+
+				// A backup written by an affected version carries a frozen marker in place
+				// of every percent sign in its row values, and the replay turns them back
+				// (see PlaceholderMarkerRepair). That changes what reached the database, so
+				// it is logged here and said on the screen below — never silent, and never
+				// mentioned when nothing was repaired. Only a real RestoreRunner has a
+				// writer to ask; a test fake reports none.
+				$repaired = $runner instanceof RestoreRunner ? $runner->repaired_marker_count() : 0;
+				if ( $repaired > 0 ) {
+					$this->logger->info(
+						'Admin restore: repaired percent signs that an older version of Pontifex had written as a long marker.',
+						array( 'repaired_markers' => $repaired )
+					);
+				}
 
 				// The restore replayed the database with raw SQL, so WordPress's option
 				// cache still holds the pre-restore values. Flush before recording, or the
@@ -417,36 +558,89 @@ final class RestoreController {
 
 				// Phase 4 (relink only): rewrite the backup's own URL to this site's across
 				// the restored database, serialised-safe (ADR 0006). The target is always
-				// this destination — never a typed address — so a relinked site can only
-				// ever point at the address the operator is already looking at, and the
-				// site does not move, so no new login URL is needed.
-				$migration = null !== $migrator
-					? $migrator->migrate( $source_url, $this->wordpress_context->site_url() )
-					: null;
+				// this destination — never a typed address — and it is the address captured
+				// BEFORE the restore ($destination_url above), not one read now: the replay
+				// has just overwritten this site's recorded URL with the backup's, so asking
+				// the site for its address at this point would return the archive's own URL
+				// and the rewrite would change nothing. The site does not move, so no new
+				// login URL is needed.
+				//
+				// Two cases have nothing to rewrite and are skipped rather than run: a
+				// backup recording no source URL has nothing to rewrite FROM, and one whose
+				// recorded URL is already this site's has nothing to rewrite TO.
+				$migration = null;
+				if ( null !== $migrator ) {
+					if ( '' === $source_url ) {
+						$this->logger->info( 'Admin restore: the backup records no source URL, so there was nothing to relink and no rewrite was run.' );
+					} elseif ( ArchiveFacts::is_same_site( $source_url, $destination_url ) ) {
+						$this->logger->info(
+							'Admin restore: the backup was taken at this site\'s own address, so no rewrite was needed.',
+							array( 'site_url' => $destination_url )
+						);
+					} else {
+						$migration = $migrator->migrate( $source_url, $destination_url );
+					}
+				}
 
 				$this->finish( $source );
-				// The pre-restore `attempted` bump was wiped when the replay replaced
-				// wp_options, so re-apply it here alongside the success, keeping the
-				// Overview figures consistent (attempted >= succeeded).
+				// The pre-restore `attempted` bump is wiped when the replay replaces
+				// wp_options (and is not, for a backup that carries no database, since
+				// nothing is replayed), so make sure the attempt is still covered
+				// alongside the success rather than blindly adding another — see
+				// bump_counters()'s $cover_attempts — keeping the Overview figures
+				// consistent (attempted >= succeeded + failed) in both cases.
 				$this->bump_counters(
 					array(
-						'attempted'      => 1,
 						'succeeded'      => 1,
 						'bytes_imported' => $size,
+					),
+					self::STATS_OPTION,
+					'bytes_imported',
+					true
+				);
+				// The record carries the facts the screen can no longer deliver itself: a
+				// restore replaces the users and sessions tables, so this request's own
+				// response is usually unreadable by the time it arrives. Written after the
+				// flush above, for the same reason the counters are. Counts and flags only.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_IMPORT,
+					'succeeded',
+					$size,
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entries,
+						'relinked'         => null !== $migration,
+						'rows_rewritten'   => null !== $migration ? $migration->rows_changed() : 0,
+						'repaired_markers' => $repaired,
+						'skipped_links'    => $runner instanceof RestoreRunner ? count( $runner->skipped_symlinks() ) : 0,
+						'recovery'         => TransferHistory::RECOVERY_NONE,
 					)
 				);
-				TransferHistory::record( $this->wordpress_context, 'import', 'succeeded', $size, gmdate( 'c' ) );
 
 				wp_send_json_success(
 					array(
 						'restored' => true,
 						'entries'  => $entries,
-						'message'  => null !== $migration
+						'message'  => ( null !== $migration
 							? sprintf(
-								/* translators: 1: number of entries restored, 2: the backup's size, human-readable, 3: number of database rows rewritten */
-								__( 'Restored and relinked — %1$d entries (%2$s) written, then the backup\'s links were rewritten to this site across %3$d database rows.', 'pontifex' ),
+								/* translators: 1: number of entries restored, 2: the backup's size, human-readable */
+								_n(
+									'Restored and relinked — %1$d entry (%2$s) written.',
+									'Restored and relinked — %1$d entries (%2$s) written.',
+									$entries,
+									'pontifex'
+								),
 								$entries,
-								$this->wordpress_context->format_size( $size ),
+								$this->wordpress_context->format_size( $size )
+							) . ' ' . sprintf(
+								/* translators: %d: the number of database rows the link rewrite changed */
+								_n(
+									'The backup\'s links were rewritten across %d database row.',
+									'The backup\'s links were rewritten across %d database rows.',
+									$migration->rows_changed(),
+									'pontifex'
+								),
 								$migration->rows_changed()
 							)
 							: sprintf(
@@ -455,23 +649,59 @@ final class RestoreController {
 								$entries,
 								$this->wordpress_context->format_size( $size ),
 								basename( (string) $path )
-							),
+							)
+						) . self::repaired_markers_note( $repaired ),
 					)
 				);
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin restore failed.', array( 'exception' => $error ) );
-			$this->finish( is_resource( $source ) ? $source : null );
+			// The lock is KEPT here: recovery below replays the safety archive, which rebuilds
+			// every table, and must not run with the site unlocked. It is released explicitly
+			// once recovery has finished.
+			$this->finish( is_resource( $source ) ? $source : null, true );
 
 			// If the safety archive was taken, the restore may have written part of the
 			// database, so replay it to return the site to its pre-restore state. When it was
 			// not taken (the failure preceded it), the site was not changed and nothing is
-			// replayed. Recovery never throws — it reports whether the site was restored.
-			$recovered = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path ) : null;
+			// replayed. Recovery never throws — it reports whether the site was restored, and
+			// whether the file-tree cleanup that goes with it could be proven complete.
+			$skipped_symlinks = array();
+			$recovery         = null !== $safety_path ? $this->recover_from_safety_archive( $safety_path, $runner, $skipped_symlinks ) : null;
 
-			$this->bump_counters( array( 'failed' => 1 ) );
-			TransferHistory::record( $this->wordpress_context, 'import', 'failed', 0, gmdate( 'c' ) );
-			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovered ) ), 500 );
+			// Unconditional, because recovery only ran on one of the two branches above, and
+			// only some of its own exits free the lock. release() is idempotent, so on the
+			// paths that already freed it this does nothing; on the branch where no safety
+			// archive was taken it is the only release there is.
+			$this->lock->release();
+
+			// The pre-bump above survives a successful recovery (the safety archive was taken
+			// after it, so replaying that archive restores it), but not a forward replay that
+			// cut over with no recovery to follow, nor a recovery that failed; and a failure
+			// that struck before the pre-bump counted no attempt at all. So the failure also
+			// makes sure the attempt is covered, which changes nothing when it already is.
+			$this->bump_counters( array( 'failed' => 1 ), self::STATS_OPTION, 'bytes_imported', true );
+			// Written AFTER the recovery above, never before it: recovery replays the safety
+			// archive, which replaces wp_options again and would wipe an earlier record. A
+			// failed restore wrote nothing that was kept, so the counts are zero; the
+			// repaired-marker count is zero too, because whatever the forward replay repaired
+			// was reverted along with it. The links are the ones the RECOVERY replay skipped.
+			TransferHistory::record(
+				$this->wordpress_context,
+				TransferHistory::OPERATION_IMPORT,
+				'failed',
+				0,
+				gmdate( 'c' ),
+				array(
+					'entries'          => 0,
+					'relinked'         => false,
+					'rows_rewritten'   => 0,
+					'repaired_markers' => 0,
+					'skipped_links'    => count( $skipped_symlinks ),
+					'recovery'         => self::recovery_history_label( $recovery ),
+				)
+			);
+			wp_send_json_error( array( 'message' => $this->failure_message( $error, $recovery, $skipped_symlinks ) ), 500 );
 		}
 	}
 
@@ -481,38 +711,203 @@ final class RestoreController {
 	 * Called only from the restore failure handler, once the safety archive has been
 	 * taken and the restore has then failed — so the database may be part-written. It
 	 * opens the safety archive, verifies it, and replays it unrestricted (like a
-	 * rollback), returning the site to its pre-restore state. It is wrapped so it can
-	 * never throw out of the failure handler: a recovery that itself fails is reported
-	 * as such, not escalated.
+	 * rollback), returning the site's DATABASE to its pre-restore state. A restore is
+	 * purely additive, though (see {@see FileWriter::write_entry()}'s own docblock),
+	 * so that replay alone leaves every FILE the failed restore created still on disk.
+	 * When $forward_runner is the real engine that ran the failed forward restore,
+	 * this also undoes exactly what that run's own FileWriter created — see
+	 * {@see RestoreRunner::remove_created_paths()} — so a file the failed restore
+	 * introduced does not survive alongside the recovered content. It is wrapped so it
+	 * can never throw out of the failure handler: a recovery that itself fails is
+	 * reported as such, not escalated.
 	 *
-	 * @param string $path The absolute path of the safety archive to replay.
-	 * @return bool True when the site was recovered; false when recovery could not complete.
+	 * The replay itself runs with $replaying_safety_archive true (see
+	 * {@see FileWriter::$replaying_safety_archive}), so an absolute-target symlink
+	 * the site had before the failed restore is skipped rather than refused — this
+	 * is this site's own prior state, not a foreign archive. Any such skip is
+	 * logged and downgrades the outcome from {@see self::RECOVERY_PRECISE} — to
+	 * {@see self::RECOVERY_MERGE_LINKS} when the file cleanup was otherwise
+	 * provably complete, or to {@see self::RECOVERY_MERGE} when it was not —
+	 * because the recovered tree is then not proven to match the site's prior
+	 * state.
+	 *
+	 * Every exit here closes the archive stream and clears progress but KEEPS the site-wide
+	 * operation lock ({@see self::finish()}'s $keep_lock): the lock must cover the whole of recovery,
+	 * file cleanup included, and the caller releases it once this method has returned.
+	 *
+	 * @param string                      $path             The absolute path of the safety archive to replay.
+	 * @param RestoreRunnerInterface|null $forward_runner   The engine that ran the failed forward restore, or null if the restore never got that far; only a real {@see RestoreRunner} instance has a creation ledger to consult, so a test fake degrades to reporting a merge rather than a claim it cannot back up.
+	 * @param array<string, string>       $skipped_symlinks Out-parameter. On return it holds every symbolic link the replay skipped, as entry path => the raw absolute target recorded in the archive, and is empty when nothing was skipped. It is written on every return path that got as far as the replay, so a caller can rely on it after any outcome other than the early {@see self::RECOVERY_FAILED} returns.
+	 * @return string One of {@see self::RECOVERY_PRECISE}, {@see self::RECOVERY_MERGE} or {@see self::RECOVERY_MERGE_LINKS} when the database was recovered, or {@see self::RECOVERY_FAILED} when recovery could not complete at all.
 	 */
-	private function recover_from_safety_archive( string $path ): bool {
-		$source = null;
+	private function recover_from_safety_archive( string $path, ?RestoreRunnerInterface $forward_runner, array &$skipped_symlinks = array() ): string {
+		// Empty until the replay has actually run, so an early failure hands the caller
+		// nothing rather than whatever the variable held before the call.
+		$skipped_symlinks = array();
+		$source           = null;
 		try {
 			$size   = $this->archive_size( $path );
 			$source = $this->open_source( $path );
 			// A safety archive is the site's own undo, so its replay is unrestricted — no
-			// required prefix, matching a rollback.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			// required prefix, matching a rollback. $replaying_safety_archive is true for
+			// the same reason: an absolute symlink target is skipped rather than refused,
+			// because this IS the site's own prior state, not a foreign archive.
+			$recovery_runner = $this->restore_runner ?? $this->default_restore_runner( null, $source, true );
 
-			if ( self::GATE_OK !== $this->verify_gate( $runner, $source, $size ) ) {
-				$this->finish( $source );
-				return false;
+			if ( self::GATE_OK !== $this->verify_gate( $recovery_runner, $source, $size ) ) {
+				$this->finish( $source, true );
+				return self::RECOVERY_FAILED;
 			}
 
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream before the recovery walk re-reads it; not a WP_Filesystem operation.
 			rewind( $source );
-			$this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
+			$this->restore_phase( $recovery_runner, $source, $size, self::PHASE_ROLLING_BACK );
 			$this->wordpress_context->flush_cache();
-			$this->finish( $source );
-			return true;
+
+			// $recovery_runner replayed the safety archive with $replaying_safety_archive
+			// true, so an absolute-target symlink the site had before the failed restore
+			// may have been skipped rather than re-created — see
+			// FileWriter::$replaying_safety_archive. Only a real RestoreRunner has a
+			// FileWriter to ask; a test fake degrades to reporting none, the same posture
+			// $forward_runner already takes below. Assigned straight to the out-parameter,
+			// so the caller sees it on every return path from here on, including the early
+			// return and the catch below.
+			$skipped_symlinks = $recovery_runner instanceof RestoreRunner ? $recovery_runner->skipped_symlinks() : array();
+			if ( array() !== $skipped_symlinks ) {
+				$this->logger->warning(
+					'Admin restore: recovery could not re-create every symbolic link, because some recorded targets are absolute paths.',
+					array( 'skipped_symlinks' => $skipped_symlinks )
+				);
+			}
+
+			if ( ! $forward_runner instanceof RestoreRunner ) {
+				$this->finish( $source, true );
+				return self::RECOVERY_MERGE;
+			}
+
+			// The safety archive's own declared paths are what "belongs to the site's
+			// prior state" means — read fresh, one last time, before the stream closes.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Rewinding the open archive stream to read its manifest for the preserved-paths set; not a WP_Filesystem operation.
+			rewind( $source );
+			$preserved_paths = self::declared_content_paths( ( new ArchiveReader( $source ) )->manifest() );
+			$this->finish( $source, true );
+
+			$cleanup = $forward_runner->remove_created_paths( $preserved_paths );
+			if ( array() !== $cleanup->failed_paths() ) {
+				$this->logger->warning(
+					'Admin restore: recovery could not remove every path the failed restore created.',
+					array( 'failed_paths' => $cleanup->failed_paths() )
+				);
+			}
+
+			// A skipped symlink means the recovered tree cannot be proven to match the
+			// site's prior state either, exactly like a ledger cap or a failed removal —
+			// so it downgrades an otherwise-precise revert. The two causes are kept apart
+			// because their messages differ: an unconfirmed cleanup sends the operator to
+			// the log for stray paths, which would be false advice when the cleanup was
+			// provably complete and the only gap is a link.
+			if ( ! $cleanup->is_precise_revert() ) {
+				return self::RECOVERY_MERGE;
+			}
+			return array() === $skipped_symlinks ? self::RECOVERY_PRECISE : self::RECOVERY_MERGE_LINKS;
 		} catch ( Throwable $recovery_error ) {
 			$this->logger->error( 'Admin restore auto-recovery failed.', array( 'exception' => $recovery_error ) );
-			$this->finish( is_resource( $source ) ? $source : null );
-			return false;
+			$this->finish( is_resource( $source ) ? $source : null, true );
+			return self::RECOVERY_FAILED;
 		}
+	}
+
+	/**
+	 * Every file/directory/symlink path an already-decoded manifest declares.
+	 *
+	 * Used to build the preserved-paths set {@see RestoreRunner::remove_created_paths()}
+	 * must never delete from, even when the failed restore's own ledger recorded them:
+	 * anything the safety archive carries belongs to the site's prior state.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return array<int, string>
+	 */
+	private static function declared_content_paths( ArchiveManifest $manifest ): array {
+		$paths = array();
+		foreach ( $manifest->entries() as $entry ) {
+			if ( ! $entry->is_file() && ! $entry->is_directory() && ! $entry->is_symlink() ) {
+				continue;
+			}
+			$path = $entry->path();
+			if ( null !== $path ) {
+				$paths[] = $path;
+			}
+		}
+		return $paths;
+	}
+
+	/**
+	 * A plain-text sentence naming every symbolic link a replay skipped, or '' when nothing was skipped.
+	 *
+	 * Appended onto {@see self::rollback()}'s own success message, because the
+	 * admin screen shows that message VERBATIM as the only surface an operator
+	 * sees (`assets/admin/pontifex-restore.js` sets it as plain textContent) —
+	 * there is no separate list the JS renders, so this is the only way the
+	 * screen can name what a rollback did not re-create. Returned with a
+	 * leading space so a caller can simply concatenate it onto a base message
+	 * that ends without trailing whitespace.
+	 *
+	 * @param array<string, string> $skipped_symlinks Every skipped link, as entry path => the raw absolute target recorded in the archive.
+	 * @return string
+	 */
+	private static function skipped_symlinks_caveat( array $skipped_symlinks ): string {
+		if ( array() === $skipped_symlinks ) {
+			return '';
+		}
+
+		$named = array();
+		foreach ( $skipped_symlinks as $entry_path => $target ) {
+			$named[] = sprintf( '%1$s -> %2$s', $entry_path, $target );
+		}
+
+		return ' ' . sprintf(
+			/* translators: 1: number of symbolic links that could not be re-created, 2: a comma-separated list of "path -> target" pairs */
+			_n(
+				'%1$d symbolic link could not be re-created, because its recorded target is an absolute path: %2$s.',
+				'%1$d symbolic links could not be re-created, because their recorded targets are absolute paths: %2$s.',
+				count( $skipped_symlinks ),
+				'pontifex'
+			),
+			count( $skipped_symlinks ),
+			implode( ', ', $named )
+		);
+	}
+
+	/**
+	 * A plain-text sentence saying frozen placeholder markers were repaired, or '' when none were.
+	 *
+	 * Appended onto the success message of {@see self::restore()} and
+	 * {@see self::rollback()}, for the same reason {@see self::skipped_symlinks_caveat()}
+	 * is: the screen shows that message VERBATIM as the only surface an operator
+	 * sees, so this is the only way it can say what the replay changed. Returned
+	 * with a leading space so a caller can simply concatenate it onto a base
+	 * message that ends without trailing whitespace, and as an empty string when
+	 * nothing was repaired so an ordinary restore's message is exactly what it
+	 * always was.
+	 *
+	 * @param int $repaired How many markers the replay turned back into percent signs.
+	 * @return string
+	 */
+	private static function repaired_markers_note( int $repaired ): string {
+		if ( $repaired < 1 ) {
+			return '';
+		}
+
+		return ' ' . sprintf(
+			/* translators: %d: the number of percent signs put back */
+			_n(
+				'Repaired %d percent sign that an older version of Pontifex had written as a long marker.',
+				'Repaired %d percent signs that an older version of Pontifex had written as a long marker.',
+				$repaired,
+				'pontifex'
+			),
+			$repaired
+		);
 	}
 
 	/**
@@ -521,9 +916,10 @@ final class RestoreController {
 	 * The `wp_ajax_pontifex_rollback` handler. Refuses without capability and
 	 * nonce, finds the most recent safety archive (a clear message when there is
 	 * none), verifies it, then replays it. No new safety archive is taken — the
-	 * same as `wp pontifex rollback`. A rollback is an undo, not a transfer, so the
-	 * import counters and transfer history are left untouched; instead it bumps its
-	 * own rollback counters so the Overview shows rollback activity.
+	 * same as `wp pontifex rollback`. A rollback is an undo, not an import, so the
+	 * import counters are left untouched; it bumps its own rollback counters so the
+	 * Overview shows rollback activity, and records itself in the transfer history
+	 * as a 'rollback' so the last thing to rewrite the site can be read back.
 	 *
 	 * @return void
 	 */
@@ -554,8 +950,11 @@ final class RestoreController {
 			// A safety archive is the site's own backup of whatever scope was overwritten
 			// (content-only for an admin restore, or whole-site for a CLI --whole-site
 			// import), so its replay is unrestricted — no required prefix, matching
-			// `wp pontifex rollback`.
-			$runner = $this->restore_runner ?? $this->default_restore_runner( null );
+			// `wp pontifex rollback`. $replaying_safety_archive is true for the same
+			// reason `wp pontifex rollback` itself is: this admin action IS a
+			// safety-archive replay, so an absolute symlink target is skipped rather
+			// than refused, exactly as the CLI command already does.
+			$runner = $this->restore_runner ?? $this->default_restore_runner( null, $source, true );
 
 			// Verify the safety archive before restoring it; a corrupt one is refused
 			// rather than replayed over the site.
@@ -569,14 +968,27 @@ final class RestoreController {
 					self::ROLLBACK_STATS_OPTION,
 					'bytes_rolled_back'
 				);
+				// Nothing was written, so there is no cache to flush and nothing to count. The
+				// gate is the same verify_gate() restore() uses, so it yields the same three
+				// verdicts, and the record names which one stopped the rollback.
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'failed',
+					0,
+					gmdate( 'c' ),
+					array(
+						'entries' => 0,
+						'gate'    => self::gate_history_label( $gate ),
+					)
+				);
 				$this->finish( $source );
 				wp_send_json_success(
 					array(
-						'rolled_back' => false,
-						'refused'     => self::GATE_REFUSED === $gate,
-						'message'     => self::GATE_REFUSED === $gate
-							? __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' )
-							: __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' ),
+						'rolled_back'     => false,
+						'refused'         => self::GATE_REFUSED === $gate,
+						'could_not_check' => self::GATE_COULD_NOT_CHECK === $gate,
+						'message'         => $this->rollback_gate_failure_message( $gate ),
 					)
 				);
 			} else {
@@ -584,11 +996,41 @@ final class RestoreController {
 				rewind( $source );
 				$entries = $this->restore_phase( $runner, $source, $size, self::PHASE_ROLLING_BACK );
 
+				// A safety archive written by an affected version is repaired as it
+				// replays, exactly as a restore is (see restore() above), and an operator
+				// who clicked Roll back is told so on the screen as well as in the log.
+				$repaired = $runner instanceof RestoreRunner ? $runner->repaired_marker_count() : 0;
+				if ( $repaired > 0 ) {
+					$this->logger->info(
+						'Admin rollback: repaired percent signs that an older version of Pontifex had written as a long marker.',
+						array( 'repaired_markers' => $repaired )
+					);
+				}
+
+				// The replay ran with $replaying_safety_archive true, so an absolute-target
+				// symlink the site had before is skipped rather than refused — see
+				// FileWriter::$replaying_safety_archive. A rollback makes no claim to a
+				// precise revert to begin with (it is deliberately additive, with no
+				// creation ledger of its own — ADR 0024), so there is no PRECISE/MERGE
+				// verdict to downgrade here, unlike recover_from_safety_archive() above.
+				// The one obligation left is honesty: naming what was not re-created, on
+				// the SCREEN (the operator never sees the log), not merely logging it.
+				$skipped_symlinks = $runner instanceof RestoreRunner ? $runner->skipped_symlinks() : array();
+				if ( array() !== $skipped_symlinks ) {
+					$this->logger->warning(
+						'Admin rollback: some symbolic links could not be re-created because their recorded targets are absolute paths.',
+						array( 'skipped_symlinks' => $skipped_symlinks )
+					);
+				}
+
 				// The rollback replayed the database too, so flush the now-stale option
 				// cache (see restore() for the full rationale) before anything reads it.
 				$this->wordpress_context->flush_cache();
 				// Record the rollback in its own counters — separate from the import
-				// transfer counters and history — so Overview shows rollback activity.
+				// counters — so Overview shows rollback activity, and in the transfer
+				// history beside them, after the flush above for the same reason. A
+				// rollback has no relink and no recovery of its own, so those keys are
+				// simply not written.
 				$this->bump_counters(
 					array(
 						'attempted'         => 1,
@@ -597,6 +1039,18 @@ final class RestoreController {
 					),
 					self::ROLLBACK_STATS_OPTION,
 					'bytes_rolled_back'
+				);
+				TransferHistory::record(
+					$this->wordpress_context,
+					TransferHistory::OPERATION_ROLLBACK,
+					'succeeded',
+					$size,
+					gmdate( 'c' ),
+					array(
+						'entries'          => $entries,
+						'repaired_markers' => $repaired,
+						'skipped_links'    => count( $skipped_symlinks ),
+					)
 				);
 
 				$this->finish( $source );
@@ -609,13 +1063,17 @@ final class RestoreController {
 							/* translators: %d: number of entries restored from the safety archive */
 							__( 'Rolled back — %d entries restored from the most recent safety archive. Your last restore has been undone.', 'pontifex' ),
 							$entries
-						),
+						) . self::skipped_symlinks_caveat( $skipped_symlinks ) . self::repaired_markers_note( $repaired ),
 					)
 				);
 			}
 		} catch ( Throwable $error ) {
 			$this->logger->error( 'Admin rollback failed.', array( 'exception' => $error ) );
 			$this->finish( is_resource( $source ) ? $source : null );
+			// A rollback that failed part-way may already have replaced wp_options, leaving the
+			// option cache holding pre-replay values, so flush before the counters and the
+			// history record are written (see restore() for the full rationale).
+			$this->wordpress_context->flush_cache();
 			$this->bump_counters(
 				array(
 					'attempted' => 1,
@@ -623,6 +1081,15 @@ final class RestoreController {
 				),
 				self::ROLLBACK_STATS_OPTION,
 				'bytes_rolled_back'
+			);
+			// A rollback has no recovery of its own, so there is no `recovery` key.
+			TransferHistory::record(
+				$this->wordpress_context,
+				TransferHistory::OPERATION_ROLLBACK,
+				'failed',
+				0,
+				gmdate( 'c' ),
+				array( 'entries' => 0 )
 			);
 			wp_send_json_error( array( 'message' => $this->rollback_failure_message() ), 500 );
 		}
@@ -648,6 +1115,14 @@ final class RestoreController {
 	 * restore or rollback runs. Returns the phase and the bytes processed against
 	 * the phase total, or the idle phase when none is recorded.
 	 *
+	 * When the phase is idle the response also carries a `last` key: null, or an
+	 * object with one `text` string describing the last restore or rollback while
+	 * it is still recent. That is what a reloaded page shows after a restore signed
+	 * the operator out, when the response to the request that ran it could not be
+	 * delivered. It is never sent while an operation is running, so it cannot sit
+	 * in the place a live result appears. It holds only counts, fixed labels and a
+	 * time, and is behind the same capability and nonce gate as the rest.
+	 *
 	 * @return void
 	 */
 	public function progress(): void {
@@ -660,12 +1135,54 @@ final class RestoreController {
 
 		$phase = isset( $progress['phase'] ) && is_string( $progress['phase'] ) ? $progress['phase'] : self::PHASE_IDLE;
 
-		wp_send_json_success(
-			array(
-				'phase'       => $phase,
-				'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
-				'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
-			)
+		$response = array(
+			'phase'       => $phase,
+			'bytes_done'  => $this->counter_int( $progress, 'bytes_done' ),
+			'bytes_total' => $this->counter_int( $progress, 'bytes_total' ),
+		);
+		if ( self::PHASE_IDLE === $phase ) {
+			$response['last'] = $this->last_outcome();
+		}
+
+		wp_send_json_success( $response );
+	}
+
+	/**
+	 * The last restore or rollback, as one line of text, while it is still recent.
+	 *
+	 * Composed here in PHP, never in the page's script: the time it was recorded,
+	 * in the site's local time and in the same format the other admin screens use
+	 * (`wp_date( 'H:i \o\n d-m-Y' )`), followed by the sentence
+	 * {@see RestoreOutcome::summary()} writes. Null when nothing is recorded, when
+	 * the newest record is older than {@see self::LAST_OUTCOME_WINDOW}, or when the
+	 * record is too damaged to describe.
+	 *
+	 * @return array{text: string}|null The line, or null for nothing to show.
+	 */
+	private function last_outcome(): ?array {
+		$latest = RestoreOutcome::latest( $this->wordpress_context );
+		if ( null === $latest || ! $latest->is_recent( time(), self::LAST_OUTCOME_WINDOW ) ) {
+			return null;
+		}
+
+		$summary = $latest->summary();
+		if ( '' === $summary ) {
+			return null;
+		}
+
+		$recorded = strtotime( $latest->occurred_at() );
+		$when     = false !== $recorded ? wp_date( 'H:i \o\n d-m-Y', $recorded ) : false;
+		if ( false === $when ) {
+			return array( 'text' => $summary );
+		}
+
+		return array(
+			'text' => sprintf(
+				/* translators: 1: the time the last restore or rollback was recorded, e.g. "08:45 on 25-06-2026", 2: a sentence saying what it did */
+				__( '%1$s — %2$s', 'pontifex' ),
+				$when,
+				$summary
+			),
 		);
 	}
 
@@ -775,12 +1292,31 @@ final class RestoreController {
 	 * @param RestoreRunnerInterface $runner The engine to verify with.
 	 * @param resource               $source The open archive stream.
 	 * @param int                    $size   The archive size, the progress denominator.
-	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED} or {@see self::GATE_BROKEN}.
+	 * @return string One of {@see self::GATE_OK}, {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
 	 */
 	private function verify_gate( RestoreRunnerInterface $runner, $source, int $size ): string {
 		$this->set_progress( self::PHASE_VERIFYING, 0, $size );
 		try {
 			$runner->verify( $source, null, $this->byte_callback( self::PHASE_VERIFYING, $size ) );
+		} catch ( HostCannotComply $error ) {
+			// This host, not the archive, is what stopped the walk short — a low
+			// memory_limit unable to hold a db_chunk it must buffer whole is the
+			// case that keeps happening in practice. Nothing was learned about
+			// the archive either way, so it must not fall into the broken branch
+			// below and be reported as damaged over a problem that is this
+			// host's, not the backup's.
+			$this->logger->warning( 'Admin restore: this host could not finish verifying the archive; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_COULD_NOT_CHECK;
+		} catch ( BuildCannotComply $error ) {
+			// The archive is sound and this host is fine; a ceiling compiled
+			// into every build of Pontifex is what stopped the walk on an
+			// entry too large to process. That fits GATE_REFUSED's own
+			// meaning exactly — intact, but a restore will not accept it —
+			// so it must not fall into the generic Throwable catch below and
+			// be reported BROKEN, which would send the operator to fetch a
+			// fresh copy of a backup a fresh copy could never fix.
+			$this->logger->warning( 'Admin restore: the archive is intact but this build will not process one of its entries; nothing was written.', array( 'exception' => $error ) );
+			return self::GATE_REFUSED;
 		} catch ( Throwable $error ) {
 			$this->logger->warning( 'Admin restore: the archive failed verification; nothing was written.', array( 'exception' => $error ) );
 			return self::GATE_BROKEN;
@@ -807,6 +1343,57 @@ final class RestoreController {
 		}
 
 		return self::GATE_OK;
+	}
+
+	/**
+	 * The message shown when a forward restore's gate does not pass.
+	 *
+	 * Three outcomes call for three different responses, so the message must
+	 * name which one actually happened rather than collapsing them into a
+	 * single "it failed": BROKEN means an integrity check ran to completion
+	 * and found a problem — reach for another copy. REFUSED means every check
+	 * ran to completion and passed, but the archive should not be restored —
+	 * keep it either way, though not always for the same reason: a symbolic
+	 * link escaping the site or contents contradicting what the archive says
+	 * it holds means do not trust it and find out where it came from, while
+	 * an entry larger than this build of Pontifex will process means the
+	 * backup itself is fine and no server setting changes the ceiling.
+	 * COULD_NOT_CHECK means no check ran to completion at all, so nothing
+	 * whatsoever is known about the backup; folding it into BROKEN is exactly
+	 * the mistake this outcome exists to stop — a host low on memory
+	 * reporting a perfectly good file as damaged.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function restore_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — this backup is not damaged; every hash matched. But a restore will not accept it: a symbolic link inside it may point outside your site, its contents may contradict what it says it holds, or one of its entries is larger than this build of Pontifex will restore. Nothing was restored. Keep the file: if the cause is an oversized entry, the backup is fine and no server setting changes that; otherwise, find out where the archive came from before trusting another copy. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying this backup, so nothing was restored. That is not a verdict on the backup: no check reached a conclusion about it, only about this server right now. Keep the file, and check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — this backup did not verify, so nothing was restored. Check the Pontifex log for details.', 'pontifex' );
+	}
+
+	/**
+	 * The message shown when a rollback's gate does not pass.
+	 *
+	 * The rollback counterpart of {@see self::restore_gate_failure_message()};
+	 * see that method's docblock for why the three outcomes need three
+	 * different messages rather than one.
+	 *
+	 * @param string $gate One of {@see self::GATE_REFUSED}, {@see self::GATE_BROKEN} or {@see self::GATE_COULD_NOT_CHECK}.
+	 * @return string The message to show the operator.
+	 */
+	private function rollback_gate_failure_message( string $gate ): string {
+		if ( self::GATE_REFUSED === $gate ) {
+			return __( 'Refused — the safety archive is not damaged; every hash matched. But a restore will not accept it, so nothing was rolled back. The Pontifex log has the details.', 'pontifex' );
+		}
+		if ( self::GATE_COULD_NOT_CHECK === $gate ) {
+			return __( 'Could not check — this host stopped part-way through verifying the safety archive, so nothing was rolled back. That is not a verdict on the safety archive: no check reached a conclusion about it, only about this server right now. Check the Pontifex log for what stopped the check — commonly too little memory — before trying again.', 'pontifex' );
+		}
+		return __( 'Broken — the safety archive did not verify, so nothing was rolled back. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	/**
@@ -932,17 +1519,63 @@ final class RestoreController {
 	 * outside the wp-content tree; a rollback passes null, replaying the safety
 	 * archive whatever its scope.
 	 *
-	 * @param string|null $required_prefix Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
+	 * The DatabaseWriter is wired with both table prefixes, mirroring
+	 * `Cli\ImportCommand`: the source prefix comes from the archive's own
+	 * provenance when it carries one, or is derived from its table names via
+	 * {@see SourceTablePrefix::resolve()} when it does not, so a cross-prefix
+	 * restore works in the browser too, not only from WP-CLI. For a rollback or
+	 * recovery replay this is normally a no-op — a safety archive is this
+	 * site's own, so its recorded (or derived) prefix and the destination
+	 * prefix already agree — but wiring every restore path the same way is
+	 * what keeps that true rather than assumed.
+	 *
+	 * @param string|null $required_prefix           Prefix every restored file path must sit under ("wp-content" for the content-only forward restore), or null to allow any path (rollback).
+	 * @param resource    $source                    The open, seekable archive stream, read here for its provenance, manifest, and (when needed) its db_chunk headers.
+	 * @param bool        $replaying_safety_archive  True only when this runner will replay this site's own safety archive (a rollback, or a failed restore's automatic recovery) rather than the operator's chosen archive; default false. See {@see \Pontifex\Restore\FileWriter::$replaying_safety_archive}.
 	 * @return RestoreRunner A runner ready to verify and restore a plain archive.
 	 */
-	private function default_restore_runner( ?string $required_prefix ): RestoreRunner {
+	private function default_restore_runner( ?string $required_prefix, $source, bool $replaying_safety_archive = false ): RestoreRunner {
+		$entry_reader   = new EntryReader( CodecRegistry::with_defaults() );
+		$archive_reader = new ArchiveReader( $source );
+		$source_prefix  = SourceTablePrefix::resolve( $archive_reader->provenance()->table_prefix(), $archive_reader->manifest(), $source, $entry_reader );
+		$dest_prefix    = self::valid_table_prefix( $this->wordpress_context->wpdb_prefix() );
+
+		// An archive written by Pontifex 1.1.0 or earlier carries a frozen marker in
+		// place of every percent sign in its row values; the writer turns them back
+		// as it replays. Decided here from the archive's own recorded exporter, so
+		// the forward restore, a rollback and a failed restore's recovery replay all
+		// repair the archive they are given.
+		$exporter       = $archive_reader->provenance()->exporter();
+		$repair_markers = PlaceholderMarkerRepair::is_needed_for( $exporter->name(), $exporter->version() );
+
 		return new RestoreRunner(
-			new EntryReader( CodecRegistry::with_defaults() ),
-			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix ),
-			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) ),
+			$entry_reader,
+			new FileWriter( $this->resolve_wordpress_root(), false, $required_prefix, null, null, null, $replaying_safety_archive ),
+			new DatabaseWriter( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ), $source_prefix, $dest_prefix, $repair_markers ),
 			null,
 			$this->wordpress_context->convert_hr_to_bytes( $this->environment->ini_get( 'memory_limit' ) )
 		);
+	}
+
+	/**
+	 * Validate the destination table prefix to a sane identifier shape, or drop it.
+	 *
+	 * Used for the destination prefix only — this site's own, read from
+	 * `$this->wordpress_context->wpdb_prefix()` — never the source prefix, which
+	 * goes through {@see SourceTablePrefix::resolve()} instead. Returns the
+	 * prefix only when it is a non-empty run of ASCII letters, digits, and
+	 * underscores — the shape a WordPress table prefix always takes. Anything
+	 * else yields '', which the DatabaseWriter reads as "no rewrite", so a
+	 * malformed value can never reach a rewrite statement. Pure function.
+	 *
+	 * @param string|null $prefix The candidate prefix.
+	 * @return string The prefix when valid, otherwise ''.
+	 */
+	private static function valid_table_prefix( ?string $prefix ): string {
+		if ( null === $prefix || '' === $prefix ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[A-Za-z0-9_]+$/', $prefix ) ? $prefix : '';
 	}
 
 	/**
@@ -1086,11 +1719,22 @@ final class RestoreController {
 	/**
 	 * Release the lock, clear progress, and close the archive stream.
 	 *
-	 * @param resource|null $source The open archive stream to close, or null.
+	 * This frees the SITE-WIDE operation lock, which is what stops a second restore,
+	 * a `wp pontifex import`, a scheduled backup or a rollback from writing the same
+	 * tables. A caller that still has destructive work to do after calling this —
+	 * replaying a safety archive, which rebuilds every table and swaps them in —
+	 * must pass $keep_lock as true, hold the lock until that work is finished, and
+	 * release it itself afterwards. Releasing first and replaying second leaves the
+	 * replay running with nothing to stop another process starting on the same tables.
+	 *
+	 * @param resource|null $source    The open archive stream to close, or null.
+	 * @param bool          $keep_lock True to leave the operation lock held, because the caller has more destructive work to do and will release it; false (the default) to release it.
 	 * @return void
 	 */
-	private function finish( $source ): void {
-		$this->lock->release();
+	private function finish( $source, bool $keep_lock = false ): void {
+		if ( ! $keep_lock ) {
+			$this->lock->release();
+		}
 		$this->clear_progress();
 		if ( is_resource( $source ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closing the archive stream opened in this request; not a WP_Filesystem operation.
@@ -1143,28 +1787,89 @@ final class RestoreController {
 	}
 
 	/**
+	 * Translate this class's recovery outcome into the label the transfer history stores.
+	 *
+	 * The RECOVERY_* constants above are private and are not being widened, so the
+	 * durable record carries {@see TransferHistory}'s own canonical labels — that class
+	 * owns the stored vocabulary — and this is the one place the two meet. They hold
+	 * the same strings today; mapping through named constants, rather than handing the
+	 * value straight across, is what stops a later rename of either from silently
+	 * changing what is stored. Null (no recovery was attempted) and anything
+	 * unrecognised both map to {@see TransferHistory::RECOVERY_NONE}.
+	 *
+	 * @param string|null $recovery One of the RECOVERY_* constants, or null when no recovery was attempted.
+	 * @return string One of {@see TransferHistory}'s RECOVERY_* labels.
+	 */
+	private static function recovery_history_label( ?string $recovery ): string {
+		return match ( $recovery ) {
+			self::RECOVERY_PRECISE     => TransferHistory::RECOVERY_PRECISE,
+			self::RECOVERY_MERGE       => TransferHistory::RECOVERY_MERGE,
+			self::RECOVERY_MERGE_LINKS => TransferHistory::RECOVERY_MERGE_LINKS,
+			self::RECOVERY_FAILED      => TransferHistory::RECOVERY_FAILED,
+			default                    => TransferHistory::RECOVERY_NONE,
+		};
+	}
+
+	/**
+	 * Translate a verify-gate verdict into the label the transfer history stores.
+	 *
+	 * The GATE_* constants above are private, so the durable record carries
+	 * {@see TransferHistory}'s own canonical labels, and this is where the two meet,
+	 * exactly as {@see self::recovery_history_label()} does for recovery. The three
+	 * verdicts are kept apart on purpose — a damaged backup, an intact one a restore
+	 * will not accept, and a host that could not finish checking call for three
+	 * different responses — so the record keeps them apart too. GATE_OK is not a
+	 * verdict that stops anything and never reaches a record; it, and anything
+	 * unrecognised, map to {@see TransferHistory::GATE_NONE}.
+	 *
+	 * @param string $gate One of the GATE_* constants.
+	 * @return string One of {@see TransferHistory}'s GATE_* labels.
+	 */
+	private static function gate_history_label( string $gate ): string {
+		return match ( $gate ) {
+			self::GATE_BROKEN          => TransferHistory::GATE_BROKEN,
+			self::GATE_REFUSED         => TransferHistory::GATE_REFUSED,
+			self::GATE_COULD_NOT_CHECK => TransferHistory::GATE_COULD_NOT_CHECK,
+			default                    => TransferHistory::GATE_NONE,
+		};
+	}
+
+	/**
 	 * The message returned when a restore fails.
 	 *
 	 * The underlying error is recorded in the log; the operator sees a plain
-	 * sentence rather than an exception string, and is told whether the site was
-	 * automatically rolled back.
+	 * sentence rather than an exception string, and is told what recovery
+	 * actually achieved — a precise revert, a merge that could not be proven
+	 * complete, or that recovery itself failed.
 	 *
-	 * @param Throwable $error     The failure (kept to keep the signature honest; not echoed).
-	 * @param bool|null $recovered Recovery outcome: true if the site was auto-rolled back to
-	 *                             its pre-restore state, false if that recovery also failed,
-	 *                             or null when no recovery was attempted (the site was not
-	 *                             changed, or this is a rollback failure).
+	 * @param Throwable             $error            The failure (kept to keep the signature honest; not echoed).
+	 * @param string|null           $recovery         One of {@see self::RECOVERY_PRECISE}, {@see self::RECOVERY_MERGE} or
+	 *                                                {@see self::RECOVERY_MERGE_LINKS} when the database was auto-rolled back
+	 *                                                to its pre-restore state, {@see self::RECOVERY_FAILED} when recovery was
+	 *                                                attempted and did not complete, or null when no recovery was attempted at
+	 *                                                all (the site was not changed, or this is a rollback failure) — null is
+	 *                                                deliberately NOT reused for "recovery failed": those two need different
+	 *                                                messages, one saying the site was never touched and the other that it may
+	 *                                                be left part-restored, so {@see self::recover_from_safety_archive()}
+	 *                                                always returns a concrete outcome string when it runs at all.
+	 * @param array<string, string> $skipped_symlinks Every link the recovery replay skipped, as entry path => the raw absolute target recorded in the archive, as filled in by {@see self::recover_from_safety_archive()}. Named in the message for a merge of either kind; empty (and ignored) otherwise.
 	 * @return string A human-readable failure message.
 	 */
-	private function failure_message( Throwable $error, ?bool $recovered = null ): string {
+	private function failure_message( Throwable $error, ?string $recovery = null, array $skipped_symlinks = array() ): string {
 		unset( $error );
-		if ( true === $recovered ) {
+		if ( self::RECOVERY_PRECISE === $recovery ) {
 			return __( 'The restore failed, so your site was automatically rolled back to its state before the restore. Check the Pontifex log for details.', 'pontifex' );
 		}
-		if ( false === $recovered ) {
-			return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
+		if ( self::RECOVERY_MERGE === $recovery ) {
+			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore, but the file cleanup could not be confirmed complete — check the Pontifex log for which paths, since a file the failed restore created may still be present alongside the recovered content.', 'pontifex' ) . self::skipped_symlinks_caveat( $skipped_symlinks );
 		}
-		return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
+		if ( self::RECOVERY_MERGE_LINKS === $recovery ) {
+			return __( 'The restore failed. Your site\'s database was rolled back to its state before the restore and the file cleanup completed, but your site cannot be confirmed to be exactly as it was.', 'pontifex' ) . self::skipped_symlinks_caveat( $skipped_symlinks );
+		}
+		if ( null === $recovery ) {
+			return __( 'The restore could not be completed; your site was not changed. Check the Pontifex log for details.', 'pontifex' );
+		}
+		return __( 'The restore failed and automatic recovery also failed — your site may be partially restored. Roll back to the most recent safety archive, or restore another backup. Check the Pontifex log for details.', 'pontifex' );
 	}
 
 	// -------------------------------------------------------------------------
@@ -1266,12 +1971,24 @@ final class RestoreController {
 	 * parameters so the same routine maintains both the import counters (default)
 	 * and the separate rollback counters.
 	 *
-	 * @param array<string, int> $delta     The amounts to add, keyed by counter name.
-	 * @param string             $option    The wp_options key to update. Defaults to the import counters.
-	 * @param string             $bytes_key The counter key holding the byte total. Defaults to bytes_imported.
+	 * With $cover_attempts true, the attempt counter is then raised, if it needs it,
+	 * to at least succeeded plus failed. A run counts its attempt before it does any
+	 * work, so that a run killed part-way still shows; but a database replay rebuilds
+	 * wp_options, which can wipe that early count, and the outcome that follows would
+	 * then leave `attempted` below `succeeded` plus `failed` — arithmetically
+	 * impossible, and enough to make the whole panel untrustworthy. Raising to a floor
+	 * rather than adding one more is deliberate: whether the early count survived
+	 * depends on what was replayed (a replay of the safety archive, taken after the
+	 * count, restores it; an archive with no database replays nothing), and adding one
+	 * blindly would double-count in exactly those cases.
+	 *
+	 * @param array<string, int> $delta          The amounts to add, keyed by counter name.
+	 * @param string             $option         The wp_options key to update. Defaults to the import counters.
+	 * @param string             $bytes_key      The counter key holding the byte total. Defaults to bytes_imported.
+	 * @param bool               $cover_attempts Whether to raise `attempted` to at least `succeeded` plus `failed` after the delta is applied. Default false.
 	 * @return void
 	 */
-	private function bump_counters( array $delta, string $option = self::STATS_OPTION, string $bytes_key = 'bytes_imported' ): void {
+	private function bump_counters( array $delta, string $option = self::STATS_OPTION, string $bytes_key = 'bytes_imported', bool $cover_attempts = false ): void {
 		$defaults = array(
 			'attempted' => 0,
 			'succeeded' => 0,
@@ -1285,6 +2002,10 @@ final class RestoreController {
 		$merged = array();
 		foreach ( array_keys( $defaults ) as $key ) {
 			$merged[ $key ] = $this->counter_int( $current, $key ) + $this->counter_int( $delta, $key );
+		}
+
+		if ( $cover_attempts ) {
+			$merged['attempted'] = max( $merged['attempted'], $merged['succeeded'] + $merged['failed'] );
 		}
 
 		$this->wordpress_context->save_option( $option, $merged );

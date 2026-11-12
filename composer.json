@@ -16,7 +16,7 @@
       "infection/extension-installer": true
     },
     "platform": {
-      "php": "8.2.0"
+      "php": "8.2.35"
     },
     "sort-packages": true
   },
@@ -60,6 +60,10 @@
       "@analyse",
       "@test",
       "@composer audit --abandoned=report"
+    ],
+    "check:plugin": [
+      "Composer\\Config::disableProcessTimeout",
+      "scripts/plugin-check.sh"
     ],
     "dev:setup": [
       "@php -r \"echo 'Installing pre-commit hooks...' . PHP_EOL;\"",

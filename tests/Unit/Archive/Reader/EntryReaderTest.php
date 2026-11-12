@@ -12,8 +12,11 @@ namespace Pontifex\Tests\Unit\Archive\Reader;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Pontifex\Archive\Codec\Codec;
+use Pontifex\Archive\Codec\CodecException;
 use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\CodecUnavailableException;
 use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Crypto\Cipher;
@@ -25,6 +28,9 @@ use Pontifex\Archive\Integrity\Sha256;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Archive\Writer\EntryWriter;
+use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 
 /**
  * Tests for {@see EntryReader}.
@@ -300,7 +306,12 @@ final class EntryReaderTest extends TestCase {
 	 *
 	 * Verifying is what an operator runs to decide whether to trust an archive.
 	 * If it passed a forged archive that restore would then act on, the check
-	 * would be reporting soundness it had not established.
+	 * would be reporting soundness it had not established. Pinned to the
+	 * specific {@see ArchiveNotTrustworthy} type (not merely its RuntimeException
+	 * parent): {@see \Pontifex\Archive\Reader\EntryReader::assert_kind_agrees()}
+	 * used to throw a bare RuntimeException, the only structural check in the
+	 * reader outside the project's exception taxonomy, so nothing could branch
+	 * on it specifically.
 	 *
 	 * @return void
 	 */
@@ -319,7 +330,7 @@ final class EntryReaderTest extends TestCase {
 			$result->entry_hash()
 		);
 
-		$this->expectException( RuntimeException::class );
+		$this->expectException( ArchiveNotTrustworthy::class );
 		$this->expectExceptionMessage( 'Entry kind mismatch' );
 
 		self::make_reader()->verify_entry( $dest, $lying_entry );
@@ -409,6 +420,116 @@ final class EntryReaderTest extends TestCase {
 		$this->expectExceptionMessage( 'On-disk entry hash does not match the manifest entry_hash' );
 
 		self::make_reader()->verify_entry( $stream, $forged_entry );
+	}
+
+	/**
+	 * The verify_entry method must reject an entry whose codec_id disagrees with the manifest entry.
+	 *
+	 * The verify-path counterpart of {@see self::test_read_entry_rejects_codec_id_mismatch()}.
+	 * Before this job, verify_entry() never performed this cross-check at
+	 * all — it only hashed the record's bytes, so a tampered codec id was
+	 * invisible until read_entry() eventually tried to decode it.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_codec_id_mismatch(): void {
+		$fixture             = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		$stream              = $fixture[0];
+		$real_manifest_entry = $fixture[1];
+
+		// Construct a manifest entry claiming GzipCodec for the same on-disk bytes (which used RawCodec).
+		$tampered_entry = ManifestEntry::for_file(
+			$real_manifest_entry->index(),
+			$real_manifest_entry->offset(),
+			$real_manifest_entry->length(),
+			'a.txt',
+			GzipCodec::ID,
+			$real_manifest_entry->entry_hash()
+		);
+
+		$this->expectException( ArchiveNotTrustworthy::class );
+		$this->expectExceptionMessage( 'codec_id mismatch' );
+
+		self::make_reader()->verify_entry( $stream, $tampered_entry );
+	}
+
+	/**
+	 * The verify_entry method must reject an entry that uses a codec id not in the registry.
+	 *
+	 * The verify-path counterpart of {@see self::test_read_entry_rejects_unknown_codec()}.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_rejects_unknown_codec(): void {
+		$empty_registry = new CodecRegistry();
+		$reader         = new EntryReader( $empty_registry );
+
+		$fixture        = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		$stream         = $fixture[0];
+		$manifest_entry = $fixture[1];
+
+		$this->expectException( ArchiveNotTrustworthy::class );
+		$this->expectExceptionMessage( 'is not registered' );
+
+		$reader->verify_entry( $stream, $manifest_entry );
+	}
+
+	/**
+	 * The verify_entry method must refuse a plain unencrypted file entry over
+	 * the fixed decoded-byte ceiling — the headline regression this job closes.
+	 *
+	 * Before this fix, verify_entry()'s only budget parameter carried the
+	 * MEMORY-derived budget, gated on `! streams_decoded_payload(...)` — the
+	 * condition {@see \Pontifex\Archive\Reader\EntryReader::read_entry()} uses
+	 * for THAT budget, not this one. `streams_decoded_payload()` is true for
+	 * every plain unencrypted file entry, so the gate was never satisfied for
+	 * the common case and this exact refusal could never fire: an oversized
+	 * plain file was reported SOUND by verify() and only then refused by
+	 * read_entry() once a restore actually tried to decode it.
+	 * $max_decoded_bytes now carries the same meaning it carries in
+	 * read_entry() — this build's compiled-in ceiling, applied to every entry
+	 * regardless of shape — so this mirrors
+	 * {@see self::test_read_entry_refuses_as_build_cannot_comply_when_over_the_fixed_decoded_byte_ceiling()}
+	 * exactly, on the verify path.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_refuses_a_plain_file_entry_over_the_fixed_decoded_byte_ceiling(): void {
+		$fixture = self::write_file_entry_to_fixture( 'wp-content/uploads/2024/huge-video.mov', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		try {
+			self::make_reader()->verify_entry( $fixture[0], $fixture[1], null, 10 );
+			$this->fail( 'verify_entry() should have raised BuildCannotComply.' );
+		} catch ( BuildCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp-content/uploads/2024/huge-video.mov',
+				$error->getMessage(),
+				'The refusal must name the entry an operator can act on.'
+			);
+			$this->assertStringContainsString( '100 decoded bytes', $error->getMessage() );
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * The verify_entry method must NOT refuse a plain file entry over the
+	 * memory-derived budget alone — it streams on restore (ADR 0010), so no
+	 * memory refusal applies to it, exactly as read_entry() treats it.
+	 *
+	 * The regression guard the test above needs: telling the two budgets apart
+	 * must not turn into refusing a plain file under a small memory budget it
+	 * was never meant to be judged against.
+	 *
+	 * @return void
+	 */
+	public function test_verify_entry_permits_a_plain_file_entry_over_the_memory_budget(): void {
+		$fixture = self::write_file_entry_to_fixture( 'note.txt', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		// A generous decoded-byte ceiling (this build's own), but a tiny
+		// memory budget the file's 100 declared bytes comfortably exceed.
+		self::make_reader()->verify_entry( $fixture[0], $fixture[1], null, 1000, 10 );
+
+		$this->addToAssertionCount( 1 );
 	}
 
 	/**
@@ -711,5 +832,404 @@ final class EntryReaderTest extends TestCase {
 		$read_result = self::make_reader()->read_entry( $dest, $manifest_entry );
 
 		$this->assertSame( $sql, $read_result->payload() );
+	}
+
+	/**
+	 * A Codec stub that always fails to decode with a caller-chosen exception class and message.
+	 *
+	 * Registered in place of a real codec so a fixture written successfully
+	 * (with a working codec) can be read back through a registry that fails
+	 * at decode time — the only way to reach the decode catch without a real
+	 * missing extension. Parameterised by exception class so the same stub
+	 * drives both branches EntryReader now distinguishes: a plain
+	 * `CodecException` (a genuinely corrupt payload) and the narrower
+	 * `CodecUnavailableException` (this host lacks the extension the codec
+	 * needs) — the only two classes {@see ZstdCodec} itself ever throws.
+	 *
+	 * @param int    $id             The codec ID this stub reports, matching the ID the fixture was written with.
+	 * @param string $message        The message the stub's decode() throws with.
+	 * @param string $exception_class The exception class to throw — CodecException::class or CodecUnavailableException::class.
+	 * @return Codec A codec that fails every decode() with $exception_class carrying $message.
+	 */
+	private static function failing_codec( int $id, string $message, string $exception_class = CodecException::class ): Codec {
+		return new class( $id, $message, $exception_class ) implements Codec {
+			/**
+			 * The codec ID this stub reports.
+			 *
+			 * @var int
+			 */
+			private int $stub_id;
+
+			/**
+			 * The message decode() throws with.
+			 *
+			 * @var string
+			 */
+			private string $message;
+
+			/**
+			 * The exception class decode() throws.
+			 *
+			 * @var class-string<CodecException>
+			 */
+			private string $exception_class;
+
+			/**
+			 * Construct a stub codec reporting the given ID and decode failure.
+			 *
+			 * @param int    $id              The codec ID to report.
+			 * @param string $message         The message decode() throws with.
+			 * @param string $exception_class The exception class decode() throws (CodecException::class or CodecUnavailableException::class).
+			 */
+			public function __construct( int $id, string $message, string $exception_class ) {
+				$this->stub_id         = $id;
+				$this->message         = $message;
+				$this->exception_class = $exception_class;
+			}
+
+			/**
+			 * Return the stub's codec ID.
+			 *
+			 * @return int The configured stub ID.
+			 */
+			public function id(): int {
+				return $this->stub_id;
+			}
+
+			/**
+			 * No-op encode for stub purposes.
+			 *
+			 * @param resource      $input   A readable stream resource.
+			 * @param resource      $output  A writable stream resource.
+			 * @param callable|null $on_read Ignored by this stub.
+			 * @return int Always zero.
+			 */
+			public function encode( $input, $output, ?callable $on_read = null ): int {
+				return 0;
+			}
+
+			/**
+			 * Always fail, as a missing extension or a genuinely corrupt payload would.
+			 *
+			 * Declared `never`, not `int`: this stub never returns, only
+			 * throws. PHP allows `never` as a covariant override of any
+			 * parent return type, so this still satisfies {@see Codec::decode()}'s
+			 * `int` signature. Branches on the configured class with two
+			 * literal `throw` statements, rather than `throw new $class(...)`,
+			 * so both are ordinary, statically-visible throws.
+			 *
+			 * @param resource $input            A readable stream resource.
+			 * @param resource $output           A writable stream resource.
+			 * @param int|null $max_output_bytes Ignored by this stub.
+			 * @throws CodecUnavailableException If this stub was configured with that class.
+			 * @throws CodecException            Otherwise, carrying this stub's configured message.
+			 */
+			public function decode( $input, $output, ?int $max_output_bytes = null ): never {
+				if ( CodecUnavailableException::class === $this->exception_class ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->message is this test double's own configured fixture message, not HTML output.
+					throw new CodecUnavailableException( $this->message );
+				}
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $this->message is this test double's own configured fixture message, not HTML output.
+				throw new CodecException( $this->message );
+			}
+		};
+	}
+
+	/**
+	 * A genuinely corrupt payload decoding a streamed file entry surfaces the
+	 * underlying message and stays ArchiveNotTrustworthy.
+	 *
+	 * A plain file entry decodes stream-to-stream through
+	 * {@see EntryReader::read_entry()}'s own catch of `CodecException` — the
+	 * site the audit found discarding the one sentence that actually explains
+	 * a decode failure behind a generic "Codec failed to decode entry
+	 * payload." This pins that the underlying message now survives, AND —
+	 * the regression guard the taxonomy split needs — that a genuinely
+	 * corrupt payload (any `CodecException` that is not the narrower
+	 * `CodecUnavailableException`) still raises `ArchiveNotTrustworthy`, not
+	 * `HostCannotComply`: real corruption must never be reported as this
+	 * host's fault.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_surfaces_the_underlying_codec_message_for_a_streamed_file(): void {
+		$fixture = self::write_file_entry_to_fixture( 'big.txt', str_repeat( 'A', 1000 ), RawCodec::ID );
+
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( RawCodec::ID, 'zstd_uncompress_add() failed; input may be malformed or truncated.' ) );
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $fixture[0], $fixture[1] );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'zstd_uncompress_add() failed; input may be malformed or truncated.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A genuinely corrupt payload decoding a buffered db_chunk entry surfaces
+	 * the underlying message and stays ArchiveNotTrustworthy.
+	 *
+	 * The buffered counterpart of the streamed-file test above:
+	 * {@see EntryReader::decode_spool_to_string()} used to throw a bare
+	 * RuntimeException carrying none of the CodecException's own message.
+	 * This pins that it now surfaces that message too, and — the two sites
+	 * agreeing — raises the same ArchiveNotTrustworthy type as the streamed
+	 * path for a genuinely corrupt payload.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_surfaces_the_underlying_codec_message_for_a_buffered_db_chunk(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( RawCodec::ID, 'zstd_uncompress_add() failed; input may be malformed or truncated.' ) );
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $dest, $manifest_entry );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'zstd_uncompress_add() failed; input may be malformed or truncated.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A missing extension decoding a streamed file entry is HostCannotComply, not ArchiveNotTrustworthy.
+	 *
+	 * The case the audit called the sharpest, because it is the real
+	 * migrate-to-a-new-server story: a backup made on a host with ext-zstd,
+	 * restored on a host without it. The bytes are fine — this host simply
+	 * cannot decode them — so this must be reported as a host problem
+	 * (routed onward by the CLI/admin surfaces to the "could not check"
+	 * outcome, exit 2), never as an untrustworthy archive.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_maps_a_missing_extension_to_host_cannot_comply_for_a_streamed_file(): void {
+		$fixture = self::write_file_entry_to_fixture( 'big.txt', str_repeat( 'A', 1000 ), RawCodec::ID );
+
+		$registry = new CodecRegistry();
+		$registry->register(
+			self::failing_codec(
+				RawCodec::ID,
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				CodecUnavailableException::class
+			)
+		);
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $fixture[0], $fixture[1] );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * A missing extension decoding a buffered db_chunk entry is HostCannotComply, not ArchiveNotTrustworthy.
+	 *
+	 * The buffered counterpart of the streamed-file test above, proving
+	 * {@see EntryReader::decode_spool_to_string()} makes the identical
+	 * distinction as {@see EntryReader::read_entry()}'s own decode catch.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_maps_a_missing_extension_to_host_cannot_comply_for_a_buffered_db_chunk(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		$registry = new CodecRegistry();
+		$registry->register(
+			self::failing_codec(
+				RawCodec::ID,
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				CodecUnavailableException::class
+			)
+		);
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->read_entry( $dest, $manifest_entry );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.',
+				$error->getMessage(),
+				'The underlying codec message must survive, not just live in $previous.'
+			);
+		}
+	}
+
+	/**
+	 * An entry over the archive's own decompression-bomb ceiling is
+	 * BuildCannotComply, not HostCannotComply or ArchiveNotTrustworthy — and
+	 * the refusal names the entry.
+	 *
+	 * $max_decoded_bytes (mirrored by {@see \Pontifex\Archive\Reader\ArchiveLimits::DEFAULT_MAX_ENTRY_BYTES})
+	 * is compiled into every build and identical on every host, so an entry
+	 * declaring more decoded bytes than it permits is a fact about neither the
+	 * archive nor this host — this build simply will not process an entry that
+	 * large ({@see BuildCannotComply}). It is not HostCannotComply, because no
+	 * server setting moves this number the way a bigger memory_limit moves the
+	 * memory-derived budget in
+	 * {@see self::test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget()}
+	 * below. And it is not ArchiveNotTrustworthy: unlike a genuine
+	 * decompression bomb ({@see self::test_read_entry_refuses_a_genuine_decompression_bomb_as_archive_not_trustworthy()}),
+	 * this entry is not lying about anything — its header honestly declares
+	 * its own size, which happens to be larger than the ceiling. Before this
+	 * fix the refusal was HostCannotComply regardless of which budget fired,
+	 * which sent an operator to fix a server that was never broken, over a
+	 * limit no server setting can change — and the message never said which
+	 * entry was the problem, so there was nothing to act on even once the
+	 * wrong advice was set aside.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_as_build_cannot_comply_when_over_the_fixed_decoded_byte_ceiling(): void {
+		$fixture = self::write_file_entry_to_fixture( 'wp-content/uploads/2024/huge-video.mov', str_repeat( 'A', 100 ), RawCodec::ID );
+
+		try {
+			self::make_reader()->read_entry( $fixture[0], $fixture[1], 10 );
+			$this->fail( 'read_entry() should have raised BuildCannotComply.' );
+		} catch ( BuildCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp-content/uploads/2024/huge-video.mov',
+				$error->getMessage(),
+				'The refusal must name the entry an operator can act on.'
+			);
+			$this->assertStringContainsString( '100 decoded bytes', $error->getMessage() );
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * An entry over THIS HOST's own memory-derived budget still refuses as
+	 * HostCannotComply.
+	 *
+	 * The regression guard the type split above needs: telling the
+	 * archive's compiled-in ceiling apart from a host's memory budget must
+	 * not silently reclassify a genuine host failure as an archive problem
+	 * too. $memory_budget only ever reaches this guard for a shape the
+	 * reader must buffer whole (a db_chunk here; ADR 0010) — a plain file
+	 * entry streams and so is never judged against it, which is why this
+	 * uses a db_chunk fixture rather than the file fixture the sibling test
+	 * above uses.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget(): void {
+		$sql_bytes = "CREATE TABLE `wp_options` (id INT);\n";
+		$dest      = self::memory_stream();
+		$source    = self::memory_stream( $sql_bytes );
+		$header    = EntryHeader::for_db_chunk( 0, 'wp_options', 1, strlen( $sql_bytes ), 0 );
+		$result    = self::make_writer()->write_entry( $header, RawCodec::ID, self::zero_nonce(), $source, $dest );
+
+		$manifest_entry = ManifestEntry::for_db_chunk( 0, 0, $result->total_entry_length(), 0, RawCodec::ID, $result->entry_hash() );
+
+		try {
+			self::make_reader()->read_entry( $dest, $manifest_entry, EntryReader::DEFAULT_MAX_DECODED_BYTES, null, 10 );
+			$this->fail( 'read_entry() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString(
+				'wp_options',
+				$error->getMessage(),
+				'A db_chunk has no path; the table name must still name the entry.'
+			);
+			$this->assertStringContainsString( '10-byte budget', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * Hand-compose a file entry whose header lies small but whose gzip payload decodes huge.
+	 *
+	 * The genuine decompression-bomb shape, distinct from a forged declared-size
+	 * mismatch ({@see self::forge_lying_file_entry()}): a real writer never
+	 * produces this, because {@see \Pontifex\Archive\Writer\EntryWriter} always
+	 * records the byte count it actually captured. Composing it by hand is the
+	 * only way to exercise the codec's own runaway-output guard rather than the
+	 * header check that runs before any decode starts.
+	 *
+	 * @param string $plaintext Highly compressible content to compress and bury inside the record.
+	 * @return array{0: resource, 1: ManifestEntry} The archive stream and matching manifest entry.
+	 */
+	private static function forge_gzip_bomb_entry( string $plaintext ): array {
+		$plain_source = self::memory_stream( $plaintext );
+		$compressed   = self::memory_stream();
+		( new GzipCodec() )->encode( $plain_source, $compressed );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $compressed );
+		$compressed_bytes = self::read_all( $compressed );
+
+		// The header's declared size is a deliberate lie — small enough to sail
+		// past the pre-decode budget check — while the gzip payload it sits
+		// beside actually decompresses to strlen( $plaintext ) bytes.
+		$header_bytes = EntryHeader::for_file( 'bomb.txt', 10, 0644, 1690000000, 'application/octet-stream', strlen( $compressed_bytes ) )->to_bytes();
+		$record       = $header_bytes . ByteOrder::pack_uint16( GzipCodec::ID ) . self::zero_nonce() . $compressed_bytes;
+		$hash         = hash( 'sha256', $record, true );
+		$record      .= $hash;
+
+		$manifest_entry = ManifestEntry::for_file( 0, 0, strlen( $record ), 'bomb.txt', GzipCodec::ID, $hash );
+
+		return array( self::memory_stream( $record ), $manifest_entry );
+	}
+
+	/**
+	 * A genuine decompression bomb — an honest-looking small header hiding a
+	 * payload that decodes far past the budget — still refuses as
+	 * ArchiveNotTrustworthy, not BuildCannotComply.
+	 *
+	 * The second regression guard the type split needs, the counterpart to
+	 * {@see self::test_read_entry_still_refuses_as_host_cannot_comply_when_over_the_memory_derived_budget()}
+	 * above. A bomb is a hostile payload whose decoded size runs away DURING
+	 * decode, discoverable only by attempting it — genuinely a fact about the
+	 * archive's bytes, caught by the codec's own runaway-output guard
+	 * ({@see \Pontifex\Archive\Codec\GzipCodec::decode()}) rather than by
+	 * {@see \Pontifex\Archive\Reader\EntryReader}'s pre-decode header check,
+	 * which this bomb sails straight past on a declared size of 10 bytes.
+	 * Confusing this with the fixed decoded-byte ceiling — an honest file
+	 * simply larger than a number compiled into the plugin — is exactly the
+	 * mistake that went wrong last round.
+	 *
+	 * @return void
+	 */
+	public function test_read_entry_refuses_a_genuine_decompression_bomb_as_archive_not_trustworthy(): void {
+		$fixture = self::forge_gzip_bomb_entry( str_repeat( 'A', 200000 ) );
+
+		try {
+			self::make_reader()->read_entry( $fixture[0], $fixture[1], 100 );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertStringContainsString(
+				'Decoded output exceeded the maximum of 100 bytes',
+				$error->getMessage(),
+				'The codec-level runaway-output guard must be what caught this, not the header check.'
+			);
+		}
 	}
 }

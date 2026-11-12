@@ -116,4 +116,139 @@ final class TransferHistoryTest extends TestCase {
 		$this->assertSame( 'succeeded', $saved[1]['outcome'] );
 		$this->assertSame( 1000, $saved[1]['bytes'] );
 	}
+
+	/**
+	 * Recording with details stores them under a `details` key, beside the four fixed fields.
+	 *
+	 * @return void
+	 */
+	public function test_record_stores_details_under_a_details_key(): void {
+		$details = array(
+			'entries'  => 42,
+			'relinked' => true,
+			'recovery' => 'precise',
+		);
+
+		$saved = $this->record_into_empty_history( 'import', 'succeeded', 2048, $details );
+
+		$this->assertCount( 1, $saved );
+		$this->assertSame( $details, $saved[0]['details'] );
+		$this->assertSame( 'import', $saved[0]['operation'] );
+		$this->assertSame( 2048, $saved[0]['bytes'] );
+	}
+
+	/**
+	 * A caller that passes no details writes exactly the entry it always did, key for key.
+	 *
+	 * @return void
+	 */
+	public function test_record_without_details_writes_exactly_the_entry_it_always_did(): void {
+		$saved = $this->record_into_empty_history( 'export', 'succeeded', 1000 );
+
+		$this->assertSame(
+			array(
+				'at'        => '2026-10-29T10:00:00+00:00',
+				'operation' => 'export',
+				'outcome'   => 'succeeded',
+				'bytes'     => 1000,
+			),
+			$saved[0]
+		);
+	}
+
+	/**
+	 * An empty details array leaves the key out as well, rather than storing an empty one.
+	 *
+	 * @return void
+	 */
+	public function test_record_with_an_empty_details_array_leaves_the_key_out(): void {
+		$saved = $this->record_into_empty_history( 'import', 'failed', 0, array() );
+
+		$this->assertArrayNotHasKey( 'details', $saved[0] );
+		$this->assertCount( 4, $saved[0] );
+	}
+
+	/**
+	 * A rollback is a third operation kind, stored as given with its details.
+	 *
+	 * @return void
+	 */
+	public function test_record_accepts_a_rollback_operation(): void {
+		$saved = $this->record_into_empty_history( 'rollback', 'succeeded', 512, array( 'entries' => 7 ) );
+
+		$this->assertSame( 'rollback', $saved[0]['operation'] );
+		$this->assertSame( 'succeeded', $saved[0]['outcome'] );
+		$this->assertSame( array( 'entries' => 7 ), $saved[0]['details'] );
+	}
+
+	/**
+	 * Record one transfer into an empty history and return the history that was saved.
+	 *
+	 * @param string                              $operation The operation to record.
+	 * @param string                              $outcome   The outcome to record.
+	 * @param int                                 $bytes     The byte count to record.
+	 * @param array<string, bool|int|string>|null $details   Optional. The details to pass; null passes none at all, so the default is exercised.
+	 * @return array<int, array<string, mixed>> The history handed to save_option().
+	 */
+	private function record_into_empty_history( string $operation, string $outcome, int $bytes, ?array $details = null ): array {
+		$saved   = array();
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+		$context->shouldReceive( 'save_option' )->once()->with(
+			TransferHistory::OPTION,
+			Mockery::on(
+				static function ( $value ) use ( &$saved ): bool {
+					$saved = $value;
+					return true;
+				}
+			)
+		);
+
+		if ( null === $details ) {
+			TransferHistory::record( $context, $operation, $outcome, $bytes, '2026-10-29T10:00:00+00:00' );
+		} else {
+			TransferHistory::record( $context, $operation, $outcome, $bytes, '2026-10-29T10:00:00+00:00', $details );
+		}
+
+		return $saved;
+	}
+
+	/**
+	 * The `gate` label is stored exactly as given, and never added on a caller's behalf.
+	 *
+	 * @return void
+	 */
+	public function test_record_stores_the_gate_label_only_when_the_caller_gives_it(): void {
+		$with    = $this->record_into_empty_history( 'import', 'failed', 0, array( 'gate' => TransferHistory::GATE_BROKEN ) );
+		$without = $this->record_into_empty_history( 'import', 'failed', 0, array( 'entries' => 0 ) );
+
+		$this->assertSame( 'broken', $with[0]['details']['gate'] );
+		$this->assertArrayNotHasKey( 'gate', $without[0]['details'] );
+	}
+
+	/**
+	 * The stored vocabulary is pinned: a rename here would change what every existing record means.
+	 *
+	 * These strings are written into people's databases. The operation kinds, the
+	 * recovery labels and the gate labels are the whole of the vocabulary a stored
+	 * entry uses, and this class owns it.
+	 *
+	 * @return void
+	 */
+	public function test_the_stored_vocabulary_is_pinned(): void {
+		$this->assertSame( 'export', TransferHistory::OPERATION_EXPORT );
+		$this->assertSame( 'import', TransferHistory::OPERATION_IMPORT );
+		$this->assertSame( 'rollback', TransferHistory::OPERATION_ROLLBACK );
+
+		$this->assertSame( '', TransferHistory::RECOVERY_NONE );
+		$this->assertSame( 'precise', TransferHistory::RECOVERY_PRECISE );
+		$this->assertSame( 'merge', TransferHistory::RECOVERY_MERGE );
+		$this->assertSame( 'merge_links', TransferHistory::RECOVERY_MERGE_LINKS );
+		$this->assertSame( 'failed', TransferHistory::RECOVERY_FAILED );
+
+		$this->assertSame( '', TransferHistory::GATE_NONE );
+		$this->assertSame( 'broken', TransferHistory::GATE_BROKEN );
+		$this->assertSame( 'refused', TransferHistory::GATE_REFUSED );
+		$this->assertSame( 'could_not_check', TransferHistory::GATE_COULD_NOT_CHECK );
+	}
 }

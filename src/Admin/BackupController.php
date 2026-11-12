@@ -25,6 +25,7 @@ use Pontifex\Job\JobStore;
 use Pontifex\Export\ExportCounters;
 use Pontifex\Lock\BackupProgress;
 use Pontifex\Lock\OperationLock;
+use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ScanProgressManifestBuilder;
@@ -363,6 +364,21 @@ final class BackupController {
 			);
 		}
 
+		$table_patterns = $this->read_user_table_exclusions();
+		$invalid_table  = self::first_invalid_pattern( $table_patterns );
+		if ( null !== $invalid_table ) {
+			wp_send_json_error(
+				array(
+					'message' => sprintf(
+						/* translators: %s: the table exclusion pattern that could not be understood */
+						__( 'That table exclusion pattern is not valid: %s. Fix or remove it and try again.', 'pontifex' ),
+						$invalid_table
+					),
+				),
+				400
+			);
+		}
+
 		// Single-runner lock: refuse a second backup while any site-mutating
 		// operation — a backup, restore, or rollback, admin or CLI — is already
 		// running, so two of them can never fight over the site or the shared
@@ -404,10 +420,12 @@ final class BackupController {
 			// duplicate pre-scan doubled the wait before the first byte was written.
 			// The curated defaults always apply; the operator's validated patterns are
 			// appended and travel into the job payload, so re-attach and cron
-			// continuation honour them too.
-			$exclusions = ExclusionRules::from_array(
-				array_merge( ExclusionRules::default_v010()->patterns(), $user_patterns )
-			);
+			// continuation honour them too. The screen now has two exclusions boxes:
+			// $user_patterns is scoped to files, directories, and symlinks, and
+			// $table_patterns is scoped to bare table names — never each other's
+			// kind — the same as ExportCommand's --exclude/--exclude-file and
+			// --exclude-table; see build_exclusion_rules().
+			$exclusions = self::build_exclusion_rules( $user_patterns, $table_patterns );
 
 			$path                     = $this->store->next_backup_path( new DateTimeImmutable() );
 			$this->active_backup_path = $path;
@@ -426,7 +444,7 @@ final class BackupController {
 			$runner  = new ResumableExportRunner( $this->environment, $this->wordpress_context, $job_store, $factory );
 			$options = new ExportOptions( $path, null, null, null, Scope::content_only( $exclusions->patterns() ) );
 
-			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->patterns(), time() );
+			$job              = $runner->start( $options, $this->resolve_content_root(), 'wp-content', $exclusions->entries(), time() );
 			$this->active_job = $job;
 
 			// Insurance for a request the host kills outright (no shutdown handler
@@ -486,6 +504,7 @@ final class BackupController {
 			$files_changed         = (int) ( $job_payload['files_changed'] ?? 0 );
 			$media_type_unresolved = (int) ( $job_payload['media_type_unresolved'] ?? 0 );
 			$total_bytes           = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
+			$exclusions_summary    = self::build_exclusions_summary( (array) ( $job_payload['exclusion_matches'] ?? array() ) );
 			$entry_count           = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
@@ -509,11 +528,12 @@ final class BackupController {
 
 			wp_send_json_success(
 				array(
-					'filename'     => basename( $path ),
-					'entries'      => $entry_count,
-					'bytes'        => $bytes_written,
-					'size'         => $this->wordpress_context->format_size( $bytes_written ),
-					'source_bytes' => $total_bytes,
+					'filename'           => basename( $path ),
+					'entries'            => $entry_count,
+					'bytes'              => $bytes_written,
+					'size'               => $this->wordpress_context->format_size( $bytes_written ),
+					'source_bytes'       => $total_bytes,
+					'exclusions_summary' => $exclusions_summary,
 				)
 			);
 		} catch ( BackupCancelled $cancelled ) {
@@ -889,8 +909,23 @@ final class BackupController {
 			);
 		}
 
+		$table_exclusions = $this->read_user_table_exclusions();
+		$invalid_table    = self::first_invalid_pattern( $table_exclusions );
+		if ( null !== $invalid_table ) {
+			wp_send_json_error(
+				array(
+					'message' => sprintf(
+						/* translators: %s: the table exclusion pattern that could not be understood */
+						__( 'That table exclusion pattern is not valid: %s. Fix or remove it and try again.', 'pontifex' ),
+						$invalid_table
+					),
+				),
+				400
+			);
+		}
+
 		try {
-			$schedule = new Schedule( $enabled, $frequency, $hour, $retention, $exclusions );
+			$schedule = new Schedule( $enabled, $frequency, $hour, $retention, $exclusions, $table_exclusions );
 		} catch ( InvalidArgumentException $invalid_schedule ) {
 			wp_send_json_error( array( 'message' => __( 'The schedule could not be saved. Reload the page and try again.', 'pontifex' ) ), 400 );
 		}
@@ -962,6 +997,123 @@ final class BackupController {
 			}
 		}
 		return $patterns;
+	}
+
+	/**
+	 * Read the operator's extra table-exclusion patterns from the create request.
+	 *
+	 * One pattern per line (a textarea), with blank lines and `#` comments
+	 * dropped — the same shape {@see self::read_user_exclusions()} accepts for
+	 * files, and the CLI's --exclude-table. The nonce is verified in
+	 * {@see self::is_authorised()} before create() calls this.
+	 *
+	 * @return string[] The submitted patterns, trimmed, blanks and comments removed.
+	 */
+	private function read_user_table_exclusions(): array {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- The nonce is verified in is_authorised() at the top of create() before this runs.
+		if ( ! isset( $_POST['table_exclusions'] ) ) {
+			return array();
+		}
+		// Deliberately NOT sanitize_textarea_field(): see the comment in
+		// self::read_user_exclusions() above for the full history — its
+		// underlying WordPress sanitiser strips every percent sign followed
+		// by two hex digits, which silently mangled real patterns and
+		// quietly dropped content from every subsequent backup. A bare
+		// table name can carry that same byte sequence just as a filesystem
+		// path can, so the same reasoning applies here: only control
+		// characters are removed, and first_invalid_pattern() still judges
+		// whether the result is a usable pattern.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- The nonce is verified in is_authorised() at the top of create() before this runs. The input IS sanitised, by strip_control_characters() on this line; the sniff recognises a fixed list of WordPress sanitisers and cannot see a project one. The recognised sanitiser for this input, sanitize_textarea_field(), is the very function that corrupts these patterns, for the reason set out above. The value never reaches SQL (it is matched against table names by the scanner) and never reaches output unescaped (the Backup screen re-renders it through esc_textarea()).
+		$raw   = self::strip_control_characters( wp_unslash( (string) $_POST['table_exclusions'] ) );
+		$lines = preg_split( '/\R/', $raw );
+		if ( false === $lines ) {
+			return array();
+		}
+		$patterns = array();
+		foreach ( $lines as $line ) {
+			$line = trim( $line );
+			if ( '' !== $line && '#' !== $line[0] ) {
+				$patterns[] = $line;
+			}
+		}
+		return $patterns;
+	}
+
+	/**
+	 * Combine the curated defaults and the operator's own file and table
+	 * patterns into one ExclusionRules, mirroring
+	 * {@see \Pontifex\Cli\ExportCommand::build_exclusion_rules()}.
+	 *
+	 * The curated defaults come first, untagged — matched against every
+	 * entry kind, exactly as before. Then $user_patterns (from the Backup
+	 * screen's file-exclusions box), scoped to files, directories, and
+	 * symlinks. Then $table_patterns (from the screen's table-exclusions
+	 * box), scoped to database chunks (bare table names). Keeping the
+	 * three lists separate, rather than merging them into one untagged
+	 * list, is what stops a file pattern from reaching a database table
+	 * it was never meant to touch. Pure function: no I/O.
+	 *
+	 * @param string[] $user_patterns  The operator's file-scoped patterns, from {@see self::read_user_exclusions()}.
+	 * @param string[] $table_patterns The operator's table-scoped patterns, from {@see self::read_user_table_exclusions()}.
+	 * @return ExclusionRules A rule set combining all three, each with its own scope.
+	 */
+	private static function build_exclusion_rules( array $user_patterns, array $table_patterns ): ExclusionRules {
+		$entries = array();
+		foreach ( ExclusionRules::default_v010()->patterns() as $pattern ) {
+			$entries[] = ExclusionPattern::untagged( $pattern );
+		}
+		foreach ( $user_patterns as $pattern ) {
+			$entries[] = ExclusionPattern::operator_file( $pattern );
+		}
+		foreach ( $table_patterns as $pattern ) {
+			$entries[] = ExclusionPattern::operator_table( $pattern );
+		}
+		return ExclusionRules::from_tagged_patterns( $entries );
+	}
+
+	/**
+	 * Build the one-line, already-translated sentence summarising how many
+	 * things each active exclusion pattern excluded, ready to display exactly
+	 * as returned.
+	 *
+	 * Built server-side, in PHP, so the browser only ever concatenates a
+	 * finished string — no list assembly and no translation happens in
+	 * JavaScript. Every pattern is included, even one whose count is 0 and
+	 * even one of Pontifex's own curated defaults: a default that matched
+	 * nothing this run is exactly as worth seeing as one that matched a
+	 * great deal, and showing every pattern is one rule rather than two —
+	 * the same rule the CLI's own summary follows (see
+	 * {@see \Pontifex\Cli\ExportCommand::print_exclusion_match_summary()}).
+	 *
+	 * Because the counts here have round-tripped through a job payload
+	 * rather than coming straight from an ExclusionRules instance, each
+	 * element is checked before use: one that is not an array with a string
+	 * 'pattern' and a numeric 'count' is skipped rather than raising.
+	 *
+	 * @param array<int, mixed> $counts The exclusion match counts, in pattern order. Each element is expected to be shaped array{pattern: string, count: int} (see {@see \Pontifex\Manifest\ExclusionRules::match_counts()}), but is deliberately typed as mixed here — this comes from a persisted job payload, which is not guaranteed to hold that shape.
+	 * @return string The finished sentence, or '' when there are no valid patterns to report.
+	 */
+	private static function build_exclusions_summary( array $counts ): string {
+		$parts = array();
+		foreach ( $counts as $entry ) {
+			if ( ! is_array( $entry ) || ! isset( $entry['pattern'], $entry['count'] ) || ! is_string( $entry['pattern'] ) || ! is_numeric( $entry['count'] ) ) {
+				continue;
+			}
+			$parts[] = sprintf(
+				/* translators: 1: exclusion pattern, 2: number of entries it excluded */
+				__( '%1$s (%2$d)', 'pontifex' ),
+				$entry['pattern'],
+				(int) $entry['count']
+			);
+		}
+		if ( array() === $parts ) {
+			return '';
+		}
+		return sprintf(
+			/* translators: %s: a comma-separated list of "pattern (count)" entries */
+			__( 'Exclusions: %s.', 'pontifex' ),
+			implode( ', ', $parts )
+		);
 	}
 
 	/**

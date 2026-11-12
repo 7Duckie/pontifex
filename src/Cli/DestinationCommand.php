@@ -10,12 +10,16 @@ declare(strict_types=1);
 namespace Pontifex\Cli;
 
 use WP_CLI;
+use Psr\Log\LoggerInterface;
 use Pontifex\Destination\DestinationAdapter;
 use Pontifex\Destination\DestinationException;
 use Pontifex\Destination\DestinationFactory;
 use Pontifex\Destination\DestinationRetention;
 use Pontifex\Destination\DestinationSpec;
 use Pontifex\Destination\DestinationStore;
+use Pontifex\Environment\Environment;
+use Pontifex\Environment\RealEnvironment;
+use Pontifex\Log\FileLogger;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 
@@ -91,8 +95,9 @@ use Pontifex\WordPress\WordPressContext;
  * : How many archives to keep at the destination (with `add`); `prune`
  *   deletes the oldest surplus down to this count. 0 means keep all
  *   (the default) — `prune` then does nothing. Archives are ordered
- *   oldest-first by remote name, so retention is only meaningful when
- *   `--output` uses a sortable, timestamped archive name.
+ *   oldest-first by their real modification time at the destination, never
+ *   by name, and only Pontifex's own generated archives are ever counted or
+ *   deleted — a hand-named file sharing the directory is left alone.
  *
  * [--output=<path>]
  * : Where to write the downloaded archive (with `pull`). Defaults to the
@@ -124,12 +129,34 @@ final class DestinationCommand {
 	private WordPressContext $wordpress_context;
 
 	/**
+	 * The Environment abstraction this command queries.
+	 *
+	 * Used only by the default logger wiring (WP_CONTENT_DIR/WP_DEBUG); when a
+	 * logger is injected directly, it is never touched.
+	 *
+	 * @var Environment
+	 */
+	private Environment $environment;
+
+	/**
+	 * The PSR-3 logger a prune passes down to {@see DestinationRetention}, so a
+	 * delete it cannot carry out is recorded somewhere an operator can find it.
+	 *
+	 * @var LoggerInterface
+	 */
+	private LoggerInterface $logger;
+
+	/**
 	 * Construct a DestinationCommand instance.
 	 *
 	 * @param WordPressContext|null $wordpress_context Optional. Defaults to a fresh RealWordPressContext.
+	 * @param Environment|null      $environment       Optional. Defaults to a fresh RealEnvironment.
+	 * @param LoggerInterface|null  $logger            Optional. When null, a FileLogger writing under wp-content/pontifex/logs is used.
 	 */
-	public function __construct( ?WordPressContext $wordpress_context = null ) {
+	public function __construct( ?WordPressContext $wordpress_context = null, ?Environment $environment = null, ?LoggerInterface $logger = null ) {
 		$this->wordpress_context = $wordpress_context ?? new RealWordPressContext();
+		$this->environment       = $environment ?? new RealEnvironment();
+		$this->logger            = $logger ?? $this->build_default_logger();
 	}
 
 	/**
@@ -411,6 +438,14 @@ final class DestinationCommand {
 	/**
 	 * Delete the oldest surplus archives at a destination, down to its configured retention.
 	 *
+	 * A listing failure and a delete failure used to be handled differently —
+	 * the former propagated an uncaught DestinationException past this method
+	 * entirely, the latter was silently absorbed and reported as success. Both
+	 * are now settled here: the whole prune (listing included) runs inside one
+	 * try/catch, and a delete failure is read off the returned
+	 * {@see \Pontifex\Destination\PruneResult} rather than assumed absent
+	 * because the deleted list came back empty.
+	 *
 	 * @param string $name The destination name.
 	 * @return void
 	 */
@@ -440,14 +475,16 @@ final class DestinationCommand {
 
 		try {
 			$adapter = $this->factory()->from_spec( $spec );
+			$result  = ( new DestinationRetention( $adapter, $retention, $this->logger ) )->prune();
 		} catch ( DestinationException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; DestinationException messages never carry a secret (ADR 0017).
 			WP_CLI::error( $e->getMessage() );
 		}
 
-		$deleted = ( new DestinationRetention( $adapter, $retention ) )->prune();
+		$deleted = $result->deleted();
+		$failed  = $result->failed();
 
-		if ( array() === $deleted ) {
+		if ( array() === $deleted && array() === $failed ) {
 			WP_CLI::success(
 				sprintf(
 					/* translators: %s: the destination name that is already within its retention */
@@ -464,6 +501,25 @@ final class DestinationCommand {
 					/* translators: %s: the remote archive name that was deleted */
 					__( 'Deleted %s.', 'pontifex' ),
 					$remote_name
+				)
+			);
+		}
+
+		if ( array() !== $failed ) {
+			// Deletes were attempted and refused: never report success over
+			// that, however many others succeeded — see this method's own
+			// docblock for the false "nothing was pruned" this replaces.
+			WP_CLI::error(
+				sprintf(
+					/* translators: 1: number of archives that could not be deleted, 2: the destination name they remain at */
+					_n(
+						'%1$d archive at "%2$s" could not be deleted and remains in place. Check the Pontifex log for the reason.',
+						'%1$d archives at "%2$s" could not be deleted and remain in place. Check the Pontifex log for the reason.',
+						count( $failed ),
+						'pontifex'
+					),
+					count( $failed ),
+					$name
 				)
 			);
 		}
@@ -540,5 +596,26 @@ final class DestinationCommand {
 	private static function default_output_path( string $archive ): string {
 		$cwd = getcwd();
 		return ( false !== $cwd ? $cwd : '.' ) . '/' . basename( $archive );
+	}
+
+	/**
+	 * Build the default file logger when the caller supplies none.
+	 *
+	 * Reads WP_CONTENT_DIR and WP_DEBUG through the Environment seam so tests
+	 * can substitute a controlled value; the same pattern
+	 * {@see \Pontifex\Cli\RollbackCommand::build_default_logger()} and
+	 * {@see \Pontifex\Cli\VerifyCommand::build_default_logger()} use.
+	 *
+	 * @return LoggerInterface
+	 */
+	private function build_default_logger(): LoggerInterface {
+		$content_dir = $this->environment->is_constant_defined( 'WP_CONTENT_DIR' )
+			? (string) $this->environment->constant_value( 'WP_CONTENT_DIR' )
+			: sys_get_temp_dir();
+
+		$debug_enabled = $this->environment->is_constant_defined( 'WP_DEBUG' )
+			&& (bool) $this->environment->constant_value( 'WP_DEBUG' );
+
+		return new FileLogger( $content_dir . '/pontifex/logs', $debug_enabled, protect_directory: true );
 	}
 }

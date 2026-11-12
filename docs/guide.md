@@ -259,6 +259,35 @@ your site.
 **So after any restore that reported a problem, look at your site.** Check
 your plugins list for anything you do not recognise.
 
+### You will be signed out, and that is expected
+
+A restore replaces every table, including the one holding your login session.
+So near the end the screen stops and tells you the session was reset. Nothing
+has gone wrong — it is the restore reaching its last stage.
+
+Log back in with the username and password from **the backup you just
+restored**, not the ones you used a minute ago. The database is now that
+backup's, so its accounts are the live ones.
+
+Then look at the **Overview** screen. It says what that restore actually did —
+how many entries it wrote, whether it rewrote your links and across how many
+rows, and anything it had to skip or repair. The Restore screen shows the same
+line for the first fifteen minutes, so if you come straight back to it after
+signing in, it is already there.
+
+### If a past restore broke your permalinks
+
+Older versions of Pontifex had a defect that damaged every value containing a
+percent sign — most visibly your permalink structure, which is usually
+something like `/%year%/%monthnum%/%day%/%postname%/`. If a restore left your
+links broken, or a plugin's settings mysteriously back at their defaults, that
+is almost certainly what happened.
+
+Restoring the same backup again now puts it right. Pontifex recognises the
+damage in backups written by an affected version, puts the percent signs back
+as it replays them, and tells you how many it repaired. Backups taken from now
+on are written correctly in the first place.
+
 ---
 
 ## 7. Moving a site to a new host or address
@@ -277,7 +306,7 @@ Going from `oldsite.com` to `newsite.com`, or from a staging address to a live
 one, the address is written into your database in thousands of places.
 
 ```
-wp pontifex import backup.wpmig --url=https://newsite.com
+wp pontifex import backup.wpmig --new-url=https://newsite.com
 ```
 
 In the browser, Pontifex notices when a backup came from a different address
@@ -345,7 +374,18 @@ the Backup screen, which both display when the next run is actually due.
 ### Keep-count
 
 `--retention=7` keeps the seven most recent *scheduled* backups and deletes
-older ones. Backups you took by hand are not touched.
+older ones. Backups you took by hand — from the Backup screen or
+`wp pontifex export` — are never touched, and they no longer count towards
+the seven either: only backups the schedule itself created compete for those
+slots, so a hand-made backup can no longer be deleted in place of one.
+
+One thing this cannot do anything about: a backup that already existed
+before you updated to this version — hand-made or scheduled — is not in the
+list Pontifex now uses to tell them apart, so it will not be pruned
+automatically either. Old backups like that will accumulate until you delete
+them yourself. That is deliberate: guessing which pre-existing backups were
+scheduled risks deleting one you made by hand, which is worse than a few
+extra files sitting on disk.
 
 ### One caveat
 

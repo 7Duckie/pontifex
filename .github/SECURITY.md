@@ -105,7 +105,7 @@ well-formed archive you chose to restore. Therefore:
   user accounts, password hashes, secret keys — so keep it outside the
   web root and delete it securely when you are done with it.
 
-Cross-URL migration (`import --url=`, with the serialised-data
+Cross-URL migration (`import --new-url=`, with the serialised-data
 defences it requires), archive verification (`wp pontifex verify`),
 and optional Ed25519 signing (`wp pontifex keygen`, `export --sign`,
 `--public-key` on `verify`/`import`) have all shipped.

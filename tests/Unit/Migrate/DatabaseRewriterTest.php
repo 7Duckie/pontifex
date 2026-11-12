@@ -179,6 +179,47 @@ final class DatabaseRewriterTest extends TestCase {
 	}
 
 	/**
+	 * A value abandoned for exceeding the walk bounds is kept unchanged and counted skipped.
+	 *
+	 * SerialisedReplacer's own adversarial tests prove a cyclic value is
+	 * kept unchanged without hanging; this proves the SAME "kept unchanged"
+	 * outcome reaches this pass's skipped-value tally, exactly like a
+	 * corrupt or blocked-object value already does above — the whole
+	 * complaint about the walk hanging in the first place was that it made
+	 * a half-migration look silent and successful, so a value abandoned for
+	 * exceeding the bounds must not go uncounted either. Uses a value
+	 * nested 80 levels deep (finite, not cyclic) rather than a
+	 * self-referencing one, so this test terminates quickly regardless of
+	 * whether the bound is implemented correctly.
+	 *
+	 * @return void
+	 */
+	public function test_keeps_a_bounded_out_value_unchanged_and_counts_it_skipped(): void {
+		$value = 'https://old.test';
+		for ( $i = 0; $i < 80; $i++ ) {
+			$value = array( 'a' => $value );
+		}
+
+		$db = new FakeMigrationDatabase();
+		$db->add_table(
+			'wp_options',
+			'option_id',
+			array(
+				array(
+					'option_id'    => 1,
+					'option_value' => serialize( $value ),
+				),
+			)
+		);
+
+		$report = ( new DatabaseRewriter( $db, new SerialisedReplacer() ) )->rewrite( 'old.test', 'new.example' );
+
+		$this->assertSame( array(), $db->updates(), 'A value that exceeds the walk bounds must not be rewritten.' );
+		$this->assertSame( 0, $report->rows_changed() );
+		$this->assertSame( 1, $report->skipped_values() );
+	}
+
+	/**
 	 * Rows without the search term are not touched.
 	 *
 	 * @return void
