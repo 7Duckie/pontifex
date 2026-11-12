@@ -561,6 +561,57 @@ See [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
   arc", is still deferred. This makes recovery honest; it does not make the file
   half of a restore transactional.
 
+## v1.2.0 — A restore stops damaging what it restores
+
+Carries the audit fix campaign and this cycle's data-loss work. A minor rather
+than a major despite a renamed CLI flag: `import --url` never functioned, because
+WP-CLI reserves `--url` as a global and consumed it before Pontifex ever saw the
+value, so the documented way to move a site to a new address silently did
+nothing. A flag that never worked cannot have been depended upon, and v2.0 stays
+reserved for the Go reference reader.
+
+- **A restore no longer damages every value holding a percent sign.** WordPress's
+  own escaping replaces each percent sign with a marker belonging to one page
+  request, and Pontifex wrote the escaped statement into the archive, freezing
+  that marker into the backup. A restore in a different request left it in the
+  database as ordinary text: permalink structures broke visibly, and serialised
+  settings stopped being readable and reverted to nothing at all, silently, while
+  the import reported success and `verify` correctly called the archive sound.
+  Present in every release from v0.0.5 to v1.1.0.
+- **Backups already carrying the damage are repaired as they replay.** Fixing the
+  writing side cleans nothing anybody already holds, and the marker is inside the
+  file. The repair is bounded four ways: the exporter version recorded in the
+  archive, `INSERT` statements only, per statement ahead of the containment
+  checks, and a count reported rather than silent. See
+  [ADR 0025](./adr/0025-repairing-placeholder-markers-at-replay.md).
+- **A restore's outcome outlives the restore.** A restore replaces the users and
+  sessions tables, so it signs out the browser watching it before the request
+  composing the result can deliver it — every message the Restore screen built
+  was unreadable on a same-site restore. The outcome is recorded in the transfer
+  journal as counts and flags and read back by the screens. See
+  [ADR 0026](./adr/0026-a-restore-outcome-has-one-durable-home.md).
+- **Ticking "this backup came from another site" does something.** It read this
+  site's address after the restore had overwritten it, so it rewrote the old
+  address to itself and reported success, leaving a migrated site serving the
+  old domain and sending the operator to a login page on the old host.
+- **Recovery after a failed restore holds the operation lock for all of its
+  work**, the file cleanup included, rather than releasing it and then replaying
+  the safety archive with nothing to stop a second process writing the same
+  tables.
+- **A refusal is no longer reported as a failure.** A damaged backup, a backup
+  this build will not accept, and a backup this host could not finish checking
+  are three different situations that all leave the site untouched, and they are
+  no longer collapsed into one message.
+- **`wp pontifex import --url` is renamed to `--new-url`**, and the old flag now
+  stops with an error naming the new one rather than restoring to the same
+  address while appearing to migrate.
+
+Also carried: the first three phases of the audit fix campaign, which close the
+findings of the three-round audit of v1.1.0 — among them a backup naming another
+tenant's table, retention deleting the newest backup rather than the oldest, a
+full disk leaving a guard file at zero bytes, and a fourteen-byte cycle in
+serialised data hanging a migration.
+
 ## v1.1.0 — Verify stops promising what a restore will not honour
 
 Closes the last open finding from the hardening arc. The public API is
