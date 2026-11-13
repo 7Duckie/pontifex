@@ -12,6 +12,53 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
+## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
+
+### Security
+
+- **phpseclib updated to 3.0.58.** Its maintainers published
+  GHSA-w3p9-g4p2-h3rr: parsing an encrypted private key, a PFX or a CMS blob
+  did not bound the PBKDF iteration count, so a crafted file could pin a CPU.
+  Pontifex reaches that code only when an offsite SFTP destination loads your
+  SSH key, and the key is one you configured yourself — so to exploit it
+  somebody would already need control of your SFTP credentials, and anybody
+  holding those can simply send your backups elsewhere instead. It is fixed
+  because the library had a fix, not because sites were at risk. The library
+  ships inside the plugin, so this release is how you receive it.
+
+### Fixed
+
+- **Four documents overstated what encrypting a backup hides.** Measured on a
+  real encrypted archive: the file contents and the database are genuinely
+  encrypted, but the list of what the archive holds is not. Every file path and
+  size, and your site's address, stay readable without the passphrase. This is
+  deliberate and cannot be changed — each entry's own header is the data that
+  cryptographically binds its contents to its slot in the archive, so the
+  header has to stay readable, and the same paths would be exposed even if the
+  index were encrypted.
+
+  The guide said a passphrase was needed to read anything in the file. The
+  format specification's manifest diagram said the index was encrypted. The
+  design document went further: it listed "inspecting archives always requires
+  the passphrase" as a known limitation, described a format flag as doing the
+  opposite of what it does, and told operators to set that flag to protect a
+  plugin list it cannot reach, because plugin names live in the file paths.
+
+  All of them now say the same, accurate thing, and the specification gained a
+  section stating the boundary in one place. **No format change and no
+  behaviour change** — the archives were always built this way, and only the
+  prose was wrong. If you encrypted a backup because the file names themselves
+  are sensitive, keep the file somewhere private; the passphrase was never
+  hiding them.
+
+- **The documents also claimed a tamper protection the format does not have.**
+  Verified by forging an archive, not by reading code: entries can be removed
+  from an archive's index, with the index's own checksum and the footer
+  rewritten to match, and the result still verifies as sound with those entries
+  silently gone. Encryption makes no difference, because every checksum in the
+  format is unkeyed and the footer is not authenticated at all. Only signing an
+  archive detects it. If a backup's completeness has to be provable, sign it.
+
 ## [1.2.0] - 2026-11-12
 
 ### Added
@@ -1970,6 +2017,7 @@ the import half and the round-trip tests still to come.
   refusing installation of any CVE-flagged dependency.
 
 [Unreleased]: https://github.com/7Duckie/pontifex/compare/v1.2.0...HEAD
+[1.2.1]: https://github.com/7Duckie/pontifex/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/7Duckie/pontifex/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/7Duckie/pontifex/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/7Duckie/pontifex/compare/v1.0.2...v1.0.3
