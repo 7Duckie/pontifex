@@ -482,16 +482,38 @@ Operators choosing to disable encryption should understand they are responsible 
 
 There is none. Losing the passphrase makes the archive permanently unrecoverable. This is by design and is consistent with the security model: any built-in recovery mechanism would become attack surface that defeats the encryption's purpose. Writers must surface this fact prominently in the UI before encryption is enabled — typically as a confirmation dialog requiring explicit acknowledgement that the operator understands the consequence of passphrase loss.
 
+### 8.7 What encryption covers, and what it does not
+
+Flag bit 0 encrypts **entry payloads** — the contents of every file and every database chunk. Nothing else in the archive is encrypted.
+
+| Block | Encrypted? |
+|---|---|
+| Entry payloads (file contents, database rows) | **Yes** — AES-256-GCM, per entry |
+| Entry headers (path, size, mode, media type) | **No, never.** The plaintext header is the AAD (§8.2, §13.2.2) |
+| Manifest (§9) | **No, never** |
+| Provenance block (§5) | Only when flag bit 2 is set |
+| Footer (§10) | **No, never** |
+
+Pontifex's own PHP implementation (§14.1) never sets bit 2, so in an archive it wrote the provenance block is always plaintext.
+
+Two consequences follow. Both are deliberate, and neither is obvious from §8.1–8.6 alone.
+
+**An encrypted archive does not hide what it contains.** Every file path, every entry's stored size, and — unless bit 2 is set — the source site's URL, its WordPress and PHP versions, its table prefix and its exclusion patterns are all readable without the passphrase. Running `strings` over the archive is sufficient. An operator who needs the file listing itself kept confidential must protect the whole `.wpmig` in storage and in transport, because the format does not offer it. That is the price of the AAD binding, and the binding is worth more than the metadata privacy it costs: it is what prevents an attacker relocating an encrypted payload into a different entry's slot.
+
+**Encryption authenticates payloads, not structure.** An entry's GCM tag proves that entry's bytes are unaltered and belong in that slot. It says nothing about *which* entries the archive claims to hold. The manifest and the footer carry unkeyed SHA-256 hashes, so anyone able to rewrite the file can drop entries from the manifest, recompute the manifest hash, rewrite the 64-byte footer that points at it, and the result verifies as sound with those entries silently absent — the database among them, since database chunks are contiguous. Encryption does not change this: an encrypted archive is exactly as susceptible as an unencrypted one. Only the optional detached signature (§11) detects it, because the Ed25519 signature covers the footer. An archive whose *completeness* must be provable has to be signed.
+
 ## 9. Manifest
 
 After the last entry, the archive contains a manifest describing every entry that precedes it.
 
 ```
 +--------+--------+-------------------------------------------------+
-| length |  hash  | manifest JSON (UTF-8, encrypted if archive is)  |
+| length |  hash  | manifest JSON (UTF-8, never encrypted)          |
 | 4 B    | 32 B   |                                                 |
 +--------+--------+-------------------------------------------------+
 ```
+
+**The manifest is never encrypted**, not even inside an encrypted archive. It is the random-access index: a reader must be able to locate an entry before it has derived a key at all, and a verify pass must be able to walk the whole archive without one. Encrypting it would also conceal nothing, because each entry's own header is written in plaintext — the AAD binding in [§13.2.2](#1322-cryptographic-invariants) requires it — so the same paths are readable from the entry stream either way. See [§8.7](#87-what-encryption-covers-and-what-it-does-not) for what an encrypted archive does and does not keep private.
 
 The manifest JSON schema:
 

@@ -410,12 +410,22 @@ archive as stored.
 | Mechanism | Covers | Does not cover |
 |---|---|---|
 | Per-entry SHA-256 | Accidental corruption of any entry | Deliberate tampering |
-| Manifest hash (in footer and embedded) | Index tampering or truncation | — |
-| AES-256-GCM, Argon2id-derived key | Confidentiality and authenticity of payloads | Anything if the passphrase is lost |
+| Manifest hash (in footer and embedded) | Truncation, and accidental damage to the index | Deliberate index tampering — the hash is unkeyed and the footer is not authenticated |
+| AES-256-GCM, Argon2id-derived key | Confidentiality and authenticity of entry payloads | The file list, paths and sizes; the archive's structure; anything if the passphrase is lost |
 | Ed25519 signature | Provenance and deliberate tampering | Confidentiality |
 
 Hashes detect damage, not attack: anyone who alters content can recompute
 them. Only the signature distinguishes the two.
+
+**Encryption hides payloads, not metadata, and not structure.** Entry headers
+and the manifest are always plaintext — the header is the AAD that binds each
+payload to its slot, so it cannot be encrypted — which means every path in an
+encrypted archive is readable without the passphrase. And because every hash is
+unkeyed and the footer is unauthenticated, anyone who can rewrite an archive can
+drop entries from the manifest and refresh the hash and footer to match; it then
+verifies as sound with those entries gone, encrypted or not. Sign an archive
+whose completeness has to be provable. See
+[§8.7 of the format specification](archive-format.md#87-what-encryption-covers-and-what-it-does-not).
 
 **Argon2id parameters are format invariants**, not tunables. Changing them
 derives a different key and makes existing archives permanently undecryptable.
