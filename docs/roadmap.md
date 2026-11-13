@@ -561,6 +561,41 @@ See [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
   arc", is still deferred. This makes recovery honest; it does not make the file
   half of a restore transactional.
 
+## v1.2.1 — A dependency advisory, and what encryption really covers
+
+A patch. One library update and a documentation correction; no source file
+changed, no format change, no behaviour change.
+
+- **phpseclib updated to 3.0.58** for GHSA-w3p9-g4p2-h3rr, where parsing an
+  encrypted key, PFX or CMS blob did not bound the PBKDF iteration count. The
+  path is reachable only where an offsite SFTP destination loads the operator's
+  own configured key, so exploitation presupposes control of those credentials —
+  at which point the backups can simply be redirected. Taken because the
+  library had a fix and `vendor/` ships inside the plugin, not because sites were
+  exposed. It surfaced as `composer audit` failing a back-merge on bytes that had
+  passed the previous day, which is how a live advisory query behaves.
+
+- **The documents stopped overstating what encryption hides.** Four of them told
+  operators that an encrypted archive conceals its contents listing. It does not,
+  and cannot: an entry's header is the data that cryptographically binds its
+  payload to its slot, and §13.2.2 of the format specification locks that binding
+  for all of v1.x — so the header stays plaintext, and the paths are readable from
+  the entry stream regardless of what the index does. The specification gained §8.7 stating the boundary once, and the guide,
+  the design document and the technical reference now agree with it. Proven by
+  reading a real encrypted archive's raw bytes rather than by reading code.
+
+- **They also claimed a tamper protection the format lacks.** Entries can be
+  dropped from the manifest with its hash and the footer rewritten to match, and
+  the archive still verifies as sound — encrypted or not, because every hash is
+  unkeyed and the footer is unauthenticated. Demonstrated by forging one. Only
+  the optional detached signature detects it; the documents now say so.
+
+Deliberately not done: encrypting the manifest. It would conceal nothing while
+the AAD binding holds, and would break every existing reader of a format locked
+at specification 1.1. Whether metadata privacy justifies a future major
+specification version is left open, and the answer is probably not — operators
+needing it should protect the whole `.wpmig` at rest.
+
 ## v1.2.0 — A restore stops damaging what it restores
 
 Carries the audit fix campaign and this cycle's data-loss work. A minor rather
