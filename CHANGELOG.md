@@ -12,6 +12,28 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Verifying a backup now tells you when this server could not restore it,
+  instead of calling it sound and leaving you to find out during the restore.**
+  Three limits a restore enforces were never checked by verify, so a backup
+  could pass every check and then be refused: an entry larger than the size
+  this installation will handle in one piece, an entry larger than the memory
+  this host can spare to unpack one, and a file or folder name longer than a
+  filesystem will accept.
+
+  All three are reported as something about **this server**, never as damage to
+  the backup — the backup is intact in every one of these cases, and a different
+  server would restore it. The message says so explicitly, because "your backup
+  is broken" is the one sentence capable of talking somebody out of a good
+  backup.
+
+  A host that enforces no memory limit at all records nothing rather than
+  reporting a check it could not answer, so an ordinary verify on such a host
+  reads exactly as it did before.
+
 ## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
 
 ### Security
