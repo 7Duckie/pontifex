@@ -494,8 +494,6 @@ Flag bit 0 encrypts **entry payloads** — the contents of every file and every 
 | Provenance block (§5) | Only when flag bit 2 is set |
 | Footer (§10) | **No, never** |
 
-Pontifex's own PHP implementation (§14.1) never sets bit 2, so in an archive it wrote the provenance block is always plaintext.
-
 Two consequences follow. Both are deliberate, and neither is obvious from §8.1–8.6 alone.
 
 **An encrypted archive does not hide what it contains.** Every file path, every entry's stored size, and — unless bit 2 is set — the source site's URL, its WordPress and PHP versions, its table prefix and its exclusion patterns are all readable without the passphrase. Running `strings` over the archive is sufficient. An operator who needs the file listing itself kept confidential must protect the whole `.wpmig` in storage and in transport, because the format does not offer it. That is the price of the AAD binding, and the binding is worth more than the metadata privacy it costs: it is what prevents an attacker relocating an encrypted payload into a different entry's slot.
@@ -753,6 +751,8 @@ The asymmetry is deliberate: adding things is cheap because readers ignoring an 
 ### 14.1 PHP (Pontifex plugin)
 
 The PHP implementation lives inside the Pontifex WordPress plugin. Source: <https://github.com/7Duckie/pontifex>. Licence: GPL-2.0-or-later.
+
+It never sets flag bit 2, so the provenance block of an archive it wrote is always plaintext. See [§8.7](#87-what-encryption-covers-and-what-it-does-not) for what that leaves readable without the passphrase.
 
 ### 14.2 Go (planned, deferred to a later release)
 
