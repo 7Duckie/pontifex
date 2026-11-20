@@ -2498,18 +2498,35 @@ final class FileWriter {
 	 * Build the sibling temp path a file is written to before its atomic rename.
 	 *
 	 * A sibling of the target (same directory), so the final rename is a
-	 * same-filesystem move; the unique suffix — built by
-	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()}, the same helper
+	 * same-filesystem move. The temp's basename is
+	 * {@see \Pontifex\Filesystem\TempArtefact::suffix()} ALONE — the target's
+	 * own name is deliberately not part of it. The suffix is 37 bytes, so a
+	 * temp named "<target name><suffix>" made a file whose own name was 219
+	 * bytes into a 256-byte temp name, one over the 255-byte limit every
+	 * standard filesystem enforces, and the restore aborted on a file whose
+	 * real name was perfectly legal. `uniqid( ..., true )` already supplies
+	 * the uniqueness that keeps concurrent writers apart, so the target's
+	 * name contributed nothing but length. The suffix is the same helper
 	 * {@see self::probe_symlink_creation()} uses, so the two producers can
-	 * never drift apart — keeps concurrent writers apart and lets
-	 * {@see self::sweep_orphaned_temp_files()} recognise one left behind by an
-	 * interrupted restore.
+	 * never drift apart, and it is what lets
+	 * {@see self::sweep_orphaned_temp_files()} recognise one left behind by
+	 * an interrupted restore.
+	 *
+	 * The one thing this costs: an orphaned temp no longer names the file it
+	 * was for. The sweep removes orphans automatically, so it rarely matters.
 	 *
 	 * @param string $target_path The final file path.
 	 * @return string The temp path to write to first.
 	 */
 	private static function temp_sibling_path( string $target_path ): string {
-		return $target_path . TempArtefact::suffix();
+		$suffix = TempArtefact::suffix();
+		// A bare filename has no directory part: dirname() would answer "."
+		// and turn the temp into "./<suffix>", so keep it bare instead.
+		if ( false === strpbrk( $target_path, '/\\' ) ) {
+			return $suffix;
+		}
+		// rtrim() so a root directory ("/") does not become "//<suffix>".
+		return rtrim( dirname( $target_path ), '/\\' ) . '/' . $suffix;
 	}
 
 	/**
