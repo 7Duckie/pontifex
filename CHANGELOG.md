@@ -16,6 +16,19 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A file with a very long name no longer stops a restore.** A restore writes
+  each file to a temporary name beside it and then renames it into place, and
+  that temporary name was the file's own name with 37 characters added. A file
+  whose name was 219 characters therefore needed a 256-character temporary
+  name, one over the limit every standard filesystem enforces — so the restore
+  failed on a file whose real name it could have written perfectly well, and
+  stopped there.
+
+  The temporary name no longer borrows the file's name at all. It is a fixed
+  37 characters whatever the file is called, so the length of your filenames
+  cannot affect a restore again. Backups themselves were never affected, and
+  nothing about the backup file changes.
+
 - **Verifying a backup now tells you when this server could not restore it,
   instead of calling it sound and leaving you to find out during the restore.**
   Three limits a restore enforces were never checked by verify, so a backup

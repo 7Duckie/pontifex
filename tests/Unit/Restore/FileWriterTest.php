@@ -4622,6 +4622,99 @@ final class FileWriterTest extends TestCase {
 	}
 
 	/**
+	 * A file whose own name is 219 bytes long is restored, not refused.
+	 *
+	 * The sibling temp used to be the target's full name plus a 37-byte
+	 * suffix, so a 219-byte basename produced a 256-byte temp name — one over
+	 * the 255-byte limit every standard filesystem enforces — and the restore
+	 * aborted on a file whose real name was perfectly legal. Drives the real
+	 * write path, not the name helper.
+	 *
+	 * @return void
+	 */
+	public function test_a_file_with_a_219_byte_name_is_written_to_its_target(): void {
+		$writer   = new FileWriter( $this->fixture_root );
+		$basename = str_repeat( 'a', 215 ) . '.txt';
+		$this->assertSame( 219, strlen( $basename ), 'Sanity check: the fixture name is exactly 219 bytes.' );
+
+		$writer->write_entry( self::file_result( 'wp-content/uploads/' . $basename, 'long-named contents' ) );
+
+		$target = $this->fixture_root . '/wp-content/uploads/' . $basename;
+		$this->assertFileExists( $target );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Test assertion against on-disk fixture.
+		$this->assertSame( 'long-named contents', file_get_contents( $target ) );
+	}
+
+	/**
+	 * The temp basename does not grow with the target's name.
+	 *
+	 * @return void
+	 */
+	public function test_the_temp_basename_is_bounded_regardless_of_the_target_name(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
+
+		$short = basename( (string) $method->invoke( null, '/dest/a.txt' ) );
+		$long  = basename( (string) $method->invoke( null, '/dest/' . str_repeat( 'b', 219 ) ) );
+
+		$this->assertSame( strlen( TempArtefact::suffix() ), strlen( $short ), 'The temp name is exactly the suffix, whatever the target is called.' );
+		$this->assertSame( strlen( $short ), strlen( $long ), 'A 219-byte target name must not lengthen the temp name.' );
+	}
+
+	/**
+	 * The temp stays a sibling of its target, in the same directory.
+	 *
+	 * Per-file crash atomicity and replacing read-only targets both depend on
+	 * the final rename staying within one directory.
+	 *
+	 * @return void
+	 */
+	public function test_the_temp_is_a_sibling_of_its_target(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
+
+		$this->assertSame( '/dest/wp-content/uploads', dirname( (string) $method->invoke( null, '/dest/wp-content/uploads/photo.jpg' ) ) );
+		$this->assertSame( '/', dirname( (string) $method->invoke( null, '/photo.jpg' ) ), 'A target directly under the filesystem root keeps the root as its directory.' );
+		$this->assertSame( '.', dirname( (string) $method->invoke( null, 'photo.jpg' ) ), 'A bare filename gets a bare temp name, not an invented directory.' );
+	}
+
+	/**
+	 * A temp named only by the suffix is still recognised as an orphan.
+	 *
+	 * @return void
+	 */
+	public function test_a_suffix_only_temp_name_is_recognised_as_an_orphan(): void {
+		$method = new ReflectionMethod( FileWriter::class, 'temp_sibling_path' );
+
+		$this->assertTrue( TempArtefact::is_orphan_name( basename( (string) $method->invoke( null, '/dest/photo.jpg' ) ) ) );
+		$this->assertTrue( TempArtefact::is_orphan_name( TempArtefact::suffix() ) );
+	}
+
+	/**
+	 * The sweep removes an orphan of the old shape and one of the new shape.
+	 *
+	 * Orphans written by earlier versions carry the target's name before the
+	 * suffix; the current shape is the suffix alone. A restore killed before
+	 * and after an upgrade must both be cleaned.
+	 *
+	 * @return void
+	 */
+	public function test_sweep_removes_orphans_of_both_the_old_and_the_new_shape(): void {
+		$writer = new FileWriter( $this->fixture_root );
+		$dir    = $this->make_fixture_directory( 'wp-content/uploads' );
+		$old    = $dir . '/' . self::orphaned_temp_name( 'photo.jpg' );
+		$new    = $dir . '/' . TempArtefact::suffix();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $old, 'old-shape bytes' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Test fixture setup.
+		file_put_contents( $new, 'new-shape bytes' );
+
+		$removed = $writer->sweep_orphaned_temp_files();
+
+		$this->assertSame( 2, $removed );
+		$this->assertFileDoesNotExist( $old );
+		$this->assertFileDoesNotExist( $new );
+	}
+
+	/**
 	 * Sweeping a destination that contains no orphans returns 0 and removes nothing.
 	 *
 	 * @return void
