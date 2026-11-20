@@ -93,7 +93,8 @@ if (!is_file($readme_file)) {
 
     // --- readme.txt size limits (wordpress.org rejects a plugin whose
     // readme breaks these at submission time; nothing else here catches
-    // that before the tag is already public). Checked in both characters
+    // that before the tag is already public). Measured both raw and after
+    // the directory's own parsing (see $parsed_size below), and in both characters
     // and bytes on purpose: the validator has historically measured with
     // strlen(), and a multi-byte character (an em dash is 3 bytes in
     // UTF-8) can push a string over the byte limit while it is still under
@@ -101,6 +102,65 @@ if (!is_file($readme_file)) {
     // nothing and cannot surprise us later.
 
     $readme_lines = preg_split('/\r\n|\r|\n/', $readme);
+
+    // The directory does not measure the raw text in this file. It parses the
+    // readme first, and that parsing expands some characters into HTML
+    // entities, so the string it measures is longer than the one written
+    // here. A notice of 285 raw characters holding six double quotes measures
+    // 315 after parsing and is refused, while a raw-only check reports it
+    // green (this happened on the 1.2.0 release branch).
+    //
+    // $parsed_size() models that expansion for the KNOWN set of characters
+    // only, via htmlspecialchars() with ENT_QUOTES:
+    //     "  becomes  &quot;   (6 characters instead of 1)
+    //     '  becomes  &#039;   (6 characters instead of 1)
+    //     &  becomes  &amp;    (5 characters instead of 1)
+    //     <  becomes  &lt;     (4 characters instead of 1)
+    //     >  becomes  &gt;     (4 characters instead of 1)
+    // That list is what is known to expand, NOT a proof of completeness: the
+    // parser may do more (curly quotes from wptexturize, say, which would
+    // cost bytes rather than characters) and nothing here models that. If
+    // Plugin Check ever refuses a notice this check passed, extend the list.
+    //
+    // Returns the characters and bytes of the expanded text, plus a
+    // description of what expanded ('' when nothing did).
+    $parsed_size = static function (string $text): array {
+        $expanded = htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+        $names    = array(
+            '"' => 'double quote',
+            "'" => 'apostrophe',
+            '&' => 'ampersand',
+            '<' => 'less-than sign',
+            '>' => 'greater-than sign',
+        );
+        $found    = array();
+        foreach ($names as $char => $name) {
+            $count = substr_count($text, $char);
+            if ($count > 0) {
+                $found[] = $count . ' ' . $name . ($count === 1 ? '' : 's');
+            }
+        }
+
+        return array(
+            'chars'    => mb_strlen($expanded, 'UTF-8'),
+            'bytes'    => strlen($expanded),
+            'expanded' => implode(', ', $found),
+        );
+    };
+
+    // Builds the detail text: raw and parsed numbers side by side, and on a
+    // failure a plain statement that the limit applies after parsing.
+    $size_detail = static function (int $raw_chars, int $raw_bytes, array $parsed, bool $ok): string {
+        $detail = "{$raw_chars} chars, {$raw_bytes} bytes raw; {$parsed['chars']} chars, {$parsed['bytes']} bytes once the readme is parsed";
+        if (!$ok) {
+            $detail .= ' -- the limit applies AFTER the readme is parsed, which expands characters into HTML entities';
+            if ($parsed['expanded'] !== '') {
+                $detail .= ' (expanding: ' . $parsed['expanded'] . ')';
+            }
+        }
+
+        return $detail;
+    };
 
     // 1. Short description: the single non-empty line between the header
     // block and "== Description ==".
@@ -125,12 +185,15 @@ if (!is_file($readme_file)) {
     if ($short_description === null) {
         $check('readme.txt short description found', false, 'no non-empty line before == Description ==');
     } else {
-        $short_chars = mb_strlen($short_description, 'UTF-8');
-        $short_bytes = strlen($short_description);
+        $short_chars  = mb_strlen($short_description, 'UTF-8');
+        $short_bytes  = strlen($short_description);
+        $short_parsed = $parsed_size($short_description);
+        $short_ok     = $short_parsed['chars'] <= 150 && $short_parsed['bytes'] <= 150
+            && $short_chars <= 150 && $short_bytes <= 150;
         $check(
             'readme.txt short description within 150 chars/bytes',
-            $short_chars <= 150 && $short_bytes <= 150,
-            "{$short_chars} chars, {$short_bytes} bytes"
+            $short_ok,
+            $size_detail($short_chars, $short_bytes, $short_parsed, $short_ok)
         );
     }
 
@@ -170,13 +233,16 @@ if (!is_file($readme_file)) {
         $check('readme.txt Upgrade Notice has entries', false, 'no "= x.y.z =" entries found');
     } else {
         foreach ($upgrade_notice_body as $entry_version => $body_lines) {
-            $body  = trim(implode("\n", $body_lines));
-            $chars = mb_strlen($body, 'UTF-8');
-            $bytes = strlen($body);
+            $body   = trim(implode("\n", $body_lines));
+            $chars  = mb_strlen($body, 'UTF-8');
+            $bytes  = strlen($body);
+            $parsed = $parsed_size($body);
+            $ok     = $parsed['chars'] <= 300 && $parsed['bytes'] <= 300
+                && $chars <= 300 && $bytes <= 300;
             $check(
                 "readme.txt Upgrade Notice ({$entry_version}) within 300 chars/bytes",
-                $chars <= 300 && $bytes <= 300,
-                "{$chars} chars, {$bytes} bytes"
+                $ok,
+                $size_detail($chars, $bytes, $parsed, $ok)
             );
         }
     }

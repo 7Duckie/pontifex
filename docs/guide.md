@@ -466,7 +466,15 @@ wp pontifex export --output=/tmp/backup.wpmig --encrypt
 ```
 
 It asks for a passphrase twice, without showing it. Anyone with the file needs
-that passphrase to read anything in it.
+that passphrase to read your files or your database.
+
+**It does not hide the list of what is in the backup.** The file names, their
+sizes, and your site's address stay readable without the passphrase — that is
+deliberate, because it is how a backup can be identified and checked without
+being unlocked first. So encryption protects the contents of your site, not the
+fact that a particular plugin, theme or folder exists in it. If the names
+themselves are sensitive, keep the `.wpmig` file somewhere private rather than
+relying on the passphrase to hide them.
 
 **There is no recovery. None.** Lose the passphrase and the backup is
 permanently unreadable — there is no master key and no reset. Put it in a
