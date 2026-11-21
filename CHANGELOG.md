@@ -16,6 +16,25 @@ v0.0.x decision log for the reasoning.
 
 ### Fixed
 
+- **A restore onto a server that lacks the backup's collation now says so up
+  front.** A backup records the collation (the text sorting rule) its database
+  was using. Restoring onto a database server that does not have it used to be
+  accepted by `verify`, then fail part-way through a restore with a raw database
+  error. `verify`, `import --dry-run` and a real restore now ask the database
+  first, before any entry is checked or restored, and name the collation: `verify`
+  reports it as "could not check" (nothing has been found wrong with the backup,
+  and nothing has been checked either), and a restore refuses with a message
+  saying the obstacle is the server's and one that has the collation can get
+  past it.
+
+  The check looks only at the collation the backup records for the database as
+  a whole. A table or column with its own collation records it only inside its
+  own definition, which is not read here, so one of those can still stop a
+  restore later. Your live tables are never at risk either way. This is narrower
+  than it may sound: it is not every MySQL 8 backup restored onto MariaDB, only
+  collations the destination does not have, such as the language-specific
+  `utf8mb4_ja_0900_as_cs`.
+
 - **A file with a very long name no longer stops a restore.** A restore writes
   each file to a temporary name beside it and then renames it into place, and
   that temporary name was the file's own name with 37 characters added. A file
