@@ -15,11 +15,13 @@ use Psr\Log\NullLogger;
 use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
+use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\ManifestEntry;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\InvalidRequest;
 
 /**
  * Drives a full restore from a Pontifex archive stream.
@@ -515,7 +517,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
-	 * @throws RuntimeException If the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
+	 * @throws RuntimeException If the passphrase of an encrypted archive is wrong (an InvalidRequest), the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
@@ -538,6 +540,13 @@ final class RestoreRunner implements RestoreRunnerInterface {
 					(int) $this->limits->max_entry_count()
 				)
 			);
+		}
+
+		// An encrypted archive is first proven against the passphrase, before any
+		// entry is walked: hashing stored bytes never touches the key, so without
+		// this a wrong passphrase verified as sound and failed only at restore.
+		if ( $reader->header()->is_encrypted() ) {
+			$this->prove_passphrase( $archive_source, $entries );
 		}
 
 		$total_budget   = $this->limits->max_total_for_archive( $this->stream_size( $archive_source ) );
@@ -586,6 +595,68 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			if ( null !== $on_entry_verified ) {
 				$on_entry_verified( $done, $total );
 			}
+		}
+	}
+
+	/**
+	 * Prove the supplied passphrase by decrypting the cheapest entry in full.
+	 *
+	 * Verification hashes each entry's stored bytes and never decrypts, so a
+	 * key derived from a mistyped passphrase was never exercised and the
+	 * archive reported sound. Reading one entry through
+	 * {@see EntryReader::read_entry()} does decrypt it, and the answer is
+	 * unambiguous: that method checks the record's SHA-256 against both the
+	 * bytes on disk and the manifest BEFORE it decrypts anything, so by the
+	 * time AES-GCM fails to authenticate, the stored bytes are exactly what
+	 * the writer produced and the only variable left is the key. (An archive
+	 * forged with recomputed hashes defeats that reasoning, but every hash in
+	 * the format is unkeyed, so only the signature can detect such a forgery —
+	 * a documented limitation, not one this check tries to close.)
+	 *
+	 * The smallest record is read; an empty-payload entry (a directory) still
+	 * authenticates the key, because GCM authenticates the entry header as
+	 * additional data and emits a tag even over empty plaintext. Anything
+	 * other than a failed decryption — a hash mismatch, a host limit —
+	 * propagates unchanged, so real corruption is never misreported here.
+	 *
+	 * @param resource                  $archive_source A seekable, readable stream containing a Pontifex archive.
+	 * @param array<int, ManifestEntry> $entries        The manifest's entries.
+	 * @throws InvalidRequest If the entry's hashes match but it will not decrypt: the passphrase is wrong.
+	 * @throws RuntimeException If reading the entry fails for any other reason.
+	 */
+	private function prove_passphrase( $archive_source, array $entries ): void {
+		$cheapest = null;
+		foreach ( $entries as $manifest_entry ) {
+			if ( null === $cheapest || $manifest_entry->length() < $cheapest->length() ) {
+				$cheapest = $manifest_entry;
+			}
+		}
+		if ( null === $cheapest ) {
+			return;
+		}
+
+		try {
+			$this->entry_reader->read_entry(
+				$archive_source,
+				$cheapest,
+				$this->limits->max_entry_bytes(),
+				null,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
+		} catch ( RuntimeException $error ) {
+			// The chained CipherException is the signal: EntryReader::decrypt_then_decompress()
+			// is the only place that wraps one. A second wrapping site would need this
+			// check revisited.
+			if ( $error->getPrevious() instanceof CipherException ) {
+				throw new InvalidRequest(
+					'The passphrase is wrong: it does not unlock this encrypted backup. The backup has not been found damaged — try again with the correct passphrase.',
+					0,
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $error is the reader's exception, chained as the previous exception for diagnostics; not HTML output.
+					$error
+				);
+			}
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Rethrowing the reader's own exception unchanged; not HTML output.
+			throw $error;
 		}
 	}
 

@@ -31,6 +31,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -423,6 +424,50 @@ final class InvokeBranchesTest extends TestCase {
 		foreach ( $captured_logs as $line ) {
 			$this->assertStringNotContainsStringIgnoringCase( 'broken', $line, 'A could-not-check outcome must never use the word "broken".' );
 		}
+	}
+
+	/**
+	 * An InvalidRequest from the verify walk is an operator error, never the broken verdict.
+	 *
+	 * A mistyped passphrase says nothing about the archive. It must exit through
+	 * WP_CLI::error, like a bad key file, and must neither log the archive as
+	 * not sound nor halt through the broken-verdict path.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_invalid_request_exits_via_wp_cli_error_not_the_broken_verdict(): void {
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_PUBLIC_KEY' )->andReturn( false );
+		$wordpress_context = Mockery::mock( WordPressContext::class );
+
+		$restore_runner = Mockery::mock( RestoreRunnerInterface::class );
+		$restore_runner
+			->shouldReceive( 'verify' )
+			->once()
+			->andThrow( new InvalidRequest( 'The passphrase is wrong: it does not unlock this encrypted backup.' ) );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldReceive( 'error' )->never();
+		$logger->shouldReceive( 'warning' )->once();
+
+		$captured_logs = array();
+		$wp_cli        = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes()->andReturnUsing(
+			function ( string $message ) use ( &$captured_logs ): void {
+				$captured_logs[] = $message;
+			}
+		);
+		$wp_cli->shouldReceive( 'error' )->once()->with( Mockery::pattern( '/passphrase is wrong/' ) );
+		$wp_cli->shouldReceive( 'halt' )->never();
+
+		$command = new VerifyCommand( $environment, $wordpress_context, $restore_runner, $logger, new NullProgressBar() );
+		$command(
+			array( $this->temp_archive_path ),
+			array()
+		);
+
+		$this->assertSame( array(), $captured_logs, 'No verdict of any kind — sound, broken or refused — may be printed.' );
 	}
 
 	/**
