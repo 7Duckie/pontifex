@@ -25,6 +25,7 @@ use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
@@ -34,6 +35,7 @@ use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
@@ -218,12 +220,13 @@ final class RestoreRunnerTest extends TestCase {
 	/**
 	 * Build an archive in memory from the given EntryPlan list and return a stream of its bytes.
 	 *
-	 * @param EntryPlan[] $plans The plans to include.
+	 * @param EntryPlan[]     $plans      The plans to include.
+	 * @param Provenance|null $provenance Optional provenance; the sample one when null.
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
-	private static function build_archive_stream( array $plans ) {
+	private static function build_archive_stream( array $plans, ?Provenance $provenance = null ) {
 		$dest = self::memory_stream();
-		self::make_archive_writer()->write_archive( self::sample_provenance(), $plans, $dest );
+		self::make_archive_writer()->write_archive( $provenance ?? self::sample_provenance(), $plans, $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
 		rewind( $dest );
 		return $dest;
@@ -1765,14 +1768,15 @@ final class RestoreRunnerTest extends TestCase {
 	/**
 	 * Build a RestoreRunner whose reader holds the given key.
 	 *
-	 * @param string $key The key the reader decrypts with.
+	 * @param string             $key The key the reader decrypts with.
+	 * @param FakeDbAdapter|null $db  Optional adapter; a fresh one when null.
 	 * @return RestoreRunner Ready to call verify() on.
 	 */
-	private function make_keyed_runner( string $key ): RestoreRunner {
+	private function make_keyed_runner( string $key, ?FakeDbAdapter $db = null ): RestoreRunner {
 		return new RestoreRunner(
 			new EntryReader( CodecRegistry::with_defaults(), new OpensslAesGcmCipher(), $key ),
 			new FileWriter( $this->fixture_root ),
-			new DatabaseWriter( new FakeDbAdapter() )
+			new DatabaseWriter( $db ?? new FakeDbAdapter() )
 		);
 	}
 
@@ -1869,6 +1873,31 @@ final class RestoreRunnerTest extends TestCase {
 	}
 
 	/**
+	 * A wrong passphrase is reported before the collation check, so no claim is made about an unread archive.
+	 *
+	 * The collation refusal speaks about the backup's restorability; on an encrypted
+	 * archive nothing of the payload has been read until the passphrase is proven.
+	 *
+	 * @return void
+	 */
+	public function test_verify_proves_the_passphrase_before_checking_the_collation(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_unicode_520_ci' );
+
+		try {
+			$this->make_keyed_runner( self::wrong_key(), $db )->verify( self::memory_stream( self::build_encrypted_archive_bytes() ) );
+			$this->fail( 'A wrong passphrase must not verify.' );
+		} catch ( InvalidRequest $e ) {
+			$this->assertStringContainsStringIgnoringCase( 'passphrase', $e->getMessage() );
+		}
+
+		$this->assertSame( array(), $db->collation_queries(), 'The collation must not be asked about until the passphrase is proven.' );
+
+		$this->expectException( HostCannotComply::class );
+		$this->make_keyed_runner( self::right_key(), $db )->verify( self::memory_stream( self::build_encrypted_archive_bytes() ) );
+	}
+
+	/**
 	 * The wrong passphrase is found before the per-entry walk begins.
 	 *
 	 * @return void
@@ -1946,5 +1975,128 @@ final class RestoreRunnerTest extends TestCase {
 				$this->assertStringContainsString( 'hash', $e->getMessage() );
 			}
 		}
+	}
+
+	/**
+	 * A provenance whose recorded database collation is the one given, with an optional scope.
+	 *
+	 * @param string     $collation The collation the archive records for its database.
+	 * @param Scope|null $scope     Optional scope; null records none, as an older archive does.
+	 * @return Provenance A valid provenance instance.
+	 */
+	private static function provenance_with_collation( string $collation, ?Scope $scope = null ): Provenance {
+		return new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			$collation,
+			new ExporterInfo( 'pontifex', '0.1.0' ),
+			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			null,
+			$scope
+		);
+	}
+
+	/**
+	 * An archive carrying one db_chunk, recording the given database collation.
+	 *
+	 * @param string           $collation The recorded collation.
+	 * @param Scope|null       $scope     Optional recorded scope.
+	 * @param EntryPlan[]|null $plans     Optional entries; one db_chunk when null.
+	 * @return resource A readable, seekable archive stream.
+	 */
+	private static function archive_recording_collation( string $collation, ?Scope $scope = null, ?array $plans = null ) {
+		$plans = $plans ?? array( self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+		return self::build_archive_stream( $plans, self::provenance_with_collation( $collation, $scope ) );
+	}
+
+	/**
+	 * A supported recorded collation changes nothing: the restore runs and the server was asked once.
+	 *
+	 * @return void
+	 */
+	public function test_restore_accepts_a_supported_recorded_collation(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+
+		$runner->restore( self::archive_recording_collation( 'utf8mb4_unicode_520_ci' ) );
+
+		$this->assertSame( array( 'utf8mb4_unicode_520_ci' ), $db->collation_queries() );
+		$this->assertNotSame( array(), $db->executed_statements(), 'A supported collation must leave the replay running.' );
+	}
+
+	/**
+	 * A restore refuses a recorded collation this server lacks, as a host problem naming it, before touching anything.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_an_unsupported_recorded_collation_before_the_walk(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner   = $this->make_runner( $db );
+		$progress = 0;
+
+		try {
+			$runner->restore(
+				self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', null, array( self::file_plan( 'note.txt', 'hello' ), self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) ) ),
+				static function () use ( &$progress ): void {
+					++$progress;
+				}
+			);
+			$this->fail( 'A restore must refuse a collation this server does not have.' );
+		} catch ( HostCannotComply $refusal ) {
+			$this->assertStringContainsString( 'utf8mb4_ja_0900_as_cs', $refusal->getMessage() );
+		}
+
+		$this->assertSame( 0, $progress, 'The refusal must land before the walk reads a single entry.' );
+		$this->assertSame( array(), $db->executed_statements(), 'No statement may run once the collation is refused.' );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/note.txt', 'No file may be written once the collation is refused.' );
+	}
+
+	/**
+	 * Verify refuses the same archive the same way, so it cannot vouch for what a restore will not honour.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_an_unsupported_recorded_collation_before_the_walk(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner   = $this->make_runner( $db );
+		$progress = 0;
+
+		try {
+			$runner->verify(
+				self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs' ),
+				static function () use ( &$progress ): void {
+					++$progress;
+				}
+			);
+			$this->fail( 'Verify must refuse a collation this server does not have.' );
+		} catch ( HostCannotComply $refusal ) {
+			$this->assertStringContainsString( 'utf8mb4_ja_0900_as_cs', $refusal->getMessage() );
+		}
+
+		$this->assertSame( 0, $progress, 'The refusal must land before the walk reads a single entry.' );
+	}
+
+	/**
+	 * A files-only archive has no database half, so the server is never asked about its collation.
+	 *
+	 * @return void
+	 */
+	public function test_a_files_only_archive_is_never_checked_for_collation(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner = $this->make_runner( $db );
+		$scope  = Scope::files_only( array() );
+
+		// Each archive needs its own plan: building one consumes the plan's stream.
+		$runner->verify( self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', $scope, array( self::file_plan( 'note.txt', 'hello' ) ) ) );
+		$runner->restore( self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', $scope, array( self::file_plan( 'note.txt', 'hello' ) ) ) );
+
+		$this->assertSame( array(), $db->collation_queries(), 'A files-only archive must never put the question to the database.' );
+		$this->assertFileExists( $this->fixture_root . '/note.txt' );
 	}
 }

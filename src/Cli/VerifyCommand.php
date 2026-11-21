@@ -895,7 +895,7 @@ final class VerifyCommand {
 			)
 		);
 		WP_CLI::log(
-			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly.', 'pontifex' )
+			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and once it is fixed the same archive should check cleanly.', 'pontifex' )
 		);
 	}
 

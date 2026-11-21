@@ -872,6 +872,40 @@ final class WpdbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Whether this server has a collation of this name.
+	 *
+	 * Reads the server's whole collation list (`SHOW COLLATION`, a few hundred rows, once
+	 * per restore) and looks for the name in it, case-insensitively, as MySQL itself does.
+	 * It deliberately does not use `LIKE` to ask for one name: `$wpdb->get_col()` returns
+	 * an empty array, not `false`, when its query fails, and `$wpdb->last_error` is left
+	 * empty when errors are suppressed (`suppress_errors`, which WordPress turns on for
+	 * many operations), so a failed query is indistinguishable from "no such collation".
+	 * Every MySQL and MariaDB server has collations, so an EMPTY list is a failed query,
+	 * never a true answer — the same positive control {@see \Pontifex\Database\HardenedTableListing}
+	 * uses — and it answers true: nothing was learned, and refusing a restore over a
+	 * question that failed would tell an operator their server lacks a collation it has.
+	 * The staged CREATE TABLE stays the arbiter (see {@see DatabaseAdapter::collation_supported()}).
+	 * Do not "optimise" this back into a single-name lookup.
+	 *
+	 * @param string $collation The collation name to look for.
+	 * @return bool True when the server has this collation, or could not be asked.
+	 */
+	public function collation_supported( string $collation ): bool {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A static statement with no inputs; a restore preflight reads the server's own live collation list, so caching does not apply.
+		$names = $this->wpdb->get_col( 'SHOW COLLATION' );
+		if ( ! is_array( $names ) || array() === $names ) {
+			return true;
+		}
+		$wanted = strtolower( $collation );
+		foreach ( $names as $name ) {
+			if ( is_string( $name ) && strtolower( $name ) === $wanted ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Read the connection's own SESSION sql_mode.
 	 *
 	 * @return string|null The SESSION sql_mode; null if it could not be read.

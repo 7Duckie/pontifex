@@ -14,6 +14,7 @@ use RuntimeException;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Database\RestorableTableTypes;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Manifest\DatabaseAdapter;
 use Pontifex\Manifest\SqlSpanScanner;
 
@@ -319,6 +320,53 @@ final class DatabaseWriter {
 	 * @var bool
 	 */
 	private bool $backslash_is_escape = true;
+
+	/**
+	 * Refuse, before any work, a backup whose recorded database collation this server lacks.
+	 *
+	 * An archive records one collation for its database as a whole
+	 * ({@see \Pontifex\Archive\Format\Provenance::db_collation()}), but a restore never
+	 * used to read it: each table's own collation travels inside the verbatim
+	 * `CREATE TABLE` in its db_chunk, so a server without that collation only
+	 * found out when the staged `CREATE` failed part-way through, as a raw
+	 * database error. Live tables were never at risk (ADR 0009) — the restore
+	 * simply failed late and confusingly. This asks the server up front instead.
+	 *
+	 * What it inspects is deliberately narrow: ONLY the collation recorded for the
+	 * database as a whole. A table or column carrying its own collation says so
+	 * only inside its `CREATE TABLE` text, and reading that would mean decoding
+	 * every chunk and parsing `COLLATE` out of each statement. So a per-table
+	 * collation this server lacks still fails during the restore, as before.
+	 *
+	 * An empty collation is nothing to check. It is HostCannotComply because the
+	 * backup is undamaged and the server is the fixable problem — verify reports it
+	 * beside the verdict rather than as it. A name that is not a plain identifier
+	 * is a different matter: no real server has one, so it is ArchiveNotTrustworthy
+	 * and is never echoed back or sent to the adapter.
+	 *
+	 * @param string $recorded_collation The collation the archive records for its database as a whole; '' means none recorded.
+	 * @return void
+	 * @throws ArchiveNotTrustworthy If the recorded collation is not a plain name.
+	 * @throws HostCannotComply      If this server does not have the recorded collation.
+	 */
+	public function assert_recorded_database_collation_is_available( string $recorded_collation ): void {
+		if ( '' === $recorded_collation ) {
+			return;
+		}
+		if ( 1 !== preg_match( '/^[A-Za-z0-9_]+$/', $recorded_collation ) ) {
+			throw new ArchiveNotTrustworthy( 'This backup records a database collation that is not a valid collation name, so it is refused.' );
+		}
+		if ( $this->adapter->collation_supported( $recorded_collation ) ) {
+			return;
+		}
+		throw new HostCannotComply(
+			sprintf(
+				'This backup records its database as using the collation "%s", which this server\'s database does not have, so it cannot be restored here. The obstacle is this server\'s rather than the backup\'s, and a database server that supports that collation can get past it. This check looked only at the collation the backup records for the database as a whole, so a single table with its own, different collation could still stop a restore later.',
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $recorded_collation matched a plain-identifier pattern above and is reported verbatim for diagnostic context; exception path, not HTML output.
+				$recorded_collation
+			)
+		);
+	}
 
 	/**
 	 * Reset for a new restore and sweep leftovers from a crashed earlier run.

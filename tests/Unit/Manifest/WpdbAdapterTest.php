@@ -737,6 +737,49 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
+	 * A collation in the server's list is supported, whatever its letter case.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_finds_a_listed_collation_case_insensitively(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'get_col' )->willReturn( array( 'utf8mb4_general_ci', 'utf8mb4_unicode_520_ci' ) );
+		$adapter = new WpdbAdapter( $wpdb );
+
+		$this->assertTrue( $adapter->collation_supported( 'utf8mb4_unicode_520_ci' ) );
+		$this->assertTrue( $adapter->collation_supported( 'UTF8MB4_GENERAL_CI' ) );
+	}
+
+	/**
+	 * A non-empty list that lacks the name means the server genuinely lacks the collation.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_reports_false_when_the_list_lacks_the_name(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'get_col' )->willReturn( array( 'utf8mb4_general_ci', 'utf8mb4_unicode_520_ci' ) );
+
+		$this->assertFalse( ( new WpdbAdapter( $wpdb ) )->collation_supported( 'utf8mb4_ja_0900_as_cs' ) );
+	}
+
+	/**
+	 * An EMPTY list is a failed query, never an answer, so it must not refuse.
+	 *
+	 * The get_col() call returns an empty array on failure and last_error is empty when errors are
+	 * suppressed, so both failure signals can be silent at once. No real server has no
+	 * collations, so empty means "could not tell" and must answer true.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_does_not_refuse_on_an_empty_list(): void {
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = '';
+		$wpdb->method( 'get_col' )->willReturn( array() );
+
+		$this->assertTrue( ( new WpdbAdapter( $wpdb ) )->collation_supported( 'utf8mb4_unicode_520_ci' ) );
+	}
+
+	/**
 	 * The prefix listing must return the matching names, alphabetised.
 	 *
 	 * @return void

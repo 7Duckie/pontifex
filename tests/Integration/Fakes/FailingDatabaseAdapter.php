@@ -214,6 +214,16 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	/**
 	 * Delegate to the real adapter.
 	 *
+	 * @param string $collation The collation name to look for.
+	 * @return bool True when the server has this collation.
+	 */
+	public function collation_supported( string $collation ): bool {
+		return $this->inner->collation_supported( $collation );
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
 	 * @return string|null The SESSION sql_mode; null if it could not be read.
 	 */
 	public function sql_mode(): ?string {
