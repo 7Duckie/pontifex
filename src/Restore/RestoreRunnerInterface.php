@@ -11,6 +11,7 @@ namespace Pontifex\Restore;
 
 use InvalidArgumentException;
 use RuntimeException;
+use Pontifex\Exception\InvalidRequest;
 
 /**
  * Contract for a full restore from a Pontifex archive stream.
@@ -66,6 +67,7 @@ interface RestoreRunnerInterface {
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback called as `( int $bytes ): void` with each chunk's byte count as an entry streams, so a caller can report progress within a large entry.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource.
+	 * @throws InvalidRequest           If the archive is encrypted and the passphrase supplied is wrong.
 	 * @throws RuntimeException         If the archive is malformed, declares too many entries, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void;

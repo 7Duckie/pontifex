@@ -716,6 +716,21 @@ cannot be opened. Not by you, not by anyone.
 one, and a tool that skipped the check would produce plausible-looking rubbish
 and write it over your live site.
 
+### "the passphrase is wrong: it does not unlock this encrypted backup"
+
+**Your typing, not your backup. Nothing is damaged. Nothing has been changed.**
+
+**What happened.** `verify` checks the passphrase before anything else, by
+unlocking one entry. Every entry's fingerprint is checked before it is
+unlocked, so by the time unlocking fails the bytes are known to be exactly what
+was written. That leaves one explanation: the passphrase. This message is
+certain, which is why it differs from the restore-time one above, which has to
+allow for altered data.
+
+**What to do.** Run `verify` again and retype the passphrase, watching for a
+trailing space, a smart quote or a different keyboard layout. The backup is
+intact; do not delete it or fetch another copy.
+
 ### "entry hash does not match" / "the entry has been tampered with or is corrupt"
 
 **Protecting you. Never bypass this.**

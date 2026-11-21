@@ -65,6 +65,24 @@ v0.0.x decision log for the reasoning.
   the same reader that would do the unpacking, so the answer cannot drift from
   what a restore would actually do.
 
+- **Checking an encrypted backup now proves the passphrase rather than assuming
+  it.** Checking reads every entry's fingerprint over the stored bytes and
+  never unlocks anything, so a mistyped passphrase was never put to the test:
+  the backup was reported sound, and the restore then failed on the first entry
+  it tried to unlock.
+
+  Verify now unlocks one entry — the smallest in the backup — before it starts,
+  and says plainly that the passphrase is wrong when it will not open. It can
+  say so with certainty rather than hedging, because each entry's fingerprint
+  is checked against both the file and the manifest before anything is
+  unlocked: if both match and the entry still will not open, the bytes are
+  exactly as they were written and the only thing left is the passphrase.
+
+  A wrong passphrase is reported as a mistake to correct, never as a damaged
+  backup — being told a good backup is broken is the one message capable of
+  talking somebody out of it. Genuine damage is still reported as damage, and
+  an unencrypted backup is checked exactly as it was before.
+
 ## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
 
 ### Security
