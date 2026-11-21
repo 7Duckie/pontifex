@@ -450,7 +450,7 @@ final class EntryReader {
 	 * reports progress mid-entry through the optional callback, so a single large
 	 * entry no longer blocks the walk.
 	 *
-	 * Before v1.1.1 the two budget parameters below could not both be honoured
+	 * Before v1.2.0 the two budget parameters below could not both be honoured
 	 * correctly: this method took a single $max_decoded_bytes that the caller
 	 * ({@see \Pontifex\Restore\RestoreRunner::verify()}) filled with the
 	 * MEMORY-derived budget, gated on `! streams_decoded_payload(...)` — the
@@ -931,7 +931,7 @@ final class EntryReader {
 	 * it no longer matters which a caller reads.
 	 *
 	 * Raised as {@see ArchiveNotTrustworthy} rather than a bare RuntimeException
-	 * — this was, until v1.1.1, the only structural check in this reader
+	 * — this was, until v1.2.0, the only structural check in this reader
 	 * outside the project's exception taxonomy (ADR 0022), so nothing could
 	 * branch on it specifically. The verdict this produces stays "broken",
 	 * which is correct for a tampered archive; only the throw's type changed.

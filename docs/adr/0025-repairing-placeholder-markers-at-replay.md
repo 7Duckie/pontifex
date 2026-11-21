@@ -1,6 +1,6 @@
 # 0025 — a restore repairs the placeholder markers older archives carry
 
-- **Status:** Accepted, 2026-10-29. Implemented on `dev`; not yet released.
+- **Status:** Accepted, 2026-10-29. Implemented and shipped in v1.2.0.
 - **Deciders:** 7Duckie.
 
 ## Context
