@@ -85,6 +85,13 @@ final class WpdbAdapter implements DatabaseAdapter {
 	private array $order_columns_are_primary_key = array();
 
 	/**
+	 * The views the latest list_tables() call left out, by name.
+	 *
+	 * @var string[]
+	 */
+	private array $excluded_views = array();
+
+	/**
 	 * Construct a WpdbAdapter around an existing wpdb instance.
 	 *
 	 * @param wpdb $wpdb The WordPress database object, typically the global $wpdb.
@@ -99,27 +106,33 @@ final class WpdbAdapter implements DatabaseAdapter {
 	 * Queries SHOW FULL TABLES LIKE '{prefix}%' so unrelated tables
 	 * sharing the same database (e.g. analytics, mailer queues) are
 	 * not pulled in. Views are left out, because a restore cannot
-	 * recreate one; see {@see self::list_unrestorable_tables()}.
+	 * recreate one; their names are kept from this same listing and
+	 * returned by {@see self::excluded_views()}.
 	 *
 	 * @return string[] Alphabetically sorted table names.
 	 * @throws RuntimeException If $wpdb signals a query error.
 	 */
 	public function list_tables(): array {
-		return $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
+		$excluded = array();
+		$tables   = $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter', $excluded );
+
+		$this->excluded_views = $excluded;
+		return $tables;
 	}
 
 	/**
-	 * Name the prefixed database objects that {@see self::list_tables()} leaves out.
+	 * Name the prefixed database objects that the latest {@see self::list_tables()} left out.
 	 *
 	 * These are the views a backup deliberately omits: a view stores no rows of its own, and
-	 * a restore cannot recreate one. Not part of {@see DatabaseAdapter}; it exists so the
-	 * export command can tell the operator what was left out. Runs the listing query again.
+	 * a restore cannot recreate one. The names come from the listing list_tables() already
+	 * read, so this asks the database nothing: a second look could disagree with the first,
+	 * and the dump runs on a snapshot connection so that every read agrees. Empty until
+	 * list_tables() has run, and replaced (never added to) by each later call to it.
 	 *
 	 * @return string[] Alphabetically sorted names; empty when nothing was left out.
-	 * @throws RuntimeException If $wpdb signals a query error, or returns no tables.
 	 */
-	public function list_unrestorable_tables(): array {
-		return $this->list_unrestorable_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
+	public function excluded_views(): array {
+		return $this->excluded_views;
 	}
 
 	/**

@@ -204,6 +204,66 @@ final class BackupControllerTest extends TestCase {
 		);
 	}
 
+	// -------------------------------------------------------------------------
+	// Database views left out of the backup.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A backup that left database views out says so in its success response and its log.
+	 *
+	 * The builder the controller is given is wrapped in the scan-progress decorator
+	 * before the runner sees it, so this also proves the names survive that wrapper:
+	 * a decorator that dropped them would leave the response empty.
+	 *
+	 * @return void
+	 */
+	public function test_create_reports_the_views_it_left_out(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$logger  = Mockery::spy( LoggerInterface::class );
+		$builder = $this->manifest_builder_returning(
+			array( $this->file_plan( 'wp-content/note.txt', "x\n" ) ),
+			array( 'wp_alpha_view', 'wp_zebra_view' )
+		);
+
+		$this->controller( $builder, $logger )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( array( 'wp_alpha_view', 'wp_zebra_view' ), $this->json['data']['excluded_views'] );
+		$summary = $this->json['data']['excluded_views_summary'];
+		$this->assertStringContainsString( '2 database views were left out on purpose', $summary );
+		$this->assertStringContainsString( 'wp_alpha_view, wp_zebra_view', $summary );
+		$this->assertStringContainsString( 'nothing but its definition is missing', $summary, 'The sentence must say what is and is not lost.' );
+
+		$logger->shouldHaveReceived( 'warning' )
+			->withArgs(
+				static fn ( $message, $context = array() ): bool => is_array( $context ) && array( 'wp_alpha_view', 'wp_zebra_view' ) === ( $context['views'] ?? null )
+			)
+			->once();
+	}
+
+	/**
+	 * A backup that left no view out reports none, and logs nothing about views.
+	 *
+	 * @return void
+	 */
+	public function test_create_is_silent_about_views_when_none_were_left_out(): void {
+		$this->authorise();
+		$this->stub_json();
+		$this->stub_transients();
+
+		$logger = Mockery::spy( LoggerInterface::class );
+
+		$this->controller( $this->manifest_builder_returning( array( $this->file_plan( 'wp-content/note.txt', "x\n" ) ) ), $logger )->create();
+
+		$this->assertTrue( $this->json['success'] );
+		$this->assertSame( array(), $this->json['data']['excluded_views'] );
+		$this->assertSame( '', $this->json['data']['excluded_views_summary'] );
+		$logger->shouldNotHaveReceived( 'warning' );
+	}
+
 	/**
 	 * The finished sentence format: "Exclusions: pattern (count), pattern
 	 * (count)." — every pattern included, even one whose count is 0.
@@ -511,6 +571,7 @@ final class BackupControllerTest extends TestCase {
 		// builder, including the tick that runs after finalising has already
 		// been reported — the real regression this test exists to catch.
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function ( string $root, ?callable $on_scan_progress = null ) use ( $plans ) {
 				if ( null !== $on_scan_progress ) {
@@ -879,6 +940,7 @@ final class BackupControllerTest extends TestCase {
 		$store->ensure_directory();
 
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function ( string $root, ?callable $on_scan ) use ( $store ) {
 				$store->request_cancel();
@@ -1064,6 +1126,7 @@ final class BackupControllerTest extends TestCase {
 			$this->file_plan( 'wp-content/b.txt', "beta\n" ),
 		);
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( $plans ) );
 
 		$this->controller( $builder )->create();
@@ -1820,12 +1883,14 @@ final class BackupControllerTest extends TestCase {
 	/**
 	 * A ManifestBuilder mock whose build() returns the given plans.
 	 *
-	 * @param array<int, EntryPlan> $plans The entry plans to return.
+	 * @param array<int, EntryPlan> $plans          The entry plans to return.
+	 * @param string[]              $excluded_views The views the builder reports as left out of its scan.
 	 * @return ManifestBuilderInterface&\Mockery\MockInterface
 	 */
-	private function manifest_builder_returning( array $plans ) {
+	private function manifest_builder_returning( array $plans, array $excluded_views = array() ) {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
 		$builder->shouldReceive( 'build' )->andReturn( ManifestStream::from_plans( $plans ) );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( $excluded_views );
 		return $builder;
 	}
 

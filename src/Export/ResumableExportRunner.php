@@ -161,6 +161,7 @@ final class ResumableExportRunner {
 			'files_changed'         => 0,
 			'media_type_unresolved' => 0,
 			'exclusion_matches'     => array(),
+			'excluded_views'        => array(),
 		);
 
 		return $this->job_store->create( Job::KIND_EXPORT, $payload, $now );
@@ -339,6 +340,13 @@ final class ResumableExportRunner {
 		// later save_progress() call this tick makes, even one triggered by
 		// the entry loop below rather than by either condition just checked.
 		$payload['exclusion_matches'] = $exclusion_matches;
+
+		// The views this tick's scan left out of the database listing, replaced like the
+		// match counts and for the same reason: every tick re-scans everything, so the last
+		// tick's answer is the true one. Read from the builder that did the scan, never
+		// from a second query, so the names persisted here are the ones the backup was
+		// actually built without. A files-only job's builder answers empty.
+		$payload['excluded_views'] = $builder->excluded_views();
 
 		if ( $total_bytes_changed || $exclusion_matches_changed ) {
 			$payload['total_bytes'] = $stream->estimated_bytes();

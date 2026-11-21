@@ -57,4 +57,16 @@ interface ManifestBuilderInterface {
 	 * @throws RuntimeException         If the build cannot complete (e.g. a scanner fails).
 	 */
 	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream;
+
+	/**
+	 * Name the database views the latest build() left out of the backup.
+	 *
+	 * A view stores no rows and a restore cannot recreate one, so a backup leaves each out
+	 * on purpose; this is how a caller learns which, from the same scan that decided what
+	 * the backup holds rather than from a second query. Empty before build() has run, and
+	 * empty for a build that does not capture the database.
+	 *
+	 * @return string[] View names in alphabetical order; empty when none were left out.
+	 */
+	public function excluded_views(): array;
 }

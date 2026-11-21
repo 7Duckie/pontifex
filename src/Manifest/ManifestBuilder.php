@@ -179,6 +179,19 @@ final class ManifestBuilder implements ManifestBuilderInterface {
 	}
 
 	/**
+	 * Name the database views the latest build() left out of the backup.
+	 *
+	 * Answered from the database scan that build() ran. A build that does not capture the
+	 * database (files-only) never scans it, so it answers empty rather than relaying
+	 * whatever the scanner last held.
+	 *
+	 * @return string[] View names in alphabetical order; empty when none were left out.
+	 */
+	public function excluded_views(): array {
+		return $this->include_database ? $this->database_scanner->excluded_views() : array();
+	}
+
+	/**
 	 * Refuse an assembled backup that captured no database.
 	 *
 	 * Every Pontifex backup contains the whole database, so a scan that produced no chunks

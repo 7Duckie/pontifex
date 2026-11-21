@@ -39,7 +39,6 @@ use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\ExclusionPattern;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
-use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\WordPress\RealWordPressContext;
 use Pontifex\WordPress\WordPressContext;
 use Pontifex\WordPress\WordPressRoot;
@@ -606,7 +605,7 @@ final class ExportCommand {
 				$this->print_media_type_warning( $result->media_type_unresolved_count() );
 				$this->print_exclusion_match_summary( $exclusion_rules->match_counts() );
 				if ( $include_database ) {
-					$this->print_excluded_view_warning();
+					$this->print_excluded_view_warning( $manifest_builder->excluded_views() );
 				}
 
 				$bytes_written = $result->bytes_written();
@@ -790,7 +789,9 @@ final class ExportCommand {
 			$media_type_unresolved = (int) ( $payload['media_type_unresolved'] ?? 0 );
 			// Absent on a job started before this counter existed (back-compat).
 			$exclusion_matches = (array) ( $payload['exclusion_matches'] ?? array() );
-			$entry_count       = count( $store->progress_log( $job->id() )->read_all() );
+			// Absent on a job started before the views were recorded (back-compat): none known.
+			$excluded_views = array_values( array_filter( (array) ( $payload['excluded_views'] ?? array() ), 'is_string' ) );
+			$entry_count    = count( $store->progress_log( $job->id() )->read_all() );
 			// Absent on a job started before the scope was recorded: it captured the database.
 			$job_scope         = null !== ( $payload['scope'] ?? null ) ? Scope::from_array( (array) $payload['scope'] ) : null;
 			$includes_database = null === $job_scope || $job_scope->includes_database();
@@ -838,7 +839,7 @@ final class ExportCommand {
 			$this->print_media_type_warning( $media_type_unresolved );
 			$this->print_exclusion_match_summary( $exclusion_matches );
 			if ( $includes_database ) {
-				$this->print_excluded_view_warning();
+				$this->print_excluded_view_warning( $excluded_views );
 			}
 			$this->print_summary( $output_path, $entry_count, $bytes_written );
 		} catch ( Throwable $error ) {
@@ -1401,31 +1402,22 @@ final class ExportCommand {
 	}
 
 	/**
-	 * Warn about database views the backup deliberately left out.
+	 * Warn about database views the backup left out, and record them in the log.
 	 *
 	 * The table listing leaves out every view, because a view stores no rows and a restore
 	 * cannot recreate one; a backup that carried it would verify sound and then fail partway
 	 * through a restore. The archive is therefore less complete than the site on purpose, so
 	 * each view is named in a warning and recorded in the log, never left silent.
 	 *
-	 * Asks the database for the views once, after the backup is written: the listing is not
-	 * handed up from the scan (which can run across several requests when resumable), and
-	 * this report must never fail a backup that already exists, so a failure to ask is
-	 * logged as a warning rather than raised.
+	 * The names are handed in by the scan that left the views out (the builder on a
+	 * one-shot export, the job payload on a resumable one), never fetched afresh: a second
+	 * query could disagree with the scan, and on the snapshot connection the dump reads
+	 * through it would not even be looking at the same database.
 	 *
+	 * @param string[] $views The names of the views the scan left out; empty when none.
 	 * @return void
 	 */
-	private function print_excluded_view_warning(): void {
-		try {
-			$views = ( new WpdbAdapter( $this->wordpress_context->wpdb_instance() ) )->list_unrestorable_tables();
-		} catch ( Throwable $error ) {
-			$this->logger->warning(
-				'Could not check whether any database views were left out of this backup.',
-				array( 'exception' => $error )
-			);
-			return;
-		}
-
+	private function print_excluded_view_warning( array $views ): void {
 		if ( array() === $views ) {
 			return;
 		}

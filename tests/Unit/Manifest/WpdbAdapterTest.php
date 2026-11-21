@@ -216,15 +216,18 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
-	 * The excluded views are retrievable by name, sorted.
+	 * The views left out are named from the listing list_tables() already read.
+	 *
+	 * The listing query runs exactly once: the names are a by-product of the one pass,
+	 * not a second look at a database that may since have changed.
 	 *
 	 * @return void
 	 */
-	public function test_list_unrestorable_tables_names_the_views_left_out(): void {
+	public function test_excluded_views_names_the_views_the_listing_left_out(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
 		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_results' )->willReturn(
+		$wpdb->expects( $this->once() )->method( 'get_results' )->willReturn(
 			array(
 				array( 'wp_options', 'BASE TABLE' ),
 				array( 'wp_zebra_view', 'VIEW' ),
@@ -233,24 +236,49 @@ final class WpdbAdapterTest extends TestCase {
 			)
 		);
 
-		$this->assertSame( array( 'wp_alpha_view', 'wp_zebra_view' ), ( new WpdbAdapter( $wpdb ) )->list_unrestorable_tables() );
+		$adapter = new WpdbAdapter( $wpdb );
+		$adapter->list_tables();
+
+		$this->assertSame( array( 'wp_alpha_view', 'wp_zebra_view' ), $adapter->excluded_views() );
 	}
 
 	/**
-	 * Naming the excluded views still refuses an empty raw result.
+	 * Before any listing has been read, no view has been left out.
+	 *
+	 * The method answers for the last listing and never queries, so it reports nothing
+	 * rather than guessing.
 	 *
 	 * @return void
 	 */
-	public function test_list_unrestorable_tables_refuses_an_empty_result(): void {
+	public function test_excluded_views_is_empty_before_any_listing(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->expects( $this->never() )->method( 'get_results' );
+
+		$this->assertSame( array(), ( new WpdbAdapter( $wpdb ) )->excluded_views() );
+	}
+
+	/**
+	 * Each listing replaces the last: a view dropped since is no longer reported.
+	 *
+	 * @return void
+	 */
+	public function test_excluded_views_reflects_only_the_latest_listing(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
 		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_results' )->willReturn( array() );
-		$wpdb->method( 'get_var' )->willReturn( null );
+		$wpdb->method( 'get_results' )->willReturnOnConsecutiveCalls(
+			array(
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_a_view', 'VIEW' ),
+			),
+			array( array( 'wp_options', 'BASE TABLE' ) )
+		);
 
-		$this->expectException( RuntimeException::class );
+		$adapter = new WpdbAdapter( $wpdb );
+		$adapter->list_tables();
+		$adapter->list_tables();
 
-		( new WpdbAdapter( $wpdb ) )->list_unrestorable_tables();
+		$this->assertSame( array(), $adapter->excluded_views() );
 	}
 
 	/**

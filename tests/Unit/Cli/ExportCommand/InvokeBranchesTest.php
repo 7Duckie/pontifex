@@ -9,8 +9,6 @@ declare(strict_types=1);
 
 namespace Pontifex\Tests\Unit\Cli\ExportCommand;
 
-require_once __DIR__ . '/../../Manifest/Fakes/WpdbStub.php';
-
 use Brain\Monkey\Functions;
 use Mockery;
 use Pontifex\Archive\Crypto\CipherException;
@@ -38,7 +36,6 @@ use Pontifex\WordPress\WordPressContext;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use RuntimeException;
-use wpdb;
 
 /**
  * Behavioural coverage of specific __invoke branches.
@@ -240,8 +237,6 @@ final class InvokeBranchesTest extends TestCase {
 
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->atLeast()->once();
-		// This context mock cannot answer the view check, so it logs that it could not look.
-		$logger->shouldReceive( 'warning' )->once()->with( Mockery::type( 'string' ), Mockery::type( 'array' ) );
 		$logger->shouldReceive( 'error' )->never();
 
 		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
@@ -313,6 +308,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wordpress_context = $this->build_wordpress_context_mock();
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder
 			->shouldReceive( 'build' )
 			->once()
@@ -351,6 +347,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wordpress_context = $this->build_wordpress_context_mock();
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder
 			->shouldReceive( 'build' )
 			->once()
@@ -411,6 +408,7 @@ final class InvokeBranchesTest extends TestCase {
 		);
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( array( $plan ) ) );
 
 		$warnings = array();
@@ -444,22 +442,17 @@ final class InvokeBranchesTest extends TestCase {
 	 *
 	 * A view stores no rows and a restore cannot recreate it, so the backup deliberately
 	 * leaves it out; that must never be silent, because the archive is less complete than
-	 * the site.
+	 * the site. The names come from the builder that did the scan, and the database is
+	 * not asked again: the context mock offers no connection, so a second look would
+	 * fail the test.
 	 *
 	 * @return void
 	 */
 	public function test_invoke_warns_naming_each_database_view_left_out(): void {
 		$environment       = $this->build_environment_mock();
 		$wordpress_context = $this->build_wordpress_context_mock();
-		$wordpress_context->shouldReceive( 'wpdb_instance' )->andReturn(
-			$this->wpdb_listing(
-				array(
-					array( 'wp_options', 'BASE TABLE' ),
-					array( 'wp_pontifex_probe_view', 'VIEW' ),
-				)
-			)
-		);
-		$manifest_builder = $this->build_manifest_builder_mock_returning_empty();
+		$wordpress_context->shouldNotReceive( 'wpdb_instance' );
+		$manifest_builder = $this->build_manifest_builder_mock_returning_empty( array( 'wp_pontifex_probe_view' ) );
 
 		$warnings = array();
 		$wp_cli   = Mockery::mock( 'alias:WP_CLI' );
@@ -499,14 +492,17 @@ final class InvokeBranchesTest extends TestCase {
 	public function test_invoke_says_nothing_about_views_when_there_are_none(): void {
 		$environment       = $this->build_environment_mock();
 		$wordpress_context = $this->build_wordpress_context_mock();
-		$wordpress_context->shouldReceive( 'wpdb_instance' )->andReturn( $this->wpdb_listing( array( array( 'wp_options', 'BASE TABLE' ) ) ) );
-		$manifest_builder = $this->build_manifest_builder_mock_returning_empty();
+		$manifest_builder  = $this->build_manifest_builder_mock_returning_empty();
 
 		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
 		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
 		$wp_cli->shouldNotReceive( 'warning' );
 
-		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldNotReceive( 'warning' );
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
 		$command(
 			array(),
 			array(
@@ -519,18 +515,35 @@ final class InvokeBranchesTest extends TestCase {
 	}
 
 	/**
-	 * Build a wpdb mock whose table listing returns the given name and type rows.
+	 * A files-only export is silent about views, whatever the builder might hold.
 	 *
-	 * @param array<int, array<int, string>> $rows The SHOW FULL TABLES rows, each name then type.
-	 * @return wpdb&\PHPUnit\Framework\MockObject\MockObject
+	 * A files-only backup never reads the database, so there is nothing it could have
+	 * left out; the command must not even ask the builder.
+	 *
+	 * @return void
 	 */
-	private function wpdb_listing( array $rows ) {
-		$mock         = $this->createMock( wpdb::class );
-		$mock->prefix = 'wp_';
-		$mock->method( 'esc_like' )->willReturnArgument( 0 );
-		$mock->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
-		$mock->method( 'get_results' )->willReturn( $rows );
-		return $mock;
+	public function test_invoke_says_nothing_about_views_on_a_files_only_export(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+		$manifest_builder  = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
+		$manifest_builder->shouldNotReceive( 'excluded_views' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'warning' );
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output'     => $this->temp_output_path,
+				'yes'        => true,
+				'files-only' => true,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_output_path );
 	}
 
 	/**
@@ -685,11 +698,13 @@ final class InvokeBranchesTest extends TestCase {
 	 * what bytes end up on disk, only that __invoke runs to
 	 * completion without invoking the branches under assertion.
 	 *
+	 * @param string[] $excluded_views The views the mock builder reports as left out.
 	 * @return ManifestBuilderInterface&\Mockery\MockInterface
 	 */
-	private function build_manifest_builder_mock_returning_empty() {
+	private function build_manifest_builder_mock_returning_empty( array $excluded_views = array() ) {
 		$mock = Mockery::mock( ManifestBuilderInterface::class );
 		$mock->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
+		$mock->shouldReceive( 'excluded_views' )->andReturn( $excluded_views );
 		return $mock;
 	}
 
@@ -915,8 +930,6 @@ final class InvokeBranchesTest extends TestCase {
 		$logger = Mockery::mock( LoggerInterface::class );
 		$logger->shouldReceive( 'info' )->with( 'Export complete.', Mockery::any() )->once()->andThrow( new RuntimeException( 'simulated post-write failure' ) );
 		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
-		// The view check cannot be answered here, and says so before the completion line fails.
-		$logger->shouldReceive( 'warning' )->once();
 		$logger->shouldReceive( 'error' )->once();
 
 		$printed = array();
