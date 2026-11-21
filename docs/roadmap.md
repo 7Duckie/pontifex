@@ -527,40 +527,6 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
-## v1.1.1 — Recovery undoes what the failed restore added
-
-A patch. Recovery after a failed import already claimed to put the site back to
-its state before the import; it now does.
-
-- **The claim was false, and provably so.** A restore is additive — it
-  overwrites and creates and removes nothing — so replaying the safety archive
-  restored every file that existed before while leaving behind every file the
-  failed import had created. The site was the original files merged with
-  whatever the failed import managed to write, and the operator was told it was
-  back to normal. The dangerous shape is restoring a backup that is not your own
-  current site: a file it introduced at a path your site never had ends up live
-  and unmentioned.
-- **Recovery now removes exactly what the failed restore created**, tracked by a
-  ledger of paths whose target did not exist before the write. Deliberately not
-  a difference against the safety archive — a live site writes uploads, caches
-  and logs throughout a restore, and a difference would delete those too.
-- **When it cannot account for everything it added** — a very large restore, or
-  a file that would not delete — it reports a merge rather than claiming a
-  revert, the same honesty the fatal-error path already showed.
-
-See [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
-
-### What is deliberately deferred
-
-- `wp pontifex rollback` keeps its additive behaviour. It makes no claim to
-  revert, and it has no ledger to work from — the run it is undoing may have
-  been another process, or days earlier — so it could only use the
-  set-difference rule ADR 0024 rejects.
-- Full file-side restore atomicity, deferred by
-  [ADR 0009](./adr/0009-atomic-staging-table-restore.md) as "a separate, later
-  arc", is still deferred. This makes recovery honest; it does not make the file
-  half of a restore transactional.
-
 ## v1.2.1 — A dependency advisory, and what encryption really covers
 
 A patch. One library update and a documentation correction; no source file
@@ -629,6 +595,20 @@ reserved for the Go reference reader.
   site's address after the restore had overwritten it, so it rewrote the old
   address to itself and reported success, leaving a migrated site serving the
   old domain and sending the operator to a login page on the old host.
+- **Recovery after a failed restore undoes what the restore added.** Recovery
+  already claimed to put the site back to its state before the import, and the
+  claim was false: a restore is additive — it overwrites and creates and removes
+  nothing — so replaying the safety archive restored every file that existed
+  before while leaving behind every file the failed import had created, and the
+  operator was told it was back to normal. The dangerous shape is restoring a
+  backup that is not your own current site: a file it introduced at a path your
+  site never had ends up live and unmentioned. It now removes exactly what the
+  failed restore created, tracked by a ledger of paths whose target did not
+  exist before the write rather than by differencing against the safety archive,
+  which would delete the uploads, caches and logs a live site writes throughout
+  a restore. When it cannot account for everything it added it reports a merge
+  rather than claiming a revert. See
+  [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
 - **Recovery after a failed restore holds the operation lock for all of its
   work**, the file cleanup included, rather than releasing it and then replaying
   the safety archive with nothing to stop a second process writing the same
@@ -646,6 +626,17 @@ findings of the three-round audit of v1.1.0 — among them a backup naming anoth
 tenant's table, retention deleting the newest backup rather than the oldest, a
 full disk leaving a guard file at zero bytes, and a fourteen-byte cycle in
 serialised data hanging a migration.
+
+### What is deliberately deferred
+
+- `wp pontifex rollback` keeps its additive behaviour. It makes no claim to
+  revert, and it has no ledger to work from — the run it is undoing may have
+  been another process, or days earlier — so it could only use the
+  set-difference rule ADR 0024 rejects.
+- Full file-side restore atomicity, deferred by
+  [ADR 0009](./adr/0009-atomic-staging-table-restore.md) as "a separate, later
+  arc", is still deferred. This makes recovery honest; it does not make the file
+  half of a restore transactional.
 
 ## v1.1.0 — Verify stops promising what a restore will not honour
 

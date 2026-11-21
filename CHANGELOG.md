@@ -122,7 +122,7 @@ v0.0.x decision log for the reasoning.
   accepts both, so both are still backed up exactly as before — the backup
   leaves out only what a restore would refuse.
 
-## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
+## [1.2.1] — 2026-11-20 — A dependency advisory, and what encryption really covers
 
 ### Security
 
@@ -196,6 +196,84 @@ v0.0.x decision log for the reasoning.
 - **Rollbacks are recorded in the transfer history**, so they appear in
   `wp pontifex stats`'s recent-transfers list alongside backups and restores.
   Previously a rollback left no trace there at all.
+
+### Changed
+
+- **An exclusion pattern written as a regex now only matches from the start
+  of the name — and this is a real behaviour change you may notice.** Only
+  the regex shape is affected (a pattern wrapped in forward slashes, like
+  `/\.log$/`); the other three shapes — an exact path, a glob such as
+  `*.log`, and a folder tree such as `path/**` — are already anchored by
+  their own meaning and are completely unchanged. If you had written a regex
+  to match a *suffix* — `/\.log$/`, to catch every file ending in `.log`
+  wherever it sits — **it now matches nothing at all**, because its match no
+  longer begins at position 0 of the name. Replace it with the glob
+  `*.log`, which does what you meant and is unaffected by this change.
+
+  This was anchored rather than refused on purpose. Refusing a pattern that
+  used to work would break a saved schedule the next time it ran
+  unattended, with nobody watching — the worst possible moment to discover
+  it. Anchoring it instead means the pattern simply stops catching anything
+  and the new match-count reporting below tells you so, quietly, on the
+  very next run.
+
+  **Pontifex's own curated defaults are unaffected.** They are not subject
+  to this anchoring at all, so the built-in `.git`-at-any-depth exclusion
+  keeps matching a `.git` folder wherever it sits in your site, exactly as
+  before.
+
+- **Pontifex now tells you how many things each exclusion pattern actually
+  matched**, on every surface that runs a backup: the `wp pontifex export`
+  summary, a resumable export's summary, the Backup screen's notice once a
+  backup finishes, and the log line a cron-driven scheduled backup writes.
+  A pattern that matched nothing now reports `0` rather than being left off
+  the list entirely — which is what makes a pattern that quietly ate a
+  table indistinguishable, until now, from one that correctly matched
+  nothing. One nuance worth knowing: a folder-tree pattern such as
+  `wp-content/cache/**` is counted as **one** match, however many thousands
+  of files sat underneath it, because the scanner prunes the whole folder
+  and never opens what is inside it to count them individually. Read the
+  number as "did this pattern do anything at all", not as a file count.
+
+- **The admin Backup screen has two exclusion boxes instead of one**, on
+  both the manual "Create a backup" section and the "Scheduled backups"
+  section: one for files, one for database tables. It previously had a
+  single box feeding both, which is the same shared-list problem the fix
+  above closes, now visible in the interface itself rather than only in
+  what you typed.
+
+- **`wp pontifex schedule set` gains `--exclude-table=<patterns>`**,
+  matching `export --exclude-table`, so a scheduled backup can leave out
+  database tables the same way a one-off export already could.
+  `wp pontifex schedule show` now prints both the file-exclusion and the
+  table-exclusion lists a scheduled backup will apply — it previously
+  printed neither, so what an unattended backup left out was invisible
+  until you went looking at the archive itself.
+
+- **`schedule set --exclude` or `--exclude-table` passed with no value at
+  all is now refused with an error**, instead of silently wiping the stored
+  list and reporting success as though nothing had changed. To clear a list
+  on purpose, pass an explicit empty value: `--exclude=`.
+
+- **A schedule saved before this change had one flat exclusion list; it is
+  now read as file patterns.** This is the safe direction to default it in:
+  if that one list had been silently excluding a database table, the table
+  now comes back into the backup rather than continuing to vanish from it.
+  Expect your next scheduled backup to be a little larger if that applied
+  to you.
+
+- **A backup interrupted part-way through its database half now asks you to
+  start again, rather than continuing.** The new bookmark that makes row
+  reading fast does not yet survive the process that created it, so a backup
+  resumed at that exact point cannot know where it had got to. Rather than
+  guess — which would re-read a table's first rows under a later batch's name,
+  duplicating some and dropping others — Pontifex stops and says so.
+
+  Two things limit when you would meet this. The database half **runs to
+  completion once it starts**, so an ordinary pause between stages never lands
+  inside it; only an outright kill, a host timeout or a crash does. And the
+  backup you are asked to redo is the one that just became dramatically
+  faster.
 
 ### Fixed
 
@@ -375,86 +453,6 @@ v0.0.x decision log for the reasoning.
   (and the screen's new table-exclusions box) can only ever match a bare
   table name. A pattern written for one can no longer reach the other, by
   construction, not by convention.
-
-### Changed
-
-- **An exclusion pattern written as a regex now only matches from the start
-  of the name — and this is a real behaviour change you may notice.** Only
-  the regex shape is affected (a pattern wrapped in forward slashes, like
-  `/\.log$/`); the other three shapes — an exact path, a glob such as
-  `*.log`, and a folder tree such as `path/**` — are already anchored by
-  their own meaning and are completely unchanged. If you had written a regex
-  to match a *suffix* — `/\.log$/`, to catch every file ending in `.log`
-  wherever it sits — **it now matches nothing at all**, because its match no
-  longer begins at position 0 of the name. Replace it with the glob
-  `*.log`, which does what you meant and is unaffected by this change.
-
-  This was anchored rather than refused on purpose. Refusing a pattern that
-  used to work would break a saved schedule the next time it ran
-  unattended, with nobody watching — the worst possible moment to discover
-  it. Anchoring it instead means the pattern simply stops catching anything
-  and the new match-count reporting below tells you so, quietly, on the
-  very next run.
-
-  **Pontifex's own curated defaults are unaffected.** They are not subject
-  to this anchoring at all, so the built-in `.git`-at-any-depth exclusion
-  keeps matching a `.git` folder wherever it sits in your site, exactly as
-  before.
-
-- **Pontifex now tells you how many things each exclusion pattern actually
-  matched**, on every surface that runs a backup: the `wp pontifex export`
-  summary, a resumable export's summary, the Backup screen's notice once a
-  backup finishes, and the log line a cron-driven scheduled backup writes.
-  A pattern that matched nothing now reports `0` rather than being left off
-  the list entirely — which is what makes a pattern that quietly ate a
-  table indistinguishable, until now, from one that correctly matched
-  nothing. One nuance worth knowing: a folder-tree pattern such as
-  `wp-content/cache/**` is counted as **one** match, however many thousands
-  of files sat underneath it, because the scanner prunes the whole folder
-  and never opens what is inside it to count them individually. Read the
-  number as "did this pattern do anything at all", not as a file count.
-
-- **The admin Backup screen has two exclusion boxes instead of one**, on
-  both the manual "Create a backup" section and the "Scheduled backups"
-  section: one for files, one for database tables. It previously had a
-  single box feeding both, which is the same shared-list problem the fix
-  above closes, now visible in the interface itself rather than only in
-  what you typed.
-
-- **`wp pontifex schedule set` gains `--exclude-table=<patterns>`**,
-  matching `export --exclude-table`, so a scheduled backup can leave out
-  database tables the same way a one-off export already could.
-  `wp pontifex schedule show` now prints both the file-exclusion and the
-  table-exclusion lists a scheduled backup will apply — it previously
-  printed neither, so what an unattended backup left out was invisible
-  until you went looking at the archive itself.
-
-- **`schedule set --exclude` or `--exclude-table` passed with no value at
-  all is now refused with an error**, instead of silently wiping the stored
-  list and reporting success as though nothing had changed. To clear a list
-  on purpose, pass an explicit empty value: `--exclude=`.
-
-- **A schedule saved before this change had one flat exclusion list; it is
-  now read as file patterns.** This is the safe direction to default it in:
-  if that one list had been silently excluding a database table, the table
-  now comes back into the backup rather than continuing to vanish from it.
-  Expect your next scheduled backup to be a little larger if that applied
-  to you.
-
-- **A backup interrupted part-way through its database half now asks you to
-  start again, rather than continuing.** The new bookmark that makes row
-  reading fast does not yet survive the process that created it, so a backup
-  resumed at that exact point cannot know where it had got to. Rather than
-  guess — which would re-read a table's first rows under a later batch's name,
-  duplicating some and dropping others — Pontifex stops and says so.
-
-  Two things limit when you would meet this. The database half **runs to
-  completion once it starts**, so an ordinary pause between stages never lands
-  inside it; only an outright kill, a host timeout or a crash does. And the
-  backup you are asked to redo is the one that just became dramatically
-  faster.
-
-### Fixed
 
 - **An interrupted download left a fragment under the backup's name, and then
   blocked its own retry.** Fetching a backup from your own server wrote

@@ -1,6 +1,6 @@
 # 0024 — recovery undoes what the restore added, by ledger rather than by difference
 
-- **Status:** Accepted, 2026-08-06. Implemented and shipped in v1.1.1. Amended
+- **Status:** Accepted, 2026-08-06. Implemented and shipped in v1.2.0. Amended
   2026-08-06 (implicitly created directories are recorded too, and a preserved
   path preserves the directories containing it — see Amendment).
 - **Deciders:** 7Duckie.
