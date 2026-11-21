@@ -13,7 +13,9 @@ use DateTimeImmutable;
 use DateTimeZone;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Pontifex\Archive\Codec\Codec;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\CodecUnavailableException;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
@@ -237,6 +239,7 @@ final class RestorePreflightTest extends TestCase {
 				RestorePreflight::CHECK_ENTRY_SIZE,
 				RestorePreflight::CHECK_ENTRY_MEMORY,
 				RestorePreflight::CHECK_PATH_LENGTH,
+				RestorePreflight::CHECK_CODEC_SUPPORT,
 			),
 			$report->checks_run()
 		);
@@ -273,8 +276,8 @@ final class RestorePreflightTest extends TestCase {
 	/**
 	 * An entry above the per-entry limit is a HOST finding, and the archive is not condemned.
 	 *
-	 * The archive is undamaged; this installation's policy refuses it, and one
-	 * configured with a higher limit would restore it.
+	 * The archive is undamaged; the limit is a property of this build, not of the
+	 * host, and no server setting changes it.
 	 *
 	 * @return void
 	 */
@@ -291,6 +294,8 @@ final class RestorePreflightTest extends TestCase {
 		$this->assertStringContainsString( 'wp-content/big.txt', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
 		$this->assertStringContainsString( '4,096', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
 		$this->assertStringContainsString( '1,000', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( 'limit this build of Pontifex applies to a single entry, on any host;', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( 'The backup is not damaged and does not need replacing — no server setting changes this ceiling.', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
 	}
 
 	/**
@@ -617,6 +622,147 @@ final class RestorePreflightTest extends TestCase {
 	// -------------------------------------------------------------------------
 	// Helpers.
 	// -------------------------------------------------------------------------
+
+	/**
+	 * A codec this host cannot decode is a HOST finding, never an archive one.
+	 *
+	 * Verify hashes stored bytes and never decodes, so without this check a zstd
+	 * backup is called sound on a host with no zstd extension and then fails to
+	 * restore. The registry here holds a codec whose decode() throws what the zstd
+	 * codec throws when its extension is missing.
+	 *
+	 * @return void
+	 */
+	public function test_a_codec_this_host_cannot_decode_is_a_host_finding(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_with_registry( $source, self::unavailable_codec( RawCodec::ID ) );
+
+		$this->assertContains( RestorePreflight::CHECK_CODEC_SUPPORT, $report->checks_run() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+		$this->assertStringContainsString( 'not damaged', $report->host_findings()[ RestorePreflight::CHECK_CODEC_SUPPORT ] );
+	}
+
+	/**
+	 * An ordinary archive runs the codec check and records nothing for it.
+	 *
+	 * @return void
+	 */
+	public function test_an_ordinary_archive_records_nothing_for_codec_support(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_for( $source );
+
+		$this->assertContains( RestorePreflight::CHECK_CODEC_SUPPORT, $report->checks_run() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+	}
+
+	/**
+	 * The codec check reads the manifest, so an unreadable header does not silence it.
+	 *
+	 * @return void
+	 */
+	public function test_the_codec_check_still_answers_when_an_entry_header_cannot_be_read(): void {
+		$real     = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+		$manifest = self::manifest_of( $real );
+		$empty    = self::memory_stream();
+
+		$registry = new CodecRegistry();
+		$registry->register( self::unavailable_codec( RawCodec::ID ) );
+		$preflight = new RestorePreflight(
+			new EntryReader( $registry ),
+			new FileWriter( $this->fixture_root )
+		);
+		$report    = $preflight->read_only_report( $empty, $manifest, null );
+
+		$this->assertArrayHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+	}
+
+	/**
+	 * Run the read-only report with one extra codec registered in place of the real one.
+	 *
+	 * @param resource $source The archive stream.
+	 * @param Codec    $codec  The codec to register in an otherwise empty registry.
+	 * @return PreflightReport
+	 */
+	private function report_with_registry( $source, Codec $codec ): PreflightReport {
+		$manifest = self::manifest_of( $source );
+		$scope    = self::scope_of( $source );
+		$registry = new CodecRegistry();
+		$registry->register( $codec );
+
+		$preflight = new RestorePreflight(
+			new EntryReader( $registry ),
+			new FileWriter( $this->fixture_root )
+		);
+
+		return $preflight->read_only_report( $source, $manifest, $scope );
+	}
+
+	/**
+	 * A codec whose decode() fails the way a missing PHP extension makes it fail.
+	 *
+	 * @param int $id The codec id to report.
+	 * @return Codec
+	 */
+	private static function unavailable_codec( int $id ): Codec {
+		return new class( $id ) implements Codec {
+			/**
+			 * The codec id this double reports.
+			 *
+			 * @var int
+			 */
+			private int $stub_id;
+
+			/**
+			 * Construct the double.
+			 *
+			 * @param int $id The codec id to report.
+			 */
+			public function __construct( int $id ) {
+				$this->stub_id = $id;
+			}
+
+			/**
+			 * Return the configured id.
+			 *
+			 * @return int
+			 */
+			public function id(): int {
+				return $this->stub_id;
+			}
+
+			/**
+			 * No-op encode.
+			 *
+			 * @param resource      $input   Ignored.
+			 * @param resource      $output  Ignored.
+			 * @param callable|null $on_read Ignored.
+			 * @return int Always zero.
+			 */
+			public function encode( $input, $output, ?callable $on_read = null ): int {
+				return 0;
+			}
+
+			/**
+			 * Always report the extension as missing.
+			 *
+			 * @param resource $input            Ignored.
+			 * @param resource $output           Ignored.
+			 * @param int|null $max_output_bytes Ignored.
+			 * @return never
+			 * @throws CodecUnavailableException Always.
+			 */
+			public function decode( $input, $output, ?int $max_output_bytes = null ): never {
+				throw new CodecUnavailableException( 'The required PHP extension is not loaded.' );
+			}
+		};
+	}
 
 	/**
 	 * Run the read-only report over an archive stream, rooted at the fixture.

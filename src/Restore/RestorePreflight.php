@@ -103,6 +103,13 @@ final class RestorePreflight {
 	public const CHECK_PATH_LENGTH = 'path_length';
 
 	/**
+	 * Name of the codec-support check, as it appears in a report.
+	 *
+	 * @var string
+	 */
+	public const CHECK_CODEC_SUPPORT = 'codec_support';
+
+	/**
 	 * The longest single path component, in bytes, this check will accept.
 	 *
 	 * 255 is the near-universal POSIX NAME_MAX: ext4, APFS and NTFS all use it. It
@@ -296,6 +303,15 @@ final class RestorePreflight {
 			$record( self::CHECK_PATH_LENGTH, $refusal );
 		}
 
+		// Reads the manifest alone, so it neither needs the header pass above nor
+		// is silenced when that pass failed.
+		$checks_run[] = self::CHECK_CODEC_SUPPORT;
+		try {
+			$this->assert_codecs_usable( $this->distinct_codec_ids( $manifest ) );
+		} catch ( Throwable $refusal ) {
+			$record( self::CHECK_CODEC_SUPPORT, $refusal );
+		}
+
 		return new PreflightReport( $checks_run, $archive_findings, $host_findings, $inconclusive );
 	}
 
@@ -404,14 +420,16 @@ final class RestorePreflight {
 	}
 
 	/**
-	 * Refuse an archive holding an entry whose decoded size exceeds this installation's per-entry limit.
+	 * Refuse an archive holding an entry whose decoded size exceeds this build's per-entry limit.
 	 *
 	 * The restore enforces that limit when it decodes every entry of every kind, so
-	 * an oversized database chunk is refused exactly as an oversized file is. It is
-	 * a HostCannotComply, deliberately and not an ArchiveNotTrustworthy: the archive
-	 * is undamaged, this installation's policy is what refuses it, and one
-	 * configured with a higher limit would restore it. Calling a good backup hostile
-	 * is the worst error this class can make.
+	 * an oversized database chunk is refused exactly as an oversized file is. The
+	 * limit is compiled into the build ({@see ArchiveLimits::defaults()}); no server
+	 * setting changes it. It is a HostCannotComply, deliberately and not an
+	 * ArchiveNotTrustworthy, because the archive is undamaged, and not a
+	 * BuildCannotComply only because PreflightReport::is_host_finding() matches
+	 * HostCannotComply alone. Calling a good backup hostile is the worst error this
+	 * class can make.
 	 *
 	 * @param array<int, array{label: string, path: string|null, size: int}> $entries Every entry, as measured by the shared header pass.
 	 * @return void
@@ -427,7 +445,7 @@ final class RestorePreflight {
 
 		$largest = self::largest_of( $over );
 		$message = sprintf(
-			'%s a decoded size above the %s-byte limit this installation applies to a single entry; the largest is %s, at %s bytes. The backup is not damaged: an installation configured with a higher limit would restore it.',
+			'%s a decoded size above the %s-byte limit this build of Pontifex applies to a single entry, on any host; the largest is %s, at %s bytes. The backup is not damaged and does not need replacing — no server setting changes this ceiling.',
 			self::count_phrase( count( $over ) ),
 			number_format( $limit ),
 			self::printable( $largest['label'] ),
@@ -442,7 +460,7 @@ final class RestorePreflight {
 	 *
 	 * Compares the same measured sizes as {@see self::assert_entry_sizes_within_limit()}
 	 * against a different limit, and is a separate check because the remedy differs:
-	 * that one is fixed by raising a configured limit, this one by giving the host more
+	 * that one has no remedy on the host, this one is fixed by giving the host more
 	 * memory. With no memory-derived budget there is nothing to compare against and it
 	 * returns without throwing, because the restore enforces no such cap either.
 	 *
@@ -510,6 +528,46 @@ final class RestorePreflight {
 		);
 		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain-text exception message; the archive-supplied parts pass through printable() first. Exception path, not HTML output.
 		throw new HostCannotComply( $message );
+	}
+
+	/**
+	 * Refuse an archive whose codecs this host cannot decode.
+	 *
+	 * Verify never decodes, so it cannot notice that a host lacks the PHP extension
+	 * an archive's compression needs; the restore would then fail at its first
+	 * decode. Each id is put to {@see EntryReader::assert_codec_usable()}, so the
+	 * answer is the one the restore itself would give, and the first refusal is
+	 * let out unchanged.
+	 *
+	 * @param int[] $codec_ids The distinct codec ids the archive uses.
+	 * @return void
+	 * @throws \Pontifex\Exception\HostCannotComply      If a codec's PHP extension is not loaded on this host.
+	 * @throws \Pontifex\Exception\ArchiveNotTrustworthy If a codec id is unknown or not registered.
+	 */
+	public function assert_codecs_usable( array $codec_ids ): void {
+		foreach ( $codec_ids as $codec_id ) {
+			$this->entry_reader->assert_codec_usable( $codec_id );
+		}
+	}
+
+	/**
+	 * Collect each distinct codec id the manifest records, once, in first-seen order.
+	 *
+	 * The manifest alone answers this: no stream, no header read, no I/O, so it
+	 * cannot fail and needs no inconclusive branch. Reading the manifest rather than
+	 * each entry's own on-disk codec id is correct, not a gap: the entry reader
+	 * already cross-checks the on-disk id against the manifest's on every read, so a
+	 * manifest that lies is refused at restore time as an archive problem.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return int[] The distinct codec ids.
+	 */
+	private function distinct_codec_ids( ArchiveManifest $manifest ): array {
+		$ids = array();
+		foreach ( $manifest->entries() as $manifest_entry ) {
+			$ids[ $manifest_entry->codec_id() ] = $manifest_entry->codec_id();
+		}
+		return array_values( $ids );
 	}
 
 	/**
