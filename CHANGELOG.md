@@ -83,6 +83,25 @@ v0.0.x decision log for the reasoning.
   talking somebody out of it. Genuine damage is still reported as damage, and
   an unencrypted backup is checked exactly as it was before.
 
+### Changed
+
+- **Database views are left out of a backup, and named when they are.** Some
+  plugins create a view: a saved query that behaves like a table but holds no
+  rows of its own. MySQL and MariaDB list views alongside tables, so every such
+  view was swept into the backup — and a restore then refused it partway
+  through, after it had already begun rebuilding the database. Checking the
+  backup called it sound throughout, so the first anyone knew was a restore
+  stopping halfway.
+
+  Views are now left out, and each one is named as the backup finishes, so
+  nothing is dropped quietly. Leaving them out loses no data: a view stores
+  only its own definition, and the tables it reads from are backed up as
+  normal. If you rely on a view, recreate it after a restore.
+
+  MariaDB sequences and system-versioned tables are **not** affected. A restore
+  accepts both, so both are still backed up exactly as before — the backup
+  leaves out only what a restore would refuse.
+
 ## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
 
 ### Security
