@@ -1232,4 +1232,112 @@ final class EntryReaderTest extends TestCase {
 			);
 		}
 	}
+
+	// -------------------------------------------------------------------------
+	// assert_codec_usable(): the question asked before a restore starts writing.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A codec whose extension is present is accepted quietly.
+	 *
+	 * Raw and gzip need nothing beyond core PHP, so they are always usable; the
+	 * encrypted variant of raw is judged by its compression byte alone.
+	 *
+	 * @return void
+	 */
+	public function test_assert_codec_usable_accepts_codecs_whose_extension_is_present(): void {
+		$reader = self::make_reader();
+
+		$reader->assert_codec_usable( RawCodec::ID );
+		$reader->assert_codec_usable( GzipCodec::ID );
+		$reader->assert_codec_usable( CodecId::with_aes_gcm( RawCodec::ID ) );
+
+		if ( extension_loaded( 'zstd' ) ) {
+			$reader->assert_codec_usable( 0x0002 );
+		}
+
+		$this->addToAssertionCount( 1 );
+	}
+
+	/**
+	 * A codec whose extension is absent is a HOST finding, in plain English.
+	 *
+	 * Forced with a real fake of the real condition: a registered codec whose
+	 * decode() throws the exception the zstd codec throws when ext-zstd is
+	 * missing. The message names the family, says the backup is undamaged, and
+	 * carries the codec id for support.
+	 *
+	 * @return void
+	 */
+	public function test_assert_codec_usable_refuses_an_absent_extension_as_host_cannot_comply(): void {
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( 0x0002, 'The zstd PHP extension (ext-zstd) is required for codec 0x0002 but is not loaded.', CodecUnavailableException::class ) );
+		$reader = new EntryReader( $registry );
+
+		try {
+			$reader->assert_codec_usable( 0x0002 );
+			$this->fail( 'assert_codec_usable() should have raised HostCannotComply.' );
+		} catch ( HostCannotComply $error ) {
+			$this->assertStringContainsString( 'zstd', $error->getMessage() );
+			$this->assertStringContainsString( '0x0002', $error->getMessage() );
+			$this->assertStringContainsString( 'not damaged', $error->getMessage() );
+			$this->assertStringNotContainsString( 'HostCannotComply', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * A codec failing for any reason other than a missing extension is not this host's fault.
+	 *
+	 * The probe reads an empty stream, so any other complaint is about the probe,
+	 * not the host; it must never condemn an archive.
+	 *
+	 * @return void
+	 */
+	public function test_assert_codec_usable_ignores_a_codec_failure_that_is_not_a_missing_extension(): void {
+		$registry = new CodecRegistry();
+		$registry->register( self::failing_codec( 0x0002, 'complaint about empty input' ) );
+		$reader = new EntryReader( $registry );
+
+		$reader->assert_codec_usable( 0x0002 );
+
+		$this->addToAssertionCount( 1 );
+	}
+
+	/**
+	 * An unregistered compression codec is refused exactly as read_entry() refuses it.
+	 *
+	 * @return void
+	 */
+	public function test_assert_codec_usable_refuses_an_unregistered_codec_like_read_entry(): void {
+		$reader = new EntryReader( new CodecRegistry() );
+
+		try {
+			$reader->assert_codec_usable( RawCodec::ID );
+			$this->fail( 'assert_codec_usable() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertSame( 'Compression codec 0x0000 (from codec id 0x0000) is not registered.', $error->getMessage() );
+		}
+
+		$fixture = self::write_file_entry_to_fixture( 'a.txt', 'data', RawCodec::ID );
+		try {
+			$reader->read_entry( $fixture[0], $fixture[1] );
+			$this->fail( 'read_entry() should have raised ArchiveNotTrustworthy.' );
+		} catch ( ArchiveNotTrustworthy $error ) {
+			$this->assertSame( 'Compression codec 0x0000 (from codec id 0x0000) is not registered.', $error->getMessage() );
+		}
+	}
+
+	/**
+	 * An unknown encryption family is refused exactly as read_entry() refuses it.
+	 *
+	 * @return void
+	 */
+	public function test_assert_codec_usable_refuses_an_unknown_encryption_family(): void {
+		$reader = self::make_reader();
+
+		$this->expectException( ArchiveNotTrustworthy::class );
+		$this->expectExceptionMessage( 'Unknown encryption family 0x0200 in codec id 0x0200.' );
+
+		$reader->assert_codec_usable( 0x0200 );
+	}
 }
