@@ -357,6 +357,11 @@
 				if ( res.data && res.data.exclusions_summary ) {
 					created = created + ' — ' + res.data.exclusions_summary;
 				}
+				// Likewise the database views the backup left out on purpose: a finished
+				// sentence from the server, shown in the same plain notice line.
+				if ( res.data && res.data.excluded_views_summary ) {
+					created = created + ' — ' + res.data.excluded_views_summary;
+				}
 				// Reloading while the browser reports itself offline would land on
 				// the browser's own error page and destroy this screen — and the
 				// notice with it. Show the verdict inline instead; the operator can

@@ -93,10 +93,11 @@ v0.0.x decision log for the reasoning.
   backup called it sound throughout, so the first anyone knew was a restore
   stopping halfway.
 
-  Views are now left out, and each one is named as the backup finishes, so
-  nothing is dropped quietly. Leaving them out loses no data: a view stores
-  only its own definition, and the tables it reads from are backed up as
-  normal. If you rely on a view, recreate it after a restore.
+  Views are now left out, and each one is named as the backup finishes —
+  on the command line, on the Backup screen, and in the log of a scheduled
+  backup — so nothing is dropped quietly. Leaving them out loses no data: a
+  view stores only its own definition, and the tables it reads from are
+  backed up as normal. If you rely on a view, recreate it after a restore.
 
   MariaDB sequences and system-versioned tables are **not** affected. A restore
   accepts both, so both are still backed up exactly as before — the backup

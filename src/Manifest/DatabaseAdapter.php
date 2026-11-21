@@ -43,6 +43,18 @@ interface DatabaseAdapter {
 	public function list_tables(): array;
 
 	/**
+	 * Name the prefixed database objects the latest list_tables() call left out.
+	 *
+	 * These are the views a backup deliberately omits: a view stores no rows, and a restore
+	 * cannot recreate one. The names come from the listing list_tables() already read and
+	 * this method asks the database nothing, so it is empty until list_tables() has run and
+	 * is replaced, never added to, by each later call to it.
+	 *
+	 * @return string[] Names in alphabetical order; empty when nothing was left out.
+	 */
+	public function excluded_views(): array;
+
+	/**
 	 * Return the number of rows in the given table.
 	 *
 	 * Used by DatabaseScanner to decide chunking — large tables are

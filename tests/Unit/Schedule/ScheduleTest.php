@@ -505,6 +505,7 @@ final class ScheduleTest extends TestCase {
 			new NullLogger(),
 			static function (): ManifestBuilderInterface {
 				$builder = Mockery::mock( ManifestBuilderInterface::class );
+				$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 				$builder->shouldReceive( 'build' )->andReturnUsing(
 					static function (): ManifestStream {
 						$contents = 'alpha';
@@ -533,6 +534,104 @@ final class ScheduleTest extends TestCase {
 
 		$this->assertFileExists( $this->content_dir . '/done.wpmig', 'The completed archive must be renamed into place.' );
 		$this->assertNull( $job_store->get( $job->id() ), 'A finished job is deleted by finalise().' );
+	}
+
+	/**
+	 * A cron-driven backup that left database views out leaves their names on the
+	 * job payload and in the log.
+	 *
+	 * Nobody watches a scheduled run, so the log is the only place the omission can
+	 * be seen. The names are read off the finished job's payload, which the tick
+	 * wrote from the very scan that left the views out.
+	 *
+	 * @return void
+	 */
+	public function test_a_scheduled_backup_logs_the_views_it_left_out(): void {
+		$job_store = new JobStore( $this->content_dir );
+		$job       = $job_store->create(
+			Job::KIND_EXPORT,
+			array(
+				'output'                => $this->content_dir . '/done.wpmig',
+				'temp'                  => $this->content_dir . '/done.part',
+				'scan_root'             => $this->content_dir,
+				'path_prefix'           => 'wp-content',
+				'exclusions'            => array(),
+				'signed'                => false,
+				'reason'                => null,
+				'scope'                 => null,
+				'schedule'              => true,
+				'phase'                 => 'files',
+				'bytes_written'         => 0,
+				'files_changed'         => 0,
+				'media_type_unresolved' => 0,
+			),
+			1700000000
+		);
+
+		$environment = Mockery::mock( Environment::class );
+		$environment->shouldReceive( 'is_constant_defined' )->with( 'PONTIFEX_VERSION' )->andReturn( false );
+		$environment->shouldReceive( 'php_version' )->andReturn( '8.3.0' );
+
+		$context = Mockery::mock( WordPressContext::class );
+		$context->shouldReceive( 'acquire_named_lock' )->once()->andReturn( true );
+		$context->shouldReceive( 'release_named_lock' )->once();
+		$context->shouldReceive( 'wp_version' )->andReturn( '6.6.0' );
+		$context->shouldReceive( 'site_url' )->andReturn( 'https://example.test' );
+		$context->shouldReceive( 'wpdb_charset' )->andReturn( 'utf8mb4' );
+		$context->shouldReceive( 'wpdb_collation' )->andReturn( 'utf8mb4_unicode_520_ci' );
+		$context->shouldReceive( 'option_value' )->andReturn( array() );
+		$context->shouldReceive( 'save_option' );
+
+		Functions\when( 'wp_next_scheduled' )->justReturn( false );
+		Functions\when( 'wp_schedule_single_event' )->justReturn( true );
+		Functions\when( 'wp_clear_scheduled_hook' )->justReturn( true );
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'delete_transient' )->justReturn( true );
+
+		$logger = Mockery::spy( \Psr\Log\LoggerInterface::class );
+
+		$ticker = new JobTicker(
+			$environment,
+			$context,
+			$job_store,
+			new BackupStore( $this->content_dir ),
+			$logger,
+			static function (): ManifestBuilderInterface {
+				$builder = Mockery::mock( ManifestBuilderInterface::class );
+				$builder->shouldReceive( 'excluded_views' )->andReturn( array( 'wp_report_view' ) );
+				$builder->shouldReceive( 'build' )->andReturnUsing(
+					static function (): ManifestStream {
+						$contents = 'alpha';
+						$plan     = new EntryPlan(
+							EntryHeader::for_file( 'wp-content/a.txt', strlen( $contents ), 0o644, 1690000000, 'application/octet-stream', 0 ),
+							0,
+							str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+							static function () use ( $contents ) {
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- php://memory is an in-process buffer, not a file.
+								$stream = fopen( 'php://memory', 'r+b' );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Operating on a test stream resource.
+								fwrite( $stream, $contents );
+								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource.
+								rewind( $stream );
+								return $stream;
+							}
+						);
+						return ManifestStream::from_plans( array( $plan ) );
+					}
+				);
+				return $builder;
+			}
+		);
+
+		$ticker->run();
+
+		$this->assertFileExists( $this->content_dir . '/done.wpmig' );
+		$logger->shouldNotHaveReceived( 'error' );
+		$logger->shouldHaveReceived( 'warning' )
+			->withArgs(
+				static fn ( $message, $context = array() ): bool => is_array( $context ) && array( 'wp_report_view' ) === ( $context['views'] ?? null )
+			)
+			->once();
 	}
 
 	/**
@@ -610,6 +709,7 @@ final class ScheduleTest extends TestCase {
 			new NullLogger(),
 			static function (): ManifestBuilderInterface {
 				$builder = Mockery::mock( ManifestBuilderInterface::class );
+				$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 				$builder->shouldReceive( 'build' )->andReturnUsing(
 					static function (): ManifestStream {
 						$contents = 'alpha';

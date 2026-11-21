@@ -436,6 +436,7 @@ final class JobTickerTest extends TestCase {
 	private function empty_manifest_builder_factory(): callable {
 		return static function (): ManifestBuilderInterface {
 			$builder = Mockery::mock( ManifestBuilderInterface::class );
+			$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 			$builder->shouldReceive( 'build' )->andReturn( ManifestStream::from_plans( array() ) );
 			return $builder;
 		};

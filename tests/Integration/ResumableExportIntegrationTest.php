@@ -293,6 +293,15 @@ final class ResumableExportIntegrationTest extends TestCase {
 				}
 
 				/**
+				 * This fixture scans no database views.
+				 *
+				 * @return string[] Always empty.
+				 */
+				public function excluded_views(): array {
+					return array();
+				}
+
+				/**
 				 * Yield the deterministic plan sequence: files, then the db_chunk.
 				 *
 				 * @param string        $wordpress_root   Ignored; fixtures are self-contained.

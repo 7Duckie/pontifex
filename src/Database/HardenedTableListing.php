@@ -26,8 +26,8 @@ use wpdb;
  *
  * The one query is `SHOW FULL TABLES`, which returns each name together with its type, so a
  * view (which lists beside base tables but which a restore cannot recreate) is told apart
- * without a second query per table. {@see self::list_prefixed_tables()} leaves views out;
- * {@see self::list_unrestorable_prefixed_tables()} names them, for reporting.
+ * without a second query per table. {@see self::list_prefixed_tables()} leaves views out and
+ * hands their names back from the same listing, for reporting.
  *
  * Lives in one trait shared by the backup scanner's adapter and the migration database, so
  * the guard cannot drift between the two the way the duplicated `last_error`-only pattern
@@ -43,45 +43,31 @@ trait HardenedTableListing {
 	 * {@see RestorableTableTypes} accepts. The empty-result refusal has already been applied to
 	 * the raw listing, before this filter runs.
 	 *
-	 * @param wpdb   $wpdb    The WordPress database object to query.
-	 * @param string $context The calling class name, used in the exception messages.
+	 * The objects left out are handed back through $excluded, from the very same listing, so a
+	 * caller that wants to report them never has to ask the database a second time: a second
+	 * query could disagree with the first, and on a snapshot connection would be a needless one.
+	 *
+	 * @param wpdb          $wpdb     The WordPress database object to query.
+	 * @param string        $context  The calling class name, used in the exception messages.
+	 * @param string[]|null $excluded Optional. Receives the names of the objects left out, alphabetically sorted; replaced, never added to.
 	 * @return string[] The prefixed table names, alphabetically sorted.
 	 * @throws RuntimeException If the query signals an error, or returns no tables.
 	 */
-	private function list_prefixed_tables( wpdb $wpdb, string $context ): array {
-		$tables = array();
+	private function list_prefixed_tables( wpdb $wpdb, string $context, ?array &$excluded = null ): array {
+		$tables   = array();
+		$left_out = array();
 		foreach ( $this->read_prefixed_table_rows( $wpdb, $context ) as $row ) {
 			if ( null === $row['type'] || RestorableTableTypes::is_restorable( $row['type'] ) ) {
 				$tables[] = $row['name'];
+			} else {
+				$left_out[] = $row['name'];
 			}
 		}
 
 		sort( $tables, SORT_STRING );
+		sort( $left_out, SORT_STRING );
+		$excluded = $left_out;
 		return $tables;
-	}
-
-	/**
-	 * List the WordPress-prefixed objects a restore cannot replay, by name.
-	 *
-	 * The complement of {@see self::list_prefixed_tables()} over the same guarded listing:
-	 * the views a backup leaves out. Runs the listing query again, so call it once for
-	 * reporting rather than per table.
-	 *
-	 * @param wpdb   $wpdb    The WordPress database object to query.
-	 * @param string $context The calling class name, used in the exception messages.
-	 * @return string[] The names of the objects left out, alphabetically sorted; possibly empty.
-	 * @throws RuntimeException If the query signals an error, or returns no tables.
-	 */
-	private function list_unrestorable_prefixed_tables( wpdb $wpdb, string $context ): array {
-		$excluded = array();
-		foreach ( $this->read_prefixed_table_rows( $wpdb, $context ) as $row ) {
-			if ( null !== $row['type'] && ! RestorableTableTypes::is_restorable( $row['type'] ) ) {
-				$excluded[] = $row['name'];
-			}
-		}
-
-		sort( $excluded, SORT_STRING );
-		return $excluded;
 	}
 
 	/**

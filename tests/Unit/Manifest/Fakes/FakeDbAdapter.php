@@ -46,15 +46,53 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Registered view names, left out of list_tables().
+	 *
+	 * @var string[]
+	 */
+	private array $views = array();
+
+	/**
+	 * The views the most recent list_tables() call left out.
+	 *
+	 * @var string[]
+	 */
+	private array $views_seen = array();
+
+	/**
+	 * Register a database view, which list_tables() leaves out and names.
+	 *
+	 * @param string $name View name.
+	 * @return void
+	 */
+	public function add_view( string $name ): void {
+		$this->views[] = $name;
+	}
+
+	/**
 	 * Return the registered table names in alphabetical order.
+	 *
+	 * Records the registered views as the ones left out, the way the real adapter
+	 * does from the same listing.
 	 *
 	 * @return string[]
 	 */
 	public function list_tables(): array {
 		$this->maybe_fail( __FUNCTION__ );
+		$this->views_seen = $this->views;
+		sort( $this->views_seen, SORT_STRING );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
+	}
+
+	/**
+	 * Return the views the most recent list_tables() call left out.
+	 *
+	 * @return string[]
+	 */
+	public function excluded_views(): array {
+		return $this->views_seen;
 	}
 
 	/**

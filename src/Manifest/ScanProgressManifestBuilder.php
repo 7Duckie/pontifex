@@ -60,4 +60,16 @@ final class ScanProgressManifestBuilder implements ManifestBuilderInterface {
 	public function build( string $wordpress_root, ?callable $on_scan_progress = null ): ManifestStream {
 		return $this->inner->build( $wordpress_root, $on_scan_progress ?? $this->on_scan_progress );
 	}
+
+	/**
+	 * Name the views the inner builder's latest scan left out.
+	 *
+	 * Forwarded, because every admin backup runs through this wrapper: a wrapper that did
+	 * not pass the answer on would leave it silently empty on exactly that path.
+	 *
+	 * @return string[] View names in alphabetical order; empty when none were left out.
+	 */
+	public function excluded_views(): array {
+		return $this->inner->excluded_views();
+	}
 }

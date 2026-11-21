@@ -67,6 +67,15 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	/**
 	 * Delegate to the real adapter.
 	 *
+	 * @return string[] The views the most recent listing left out.
+	 */
+	public function excluded_views(): array {
+		return $this->inner->excluded_views();
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
 	 * @param string $table_name Fully prefixed table name.
 	 * @return int Row count.
 	 */

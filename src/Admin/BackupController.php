@@ -505,7 +505,9 @@ final class BackupController {
 			$media_type_unresolved = (int) ( $job_payload['media_type_unresolved'] ?? 0 );
 			$total_bytes           = max( $total_bytes, $this->counter_int( $job_payload, 'total_bytes' ) );
 			$exclusions_summary    = self::build_exclusions_summary( (array) ( $job_payload['exclusion_matches'] ?? array() ) );
-			$entry_count           = count( $job_store->progress_log( $job->id() )->read_all() );
+			// Absent on a job started before the views were recorded (back-compat): none known.
+			$excluded_views = array_values( array_filter( (array) ( $job_payload['excluded_views'] ?? array() ), 'is_string' ) );
+			$entry_count    = count( $job_store->progress_log( $job->id() )->read_all() );
 			$job_store->delete( $job->id() );
 			$this->active_job = null;
 			wp_clear_scheduled_hook( JobTicker::CRON_HOOK );
@@ -526,14 +528,23 @@ final class BackupController {
 			);
 			TransferHistory::record( $this->wordpress_context, 'export', 'succeeded', $bytes_written, gmdate( 'c' ) );
 
+			// A view stores no rows and a restore cannot recreate one, so the backup left
+			// each out on purpose. The archive is therefore less complete than the site,
+			// and that is recorded rather than left silent.
+			if ( array() !== $excluded_views ) {
+				$this->logger->warning( 'Database views were left out of the backup.', array( 'views' => $excluded_views ) );
+			}
+
 			wp_send_json_success(
 				array(
-					'filename'           => basename( $path ),
-					'entries'            => $entry_count,
-					'bytes'              => $bytes_written,
-					'size'               => $this->wordpress_context->format_size( $bytes_written ),
-					'source_bytes'       => $total_bytes,
-					'exclusions_summary' => $exclusions_summary,
+					'filename'               => basename( $path ),
+					'entries'                => $entry_count,
+					'bytes'                  => $bytes_written,
+					'size'                   => $this->wordpress_context->format_size( $bytes_written ),
+					'source_bytes'           => $total_bytes,
+					'exclusions_summary'     => $exclusions_summary,
+					'excluded_views'         => $excluded_views,
+					'excluded_views_summary' => self::build_excluded_views_summary( $excluded_views ),
 				)
 			);
 		} catch ( BackupCancelled $cancelled ) {
@@ -1113,6 +1124,35 @@ final class BackupController {
 			/* translators: %s: a comma-separated list of "pattern (count)" entries */
 			__( 'Exclusions: %s.', 'pontifex' ),
 			implode( ', ', $parts )
+		);
+	}
+
+	/**
+	 * Build the one-line, already-translated sentence saying which database views the
+	 * backup left out, ready to display exactly as returned.
+	 *
+	 * Built server-side, like {@see self::build_exclusions_summary()}, so the browser only
+	 * concatenates a finished string. A view is only a saved query and holds no rows, and a
+	 * restore cannot recreate one, so leaving it out loses nothing but its definition; the
+	 * sentence says that plainly, since "left out" alone sounds like data went missing.
+	 *
+	 * @param string[] $views The names of the views the backup left out.
+	 * @return string The finished sentence, or '' when no view was left out.
+	 */
+	private static function build_excluded_views_summary( array $views ): string {
+		if ( array() === $views ) {
+			return '';
+		}
+		return sprintf(
+			/* translators: 1: number of database views, 2: comma-separated view names */
+			_n(
+				'%1$d database view was left out on purpose: %2$s. A view stores no rows, it is only a saved query, so nothing but its definition is missing from the backup.',
+				'%1$d database views were left out on purpose: %2$s. A view stores no rows, it is only a saved query, so nothing but its definition is missing from the backup.',
+				count( $views ),
+				'pontifex'
+			),
+			count( $views ),
+			implode( ', ', $views )
 		);
 	}
 

@@ -410,4 +410,44 @@ final class ManifestBuilderTest extends TestCase {
 		$this->assertCount( 1, $file_plans );
 		$this->assertNull( $file_plans[0]->header()->media_type() );
 	}
+
+	/**
+	 * A backup that carries the database reports the views the scan left out.
+	 *
+	 * @return void
+	 */
+	public function test_build_reports_the_views_the_database_scan_left_out(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
+		$db->add_view( 'wp_report_view' );
+
+		$builder = self::default_builder( $db );
+		$builder->build( $this->fixture_root );
+
+		$this->assertSame( array( 'wp_report_view' ), $builder->excluded_views() );
+	}
+
+	/**
+	 * A files-only backup never scans the database, so it reports no views.
+	 *
+	 * The adapter here holds a view and has been listed once by an earlier scan, so a
+	 * builder that read through to it, rather than answering for its own scan, would
+	 * report a stale name.
+	 *
+	 * @return void
+	 */
+	public function test_a_files_only_build_reports_no_views(): void {
+		$this->write_file( 'a.txt', 'alpha' );
+
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
+		$db->add_view( 'wp_report_view' );
+		$database_scanner = new DatabaseScanner( $db, ExclusionRules::none() );
+		$database_scanner->scan();
+
+		$builder = new ManifestBuilder( new FileScanner( ExclusionRules::none() ), $database_scanner, true, false );
+		$builder->build( $this->fixture_root );
+
+		$this->assertSame( array(), $builder->excluded_views() );
+	}
 }

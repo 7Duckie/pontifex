@@ -341,7 +341,10 @@ the base tables, but a restore refuses to replay a `CREATE VIEW` (ADR 0019), so
 an archive carrying one verified sound and then failed partway through the
 restore. The table listing therefore keeps only the object types a restore
 accepts — `BASE TABLE`, and MariaDB's `SYSTEM VERSIONED` and `SEQUENCE` — and
-`wp pontifex export` names each view it left out. A view stores no rows of its
+every backup path names each view it left out, from the same listing that left
+it out rather than a second query: `wp pontifex export` warns and logs, the
+admin Backup screen adds a sentence to its notice and logs, and a scheduled
+backup logs, since nobody is watching it. A view stores no rows of its
 own, so nothing is lost but the definition; recreate it after a restore. The
 one list of accepted types lives in `Pontifex\Database\RestorableTableTypes`,
 read by both the export listing and the restore's own check, so the two cannot
