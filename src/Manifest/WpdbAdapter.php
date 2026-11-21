@@ -96,15 +96,30 @@ final class WpdbAdapter implements DatabaseAdapter {
 	/**
 	 * List every WordPress-prefixed table in the database.
 	 *
-	 * Queries SHOW TABLES LIKE '{prefix}%' so unrelated tables
+	 * Queries SHOW FULL TABLES LIKE '{prefix}%' so unrelated tables
 	 * sharing the same database (e.g. analytics, mailer queues) are
-	 * not pulled in.
+	 * not pulled in. Views are left out, because a restore cannot
+	 * recreate one; see {@see self::list_unrestorable_tables()}.
 	 *
 	 * @return string[] Alphabetically sorted table names.
 	 * @throws RuntimeException If $wpdb signals a query error.
 	 */
 	public function list_tables(): array {
 		return $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
+	}
+
+	/**
+	 * Name the prefixed database objects that {@see self::list_tables()} leaves out.
+	 *
+	 * These are the views a backup deliberately omits: a view stores no rows of its own, and
+	 * a restore cannot recreate one. Not part of {@see DatabaseAdapter}; it exists so the
+	 * export command can tell the operator what was left out. Runs the listing query again.
+	 *
+	 * @return string[] Alphabetically sorted names; empty when nothing was left out.
+	 * @throws RuntimeException If $wpdb signals a query error, or returns no tables.
+	 */
+	public function list_unrestorable_tables(): array {
+		return $this->list_unrestorable_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
 	}
 
 	/**
