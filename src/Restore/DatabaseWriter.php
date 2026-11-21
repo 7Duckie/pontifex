@@ -12,6 +12,7 @@ namespace Pontifex\Restore;
 use InvalidArgumentException;
 use RuntimeException;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Database\RestorableTableTypes;
 use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Manifest\DatabaseAdapter;
 use Pontifex\Manifest\SqlSpanScanner;
@@ -778,43 +779,6 @@ final class DatabaseWriter {
 	private const ALLOWED_ENGINES = array( 'innodb', 'myisam', 'aria', 'memory', 'rocksdb', 'tokudb', 'columnstore' );
 
 	/**
-	 * TABLE_TYPE values an ordinary local table may report (ADR 0019).
-	 *
-	 * A plain 'BASE TABLE' is the ordinary case. MariaDB 10.3+ additionally
-	 * reports a table created `WITH SYSTEM VERSIONING` as TABLE_TYPE
-	 * 'SYSTEM VERSIONED' — confirmed empirically against a live MariaDB
-	 * server (12.3.2): `information_schema.TABLES.TABLE_TYPE` for such a
-	 * table reads exactly `SYSTEM VERSIONED`, never `BASE TABLE`. This is
-	 * still ordinary local storage — the server merely keeps an extra
-	 * historical row version alongside the current one, on the same local
-	 * disk, with no cross-table, cross-connection, or file-path capability
-	 * — so refusing it here would refuse a site restoring its own,
-	 * perfectly legitimate backup.
-	 *
-	 * MariaDB additionally reports a `CREATE SEQUENCE` object's TABLE_TYPE
-	 * as 'SEQUENCE' — also confirmed empirically against a live MariaDB
-	 * server (12.3.2): `CREATE SEQUENCE x START WITH 1 INCREMENT BY 1`
-	 * reads `TABLE_TYPE = 'SEQUENCE'`, `ENGINE = 'InnoDB'` (already
-	 * allow-listed), `CREATE_OPTIONS = ''`. Pontifex's own DatabaseScanner
-	 * already exports a sequence as an ordinary db_chunk — `SHOW TABLES`
-	 * lists it alongside real tables, and `SHOW CREATE TABLE` returns a
-	 * plain `CREATE TABLE ... SEQUENCE=1` statement over eight ordinary
-	 * bigint columns — and replaying that SQL against a fresh connection
-	 * rebuilds a working sequence (`SELECT NEXTVAL(...)` succeeds). A
-	 * sequence is local, single-table storage with no cross-table,
-	 * cross-connection, or file-path capability of its own — the same
-	 * standard SYSTEM VERSIONED meets above — so refusing it here would
-	 * make any site with so much as one sequence anywhere unable to
-	 * restore its own backup at all, since restore is all-or-nothing (the
-	 * same defect class SYSTEM VERSIONED closed; this sibling was missed
-	 * the first time). Anything else this column can report (`VIEW`,
-	 * `SYSTEM VIEW`) is refused, as before.
-	 *
-	 * @var string[]
-	 */
-	private const ALLOWED_TABLE_TYPES = array( 'BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE' );
-
-	/**
 	 * CREATE_OPTIONS fragments that mark a table as reading or writing
 	 * through something other than its own ordinary local storage (ADR
 	 * 0019): a MERGE table's UNION of other tables, a FEDERATED/CONNECT
@@ -890,7 +854,7 @@ final class DatabaseWriter {
 			);
 		}
 
-		if ( ! in_array( $facts['table_type'], self::ALLOWED_TABLE_TYPES, true ) ) {
+		if ( ! RestorableTableTypes::is_restorable( $facts['table_type'] ) ) {
 			throw new RuntimeException(
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $facts['table_type'] is the server's own information_schema.TABLES.TABLE_TYPE value, reported for diagnostic context, never the statement's own bytes; exception path, not HTML output.
 				sprintf( 'A staged CREATE built a "%s", not an ordinary table; refusing to replay it against the live database.', $facts['table_type'] )

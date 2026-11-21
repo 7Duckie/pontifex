@@ -48,12 +48,41 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 	public function test_list_tables_returns_alphabetised_prefixed_tables(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
-		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_col' )->willReturn( array( 'wp_postmeta', 'wp_options', 'wp_posts' ) );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_postmeta', 'BASE TABLE' ),
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_posts', 'BASE TABLE' ),
+			)
+		);
 
 		$tables = ( new WpdbMigrationDatabase( $wpdb ) )->list_tables();
 
 		$this->assertSame( array( 'wp_options', 'wp_postmeta', 'wp_posts' ), $tables );
+	}
+
+	/**
+	 * A view is not listed for the rewrite pass, while sequences and system-versioned tables are.
+	 *
+	 * A view stores no rows of its own; the base tables behind it are walked directly.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_leaves_out_views_but_keeps_every_restorable_type(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_a_view', 'VIEW' ),
+				array( 'wp_seq', 'SEQUENCE' ),
+				array( 'wp_audit', 'SYSTEM VERSIONED' ),
+			)
+		);
+
+		$this->assertSame( array( 'wp_audit', 'wp_options', 'wp_seq' ), ( new WpdbMigrationDatabase( $wpdb ) )->list_tables() );
 	}
 
 	/**
@@ -80,7 +109,7 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 		$wpdb->last_error = 'connection lost';
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
 		$wpdb->method( 'prepare' )->willReturn( '' );
-		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 
 		$this->expectException( RuntimeException::class );
 
@@ -99,8 +128,8 @@ final class WpdbMigrationDatabaseTest extends TestCase {
 	public function test_list_tables_refuses_an_empty_result_without_error(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
-		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 		$wpdb->method( 'get_var' )->willReturn( null );
 
 		$this->expectException( RuntimeException::class );

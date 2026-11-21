@@ -336,6 +336,17 @@ reader refuses a major version above its own rather than guessing.
 `wp-content/cache`, `.git` at any depth) unless `--no-defaults`, then user
 patterns, then scope flags.
 
+**Database views are never captured.** `SHOW FULL TABLES` lists a view beside
+the base tables, but a restore refuses to replay a `CREATE VIEW` (ADR 0019), so
+an archive carrying one verified sound and then failed partway through the
+restore. The table listing therefore keeps only the object types a restore
+accepts — `BASE TABLE`, and MariaDB's `SYSTEM VERSIONED` and `SEQUENCE` — and
+`wp pontifex export` names each view it left out. A view stores no rows of its
+own, so nothing is lost but the definition; recreate it after a restore. The
+one list of accepted types lives in `Pontifex\Database\RestorableTableTypes`,
+read by both the export listing and the restore's own check, so the two cannot
+disagree.
+
 **Resumable exports** (ADR 0015) persist an entry cursor and the archive's
 byte position after each tick, and verify the partial file's length matches
 what was claimed before appending. If the scan's *shape* changes between ticks
