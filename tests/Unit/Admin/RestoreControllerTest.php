@@ -1569,9 +1569,14 @@ final class RestoreControllerTest extends TestCase {
 		);
 		$environment->shouldReceive( 'ini_get' )->andReturn( '256M' );
 
+		// The real adapter asks the server whether it has the archive's collation
+		// before the restore starts; any non-null scalar answers "it does".
+		$wpdb = Mockery::mock( wpdb::class )->makePartial();
+		$wpdb->shouldReceive( 'get_var' )->andReturn( 'utf8mb4_unicode_520_ci' );
+
 		$context = $this->context();
 		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );
-		$context->shouldReceive( 'wpdb_instance' )->andReturn( new wpdb() );
+		$context->shouldReceive( 'wpdb_instance' )->andReturn( $wpdb );
 		$context->shouldReceive( 'convert_hr_to_bytes' )->andReturn( 0 );
 
 		$controller = new RestoreController(
@@ -2275,6 +2280,9 @@ final class RestoreControllerTest extends TestCase {
 				return 0;
 			}
 		);
+		// The real adapter asks the server whether it has the archive's collation
+		// before the restore starts; any non-null scalar answers "it does".
+		$wpdb->shouldReceive( 'get_var' )->andReturn( 'utf8mb4_unicode_520_ci' );
 
 		$context = $this->context();
 		$context->shouldReceive( 'wpdb_prefix' )->andReturn( 'wp_' );

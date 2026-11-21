@@ -275,6 +275,52 @@ overwhelming majority of WordPress hosting — every distinct spelling is
 already a distinct file, no case-folding comparison is ever needed, and this
 check never runs at all.
 
+### "records its database as using the collation … which this server's database does not have"
+
+> This backup records its database as using the collation
+> "utf8mb4_ja_0900_as_cs", which this server's database does not have, so it
+> cannot be restored here. The obstacle is this server's rather than the
+> backup's, and a database server that supports that collation can get past it.
+> This check looked only at the
+> collation the backup records for the database as a whole, so a single table
+> with its own, different collation could still stop a restore later.
+
+**An environment problem, not a fault in the backup. Not common.**
+
+**What happened.** A collation is the rule a database uses to sort and compare
+text — whether "a" and "A" count as equal, say. Your backup records the one it
+was taken with, and the database you are restoring onto has to know that rule
+to rebuild the tables. This one does not. Which servers lack which collations
+varies; a very new MySQL can have collations an older MySQL or MariaDB has
+never heard of, and the language-specific ones are the usual cases. It is not
+true that every move between those two products hits this.
+
+**Nothing has been changed.** Pontifex asks before it checks or restores a single entry,
+so neither your files nor your database were touched. Previously the same
+backup was accepted by `verify` and then failed part-way through a restore with
+a raw database error; asking up front is what changed.
+
+**This is not a verdict on your backup.** `verify` reports it as "could not
+check", not as broken, because the obstacle is this server's and the check
+stopped before it looked at a single entry. Nothing has been found wrong with
+the file, and nothing has been confirmed about it either. Keep it, and check it
+again once it is on a server that has the collation.
+
+**What to do.** Restore onto a database server that has the collation named in
+the message — usually a newer version of the same kind of server, or the kind
+the backup came from.
+
+**What not to do.** Do not delete the backup, and do not edit the collation out
+of the archive or the SQL inside it: that is silently converting your data's
+sorting rules, which is exactly what Pontifex declines to do for you.
+
+**What this check does not cover.** It looks only at the collation the backup
+records for the database as a whole. A single table or column can carry its own
+collation, written only inside that table's definition, and Pontifex does not
+read it here. If one such table has a collation this server lacks, the restore
+will still stop when it reaches that table. Your live tables are untouched in
+that case — the tables are built as temporary copies first.
+
 ### "This backup's entries are compressed with zstd (codec id 0x0002), and this server cannot unpack them"
 
 > This backup's entries are compressed with zstd (codec id 0x0002), and this
@@ -790,8 +836,8 @@ command line manages easily.
 >
 > This is not a verdict on the backup — no check ran to completion, so
 > nothing is known about it either way. Keep the file; the problem named
-> above is this host's, and is usually fixable (more memory, more disk
-> space), after which the same archive should check cleanly.
+> above is this host's, and once it is fixed the same archive should check
+> cleanly.
 
 **Common on shared hosting with large sites. An environment problem, and —
 importantly — not a verdict of any kind.**

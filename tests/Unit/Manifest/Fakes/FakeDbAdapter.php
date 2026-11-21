@@ -354,6 +354,50 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Collations collation_supported() reports as missing; every other name is supported.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $unsupported_collations = array();
+
+	/**
+	 * Every collation name collation_supported() was asked about, in order.
+	 *
+	 * @var string[]
+	 */
+	private array $collation_queries = array();
+
+	/**
+	 * Mark a collation as one this fake server does not have.
+	 *
+	 * @param string $collation The collation name to report as unsupported.
+	 * @return void
+	 */
+	public function mark_collation_unsupported( string $collation ): void {
+		$this->unsupported_collations[ $collation ] = true;
+	}
+
+	/**
+	 * Return every collation name asked about, in order.
+	 *
+	 * @return string[] The recorded names; empty when the adapter was never asked.
+	 */
+	public function collation_queries(): array {
+		return $this->collation_queries;
+	}
+
+	/**
+	 * Record the question and answer it: supported unless marked otherwise.
+	 *
+	 * @param string $collation The collation name asked about.
+	 * @return bool False when the name was marked unsupported.
+	 */
+	public function collation_supported( string $collation ): bool {
+		$this->collation_queries[] = $collation;
+		return ! isset( $this->unsupported_collations[ $collation ] );
+	}
+
+	/**
 	 * Canned average row widths, keyed by table name.
 	 *
 	 * @var array<string, int>
