@@ -148,7 +148,10 @@ refusal, because claiming a refusal would assert an intent that was not there.
 
 Verify checks structure, the entry-count ceiling, and per-entry hashes, then
 runs every restore preflight that writes nothing: scope-versus-manifest,
-symlink target confinement, and free space.
+symlink target confinement, free space, the per-entry size limit, the
+per-entry memory budget (skipped when the host sets no memory cap), each
+entry's own recorded path against the 255-byte name limit, and whether this
+host can decode the codecs the archive uses.
 
 It applies the same structural checks and the same size budgets a restore
 applies, on the same terms: the record must leave room for the fields that

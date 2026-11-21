@@ -37,15 +37,33 @@ v0.0.x decision log for the reasoning.
   this host can spare to unpack one, and a file or folder name longer than a
   filesystem will accept.
 
-  All three are reported as something about **this server**, never as damage to
-  the backup — the backup is intact in every one of these cases, and a different
-  server would restore it. The message says so explicitly, because "your backup
-  is broken" is the one sentence capable of talking somebody out of a good
-  backup.
+  None of the three is reported as damage to the backup, because the backup is
+  intact in every one of them. The message says so explicitly, because "your
+  backup is broken" is the one sentence capable of talking somebody out of a
+  good backup. Two of them are about **this server** and are fixed by changing
+  it: more memory for an oversized entry, a filesystem that accepts the name.
+  The third is a ceiling compiled into every build of Pontifex, identical on
+  every host, and the message now says so rather than implying there is a
+  setting to raise.
 
   A host that enforces no memory limit at all records nothing rather than
   reporting a check it could not answer, so an ordinary verify on such a host
   reads exactly as it did before.
+
+- **Verifying a backup now tells you when this server cannot unpack it.**
+  Backups are compressed, and which compression is used is decided by the
+  server that writes the backup: one with the zstd PHP extension produces a
+  zstd backup. A server without that extension can still check every
+  fingerprint in such a backup, because checking never unpacks anything — so
+  verify called it sound, and the restore then failed the moment it tried to
+  unpack the first entry. That is the ordinary move-to-a-new-server case this
+  plugin exists for.
+
+  Verify and the Restore screen now ask, before anything is written, whether
+  this server can unpack what the backup holds, and say plainly that the backup
+  is undamaged and will restore on a server that can. The question is put to
+  the same reader that would do the unpacking, so the answer cannot drift from
+  what a restore would actually do.
 
 ## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
 
