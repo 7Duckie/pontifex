@@ -14,6 +14,7 @@ use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
 use Throwable;
 
 /**
@@ -79,6 +80,52 @@ final class RestorePreflight {
 	 * @var string
 	 */
 	public const CHECK_SYMLINKS_CREATABLE = 'symlinks_creatable';
+
+	/**
+	 * Name of the per-entry decoded-size check, as it appears in a report.
+	 *
+	 * @var string
+	 */
+	public const CHECK_ENTRY_SIZE = 'entry_size';
+
+	/**
+	 * Name of the per-entry memory-budget check, as it appears in a report.
+	 *
+	 * @var string
+	 */
+	public const CHECK_ENTRY_MEMORY = 'entry_memory';
+
+	/**
+	 * Name of the path-component-length check, as it appears in a report.
+	 *
+	 * @var string
+	 */
+	public const CHECK_PATH_LENGTH = 'path_length';
+
+	/**
+	 * Name of the codec-support check, as it appears in a report.
+	 *
+	 * @var string
+	 */
+	public const CHECK_CODEC_SUPPORT = 'codec_support';
+
+	/**
+	 * The longest single path component, in bytes, this check will accept.
+	 *
+	 * 255 is the near-universal POSIX NAME_MAX: ext4, APFS and NTFS all use it. It
+	 * is a fixed floor rather than a reading taken from the destination filesystem,
+	 * because PHP exposes no portable way to ask a filesystem for its own limit.
+	 *
+	 * @var int
+	 */
+	private const MAX_PATH_COMPONENT_BYTES = 255;
+
+	/**
+	 * The longest rendered path a message will carry, in characters.
+	 *
+	 * @var int
+	 */
+	private const MAX_PATH_IN_MESSAGE = 200;
 
 	/**
 	 * The decoder used to read each declared symlink entry's header.
@@ -167,6 +214,20 @@ final class RestorePreflight {
 			$inconclusive[ $check ] = $refusal->getMessage();
 		};
 
+		// One header pass, shared by the three checks that follow it. If it cannot be
+		// completed, none of the three can answer — so each says so, as inconclusive,
+		// rather than all three condemning the archive over one unreadable header. The
+		// free-space check below reads headers too and reports an unreadable one as an
+		// archive finding, so that finding is already made once and is not repeated.
+		$entries       = array();
+		$entries_error = null;
+		try {
+			$entries = $this->declared_entry_sizes( $archive_source, $manifest );
+		} catch ( Throwable $failure ) {
+			$entries_error = $failure;
+		}
+		$not_measured = 'Could not be established, because an entry header in this backup could not be read.';
+
 		$checks_run[] = self::CHECK_SCOPE;
 		try {
 			$this->assert_scope_consistent_with_manifest( $scope, $manifest );
@@ -201,6 +262,54 @@ final class RestorePreflight {
 			}
 		} catch ( Throwable $refusal ) {
 			$record( self::CHECK_FREE_SPACE, $refusal );
+		}
+
+		$checks_run[] = self::CHECK_ENTRY_SIZE;
+		try {
+			if ( null !== $entries_error ) {
+				$inconclusive[ self::CHECK_ENTRY_SIZE ] = $not_measured;
+			} else {
+				$this->assert_entry_sizes_within_limit( $entries );
+			}
+		} catch ( Throwable $refusal ) {
+			$record( self::CHECK_ENTRY_SIZE, $refusal );
+		}
+
+		$checks_run[] = self::CHECK_ENTRY_MEMORY;
+		try {
+			// A budget of 0 means this host enforces no memory cap (memory_limit of -1,
+			// say), so a restore can never refuse an entry on memory grounds. That is not
+			// an unanswered question, so nothing is recorded: the check ran, and had no
+			// limit to judge by.
+			if ( $this->entry_memory_budget > 0 ) {
+				if ( null !== $entries_error ) {
+					$inconclusive[ self::CHECK_ENTRY_MEMORY ] = $not_measured;
+				} else {
+					$this->assert_entry_sizes_within_memory( $entries );
+				}
+			}
+		} catch ( Throwable $refusal ) {
+			$record( self::CHECK_ENTRY_MEMORY, $refusal );
+		}
+
+		$checks_run[] = self::CHECK_PATH_LENGTH;
+		try {
+			if ( null !== $entries_error ) {
+				$inconclusive[ self::CHECK_PATH_LENGTH ] = $not_measured;
+			} else {
+				$this->assert_path_components_within_limit( $entries );
+			}
+		} catch ( Throwable $refusal ) {
+			$record( self::CHECK_PATH_LENGTH, $refusal );
+		}
+
+		// Reads the manifest alone, so it neither needs the header pass above nor
+		// is silenced when that pass failed.
+		$checks_run[] = self::CHECK_CODEC_SUPPORT;
+		try {
+			$this->assert_codecs_usable( $this->distinct_codec_ids( $manifest ) );
+		} catch ( Throwable $refusal ) {
+			$record( self::CHECK_CODEC_SUPPORT, $refusal );
 		}
 
 		return new PreflightReport( $checks_run, $archive_findings, $host_findings, $inconclusive );
@@ -308,6 +417,267 @@ final class RestorePreflight {
 			$manifest->entries(),
 			$this->declared_file_sizes( $archive_source, $manifest )
 		);
+	}
+
+	/**
+	 * Refuse an archive holding an entry whose decoded size exceeds this build's per-entry limit.
+	 *
+	 * The restore enforces that limit when it decodes every entry of every kind, so
+	 * an oversized database chunk is refused exactly as an oversized file is. The
+	 * limit is compiled into the build ({@see ArchiveLimits::defaults()}); no server
+	 * setting changes it. It is a HostCannotComply, deliberately and not an
+	 * ArchiveNotTrustworthy, because the archive is undamaged, and not a
+	 * BuildCannotComply only because PreflightReport::is_host_finding() matches
+	 * HostCannotComply alone. Calling a good backup hostile is the worst error this
+	 * class can make.
+	 *
+	 * @param array<int, array{label: string, path: string|null, size: int}> $entries Every entry, as measured by the shared header pass.
+	 * @return void
+	 * @throws \Pontifex\Exception\HostCannotComply If any entry's decoded size exceeds the configured limit.
+	 */
+	public function assert_entry_sizes_within_limit( array $entries ): void {
+		$limit = $this->limits->max_entry_bytes();
+
+		$over = self::entries_above( $entries, $limit );
+		if ( array() === $over ) {
+			return;
+		}
+
+		$largest = self::largest_of( $over );
+		$message = sprintf(
+			'%s a decoded size above the %s-byte limit this build of Pontifex applies to a single entry, on any host; the largest is %s, at %s bytes. The backup is not damaged and does not need replacing — no server setting changes this ceiling.',
+			self::count_phrase( count( $over ) ),
+			number_format( $limit ),
+			self::printable( $largest['label'] ),
+			number_format( $largest['size'] )
+		);
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain-text exception message; the archive-supplied parts pass through printable() first. Exception path, not HTML output.
+		throw new HostCannotComply( $message );
+	}
+
+	/**
+	 * Refuse an archive holding an entry too large for this host's per-entry memory budget.
+	 *
+	 * Compares the same measured sizes as {@see self::assert_entry_sizes_within_limit()}
+	 * against a different limit, and is a separate check because the remedy differs:
+	 * that one has no remedy on the host, this one is fixed by giving the host more
+	 * memory. With no memory-derived budget there is nothing to compare against and it
+	 * returns without throwing, because the restore enforces no such cap either.
+	 *
+	 * @param array<int, array{label: string, path: string|null, size: int}> $entries Every entry, as measured by the shared header pass.
+	 * @return void
+	 * @throws \Pontifex\Exception\HostCannotComply If any entry's decoded size exceeds the memory budget.
+	 */
+	public function assert_entry_sizes_within_memory( array $entries ): void {
+		if ( $this->entry_memory_budget <= 0 ) {
+			return;
+		}
+
+		$over = self::entries_above( $entries, $this->entry_memory_budget );
+		if ( array() === $over ) {
+			return;
+		}
+
+		$largest = self::largest_of( $over );
+		$message = sprintf(
+			'%s a decoded size above the %s-byte memory budget this host allows for a single entry; the largest is %s, at %s bytes. The backup is not damaged: it needs a host with more memory.',
+			self::count_phrase( count( $over ) ),
+			number_format( $this->entry_memory_budget ),
+			self::printable( $largest['label'] ),
+			number_format( $largest['size'] )
+		);
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain-text exception message; the archive-supplied parts pass through printable() first. Exception path, not HTML output.
+		throw new HostCannotComply( $message );
+	}
+
+	/**
+	 * Refuse an archive holding a path with a single component longer than the filesystem allows.
+	 *
+	 * Measured in BYTES with strlen(), never characters: a filename in a multi-byte
+	 * script reaches a byte limit well before a character count would suggest.
+	 * Only each entry's own recorded path is judged. The longer name a restore uses
+	 * while a file is being written is a separate matter and is not allowed for here.
+	 *
+	 * @param array<int, array{label: string, path: string|null, size: int}> $entries Every entry, as measured by the shared header pass.
+	 * @return void
+	 * @throws \Pontifex\Exception\HostCannotComply If any path has a component longer than the filesystem limit.
+	 */
+	public function assert_path_components_within_limit( array $entries ): void {
+		$offending = array();
+		foreach ( $entries as $entry ) {
+			if ( null === $entry['path'] ) {
+				continue;
+			}
+			foreach ( explode( '/', $entry['path'] ) as $component ) {
+				if ( strlen( $component ) > self::MAX_PATH_COMPONENT_BYTES ) {
+					$offending[] = $entry['path'];
+					break;
+				}
+			}
+		}
+
+		if ( array() === $offending ) {
+			return;
+		}
+
+		$message = sprintf(
+			'%s a file or folder name longer than the %d bytes filesystems commonly allow; the first is %s. The backup is not damaged, but it cannot be written to a standard filesystem as it stands.',
+			1 === count( $offending ) ? 'One entry has' : sprintf( '%d entries have', count( $offending ) ),
+			self::MAX_PATH_COMPONENT_BYTES,
+			self::printable( $offending[0] )
+		);
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain-text exception message; the archive-supplied parts pass through printable() first. Exception path, not HTML output.
+		throw new HostCannotComply( $message );
+	}
+
+	/**
+	 * Refuse an archive whose codecs this host cannot decode.
+	 *
+	 * Verify never decodes, so it cannot notice that a host lacks the PHP extension
+	 * an archive's compression needs; the restore would then fail at its first
+	 * decode. Each id is put to {@see EntryReader::assert_codec_usable()}, so the
+	 * answer is the one the restore itself would give, and the first refusal is
+	 * let out unchanged.
+	 *
+	 * @param int[] $codec_ids The distinct codec ids the archive uses.
+	 * @return void
+	 * @throws \Pontifex\Exception\HostCannotComply      If a codec's PHP extension is not loaded on this host.
+	 * @throws \Pontifex\Exception\ArchiveNotTrustworthy If a codec id is unknown or not registered.
+	 */
+	public function assert_codecs_usable( array $codec_ids ): void {
+		foreach ( $codec_ids as $codec_id ) {
+			$this->entry_reader->assert_codec_usable( $codec_id );
+		}
+	}
+
+	/**
+	 * Collect each distinct codec id the manifest records, once, in first-seen order.
+	 *
+	 * The manifest alone answers this: no stream, no header read, no I/O, so it
+	 * cannot fail and needs no inconclusive branch. Reading the manifest rather than
+	 * each entry's own on-disk codec id is correct, not a gap: the entry reader
+	 * already cross-checks the on-disk id against the manifest's on every read, so a
+	 * manifest that lies is refused at restore time as an archive problem.
+	 *
+	 * @param ArchiveManifest $manifest The archive's already-decoded manifest.
+	 * @return int[] The distinct codec ids.
+	 */
+	private function distinct_codec_ids( ArchiveManifest $manifest ): array {
+		$ids = array();
+		foreach ( $manifest->entries() as $manifest_entry ) {
+			$ids[ $manifest_entry->codec_id() ] = $manifest_entry->codec_id();
+		}
+		return array_values( $ids );
+	}
+
+	/**
+	 * Select the entries whose decoded size is above a limit.
+	 *
+	 * @param array<int, array{label: string, path: string|null, size: int}> $entries Every entry.
+	 * @param int                                                            $limit   The limit, in bytes.
+	 * @return array<int, array{label: string, path: string|null, size: int}> Those above it, in their original order.
+	 */
+	private static function entries_above( array $entries, int $limit ): array {
+		return array_values(
+			array_filter(
+				$entries,
+				static function ( array $entry ) use ( $limit ): bool {
+					return $entry['size'] > $limit;
+				}
+			)
+		);
+	}
+
+	/**
+	 * Pick the largest of a non-empty set of entries; the first wins a tie.
+	 *
+	 * @param array<int, array{label: string, path: string|null, size: int}> $entries A non-empty set.
+	 * @return array{label: string, path: string|null, size: int} The largest.
+	 */
+	private static function largest_of( array $entries ): array {
+		$largest = $entries[0];
+		foreach ( $entries as $entry ) {
+			if ( $entry['size'] > $largest['size'] ) {
+				$largest = $entry;
+			}
+		}
+		return $largest;
+	}
+
+	/**
+	 * Phrase a count of entries so it reads correctly for one and for many.
+	 *
+	 * @param int $count How many entries; at least 1.
+	 * @return string "One entry has" or "N entries have".
+	 */
+	private static function count_phrase( int $count ): string {
+		return 1 === $count ? 'One entry has' : sprintf( '%d entries have', $count );
+	}
+
+	/**
+	 * Make an archive-supplied string safe to print in a message, and bounded in length.
+	 *
+	 * Every byte outside printable ASCII is written as a \xNN escape, so a name can
+	 * neither emit raw bytes into a message nor pass off one character for another.
+	 *
+	 * @param string $value The raw string.
+	 * @return string The escaped, possibly shortened, string.
+	 */
+	private static function printable( string $value ): string {
+		$escaped = (string) preg_replace_callback(
+			'/[^\x20-\x7E]/',
+			static function ( array $matched ): string {
+				return sprintf( '\\x%02X', ord( $matched[0] ) );
+			},
+			$value
+		);
+
+		if ( strlen( $escaped ) > self::MAX_PATH_IN_MESSAGE ) {
+			return substr( $escaped, 0, self::MAX_PATH_IN_MESSAGE ) . '...';
+		}
+		return $escaped;
+	}
+
+	/**
+	 * Measure every entry of every kind once, for the checks that weigh decoded size and path.
+	 *
+	 * Unlike {@see self::declared_file_sizes()}, which covers file entries only
+	 * because only files consume disk, this reads the header of EVERY entry: the
+	 * per-entry limit is enforced on decode for every kind, so a database chunk
+	 * can be refused as surely as a file. The two passes overlap on file entries.
+	 * That duplication is deliberate for this slice — collapsing them would alter
+	 * the behaviour of the shipped free-space check, which is not this slice's
+	 * business — so declared_file_sizes() is left exactly as it was.
+	 *
+	 * Reads headers only, via {@see EntryReader::peek_header()}; no payload is read.
+	 *
+	 * @param resource        $archive_source A seekable, readable stream containing the archive.
+	 * @param ArchiveManifest $manifest       The archive's already-decoded manifest.
+	 * @return array<int, array{label: string, path: string|null, size: int}> Per entry: a printable label, its manifest path (null for a database chunk) and its decoded size.
+	 * @throws \Pontifex\Exception\ArchiveNotTrustworthy If an entry's header cannot be read or is malformed.
+	 */
+	private function declared_entry_sizes( $archive_source, ArchiveManifest $manifest ): array {
+		$entries = array();
+
+		foreach ( $manifest->entries() as $manifest_entry ) {
+			$header = $this->entry_reader->peek_header( $archive_source, $manifest_entry );
+			$path   = $manifest_entry->path();
+
+			if ( null !== $path ) {
+				$label = $path;
+			} else {
+				$table = $header->table_name();
+				$label = null !== $table ? 'database chunk for table ' . $table : 'a database chunk';
+			}
+
+			$entries[] = array(
+				'label' => $label,
+				'path'  => $path,
+				'size'  => $header->estimated_bytes(),
+			);
+		}
+
+		return $entries;
 	}
 
 	/**

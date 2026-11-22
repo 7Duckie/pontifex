@@ -22,6 +22,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Environment\RealEnvironment;
 use Pontifex\Exception\BuildCannotComply;
 use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 use Pontifex\Log\FileLogger;
 use Pontifex\Manifest\WpdbAdapter;
 use Pontifex\Restore\DatabaseWriter;
@@ -289,6 +290,23 @@ final class VerifyCommand {
 
 			$this->print_sound( $archive_path, $entry_total, $this->describe_archive_scope( $source ) );
 			$this->print_restorability( $report );
+		} catch ( InvalidRequest $error ) {
+			// The operator's mistake, not a finding about the archive: the verify
+			// engine could not decrypt an encrypted backup with the passphrase it
+			// was given. Nothing was learned about the archive's soundness, and
+			// "broken" is the one verdict that could talk somebody out of a good
+			// backup over a typo — so it exits via WP_CLI::error, exactly as a bad
+			// key file does in resolve_public_key(), never the broken-verdict path.
+			$this->logger->warning(
+				'Verify stopped: the request was not valid.',
+				array(
+					'archive'   => $archive_path,
+					'exception' => $error,
+				)
+			);
+
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- WP_CLI::error renders the message to the terminal, not HTML; the message is our own.
+			WP_CLI::error( PathRedactor::from_environment()->redact( $error->getMessage() ) );
 		} catch ( HostCannotComply $error ) {
 			// This host, not the archive, is what stopped the walk short — a
 			// low memory_limit unable to hold a db_chunk it must buffer whole
@@ -877,7 +895,7 @@ final class VerifyCommand {
 			)
 		);
 		WP_CLI::log(
-			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly.', 'pontifex' )
+			__( 'This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host\'s, and once it is fixed the same archive should check cleanly.', 'pontifex' )
 		);
 	}
 

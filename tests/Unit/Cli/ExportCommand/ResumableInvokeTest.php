@@ -27,6 +27,7 @@ use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Manifest\ManifestStream;
 use Pontifex\Tests\TestCase;
 use Pontifex\WordPress\WordPressContext;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
@@ -221,6 +222,79 @@ final class ResumableInvokeTest extends TestCase {
 	}
 
 	/**
+	 * A resumable export names the views its scan left out, from the job payload.
+	 *
+	 * The names reach the command through the finished job record, not a fresh look at
+	 * the database: the context mock offers no connection, so a second query would fail
+	 * the test.
+	 *
+	 * @return void
+	 */
+	public function test_a_resumable_export_names_the_views_from_the_job_payload(): void {
+		$warnings = array();
+		$wp_cli   = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+		$wp_cli->shouldReceive( 'warning' )->andReturnUsing(
+			static function ( string $message ) use ( &$warnings ): void {
+				$warnings[] = $message;
+			}
+		);
+
+		$logger  = Mockery::spy( LoggerInterface::class );
+		$context = $this->context_mock();
+		$context->shouldNotReceive( 'wpdb_instance' );
+		$command = new ExportCommand( $this->environment_mock(), $context, $this->builder_mock( array( 'wp_pontifex_probe_view' ) ), $logger, new NullProgressBar() );
+
+		$command(
+			array(),
+			array(
+				'output'    => $this->output_path,
+				'resumable' => true,
+				'yes'       => true,
+			)
+		);
+
+		$this->assertCount( 1, $warnings, 'Exactly one warning: the view notice.' );
+		$this->assertStringContainsString( 'wp_pontifex_probe_view', $warnings[0] );
+		$this->assertStringContainsString( 'left out on purpose', $warnings[0] );
+		$logger->shouldHaveReceived( 'warning' )
+			->withArgs(
+				static fn ( $message, $context = array() ): bool => is_array( $context ) && array( 'wp_pontifex_probe_view' ) === ( $context['views'] ?? null )
+			)
+			->once();
+	}
+
+	/**
+	 * A resumable export whose scan left no view out says nothing about views.
+	 *
+	 * @return void
+	 */
+	public function test_a_resumable_export_with_no_views_is_silent_about_them(): void {
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'error' )->never();
+		$wp_cli->shouldNotReceive( 'warning' );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldNotReceive( 'warning' );
+
+		$command = new ExportCommand( $this->environment_mock(), $this->context_mock(), $this->builder_mock(), $logger, new NullProgressBar() );
+
+		$command(
+			array(),
+			array(
+				'output'    => $this->output_path,
+				'resumable' => true,
+				'yes'       => true,
+			)
+		);
+
+		$this->assertFileExists( $this->output_path );
+	}
+
+	/**
 	 * A resumable export that fails says --resume will NOT pick it up, and why.
 	 *
 	 * This is the verdict most at risk of a plausible lie. "Continue it with --resume"
@@ -362,6 +436,7 @@ final class ResumableInvokeTest extends TestCase {
 	 */
 	private function failing_builder_mock() {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function (): ManifestStream {
 				return ManifestStream::from_plans(
@@ -384,10 +459,12 @@ final class ResumableInvokeTest extends TestCase {
 	/**
 	 * A ManifestBuilderInterface serving one file and one db chunk, fresh per build().
 	 *
+	 * @param string[] $excluded_views The views the builder reports as left out of its scan.
 	 * @return ManifestBuilderInterface&\Mockery\MockInterface The builder mock.
 	 */
-	private function builder_mock() {
+	private function builder_mock( array $excluded_views = array() ) {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( $excluded_views );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function (): ManifestStream {
 				$plans = array();

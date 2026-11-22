@@ -275,6 +275,148 @@ overwhelming majority of WordPress hosting — every distinct spelling is
 already a distinct file, no case-folding comparison is ever needed, and this
 check never runs at all.
 
+### "records its database as using the collation … which this server's database does not have"
+
+> This backup records its database as using the collation
+> "utf8mb4_ja_0900_as_cs", which this server's database does not have, so it
+> cannot be restored here. The obstacle is this server's rather than the
+> backup's, and a database server that supports that collation can get past it.
+> This check looked only at the
+> collation the backup records for the database as a whole, so a single table
+> with its own, different collation could still stop a restore later.
+
+**An environment problem, not a fault in the backup. Not common.**
+
+**What happened.** A collation is the rule a database uses to sort and compare
+text — whether "a" and "A" count as equal, say. Your backup records the one it
+was taken with, and the database you are restoring onto has to know that rule
+to rebuild the tables. This one does not. Which servers lack which collations
+varies; a very new MySQL can have collations an older MySQL or MariaDB has
+never heard of, and the language-specific ones are the usual cases. It is not
+true that every move between those two products hits this.
+
+**Nothing has been changed.** Pontifex asks before it checks or restores a single entry,
+so neither your files nor your database were touched. Previously the same
+backup was accepted by `verify` and then failed part-way through a restore with
+a raw database error; asking up front is what changed.
+
+**This is not a verdict on your backup.** `verify` reports it as "could not
+check", not as broken, because the obstacle is this server's and the check
+stopped before it looked at a single entry. Nothing has been found wrong with
+the file, and nothing has been confirmed about it either. Keep it, and check it
+again once it is on a server that has the collation.
+
+**What to do.** Restore onto a database server that has the collation named in
+the message — usually a newer version of the same kind of server, or the kind
+the backup came from.
+
+**What not to do.** Do not delete the backup, and do not edit the collation out
+of the archive or the SQL inside it: that is silently converting your data's
+sorting rules, which is exactly what Pontifex declines to do for you.
+
+**What this check does not cover.** It looks only at the collation the backup
+records for the database as a whole. A single table or column can carry its own
+collation, written only inside that table's definition, and Pontifex does not
+read it here. If one such table has a collation this server lacks, the restore
+will still stop when it reaches that table. Your live tables are untouched in
+that case — the tables are built as temporary copies first.
+
+### "This backup's entries are compressed with zstd (codec id 0x0002), and this server cannot unpack them"
+
+> This backup's entries are compressed with zstd (codec id 0x0002), and this
+> server cannot unpack them. The zstd PHP extension (ext-zstd) is required for
+> codec 0x0002 but is not loaded. The backup is not damaged — it will restore
+> on a server that can.
+
+**Likely the first thing you meet when moving a site to a new server. An
+environment problem, not a fault in the backup.**
+
+**What happened.** Pontifex compresses a backup with zstd when the server
+making it has the `zstd` PHP extension, and with gzip when it does not. The
+choice is made once, by the server that writes the backup. A backup written by
+a server that has the extension can therefore only be unpacked by a server that
+has it too, and this server does not. Verify reports this in advance, as a note
+beside its verdict — "the backup is fine, but this server could not restore it
+right now" — so you find out before you start a restore rather than during it.
+
+**Your backup is fine.** Nothing inside it is damaged; every fingerprint
+matched. Only this server's PHP is missing a part.
+
+**What to do.** Install or enable the `zstd` PHP extension on the server you
+are restoring onto, or restore onto a server that already has it. Your host's
+support can usually do the first; it is the same kind of request as asking for
+any other PHP extension.
+
+**What not to do.** Do not treat the backup as damaged, and do not take a fresh
+export to get round it. The server that wrote this backup chose zstd because it
+has the extension, so a new export from that same server is compressed the same
+way and is refused the identical way here.
+
+**In the browser:** the Verify screen shows it after "The backup is fine, but
+this server could not restore it right now:".
+
+### "a decoded size above the N-byte memory budget this host allows for a single entry"
+
+> … a decoded size above the N-byte memory budget this host allows for a single
+> entry; the largest is X, at N bytes. The backup is not damaged: it needs a
+> host with more memory.
+
+**An environment problem, not a fault in the backup. Fixed by giving the
+server more memory.**
+
+**What happened.** To restore a file, Pontifex has to unpack it, and part of
+the work happens in memory. It allows a single file a quarter of PHP's
+`memory_limit`, and this archive holds at least one file that unpacks to more
+than that. The message names the largest one. Where `memory_limit` is `-1`
+(no limit), there is no such budget and this refusal does not arise.
+
+**Your backup is fine.** A server with a higher `memory_limit` restores it.
+
+**What to do.** Raise PHP's `memory_limit`, or restore on a server that has
+more, then check again.
+
+**What not to do.** Do not confuse this with the 2 GB refusal in "Archive is
+REFUSED: … but this build will not restore a single entry over 2 GB". That one
+is a fixed ceiling inside Pontifex, and no server setting moves it; this one
+is about *this server's* memory, and raising `memory_limit` is exactly what
+fixes it. Reaching for a memory setting when you were told about the 2 GB
+ceiling does nothing, and giving up on the backup when you were told about
+this budget throws away a restore that one setting would have allowed.
+
+**In the browser:** the Verify screen shows it after "The backup is fine, but
+this server could not restore it right now:".
+
+### "a file or folder name longer than the 255 bytes filesystems commonly allow"
+
+> … a file or folder name longer than the 255 bytes filesystems commonly
+> allow; the first is X. The backup is not damaged, but it cannot be written to
+> a standard filesystem as it stands.
+
+**Rare. The backup is undamaged; the name inside it is the problem.**
+
+**What happened.** One or more of the files or folders in the archive has a
+name longer than 255 bytes, which is the longest name most filesystems will
+store. The message names the first one. Two details decide whether a name
+counts. The length is measured in *bytes*, not characters, so a name written
+in a script where each letter takes several bytes reaches the limit at far
+fewer letters than 255. And Pontifex judges each file's or folder's own
+recorded path as it is stored in the archive; it does not count the longer
+temporary name a restore uses for a moment while it writes a file.
+
+**Your backup is fine.** Nothing is damaged; the archive simply records a
+name a standard filesystem cannot store.
+
+**What to do.** Find that file or folder on the original site, shorten its
+name, and take a new backup. The new backup records the shorter name and does
+not hit this refusal.
+
+**What not to do.** Do not treat the backup as damaged, and do not try the
+restore again unchanged — the name is in the archive, so it fails the same way
+each time.
+
+**In the browser:** the Verify screen shows it after "The backup is fine, but
+this server could not restore it right now:".
+
 ### "this process cannot see into that directory"
 
 > The restore was stopped before anything was written. Resolving the symbolic
@@ -620,6 +762,21 @@ cannot be opened. Not by you, not by anyone.
 one, and a tool that skipped the check would produce plausible-looking rubbish
 and write it over your live site.
 
+### "the passphrase is wrong: it does not unlock this encrypted backup"
+
+**Your typing, not your backup. Nothing is damaged. Nothing has been changed.**
+
+**What happened.** `verify` checks the passphrase before anything else, by
+unlocking one entry. Every entry's fingerprint is checked before it is
+unlocked, so by the time unlocking fails the bytes are known to be exactly what
+was written. That leaves one explanation: the passphrase. This message is
+certain, which is why it differs from the restore-time one above, which has to
+allow for altered data.
+
+**What to do.** Run `verify` again and retype the passphrase, watching for a
+trailing space, a smart quote or a different keyboard layout. The backup is
+intact; do not delete it or fetch another copy.
+
 ### "entry hash does not match" / "the entry has been tampered with or is corrupt"
 
 **Protecting you. Never bypass this.**
@@ -679,8 +836,8 @@ command line manages easily.
 >
 > This is not a verdict on the backup — no check ran to completion, so
 > nothing is known about it either way. Keep the file; the problem named
-> above is this host's, and is usually fixable (more memory, more disk
-> space), after which the same archive should check cleanly.
+> above is this host's, and once it is fixed the same archive should check
+> cleanly.
 
 **Common on shared hosting with large sites. An environment problem, and —
 importantly — not a verdict of any kind.**
@@ -744,6 +901,15 @@ changes it. Do not treat the backup as damaged; every hash matched.
 
 **In the browser:** the Verify and Restore screens report the same Refused
 outcome, worded for the screen rather than the terminal.
+
+**Verify may name the same ceiling in different words.** The same 2 GB limit
+can also come up as a note beside a sound verdict: "… a decoded size above the
+N-byte limit this build of Pontifex applies to a single entry, on any host; the
+largest is X, at N bytes. The backup is not damaged and does not need replacing
+— no server setting changes this ceiling." That is this same limit, found in
+advance rather than during the restore, and everything above applies
+unchanged. This is not the memory-budget refusal under "Restoring", which
+raising `memory_limit` does fix.
 
 ### "this archive is format version X.Y, but this reader supports…"
 

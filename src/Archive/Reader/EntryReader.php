@@ -19,6 +19,9 @@ use Pontifex\Archive\Codec\CodecException;
 use Pontifex\Archive\Codec\CodecId;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\CodecUnavailableException;
+use Pontifex\Archive\Codec\GzipCodec;
+use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Codec\ZstdCodec;
 use Pontifex\Archive\Crypto\Cipher;
 use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\ByteOrder;
@@ -254,19 +257,7 @@ final class EntryReader {
 			);
 		}
 
-		// The codec id's low byte selects the compression codec; its high byte selects
-		// encryption (0x0100 = AES-256-GCM).
-		$compression_codec_id = CodecId::compression( $codec_id );
-		if ( CodecId::is_encrypted( $codec_id ) && CodecId::ENCRYPTION_AES_GCM !== CodecId::encryption_family( $codec_id ) ) {
-			throw new ArchiveNotTrustworthy(
-				sprintf( 'Unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
-			);
-		}
-		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
-			throw new ArchiveNotTrustworthy(
-				sprintf( 'Compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
-			);
-		}
+		$compression_codec_id = $this->assert_codec_id_known( $codec_id );
 
 		// The nonce and the plaintext header bytes are inputs to decryption: the nonce
 		// sits between codec_id and the payload, and the header bytes (with their length
@@ -459,7 +450,7 @@ final class EntryReader {
 	 * reports progress mid-entry through the optional callback, so a single large
 	 * entry no longer blocks the walk.
 	 *
-	 * Before v1.1.1 the two budget parameters below could not both be honoured
+	 * Before v1.2.0 the two budget parameters below could not both be honoured
 	 * correctly: this method took a single $max_decoded_bytes that the caller
 	 * ({@see \Pontifex\Restore\RestoreRunner::verify()}) filled with the
 	 * MEMORY-derived budget, gated on `! streams_decoded_payload(...)` — the
@@ -642,6 +633,102 @@ final class EntryReader {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $message quotes the entry's own path for diagnostic context; exception path, not HTML output.
 			throw new BuildCannotComply( $message );
 		}
+	}
+
+	/**
+	 * Establish that this reader could decode an entry stored with this codec id, on this host.
+	 *
+	 * Verify hashes each entry's stored bytes and never decodes one, so it cannot
+	 * notice that this host lacks the PHP extension the archive's codec needs; the
+	 * restore that follows then fails at its first decode. This asks the question
+	 * early, and answers it by throwing exactly what {@see self::read_entry()} would
+	 * throw for the same codec id, so the preflight can never disagree with the
+	 * restore it predicts: the same two refusals, in the same order, for an unknown
+	 * encryption family and an unregistered compression codec, then HostCannotComply
+	 * for a codec whose extension is absent.
+	 *
+	 * The last question is asked by decoding an empty stream. A codec that needs an
+	 * extension checks for it before it looks at its input (the zstd codec's first
+	 * statement), so the probe reads and writes nothing; the gzip and raw codecs
+	 * decode an empty stream to nothing without complaint.
+	 *
+	 * @param int $codec_id The two-byte codec id an entry carries, as the manifest records it.
+	 * @return void
+	 * @throws HostCannotComply If the codec is registered but the PHP extension it needs is not loaded on this host. An unknown encryption family or unregistered compression codec raises ArchiveNotTrustworthy from {@see self::assert_codec_id_known()}, which is not a literal throw here.
+	 */
+	public function assert_codec_usable( int $codec_id ): void {
+		$compression_codec_id = $this->assert_codec_id_known( $codec_id );
+
+		$input  = $this->open_spool();
+		$output = $this->open_spool();
+		try {
+			$this->codec_registry->get( $compression_codec_id )->decode( $input, $output, null );
+		} catch ( CodecUnavailableException $e ) {
+			$message = sprintf(
+				'This backup\'s entries are compressed with %s (codec id 0x%04X), and this server cannot unpack them. %s The backup is not damaged — it will restore on a server that can.',
+				self::compression_family_name( $compression_codec_id ),
+				(int) $codec_id,
+				$e->getMessage()
+			);
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain-text message built from a constant sentence, a codec family name and the underlying codec exception's message; not HTML output.
+			throw new HostCannotComply( $message, 0, $e );
+		// phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- Deliberately empty: the reason is the comment inside.
+		} catch ( CodecException ) {
+			// The availability guard did not fire, so the extension is present, and
+			// any other complaint is about the empty probe stream, not about this
+			// host. A third-party codec that checked availability only after reading
+			// its input would be reported as available here; the probe then errs
+			// toward "available", so the restore still refuses properly at decode
+			// time and the preflight never wrongly condemns an archive. That is the
+			// safe direction, and it is intentional.
+		} finally {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp buffer; not a filesystem path.
+			fclose( $input );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Cleanup of a php://temp buffer; not a filesystem path.
+			fclose( $output );
+		}
+	}
+
+	/**
+	 * Refuse a codec id this reader does not know, and return its compression codec id.
+	 *
+	 * The one home for the two refusals, shared by {@see self::read_entry()} and
+	 * {@see self::assert_codec_usable()} so the restore and the preflight that
+	 * predicts it can never disagree. The codec id's low byte selects the
+	 * compression codec; its high byte selects encryption (0x0100 = AES-256-GCM).
+	 *
+	 * @param int $codec_id The two-byte codec id an entry carries.
+	 * @return int The compression codec id (the low byte).
+	 * @throws ArchiveNotTrustworthy If the encryption family is unknown or the compression codec is not registered.
+	 */
+	private function assert_codec_id_known( int $codec_id ): int {
+		$compression_codec_id = CodecId::compression( $codec_id );
+		if ( CodecId::is_encrypted( $codec_id ) && CodecId::ENCRYPTION_AES_GCM !== CodecId::encryption_family( $codec_id ) ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Unknown encryption family 0x%04X in codec id 0x%04X.', (int) CodecId::encryption_family( $codec_id ), (int) $codec_id )
+			);
+		}
+		if ( ! $this->codec_registry->has( $compression_codec_id ) ) {
+			throw new ArchiveNotTrustworthy(
+				sprintf( 'Compression codec 0x%04X (from codec id 0x%04X) is not registered.', (int) $compression_codec_id, (int) $codec_id )
+			);
+		}
+		return $compression_codec_id;
+	}
+
+	/**
+	 * Name a compression family in words, for a message a site owner reads.
+	 *
+	 * @param int $compression_codec_id The compression byte of a codec id.
+	 * @return string "raw", "gzip" or "zstd", or a neutral phrase for an id this build does not name.
+	 */
+	private static function compression_family_name( int $compression_codec_id ): string {
+		return match ( $compression_codec_id ) {
+			RawCodec::ID  => 'raw (no compression)',
+			GzipCodec::ID => 'gzip',
+			ZstdCodec::ID => 'zstd',
+			default       => 'a compression format this build does not name',
+		};
 	}
 
 	/**
@@ -844,7 +931,7 @@ final class EntryReader {
 	 * it no longer matters which a caller reads.
 	 *
 	 * Raised as {@see ArchiveNotTrustworthy} rather than a bare RuntimeException
-	 * — this was, until v1.1.1, the only structural check in this reader
+	 * — this was, until v1.2.0, the only structural check in this reader
 	 * outside the project's exception taxonomy (ADR 0022), so nothing could
 	 * branch on it specifically. The verdict this produces stays "broken",
 	 * which is correct for a tampered archive; only the throw's type changed.

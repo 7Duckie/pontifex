@@ -308,6 +308,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wordpress_context = $this->build_wordpress_context_mock();
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder
 			->shouldReceive( 'build' )
 			->once()
@@ -346,6 +347,7 @@ final class InvokeBranchesTest extends TestCase {
 		$wordpress_context = $this->build_wordpress_context_mock();
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder
 			->shouldReceive( 'build' )
 			->once()
@@ -406,6 +408,7 @@ final class InvokeBranchesTest extends TestCase {
 		);
 
 		$manifest_builder = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( ManifestStream::from_plans( array( $plan ) ) );
 
 		$warnings = array();
@@ -432,6 +435,115 @@ final class InvokeBranchesTest extends TestCase {
 		$this->assertStringContainsString( '1000', $warnings[0], 'The per-file warning must state the scan-time byte count.' );
 		$this->assertStringContainsString( '400', $warnings[0], 'The per-file warning must state the captured byte count.' );
 		$this->assertStringContainsString( '1 file changed while the backup ran', $warnings[1], 'The summary must count the changed files.' );
+	}
+
+	/**
+	 * A database view left out of the backup is named in a warning and recorded in the log.
+	 *
+	 * A view stores no rows and a restore cannot recreate it, so the backup deliberately
+	 * leaves it out; that must never be silent, because the archive is less complete than
+	 * the site. The names come from the builder that did the scan, and the database is
+	 * not asked again: the context mock offers no connection, so a second look would
+	 * fail the test.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_warns_naming_each_database_view_left_out(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+		$wordpress_context->shouldNotReceive( 'wpdb_instance' );
+		$manifest_builder = $this->build_manifest_builder_mock_returning_empty( array( 'wp_pontifex_probe_view' ) );
+
+		$warnings = array();
+		$wp_cli   = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldReceive( 'warning' )
+			->once()
+			->andReturnUsing(
+				static function ( string $message ) use ( &$warnings ): void {
+					$warnings[] = $message;
+				}
+			);
+
+		$logger  = Mockery::spy( LoggerInterface::class );
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertStringContainsString( 'wp_pontifex_probe_view', $warnings[0], 'The warning must name the view that was left out.' );
+		$this->assertStringContainsString( 'left out on purpose', $warnings[0], 'The warning must say the omission is deliberate.' );
+		$logger->shouldHaveReceived( 'warning' )
+			->withArgs(
+				static fn ( $message, $context = array() ): bool => is_array( $context ) && array( 'wp_pontifex_probe_view' ) === ( $context['views'] ?? null )
+			)
+			->once();
+	}
+
+	/**
+	 * With no views in the database the export stays silent about them.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_says_nothing_about_views_when_there_are_none(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+		$manifest_builder  = $this->build_manifest_builder_mock_returning_empty();
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'warning' );
+
+		$logger = Mockery::mock( LoggerInterface::class );
+		$logger->shouldReceive( 'info' )->zeroOrMoreTimes();
+		$logger->shouldNotReceive( 'warning' );
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, $logger, new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output' => $this->temp_output_path,
+				'yes'    => true,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_output_path );
+	}
+
+	/**
+	 * A files-only export is silent about views, whatever the builder might hold.
+	 *
+	 * A files-only backup never reads the database, so there is nothing it could have
+	 * left out; the command must not even ask the builder.
+	 *
+	 * @return void
+	 */
+	public function test_invoke_says_nothing_about_views_on_a_files_only_export(): void {
+		$environment       = $this->build_environment_mock();
+		$wordpress_context = $this->build_wordpress_context_mock();
+		$manifest_builder  = Mockery::mock( ManifestBuilderInterface::class );
+		$manifest_builder->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
+		$manifest_builder->shouldNotReceive( 'excluded_views' );
+
+		$wp_cli = Mockery::mock( 'alias:WP_CLI' );
+		$wp_cli->shouldReceive( 'log' )->zeroOrMoreTimes();
+		$wp_cli->shouldNotReceive( 'warning' );
+
+		$command = new ExportCommand( $environment, $wordpress_context, $manifest_builder, new NullLogger(), new NullProgressBar() );
+		$command(
+			array(),
+			array(
+				'output'     => $this->temp_output_path,
+				'yes'        => true,
+				'files-only' => true,
+			)
+		);
+
+		$this->assertFileExists( $this->temp_output_path );
 	}
 
 	/**
@@ -586,11 +698,13 @@ final class InvokeBranchesTest extends TestCase {
 	 * what bytes end up on disk, only that __invoke runs to
 	 * completion without invoking the branches under assertion.
 	 *
+	 * @param string[] $excluded_views The views the mock builder reports as left out.
 	 * @return ManifestBuilderInterface&\Mockery\MockInterface
 	 */
-	private function build_manifest_builder_mock_returning_empty() {
+	private function build_manifest_builder_mock_returning_empty( array $excluded_views = array() ) {
 		$mock = Mockery::mock( ManifestBuilderInterface::class );
 		$mock->shouldReceive( 'build' )->once()->andReturn( \Pontifex\Manifest\ManifestStream::from_plans( array() ) );
+		$mock->shouldReceive( 'excluded_views' )->andReturn( $excluded_views );
 		return $mock;
 	}
 

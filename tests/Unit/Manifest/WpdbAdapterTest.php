@@ -72,15 +72,21 @@ final class WpdbAdapterTest extends TestCase {
 	}
 
 	/**
-	 * The list_tables method must return an alphabetised list of strings from $wpdb->get_col().
+	 * The list_tables method must return an alphabetised list of strings from $wpdb->get_results().
 	 *
 	 * @return void
 	 */
 	public function test_list_tables_returns_alphabetised_strings(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
-		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_col' )->willReturn( array( 'wp_postmeta', 'wp_options', 'wp_posts' ) );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_postmeta', 'BASE TABLE' ),
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_posts', 'BASE TABLE' ),
+			)
+		);
 
 		$tables = ( new WpdbAdapter( $wpdb ) )->list_tables();
 
@@ -97,7 +103,7 @@ final class WpdbAdapterTest extends TestCase {
 		$wpdb->last_error = 'Connection lost';
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
 		$wpdb->method( 'prepare' )->willReturn( '' );
-		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 
 		$this->expectException( RuntimeException::class );
 
@@ -117,13 +123,162 @@ final class WpdbAdapterTest extends TestCase {
 	public function test_list_tables_refuses_an_empty_result_without_error(): void {
 		$wpdb = $this->mock_wpdb();
 		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
-		$wpdb->method( 'prepare' )->willReturn( "SHOW TABLES LIKE 'wp_%'" );
-		$wpdb->method( 'get_col' )->willReturn( array() );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn( array() );
 		$wpdb->method( 'get_var' )->willReturn( null );
 
 		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'WpdbAdapter: the database returned no wp_-prefixed tables, and the core options table is absent, so the database may be unavailable. Refusing to proceed with no database.' );
 
 		( new WpdbAdapter( $wpdb ) )->list_tables();
+	}
+
+	/**
+	 * A view carrying the site's prefix is not enumerated.
+	 *
+	 * SHOW TABLES lists views beside base tables, but a restore cannot recreate one, so a
+	 * backup that carried it would verify sound and then fail mid-restore.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_leaves_out_a_view_with_the_site_prefix(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_posts', 'BASE TABLE' ),
+				array( 'wp_pontifex_probe_view', 'VIEW' ),
+				array( 'wp_options', 'BASE TABLE' ),
+			)
+		);
+
+		$this->assertSame( array( 'wp_options', 'wp_posts' ), ( new WpdbAdapter( $wpdb ) )->list_tables() );
+	}
+
+	/**
+	 * SEQUENCE and SYSTEM VERSIONED objects are still enumerated.
+	 *
+	 * The restore accepts both, so leaving them out of a backup would be a new data-loss
+	 * bug introduced by the view fix. This is the regression that guards against it.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_keeps_sequences_and_system_versioned_tables(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_ticket_seq', 'SEQUENCE' ),
+				array( 'wp_audit', 'SYSTEM VERSIONED' ),
+				array( 'wp_a_view', 'VIEW' ),
+			)
+		);
+
+		$this->assertSame( array( 'wp_audit', 'wp_options', 'wp_ticket_seq' ), ( new WpdbAdapter( $wpdb ) )->list_tables() );
+	}
+
+	/**
+	 * A row with no type column is kept, never dropped.
+	 *
+	 * Only an object positively reported as unrestorable is left out; a row that does not
+	 * say what it is must not silently vanish from the backup.
+	 *
+	 * @return void
+	 */
+	public function test_list_tables_keeps_a_row_that_reports_no_type(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn( array( array( 'wp_options' ) ) );
+
+		$this->assertSame( array( 'wp_options' ), ( new WpdbAdapter( $wpdb ) )->list_tables() );
+	}
+
+	/**
+	 * The empty-result refusal looks at the raw result, before any filtering.
+	 *
+	 * A result holding only a view is a database that has the prefix but nothing a
+	 * restore can replay; it is not the "query failed silently" case the refusal exists
+	 * for, so it must not be reported as one.
+	 *
+	 * @return void
+	 */
+	public function test_the_empty_result_refusal_is_applied_before_filtering(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturn( array( array( 'wp_only_a_view', 'VIEW' ) ) );
+
+		$this->assertSame( array(), ( new WpdbAdapter( $wpdb ) )->list_tables() );
+	}
+
+	/**
+	 * The views left out are named from the listing list_tables() already read.
+	 *
+	 * The listing query runs exactly once: the names are a by-product of the one pass,
+	 * not a second look at a database that may since have changed.
+	 *
+	 * @return void
+	 */
+	public function test_excluded_views_names_the_views_the_listing_left_out(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->expects( $this->once() )->method( 'get_results' )->willReturn(
+			array(
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_zebra_view', 'VIEW' ),
+				array( 'wp_ticket_seq', 'SEQUENCE' ),
+				array( 'wp_alpha_view', 'VIEW' ),
+			)
+		);
+
+		$adapter = new WpdbAdapter( $wpdb );
+		$adapter->list_tables();
+
+		$this->assertSame( array( 'wp_alpha_view', 'wp_zebra_view' ), $adapter->excluded_views() );
+	}
+
+	/**
+	 * Before any listing has been read, no view has been left out.
+	 *
+	 * The method answers for the last listing and never queries, so it reports nothing
+	 * rather than guessing.
+	 *
+	 * @return void
+	 */
+	public function test_excluded_views_is_empty_before_any_listing(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->expects( $this->never() )->method( 'get_results' );
+
+		$this->assertSame( array(), ( new WpdbAdapter( $wpdb ) )->excluded_views() );
+	}
+
+	/**
+	 * Each listing replaces the last: a view dropped since is no longer reported.
+	 *
+	 * @return void
+	 */
+	public function test_excluded_views_reflects_only_the_latest_listing(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'esc_like' )->willReturnArgument( 0 );
+		$wpdb->method( 'prepare' )->willReturn( "SHOW FULL TABLES LIKE 'wp_%'" );
+		$wpdb->method( 'get_results' )->willReturnOnConsecutiveCalls(
+			array(
+				array( 'wp_options', 'BASE TABLE' ),
+				array( 'wp_a_view', 'VIEW' ),
+			),
+			array( array( 'wp_options', 'BASE TABLE' ) )
+		);
+
+		$adapter = new WpdbAdapter( $wpdb );
+		$adapter->list_tables();
+		$adapter->list_tables();
+
+		$this->assertSame( array(), $adapter->excluded_views() );
 	}
 
 	/**
@@ -579,6 +734,49 @@ final class WpdbAdapterTest extends TestCase {
 		$wpdb->method( 'get_var' )->willReturn( null );
 
 		$this->assertFalse( ( new WpdbAdapter( $wpdb ) )->table_exists( 'wp_missing' ) );
+	}
+
+	/**
+	 * A collation in the server's list is supported, whatever its letter case.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_finds_a_listed_collation_case_insensitively(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'get_col' )->willReturn( array( 'utf8mb4_general_ci', 'utf8mb4_unicode_520_ci' ) );
+		$adapter = new WpdbAdapter( $wpdb );
+
+		$this->assertTrue( $adapter->collation_supported( 'utf8mb4_unicode_520_ci' ) );
+		$this->assertTrue( $adapter->collation_supported( 'UTF8MB4_GENERAL_CI' ) );
+	}
+
+	/**
+	 * A non-empty list that lacks the name means the server genuinely lacks the collation.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_reports_false_when_the_list_lacks_the_name(): void {
+		$wpdb = $this->mock_wpdb();
+		$wpdb->method( 'get_col' )->willReturn( array( 'utf8mb4_general_ci', 'utf8mb4_unicode_520_ci' ) );
+
+		$this->assertFalse( ( new WpdbAdapter( $wpdb ) )->collation_supported( 'utf8mb4_ja_0900_as_cs' ) );
+	}
+
+	/**
+	 * An EMPTY list is a failed query, never an answer, so it must not refuse.
+	 *
+	 * The get_col() call returns an empty array on failure and last_error is empty when errors are
+	 * suppressed, so both failure signals can be silent at once. No real server has no
+	 * collations, so empty means "could not tell" and must answer true.
+	 *
+	 * @return void
+	 */
+	public function test_collation_supported_does_not_refuse_on_an_empty_list(): void {
+		$wpdb             = $this->mock_wpdb();
+		$wpdb->last_error = '';
+		$wpdb->method( 'get_col' )->willReturn( array() );
+
+		$this->assertTrue( ( new WpdbAdapter( $wpdb ) )->collation_supported( 'utf8mb4_unicode_520_ci' ) );
 	}
 
 	/**

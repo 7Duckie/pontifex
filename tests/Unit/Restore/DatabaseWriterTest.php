@@ -21,6 +21,7 @@ use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReadResult;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Exception\ArchiveNotTrustworthy;
+use Pontifex\Exception\HostCannotComply;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Tests\Unit\Manifest\Fakes\FakeDbAdapter;
 
@@ -832,6 +833,75 @@ final class DatabaseWriterTest extends TestCase {
 
 		$this->assertSame( array(), $adapter->charset_calls(), 'The malformed charset must never reach the adapter.' );
 		$this->assertSame( array(), $adapter->executed_statements(), 'The refusal must land before any statement executes.' );
+	}
+
+	/**
+	 * A recorded database collation this server has changes nothing.
+	 *
+	 * @return void
+	 */
+	public function test_a_supported_recorded_collation_is_accepted(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		$writer->assert_recorded_database_collation_is_available( 'utf8mb4_unicode_520_ci' );
+
+		$this->assertSame( array( 'utf8mb4_unicode_520_ci' ), $adapter->collation_queries() );
+		$this->assertSame( array(), $adapter->executed_statements(), 'The check only asks; it never writes.' );
+	}
+
+	/**
+	 * A recorded collation this server lacks is a host problem, and the message names it.
+	 *
+	 * @return void
+	 */
+	public function test_an_unsupported_recorded_collation_is_refused_as_a_host_problem(): void {
+		$adapter = new FakeDbAdapter();
+		$adapter->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$writer = new DatabaseWriter( $adapter );
+
+		try {
+			$writer->assert_recorded_database_collation_is_available( 'utf8mb4_ja_0900_as_cs' );
+			$this->fail( 'An unsupported collation must be refused.' );
+		} catch ( HostCannotComply $refusal ) {
+			$this->assertStringContainsString( 'utf8mb4_ja_0900_as_cs', $refusal->getMessage() );
+			$this->assertStringContainsString( 'this server\'s rather than the backup\'s', $refusal->getMessage() );
+			$this->assertStringNotContainsString( 'damaged', $refusal->getMessage(), 'No check has read the backup, so the message must not vouch for it.' );
+			$this->assertStringContainsString( 'database as a whole', $refusal->getMessage(), 'The message must say how little was checked.' );
+		}
+	}
+
+	/**
+	 * An empty recorded collation is nothing to check, so the adapter is never asked.
+	 *
+	 * @return void
+	 */
+	public function test_an_empty_recorded_collation_is_not_checked(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		$writer->assert_recorded_database_collation_is_available( '' );
+
+		$this->assertSame( array(), $adapter->collation_queries() );
+	}
+
+	/**
+	 * A recorded collation that is not a plain name is refused as untrustworthy, and never reaches the adapter.
+	 *
+	 * @return void
+	 */
+	public function test_a_malformed_recorded_collation_is_refused_without_asking_the_adapter(): void {
+		$adapter = new FakeDbAdapter();
+		$writer  = new DatabaseWriter( $adapter );
+
+		try {
+			$writer->assert_recorded_database_collation_is_available( "x'; DROP TABLE y --" );
+			$this->fail( 'A malformed collation must be refused.' );
+		} catch ( ArchiveNotTrustworthy $refusal ) {
+			$this->assertStringContainsString( 'collation', $refusal->getMessage() );
+		}
+
+		$this->assertSame( array(), $adapter->collation_queries() );
 	}
 
 	/**

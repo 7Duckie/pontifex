@@ -67,6 +67,15 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	/**
 	 * Delegate to the real adapter.
 	 *
+	 * @return string[] The views the most recent listing left out.
+	 */
+	public function excluded_views(): array {
+		return $this->inner->excluded_views();
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
 	 * @param string $table_name Fully prefixed table name.
 	 * @return int Row count.
 	 */
@@ -200,6 +209,16 @@ final class FailingDatabaseAdapter implements DatabaseAdapter {
 	 */
 	public function partition_storage_directory_present( string $table_name ): bool {
 		return $this->inner->partition_storage_directory_present( $table_name );
+	}
+
+	/**
+	 * Delegate to the real adapter.
+	 *
+	 * @param string $collation The collation name to look for.
+	 * @return bool True when the server has this collation.
+	 */
+	public function collation_supported( string $collation ): bool {
+		return $this->inner->collation_supported( $collation );
 	}
 
 	/**

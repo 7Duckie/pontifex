@@ -1,6 +1,6 @@
 # 0026 — a restore's outcome has one durable home, because a restore destroys its own caller
 
-- **Status:** Accepted, 2026-10-29. Implemented on `dev`; not yet released.
+- **Status:** Accepted, 2026-10-29. Implemented and shipped in v1.2.0.
 - **Deciders:** 7Duckie.
 
 ## Context

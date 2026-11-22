@@ -15,11 +15,15 @@ use Psr\Log\NullLogger;
 use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
+use Pontifex\Archive\Crypto\CipherException;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Reader\EntryReadResult;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 
 /**
  * Drives a full restore from a Pontifex archive stream.
@@ -55,6 +59,10 @@ use Pontifex\Archive\Reader\EntryReadResult;
  *     and footer; throws if either is malformed).
  *  2. Read the manifest (validates the manifest's internal hash
  *     against the footer's recorded hash; throws on mismatch).
+ *  2a. Ask the database whether it has the one collation the archive
+ *     records for the database as a whole (skipped when the archive has
+ *     no database half). It looks at that recorded collation only, never
+ *     a table's own, and it runs in verify() as well as restore().
  *  3. Settle the preflights, all of which now live in
  *     {@see RestorePreflight} so that verify and a dry run can run the
  *     same checks against the same destination rather than promising
@@ -333,7 +341,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param callable|null $on_entry_restored Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's read, called as `( int $bytes ): void`.
 	 * @throws InvalidArgumentException If $archive_source is not a valid stream resource or is not seekable.
-	 * @throws RuntimeException         If the archive is malformed, hash verification fails, this host cannot create the symlinks the archive declares, a declared symlink's target would reach out of the site, the destination lacks the free disk space this restore needs, or any worker fails.
+	 * @throws RuntimeException         If the archive is malformed, hash verification fails, this server's database lacks the collation the archive records, this host cannot create the symlinks the archive declares, a declared symlink's target would reach out of the site, the destination lacks the free disk space this restore needs, or any worker fails.
 	 */
 	public function restore( $archive_source, ?callable $on_entry_restored = null, ?callable $on_bytes = null ): void {
 		// Reset the writer's staging state and sweep leftovers a crashed earlier
@@ -352,6 +360,10 @@ final class RestoreRunner implements RestoreRunnerInterface {
 		// scope, so this only catches a corrupt or hand-forged archive — refuse
 		// it rather than restore contents the scope says are not there.
 		$this->preflight->assert_scope_consistent_with_manifest( $provenance->scope(), $manifest );
+
+		// Refuse a database collation this server lacks while nothing has been
+		// touched — see assert_recorded_collation_is_available().
+		$this->assert_recorded_collation_is_available( $provenance );
 
 		// Establish the host CAN create a symlink at all before spending any
 		// work deciding whether the declared targets are SAFE. A host with
@@ -515,7 +527,7 @@ final class RestoreRunner implements RestoreRunnerInterface {
 	 * @param resource      $archive_source    A seekable, readable stream containing a Pontifex archive.
 	 * @param callable|null $on_entry_verified Optional per-entry progress callback, called as `( int $done, int $total ): void`.
 	 * @param callable|null $on_bytes          Optional byte-progress callback forwarded to each entry's verify read, called as `( int $bytes ): void`.
-	 * @throws RuntimeException If the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
+	 * @throws RuntimeException If the passphrase of an encrypted archive is wrong (an InvalidRequest), this server's database lacks the collation the archive records (a HostCannotComply), the archive is malformed, declares too many entries, the running declared total of its file entries exceeds the archive's decoded-byte budget, or hash verification fails.
 	 */
 	public function verify( $archive_source, ?callable $on_entry_verified = null, ?callable $on_bytes = null ): void {
 		$reader   = new ArchiveReader( $archive_source, $this->memory_limit_bytes );
@@ -539,6 +551,19 @@ final class RestoreRunner implements RestoreRunnerInterface {
 				)
 			);
 		}
+
+		// An encrypted archive is first proven against the passphrase, before any
+		// entry is walked: hashing stored bytes never touches the key, so without
+		// this a wrong passphrase verified as sound and failed only at restore.
+		if ( $reader->header()->is_encrypted() ) {
+			$this->prove_passphrase( $archive_source, $entries );
+		}
+
+		// The same collation question a restore asks first, so a backup this
+		// server could not restore is never reported sound. It runs only after
+		// the passphrase is proven: its refusal speaks about the backup's restorability,
+		// and nothing of an encrypted payload has been read until then.
+		$this->assert_recorded_collation_is_available( $reader->provenance() );
 
 		$total_budget   = $this->limits->max_total_for_archive( $this->stream_size( $archive_source ) );
 		$decoded_so_far = 0;
@@ -586,6 +611,89 @@ final class RestoreRunner implements RestoreRunnerInterface {
 			if ( null !== $on_entry_verified ) {
 				$on_entry_verified( $done, $total );
 			}
+		}
+	}
+
+	/**
+	 * Ask the database whether it has the collation the archive records for the database as a whole.
+	 *
+	 * Skipped for an archive with no database half, which has no collation to be
+	 * unable to honour; an archive that records no scope predates the field and is
+	 * whole-site, so it is checked. This inspects only that one recorded collation,
+	 * never a table's own — see {@see DatabaseWriter::assert_recorded_database_collation_is_available()}.
+	 * It writes nothing, so verify() runs it too.
+	 *
+	 * @param Provenance $provenance The archive's provenance.
+	 * @return void
+	 * @throws HostCannotComply If this server does not have the recorded collation.
+	 */
+	private function assert_recorded_collation_is_available( Provenance $provenance ): void {
+		$scope = $provenance->scope();
+		if ( null !== $scope && ! $scope->includes_database() ) {
+			return;
+		}
+		$this->database_writer->assert_recorded_database_collation_is_available( $provenance->db_collation() );
+	}
+
+	/**
+	 * Prove the supplied passphrase by decrypting the cheapest entry in full.
+	 *
+	 * Verification hashes each entry's stored bytes and never decrypts, so a
+	 * key derived from a mistyped passphrase was never exercised and the
+	 * archive reported sound. Reading one entry through
+	 * {@see EntryReader::read_entry()} does decrypt it, and the answer is
+	 * unambiguous: that method checks the record's SHA-256 against both the
+	 * bytes on disk and the manifest BEFORE it decrypts anything, so by the
+	 * time AES-GCM fails to authenticate, the stored bytes are exactly what
+	 * the writer produced and the only variable left is the key. (An archive
+	 * forged with recomputed hashes defeats that reasoning, but every hash in
+	 * the format is unkeyed, so only the signature can detect such a forgery —
+	 * a documented limitation, not one this check tries to close.)
+	 *
+	 * The smallest record is read; an empty-payload entry (a directory) still
+	 * authenticates the key, because GCM authenticates the entry header as
+	 * additional data and emits a tag even over empty plaintext. Anything
+	 * other than a failed decryption — a hash mismatch, a host limit —
+	 * propagates unchanged, so real corruption is never misreported here.
+	 *
+	 * @param resource                  $archive_source A seekable, readable stream containing a Pontifex archive.
+	 * @param array<int, ManifestEntry> $entries        The manifest's entries.
+	 * @throws InvalidRequest If the entry's hashes match but it will not decrypt: the passphrase is wrong.
+	 * @throws RuntimeException If reading the entry fails for any other reason.
+	 */
+	private function prove_passphrase( $archive_source, array $entries ): void {
+		$cheapest = null;
+		foreach ( $entries as $manifest_entry ) {
+			if ( null === $cheapest || $manifest_entry->length() < $cheapest->length() ) {
+				$cheapest = $manifest_entry;
+			}
+		}
+		if ( null === $cheapest ) {
+			return;
+		}
+
+		try {
+			$this->entry_reader->read_entry(
+				$archive_source,
+				$cheapest,
+				$this->limits->max_entry_bytes(),
+				null,
+				$this->entry_memory_budget > 0 ? $this->entry_memory_budget : null
+			);
+		} catch ( RuntimeException $error ) {
+			// The chained CipherException is the signal: EntryReader::decrypt_then_decompress()
+			// is the only place that wraps one. A second wrapping site would need this
+			// check revisited.
+			if ( $error->getPrevious() instanceof CipherException ) {
+				throw new InvalidRequest(
+					'The passphrase is wrong: it does not unlock this encrypted backup. The backup has not been found damaged — try again with the correct passphrase.',
+					0,
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $error is the reader's exception, chained as the previous exception for diagnostics; not HTML output.
+					$error
+				);
+			}
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Rethrowing the reader's own exception unchanged; not HTML output.
+			throw $error;
 		}
 	}
 

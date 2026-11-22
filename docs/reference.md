@@ -124,8 +124,9 @@ Restores an archive over the current site.
 | `--public-key=<path>` | Require a valid signature from this key. |
 
 `--dry-run` is a full rehearsal: it runs every gate and every preflight a real
-restore runs — signature, scope, host symlink capability, symlink target
-confinement, free space — and writes nothing. The host capability probe creates
+restore runs — signature, scope, the database collation the archive records,
+host symlink capability, symlink target confinement, free space — and writes
+nothing. The host capability probe creates
 and removes one test symbolic link, which is the only thing a dry run touches
 and the only check `verify` cannot perform. See
 [ADR 0023](adr/0023-verify-and-restorability.md).
@@ -148,7 +149,11 @@ refusal, because claiming a refusal would assert an intent that was not there.
 
 Verify checks structure, the entry-count ceiling, and per-entry hashes, then
 runs every restore preflight that writes nothing: scope-versus-manifest,
-symlink target confinement, and free space.
+whether this server's database has the collation the archive records for the
+database as a whole (see below), symlink target confinement, free space, the per-entry size limit, the
+per-entry memory budget (skipped when the host sets no memory cap), each
+entry's own recorded path against the 255-byte name limit, and whether this
+host can decode the codecs the archive uses.
 
 It applies the same structural checks and the same size budgets a restore
 applies, on the same terms: the record must leave room for the fields that
@@ -166,6 +171,18 @@ wording:
 | Broken | 1 | A hash mismatch, malformed structure, or a defensive-limit breach. |
 | Could not check | 2 | This host stopped the check before it reached a verdict — commonly too little memory. Not a statement about the archive either way. |
 
+**The collation check looks at one thing only.** An archive records a single
+collation for its database as a whole, and verify and restore both ask the
+database whether it has that collation (`SHOW COLLATION`) before any entry is
+checked or restored; an archive with no database half is never asked about. A
+collation this server lacks is a host problem, so verify reports it as **could
+not check** (exit 2) and a restore refuses it as one — the obstacle is the server's,
+not something found in the backup, and a server that has the collation can get
+past it. A table or column that
+carries its *own* collation records it only inside its `CREATE TABLE` text,
+which this check does not read, so such a collation can still stop a restore
+part-way through. Live tables are safe in that case (ADR 0009).
+
 A finding against the **host** — no free space — is reported as a warning
 alongside a sound verdict, never as the verdict: a full disk is not a damaged
 backup. That is the shape for a host problem discovered *after* verification
@@ -178,8 +195,9 @@ the other, so it is its own outcome, **could not check**, exit code 2. A
 script gating on this command should treat 2 as "unknown", not as "bad"
 alongside exit 1. The host symlink-capability probe is not run, because
 establishing it requires creating a link; use `doctor`, or `import --dry-run`
-for a specific archive. Verify does not decode payloads, so it still does not
-test a passphrase.
+for a specific archive. Verify does not decode payloads, but it does test a
+passphrase: for an encrypted archive it decrypts the smallest entry in full
+first, so a wrong passphrase is reported rather than verifying as sound.
 
 **What the size budgets can and cannot establish here.** A restore counts each
 entry's actual decoded size as it decodes it. Verify decodes nothing, so it
@@ -333,6 +351,20 @@ reader refuses a major version above its own rather than guessing.
 `wp-content/cache`, `.git` at any depth) unless `--no-defaults`, then user
 patterns, then scope flags.
 
+**Database views are never captured.** `SHOW FULL TABLES` lists a view beside
+the base tables, but a restore refuses to replay a `CREATE VIEW` (ADR 0019), so
+an archive carrying one verified sound and then failed partway through the
+restore. The table listing therefore keeps only the object types a restore
+accepts — `BASE TABLE`, and MariaDB's `SYSTEM VERSIONED` and `SEQUENCE` — and
+every backup path names each view it left out, from the same listing that left
+it out rather than a second query: `wp pontifex export` warns and logs, the
+admin Backup screen adds a sentence to its notice and logs, and a scheduled
+backup logs, since nobody is watching it. A view stores no rows of its
+own, so nothing is lost but the definition; recreate it after a restore. The
+one list of accepted types lives in `Pontifex\Database\RestorableTableTypes`,
+read by both the export listing and the restore's own check, so the two cannot
+disagree.
+
 **Resumable exports** (ADR 0015) persist an entry cursor and the archive's
 byte position after each tick, and verify the partial file's length matches
 what was claimed before appending. If the scan's *shape* changes between ticks
@@ -349,6 +381,7 @@ Order is the important part. Everything above the line is a preflight:
 ```
 open archive (header, footer, manifest, provenance, signature)
 assert scope consistent with manifest
+ask the database for the collation the archive records (database as a whole only)
 resolve every declared symlink target
 assert host can create symlinks where they will land
 sweep temp files left by a crashed earlier restore
