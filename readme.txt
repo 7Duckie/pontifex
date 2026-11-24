@@ -4,7 +4,7 @@ Tags: backup, migration, wp-cli, database, restore
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.2
-Stable tag: 1.2.1
+Stable tag: 1.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -102,6 +102,9 @@ No. A `.git` directory — at the site root, in `wp-content`, or inside any plug
 
 The full, detailed changelog is maintained in `CHANGELOG.md` in the source repository. Recent releases:
 
+= 1.3.0 =
+* Verifying a backup now answers for this server, not only for the file. Five limits that stop a restore were never checked, so a backup could be called sound and then refused: an entry too large to unpack in one piece, an entry too large for the memory this host can spare, a file or folder name longer than the filesystem accepts, compression this server cannot load (zstd, in practice, when the backup came from a server that had it), and a database collation this server does not have. All five are now reported before anything is written, and none of them is reported as damage, because in every one the backup is intact and will restore on a server that can take it. Also fixed: checking an encrypted backup now unlocks one entry to prove the passphrase, instead of reporting sound and then failing on the first entry of the restore; and a file whose name ran to 219 characters stopped a restore, because the temporary name a restore writes beside it added 37 characters and crossed the limit every filesystem enforces, so that temporary name no longer borrows the file's name at all. Changed: database views are left out of a backup and named as it finishes, on the command line, on the Backup screen and in a scheduled backup's log. A restore refused them partway through rebuilding the database, so leaving them out is what makes the backup restorable; no data is lost, because a view holds only its own definition and the tables it reads from are backed up as normal. Recreate any view you rely on after a restore. MariaDB sequences and system-versioned tables are unaffected. No breaking changes.
+
 = 1.2.1 =
 * Security: updates the phpseclib library for an advisory of its own (GHSA-w3p9-g4p2-h3rr), where parsing an encrypted SSH key did not bound its iteration count, so a crafted key file could pin a CPU. Pontifex reaches that code only when an offsite SFTP destination loads the key you configured yourself, so exploiting it would require control of your SFTP credentials already; the library ships inside the plugin, so this release is how you receive the fix. Fixed: four documents overstated what encrypting a backup hides. The contents of your files and your database are genuinely encrypted, but the list of what the backup contains is not: every file name and size, and your site's address, stay readable without the passphrase. That is deliberate and cannot be changed, because each entry's header is what cryptographically ties its contents to its place in the file. The guide claimed a passphrase was needed to read anything in the backup; the format specification said the index was encrypted; the design document listed the opposite of the truth as a known limitation and misdescribed a format flag. If you encrypted a backup because the file names themselves are sensitive, keep the file somewhere private. Also fixed: those documents credited the format with detecting deliberate tampering with its index, which it does not; only signing a backup detects that. No format change, no behaviour change, no breaking changes.
 
@@ -163,6 +166,9 @@ The full, detailed changelog is maintained in `CHANGELOG.md` in the source repos
 * Security hardening from a full audit.
 
 == Upgrade Notice ==
+
+= 1.3.0 =
+Verifying a backup now checks what this server can actually restore: entry size, memory, name length, compression and collation. Each is reported before anything is written, and never as damage. Encrypted backups prove the passphrase. Database views are left out and named.
 
 = 1.2.1 =
 Updates the phpseclib library for an advisory where a crafted SSH key could pin a CPU; only offsite SFTP reaches it. Also corrects four documents that overstated what encryption hides: an encrypted backup protects its contents, not the list of file names it holds.

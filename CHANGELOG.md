@@ -12,7 +12,7 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
-## [Unreleased]
+## [1.3.0] — 2026-11-24 — Verify answers for the server, not just the file
 
 ### Fixed
 
@@ -2124,7 +2124,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/7Duckie/pontifex/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/7Duckie/pontifex/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/7Duckie/pontifex/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/7Duckie/pontifex/compare/v1.0.3...v1.1.0
