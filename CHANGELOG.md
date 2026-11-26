@@ -12,7 +12,7 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
-## [1.3.0] — 2026-11-24 — Verify answers for the server, not just the file
+## [1.3.0] — 2026-11-26 — Verify answers for the server, not just the file
 
 ### Fixed
 
