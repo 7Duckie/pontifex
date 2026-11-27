@@ -380,6 +380,8 @@ final class JobTicker {
 		$media_type_unresolved = isset( $payload['media_type_unresolved'] ) ? (int) $payload['media_type_unresolved'] : 0;
 		// Absent on a job started before this counter existed (back-compat).
 		$exclusion_matches = isset( $payload['exclusion_matches'] ) ? (array) $payload['exclusion_matches'] : array();
+		// Absent on a job started before the views were recorded (back-compat): none known.
+		$excluded_views = isset( $payload['excluded_views'] ) ? array_values( array_filter( (array) $payload['excluded_views'], 'is_string' ) ) : array();
 		$this->job_store->delete( $job_id );
 		$this->release_holder_if_backup();
 
@@ -401,6 +403,12 @@ final class JobTicker {
 				'exclusion_matches'     => $exclusion_matches,
 			)
 		);
+
+		// Nobody watches a cron-driven run, so the log is the only place the omission of a
+		// database view (which a restore cannot recreate) can be seen.
+		if ( array() !== $excluded_views ) {
+			$this->logger->warning( 'Database views were left out of the backup.', array( 'views' => $excluded_views ) );
+		}
 
 		if ( ! empty( $payload['schedule'] ) ) {
 			// Record this backup as one the SCHEDULER wrote, before pruning runs,

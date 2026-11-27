@@ -75,6 +75,13 @@ final class ResumableExportRunnerTest extends TestCase {
 	private array $specs;
 
 	/**
+	 * The views the fake builder reports as left out of the scan.
+	 *
+	 * @var string[]
+	 */
+	private array $excluded_views = array();
+
+	/**
 	 * Create fixture paths and the default four-entry spec list.
 	 *
 	 * @return void
@@ -151,6 +158,7 @@ final class ResumableExportRunnerTest extends TestCase {
 	 */
 	private function fake_builder( array $specs ): ManifestBuilderInterface {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturnUsing( fn (): array => $this->excluded_views );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function () use ( $specs ): ManifestStream {
 				$plans = array();
@@ -202,6 +210,7 @@ final class ResumableExportRunnerTest extends TestCase {
 	 */
 	private function fake_builder_honouring_exclusions( array $file_specs, ExclusionRules $rules ): ManifestBuilderInterface {
 		$builder = Mockery::mock( ManifestBuilderInterface::class );
+		$builder->shouldReceive( 'excluded_views' )->andReturn( array() );
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			static function () use ( $file_specs, $rules ): ManifestStream {
 				$plans = array();
@@ -756,6 +765,64 @@ final class ResumableExportRunnerTest extends TestCase {
 			$finished->payload()['exclusion_matches'] ?? null,
 			'With no exclusion patterns configured for this job, the derived value is an empty array once a tick has run.'
 		);
+	}
+
+	/**
+	 * The views the scan left out are persisted on the job, so a backup finished
+	 * across several requests still reports them.
+	 *
+	 * @return void
+	 */
+	public function test_the_excluded_views_reach_the_finished_payload(): void {
+		$this->excluded_views = array( 'wp_alpha_view', 'wp_zebra_view' );
+
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$this->assertSame(
+			array( 'wp_alpha_view', 'wp_zebra_view' ),
+			$store->get( $job->id() )->payload()['excluded_views'] ?? null,
+			'The names the scan reported must survive on the finished job.'
+		);
+	}
+
+	/**
+	 * The views are replaced by each tick's own scan, never accumulated.
+	 *
+	 * Every tick re-scans everything, so a view dropped between ticks must not linger on
+	 * the payload, and one that appears must not be listed twice.
+	 *
+	 * @return void
+	 */
+	public function test_each_tick_replaces_the_excluded_views_rather_than_adding(): void {
+		$this->excluded_views = array( 'wp_first_view' );
+
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+		$this->assertSame( array( 'wp_first_view' ), $store->get( $job->id() )->payload()['excluded_views'] ?? null );
+
+		$this->excluded_views = array( 'wp_second_view' );
+		$runner->tick( $store->get( $job->id() ), 0.0 );
+
+		$this->assertSame( array( 'wp_second_view' ), $store->get( $job->id() )->payload()['excluded_views'] ?? null, 'The second tick\'s scan replaces the first\'s answer.' );
+	}
+
+	/**
+	 * A scan that left no view out leaves an empty list on the job.
+	 *
+	 * @return void
+	 */
+	public function test_no_excluded_views_leaves_an_empty_list_on_the_payload(): void {
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+
+		$this->tick_until_done( $runner, $store, $job->id(), 0.0 );
+
+		$this->assertSame( array(), $store->get( $job->id() )->payload()['excluded_views'] ?? null );
 	}
 
 	/**

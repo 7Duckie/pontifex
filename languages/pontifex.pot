@@ -2,14 +2,14 @@
 # This file is distributed under the GPL-2.0-or-later.
 msgid ""
 msgstr ""
-"Project-Id-Version: Pontifex 1.2.1\n"
+"Project-Id-Version: Pontifex 1.3.0\n"
 "Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/pontifex\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-11-13T08:22:15+00:00\n"
+"POT-Creation-Date: 2026-11-24T15:12:07+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: pontifex\n"
@@ -74,56 +74,64 @@ msgstr ""
 
 #. translators: %s: the exclusion pattern that could not be understood
 #: src/Admin/BackupController.php:359
-#: src/Admin/BackupController.php:904
+#: src/Admin/BackupController.php:915
 #, php-format
 msgid "That exclusion pattern is not valid: %s. Fix or remove it and try again."
 msgstr ""
 
 #. translators: %s: the table exclusion pattern that could not be understood
 #: src/Admin/BackupController.php:374
-#: src/Admin/BackupController.php:919
+#: src/Admin/BackupController.php:930
 #, php-format
 msgid "That table exclusion pattern is not valid: %s. Fix or remove it and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:840
+#: src/Admin/BackupController.php:851
 msgid "That backup could not be deleted."
 msgstr ""
 
-#: src/Admin/BackupController.php:930
+#: src/Admin/BackupController.php:941
 #: src/Admin/Menu.php:328
 msgid "The schedule could not be saved. Reload the page and try again."
 msgstr ""
 
 #. translators: 1: exclusion pattern, 2: number of entries it excluded
-#: src/Admin/BackupController.php:1104
+#: src/Admin/BackupController.php:1115
 #, php-format
 msgid "%1$s (%2$d)"
 msgstr ""
 
 #. translators: %s: a comma-separated list of "pattern (count)" entries
-#: src/Admin/BackupController.php:1114
+#: src/Admin/BackupController.php:1125
 #, php-format
 msgid "Exclusions: %s."
 msgstr ""
 
-#: src/Admin/BackupController.php:1198
+#. translators: 1: number of database views, 2: comma-separated view names
+#: src/Admin/BackupController.php:1148
+#, php-format
+msgid "%1$d database view was left out on purpose: %2$s. A view stores no rows, it is only a saved query, so nothing but its definition is missing from the backup."
+msgid_plural "%1$d database views were left out on purpose: %2$s. A view stores no rows, it is only a saved query, so nothing but its definition is missing from the backup."
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/Admin/BackupController.php:1238
 msgid "You do not have permission to download this backup."
 msgstr ""
 
-#: src/Admin/BackupController.php:1207
+#: src/Admin/BackupController.php:1247
 msgid "You do not have permission to manage backups, or your session has expired. Reload the page and try again."
 msgstr ""
 
-#: src/Admin/BackupController.php:1222
+#: src/Admin/BackupController.php:1262
 msgid "A restore or rollback is currently running. Please wait for it to finish before starting a backup."
 msgstr ""
 
-#: src/Admin/BackupController.php:1224
+#: src/Admin/BackupController.php:1264
 msgid "A backup is already running. Please wait for it to finish."
 msgstr ""
 
-#: src/Admin/BackupController.php:1238
+#: src/Admin/BackupController.php:1278
 #: src/Admin/Menu.php:323
 msgid "The backup could not be completed. Check the Pontifex log for details."
 msgstr ""
@@ -1327,37 +1335,37 @@ msgstr ""
 msgid "--sign requires --signing-key=<path> (the secret-key file from \"wp pontifex keygen\")."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:724
+#: src/Cli/ExportCommand.php:727
 msgid "No interrupted resumable export found to resume."
 msgstr ""
 
 #. translators: %s: the output path the interrupted export writes to
-#: src/Cli/ExportCommand.php:728
+#: src/Cli/ExportCommand.php:731
 #, php-format
 msgid "This resumable export writes to %s; --output cannot change on resume."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:733
+#: src/Cli/ExportCommand.php:736
 msgid "This resumable export was started with different signing settings; resume with the same --sign/--signing-key flags it began with."
 msgstr ""
 
 #. translators: %s: the output path
-#: src/Cli/ExportCommand.php:739
+#: src/Cli/ExportCommand.php:742
 #, php-format
 msgid "Resuming the interrupted export to %s."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:753
+#: src/Cli/ExportCommand.php:756
 msgid "This export is resumable: if it is interrupted, continue it with `wp pontifex export --resume`."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:773
+#: src/Cli/ExportCommand.php:776
 msgid "Writing archive"
 msgstr ""
 
 #. translators: %d: number of files that changed during the export
-#: src/Cli/ExportCommand.php:821
-#: src/Cli/ExportCommand.php:1426
+#: src/Cli/ExportCommand.php:829
+#: src/Cli/ExportCommand.php:1474
 #, php-format
 msgid "%d file changed while the backup ran. The archive is consistent, but re-run the export if you want a settled copy of that file."
 msgid_plural "%d files changed while the backup ran. The archive is consistent, but re-run the export if you want settled copies of those files."
@@ -1365,37 +1373,37 @@ msgstr[0] ""
 msgstr[1] ""
 
 #. translators: %s: the destination name
-#: src/Cli/ExportCommand.php:866
+#: src/Cli/ExportCommand.php:877
 #, php-format
 msgid "No destination named \"%s\" is configured. Add one with `wp pontifex destination`."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:921
+#: src/Cli/ExportCommand.php:932
 msgid "Uploading an unencrypted archive to the destination — anyone who can read the destination can read this backup. Consider --encrypt."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:924
+#: src/Cli/ExportCommand.php:935
 msgid "Uploading the archive to the destination…"
 msgstr ""
 
 #. translators: 1: the failure reason, 2: the local archive path
-#: src/Cli/ExportCommand.php:932
+#: src/Cli/ExportCommand.php:943
 #, php-format
 msgid "The upload to the destination failed: %1$s The local archive is still at %2$s."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:939
+#: src/Cli/ExportCommand.php:950
 msgid "Uploaded the archive to the destination."
 msgstr ""
 
 #. translators: %s: the remote archive name that was deleted
-#: src/Cli/ExportCommand.php:945
+#: src/Cli/ExportCommand.php:956
 #, php-format
 msgid "Pruned old archive from the destination: %s"
 msgstr ""
 
 #. translators: %d: number of archives that could not be pruned
-#: src/Cli/ExportCommand.php:957
+#: src/Cli/ExportCommand.php:968
 #, php-format
 msgid "The archive uploaded successfully, but %d old archive at the destination could not be pruned and remains in place. Check the Pontifex log for the reason."
 msgid_plural "The archive uploaded successfully, but %d old archives at the destination could not be pruned and remain in place. Check the Pontifex log for the reason."
@@ -1403,59 +1411,67 @@ msgstr[0] ""
 msgstr[1] ""
 
 #. translators: %s: the failure reason
-#: src/Cli/ExportCommand.php:969
+#: src/Cli/ExportCommand.php:980
 #, php-format
 msgid "The archive uploaded successfully, but pruning old archives at the destination failed: %s"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:986
+#: src/Cli/ExportCommand.php:997
 msgid "--output=<path> is required."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1313
+#: src/Cli/ExportCommand.php:1324
 msgid "Scope: whole-site (the entire WordPress root, including core and wp-config.php)."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1317
+#: src/Cli/ExportCommand.php:1328
 msgid "Scope: files-only (wp-content, no database). Its restore writes only files."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1321
+#: src/Cli/ExportCommand.php:1332
 msgid "Scope: database-only (every table belonging to this WordPress site, no files). Its restore writes only the database."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1324
+#: src/Cli/ExportCommand.php:1335
 msgid "Scope: content-only (wp-content plus every table belonging to this WordPress site). Use --whole-site for a full-site clone."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1336
+#: src/Cli/ExportCommand.php:1347
 msgid "No exclusion patterns are active."
 msgstr ""
 
 #. translators: %d: number of active exclusion patterns
-#: src/Cli/ExportCommand.php:1339
+#: src/Cli/ExportCommand.php:1350
 #, php-format
 msgid "Active exclusion patterns (%d):"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1380
+#: src/Cli/ExportCommand.php:1391
 msgid "Exclusion pattern matches:"
 msgstr ""
 
 #. translators: 1: exclusion pattern, 2: number of entries it excluded
-#: src/Cli/ExportCommand.php:1385
+#: src/Cli/ExportCommand.php:1396
 #, php-format
 msgid "  %1$s: %2$d"
 msgstr ""
 
+#. translators: 1: number of database views, 2: comma-separated view names
+#: src/Cli/ExportCommand.php:1429
+#, php-format
+msgid "%1$d database view was left out on purpose: %2$s. A view stores no rows, it is only a saved query, and a restore cannot recreate one."
+msgid_plural "%1$d database views were left out on purpose: %2$s. A view stores no rows, it is only a saved query, and a restore cannot recreate one."
+msgstr[0] ""
+msgstr[1] ""
+
 #. translators: 1: file path, 2: byte count recorded at scan time, 3: byte count actually captured
-#: src/Cli/ExportCommand.php:1415
+#: src/Cli/ExportCommand.php:1463
 #, php-format
 msgid "%1$s changed while it was being read (the scan recorded %2$d bytes; %3$d were captured). The archive records the captured content."
 msgstr ""
 
 #. translators: %d: number of files whose media type could not be determined
-#: src/Cli/ExportCommand.php:1461
+#: src/Cli/ExportCommand.php:1509
 #, php-format
 msgid "%d file's media type could not be determined and was recorded as unknown. The archive is unaffected and restores normally."
 msgid_plural "%d files' media types could not be determined and were recorded as unknown. The archive is unaffected and restores normally."
@@ -1463,33 +1479,33 @@ msgstr[0] ""
 msgstr[1] ""
 
 #. translators: 1: number of entries, 2: human-readable size, 3: the output file path
-#: src/Cli/ExportCommand.php:1484
+#: src/Cli/ExportCommand.php:1532
 #, php-format
 msgid "Exported %1$d entries (%2$s) to %3$s"
 msgstr ""
 
 #. translators: %s: the reason the archive was refused
-#: src/Cli/ExportCommand.php:1528
+#: src/Cli/ExportCommand.php:1576
 #, php-format
 msgid "The archive cannot be trusted: %s"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1534
+#: src/Cli/ExportCommand.php:1582
 msgid "Do not continue this export — start a fresh one."
 msgstr ""
 
 #. translators: %s: the reason this host could not comply
-#: src/Cli/ExportCommand.php:1542
+#: src/Cli/ExportCommand.php:1590
 #, php-format
 msgid "This host cannot complete the backup: %s"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1546
+#: src/Cli/ExportCommand.php:1594
 msgid "The problem is this server — usually disk space, memory, or permissions — and it is usually fixable."
 msgstr ""
 
 #. translators: %s: what was wrong with the command that was run
-#: src/Cli/ExportCommand.php:1555
+#: src/Cli/ExportCommand.php:1603
 #: src/Cli/ImportCommand.php:1807
 #: src/Cli/RollbackCommand.php:793
 #, php-format
@@ -1497,52 +1513,52 @@ msgid "The request needs correcting: %s"
 msgstr ""
 
 #. translators: %s: the failure message
-#: src/Cli/ExportCommand.php:1565
+#: src/Cli/ExportCommand.php:1613
 #, php-format
 msgid "The failure was: %s"
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1569
+#: src/Cli/ExportCommand.php:1617
 #: src/Cli/ImportCommand.php:1822
 #: src/Cli/RollbackCommand.php:808
 msgid "Full details are in the Pontifex log: wp-content/pontifex/logs/pontifex.log"
 msgstr ""
 
 #. translators: %s: the output file path
-#: src/Cli/ExportCommand.php:1607
+#: src/Cli/ExportCommand.php:1655
 #, php-format
 msgid "The archive itself was written to %s and is complete; the failure came after it."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1615
+#: src/Cli/ExportCommand.php:1663
 msgid "This export cannot be continued with --resume: a failed job is closed, and only an interrupted one can be picked up again."
 msgstr ""
 
 #. translators: %s: the path of the part-written file left behind
-#: src/Cli/ExportCommand.php:1622
+#: src/Cli/ExportCommand.php:1670
 #, php-format
 msgid "A part-written file is left at %s. It is not a backup and nothing will resume it — delete it and export again."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1629
+#: src/Cli/ExportCommand.php:1677
 msgid "No archive was written. Export again once the problem is fixed."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1634
+#: src/Cli/ExportCommand.php:1682
 msgid "No archive was written."
 msgstr ""
 
 #. translators: %s: the output file path
-#: src/Cli/ExportCommand.php:1641
+#: src/Cli/ExportCommand.php:1689
 #, php-format
 msgid "No archive was written to %s. Anything already there is an earlier backup, left untouched."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1687
+#: src/Cli/ExportCommand.php:1735
 msgid "Export refused."
 msgstr ""
 
-#: src/Cli/ExportCommand.php:1688
+#: src/Cli/ExportCommand.php:1736
 msgid "Export failed."
 msgstr ""
 
@@ -1612,7 +1628,7 @@ msgid "The Ed25519 signature did not verify against the supplied public key; ref
 msgstr ""
 
 #: src/Cli/ImportCommand.php:1424
-#: src/Cli/VerifyCommand.php:553
+#: src/Cli/VerifyCommand.php:571
 msgid "Signature verified against the supplied public key."
 msgstr ""
 
@@ -1929,74 +1945,74 @@ msgstr ""
 msgid "No transfers recorded yet. Run `wp pontifex export` or `wp pontifex import` to start the tally."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:360
+#: src/Cli/VerifyCommand.php:378
 msgid "An archive path is required: wp pontifex verify <archive>."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:545
+#: src/Cli/VerifyCommand.php:563
 msgid "This archive is signed, but its signature was NOT verified. Pass --public-key=<path> to verify it."
 msgstr ""
 
 #. translators: 1: number of entries verified, 2: the archive path
-#: src/Cli/VerifyCommand.php:629
+#: src/Cli/VerifyCommand.php:647
 #, php-format
 msgid "Archive is sound: %1$d entries verified, every hash checked. %2$s"
 msgstr ""
 
 #. translators: %s: what the archive contains, e.g. "files only (wp-content, no database)"
-#: src/Cli/VerifyCommand.php:637
+#: src/Cli/VerifyCommand.php:655
 #, php-format
 msgid "This backup contains: %s."
 msgstr ""
 
 #. translators: %s: the archive path
-#: src/Cli/VerifyCommand.php:745
+#: src/Cli/VerifyCommand.php:763
 #, php-format
 msgid "Archive is REFUSED: every hash matched, so the file is not damaged — but a restore would refuse it. (%s)"
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:753
+#: src/Cli/VerifyCommand.php:771
 msgid "Pontifex never produces an archive like this. Treat it as untrusted and find out where it came from."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:797
+#: src/Cli/VerifyCommand.php:815
 msgid "The backup is fine, but this host could not restore it right now:"
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:803
+#: src/Cli/VerifyCommand.php:821
 msgid "This is about this server, not about the backup. Run wp pontifex import --dry-run to rehearse the whole restore."
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:809
+#: src/Cli/VerifyCommand.php:827
 msgid "Some checks about whether this host could restore it could not be answered:"
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:815
+#: src/Cli/VerifyCommand.php:833
 msgid "This is about this server, not about the backup."
 msgstr ""
 
 #. translators: 1: the failure message, 2: the archive path
-#: src/Cli/VerifyCommand.php:836
+#: src/Cli/VerifyCommand.php:854
 #, php-format
 msgid "Archive is BROKEN: %1$s (%2$s)"
 msgstr ""
 
 #. translators: 1: the host problem that stopped the check, 2: the archive path
-#: src/Cli/VerifyCommand.php:874
+#: src/Cli/VerifyCommand.php:892
 #, php-format
 msgid "Could not check: %1$s (%2$s)"
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:880
-msgid "This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host's, and is usually fixable (more memory, more disk space), after which the same archive should check cleanly."
+#: src/Cli/VerifyCommand.php:898
+msgid "This is not a verdict on the backup — no check ran to completion, so nothing is known about it either way. Keep the file; the problem named above is this host's, and once it is fixed the same archive should check cleanly."
 msgstr ""
 
 #. translators: 1: which entry was too large and by how much, 2: the archive path
-#: src/Cli/VerifyCommand.php:907
+#: src/Cli/VerifyCommand.php:925
 #, php-format
 msgid "Archive is REFUSED: every hash matched, so the file is not damaged — but %1$s (%2$s)"
 msgstr ""
 
-#: src/Cli/VerifyCommand.php:913
+#: src/Cli/VerifyCommand.php:931
 msgid "This build of Pontifex will not restore a single entry over 2 GB, on any host — no server setting changes that. The backup is not damaged and does not need replacing."
 msgstr ""

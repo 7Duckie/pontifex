@@ -556,4 +556,33 @@ final class DatabaseScannerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Operating on a test stream resource.
 		return (string) stream_get_contents( $stream );
 	}
+
+	/**
+	 * The scanner reports the views the adapter left out of its table listing.
+	 *
+	 * @return void
+	 */
+	public function test_scan_reports_the_views_the_listing_left_out(): void {
+		$db = new FakeDbAdapter();
+		$db->add_table( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" );
+		$db->add_view( 'wp_zebra_view' );
+		$db->add_view( 'wp_alpha_view' );
+
+		$scanner = self::unfiltered_scanner( $db );
+		$scanner->scan();
+
+		$this->assertSame( array( 'wp_alpha_view', 'wp_zebra_view' ), $scanner->excluded_views() );
+	}
+
+	/**
+	 * A scanner that has not scanned reports no views, never a guess.
+	 *
+	 * @return void
+	 */
+	public function test_a_scanner_that_has_not_scanned_reports_no_views(): void {
+		$db = new FakeDbAdapter();
+		$db->add_view( 'wp_a_view' );
+
+		$this->assertSame( array(), self::unfiltered_scanner( $db )->excluded_views() );
+	}
 }

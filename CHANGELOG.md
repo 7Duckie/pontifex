@@ -12,7 +12,117 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
-## [1.2.1] — 2026-11-13 — A dependency advisory, and what encryption really covers
+## [1.3.0] — 2026-11-26 — Verify answers for the server, not just the file
+
+### Fixed
+
+- **A restore onto a server that lacks the backup's collation now says so up
+  front.** A backup records the collation (the text sorting rule) its database
+  was using. Restoring onto a database server that does not have it used to be
+  accepted by `verify`, then fail part-way through a restore with a raw database
+  error. `verify`, `import --dry-run` and a real restore now ask the database
+  first, before any entry is checked or restored, and name the collation: `verify`
+  reports it as "could not check" (nothing has been found wrong with the backup,
+  and nothing has been checked either), and a restore refuses with a message
+  saying the obstacle is the server's and one that has the collation can get
+  past it.
+
+  The check looks only at the collation the backup records for the database as
+  a whole. A table or column with its own collation records it only inside its
+  own definition, which is not read here, so one of those can still stop a
+  restore later. Your live tables are never at risk either way. This is narrower
+  than it may sound: it is not every MySQL 8 backup restored onto MariaDB, only
+  collations the destination does not have, such as the language-specific
+  `utf8mb4_ja_0900_as_cs`.
+
+- **A file with a very long name no longer stops a restore.** A restore writes
+  each file to a temporary name beside it and then renames it into place, and
+  that temporary name was the file's own name with 37 characters added. A file
+  whose name was 219 characters therefore needed a 256-character temporary
+  name, one over the limit every standard filesystem enforces — so the restore
+  failed on a file whose real name it could have written perfectly well, and
+  stopped there.
+
+  The temporary name no longer borrows the file's name at all. It is a fixed
+  37 characters whatever the file is called, so the length of your filenames
+  cannot affect a restore again. Backups themselves were never affected, and
+  nothing about the backup file changes.
+
+- **Verifying a backup now tells you when this server could not restore it,
+  instead of calling it sound and leaving you to find out during the restore.**
+  Three limits a restore enforces were never checked by verify, so a backup
+  could pass every check and then be refused: an entry larger than the size
+  this installation will handle in one piece, an entry larger than the memory
+  this host can spare to unpack one, and a file or folder name longer than a
+  filesystem will accept.
+
+  None of the three is reported as damage to the backup, because the backup is
+  intact in every one of them. The message says so explicitly, because "your
+  backup is broken" is the one sentence capable of talking somebody out of a
+  good backup. Two of them are about **this server** and are fixed by changing
+  it: more memory for an oversized entry, a filesystem that accepts the name.
+  The third is a ceiling compiled into every build of Pontifex, identical on
+  every host, and the message now says so rather than implying there is a
+  setting to raise.
+
+  A host that enforces no memory limit at all records nothing rather than
+  reporting a check it could not answer, so an ordinary verify on such a host
+  reads exactly as it did before.
+
+- **Verifying a backup now tells you when this server cannot unpack it.**
+  Backups are compressed, and which compression is used is decided by the
+  server that writes the backup: one with the zstd PHP extension produces a
+  zstd backup. A server without that extension can still check every
+  fingerprint in such a backup, because checking never unpacks anything — so
+  verify called it sound, and the restore then failed the moment it tried to
+  unpack the first entry. That is the ordinary move-to-a-new-server case this
+  plugin exists for.
+
+  Verify and the Restore screen now ask, before anything is written, whether
+  this server can unpack what the backup holds, and say plainly that the backup
+  is undamaged and will restore on a server that can. The question is put to
+  the same reader that would do the unpacking, so the answer cannot drift from
+  what a restore would actually do.
+
+- **Checking an encrypted backup now proves the passphrase rather than assuming
+  it.** Checking reads every entry's fingerprint over the stored bytes and
+  never unlocks anything, so a mistyped passphrase was never put to the test:
+  the backup was reported sound, and the restore then failed on the first entry
+  it tried to unlock.
+
+  Verify now unlocks one entry — the smallest in the backup — before it starts,
+  and says plainly that the passphrase is wrong when it will not open. It can
+  say so with certainty rather than hedging, because each entry's fingerprint
+  is checked against both the file and the manifest before anything is
+  unlocked: if both match and the entry still will not open, the bytes are
+  exactly as they were written and the only thing left is the passphrase.
+
+  A wrong passphrase is reported as a mistake to correct, never as a damaged
+  backup — being told a good backup is broken is the one message capable of
+  talking somebody out of it. Genuine damage is still reported as damage, and
+  an unencrypted backup is checked exactly as it was before.
+
+### Changed
+
+- **Database views are left out of a backup, and named when they are.** Some
+  plugins create a view: a saved query that behaves like a table but holds no
+  rows of its own. MySQL and MariaDB list views alongside tables, so every such
+  view was swept into the backup — and a restore then refused it partway
+  through, after it had already begun rebuilding the database. Checking the
+  backup called it sound throughout, so the first anyone knew was a restore
+  stopping halfway.
+
+  Views are now left out, and each one is named as the backup finishes —
+  on the command line, on the Backup screen, and in the log of a scheduled
+  backup — so nothing is dropped quietly. Leaving them out loses no data: a
+  view stores only its own definition, and the tables it reads from are
+  backed up as normal. If you rely on a view, recreate it after a restore.
+
+  MariaDB sequences and system-versioned tables are **not** affected. A restore
+  accepts both, so both are still backed up exactly as before — the backup
+  leaves out only what a restore would refuse.
+
+## [1.2.1] — 2026-11-20 — A dependency advisory, and what encryption really covers
 
 ### Security
 
@@ -86,6 +196,84 @@ v0.0.x decision log for the reasoning.
 - **Rollbacks are recorded in the transfer history**, so they appear in
   `wp pontifex stats`'s recent-transfers list alongside backups and restores.
   Previously a rollback left no trace there at all.
+
+### Changed
+
+- **An exclusion pattern written as a regex now only matches from the start
+  of the name — and this is a real behaviour change you may notice.** Only
+  the regex shape is affected (a pattern wrapped in forward slashes, like
+  `/\.log$/`); the other three shapes — an exact path, a glob such as
+  `*.log`, and a folder tree such as `path/**` — are already anchored by
+  their own meaning and are completely unchanged. If you had written a regex
+  to match a *suffix* — `/\.log$/`, to catch every file ending in `.log`
+  wherever it sits — **it now matches nothing at all**, because its match no
+  longer begins at position 0 of the name. Replace it with the glob
+  `*.log`, which does what you meant and is unaffected by this change.
+
+  This was anchored rather than refused on purpose. Refusing a pattern that
+  used to work would break a saved schedule the next time it ran
+  unattended, with nobody watching — the worst possible moment to discover
+  it. Anchoring it instead means the pattern simply stops catching anything
+  and the new match-count reporting below tells you so, quietly, on the
+  very next run.
+
+  **Pontifex's own curated defaults are unaffected.** They are not subject
+  to this anchoring at all, so the built-in `.git`-at-any-depth exclusion
+  keeps matching a `.git` folder wherever it sits in your site, exactly as
+  before.
+
+- **Pontifex now tells you how many things each exclusion pattern actually
+  matched**, on every surface that runs a backup: the `wp pontifex export`
+  summary, a resumable export's summary, the Backup screen's notice once a
+  backup finishes, and the log line a cron-driven scheduled backup writes.
+  A pattern that matched nothing now reports `0` rather than being left off
+  the list entirely — which is what makes a pattern that quietly ate a
+  table indistinguishable, until now, from one that correctly matched
+  nothing. One nuance worth knowing: a folder-tree pattern such as
+  `wp-content/cache/**` is counted as **one** match, however many thousands
+  of files sat underneath it, because the scanner prunes the whole folder
+  and never opens what is inside it to count them individually. Read the
+  number as "did this pattern do anything at all", not as a file count.
+
+- **The admin Backup screen has two exclusion boxes instead of one**, on
+  both the manual "Create a backup" section and the "Scheduled backups"
+  section: one for files, one for database tables. It previously had a
+  single box feeding both, which is the same shared-list problem the fix
+  above closes, now visible in the interface itself rather than only in
+  what you typed.
+
+- **`wp pontifex schedule set` gains `--exclude-table=<patterns>`**,
+  matching `export --exclude-table`, so a scheduled backup can leave out
+  database tables the same way a one-off export already could.
+  `wp pontifex schedule show` now prints both the file-exclusion and the
+  table-exclusion lists a scheduled backup will apply — it previously
+  printed neither, so what an unattended backup left out was invisible
+  until you went looking at the archive itself.
+
+- **`schedule set --exclude` or `--exclude-table` passed with no value at
+  all is now refused with an error**, instead of silently wiping the stored
+  list and reporting success as though nothing had changed. To clear a list
+  on purpose, pass an explicit empty value: `--exclude=`.
+
+- **A schedule saved before this change had one flat exclusion list; it is
+  now read as file patterns.** This is the safe direction to default it in:
+  if that one list had been silently excluding a database table, the table
+  now comes back into the backup rather than continuing to vanish from it.
+  Expect your next scheduled backup to be a little larger if that applied
+  to you.
+
+- **A backup interrupted part-way through its database half now asks you to
+  start again, rather than continuing.** The new bookmark that makes row
+  reading fast does not yet survive the process that created it, so a backup
+  resumed at that exact point cannot know where it had got to. Rather than
+  guess — which would re-read a table's first rows under a later batch's name,
+  duplicating some and dropping others — Pontifex stops and says so.
+
+  Two things limit when you would meet this. The database half **runs to
+  completion once it starts**, so an ordinary pause between stages never lands
+  inside it; only an outright kill, a host timeout or a crash does. And the
+  backup you are asked to redo is the one that just became dramatically
+  faster.
 
 ### Fixed
 
@@ -265,86 +453,6 @@ v0.0.x decision log for the reasoning.
   (and the screen's new table-exclusions box) can only ever match a bare
   table name. A pattern written for one can no longer reach the other, by
   construction, not by convention.
-
-### Changed
-
-- **An exclusion pattern written as a regex now only matches from the start
-  of the name — and this is a real behaviour change you may notice.** Only
-  the regex shape is affected (a pattern wrapped in forward slashes, like
-  `/\.log$/`); the other three shapes — an exact path, a glob such as
-  `*.log`, and a folder tree such as `path/**` — are already anchored by
-  their own meaning and are completely unchanged. If you had written a regex
-  to match a *suffix* — `/\.log$/`, to catch every file ending in `.log`
-  wherever it sits — **it now matches nothing at all**, because its match no
-  longer begins at position 0 of the name. Replace it with the glob
-  `*.log`, which does what you meant and is unaffected by this change.
-
-  This was anchored rather than refused on purpose. Refusing a pattern that
-  used to work would break a saved schedule the next time it ran
-  unattended, with nobody watching — the worst possible moment to discover
-  it. Anchoring it instead means the pattern simply stops catching anything
-  and the new match-count reporting below tells you so, quietly, on the
-  very next run.
-
-  **Pontifex's own curated defaults are unaffected.** They are not subject
-  to this anchoring at all, so the built-in `.git`-at-any-depth exclusion
-  keeps matching a `.git` folder wherever it sits in your site, exactly as
-  before.
-
-- **Pontifex now tells you how many things each exclusion pattern actually
-  matched**, on every surface that runs a backup: the `wp pontifex export`
-  summary, a resumable export's summary, the Backup screen's notice once a
-  backup finishes, and the log line a cron-driven scheduled backup writes.
-  A pattern that matched nothing now reports `0` rather than being left off
-  the list entirely — which is what makes a pattern that quietly ate a
-  table indistinguishable, until now, from one that correctly matched
-  nothing. One nuance worth knowing: a folder-tree pattern such as
-  `wp-content/cache/**` is counted as **one** match, however many thousands
-  of files sat underneath it, because the scanner prunes the whole folder
-  and never opens what is inside it to count them individually. Read the
-  number as "did this pattern do anything at all", not as a file count.
-
-- **The admin Backup screen has two exclusion boxes instead of one**, on
-  both the manual "Create a backup" section and the "Scheduled backups"
-  section: one for files, one for database tables. It previously had a
-  single box feeding both, which is the same shared-list problem the fix
-  above closes, now visible in the interface itself rather than only in
-  what you typed.
-
-- **`wp pontifex schedule set` gains `--exclude-table=<patterns>`**,
-  matching `export --exclude-table`, so a scheduled backup can leave out
-  database tables the same way a one-off export already could.
-  `wp pontifex schedule show` now prints both the file-exclusion and the
-  table-exclusion lists a scheduled backup will apply — it previously
-  printed neither, so what an unattended backup left out was invisible
-  until you went looking at the archive itself.
-
-- **`schedule set --exclude` or `--exclude-table` passed with no value at
-  all is now refused with an error**, instead of silently wiping the stored
-  list and reporting success as though nothing had changed. To clear a list
-  on purpose, pass an explicit empty value: `--exclude=`.
-
-- **A schedule saved before this change had one flat exclusion list; it is
-  now read as file patterns.** This is the safe direction to default it in:
-  if that one list had been silently excluding a database table, the table
-  now comes back into the backup rather than continuing to vanish from it.
-  Expect your next scheduled backup to be a little larger if that applied
-  to you.
-
-- **A backup interrupted part-way through its database half now asks you to
-  start again, rather than continuing.** The new bookmark that makes row
-  reading fast does not yet survive the process that created it, so a backup
-  resumed at that exact point cannot know where it had got to. Rather than
-  guess — which would re-read a table's first rows under a later batch's name,
-  duplicating some and dropping others — Pontifex stops and says so.
-
-  Two things limit when you would meet this. The database half **runs to
-  completion once it starts**, so an ordinary pause between stages never lands
-  inside it; only an outright kill, a host timeout or a crash does. And the
-  backup you are asked to redo is the one that just became dramatically
-  faster.
-
-### Fixed
 
 - **An interrupted download left a fragment under the backup's name, and then
   blocked its own retry.** Fetching a backup from your own server wrote
@@ -2016,7 +2124,8 @@ the import half and the round-trip tests still to come.
 - Security tooling: `roave/security-advisories` in `require-dev`
   refusing installation of any CVE-flagged dependency.
 
-[Unreleased]: https://github.com/7Duckie/pontifex/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/7Duckie/pontifex/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/7Duckie/pontifex/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/7Duckie/pontifex/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/7Duckie/pontifex/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/7Duckie/pontifex/compare/v1.0.3...v1.1.0

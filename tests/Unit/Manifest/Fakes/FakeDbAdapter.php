@@ -46,15 +46,53 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	}
 
 	/**
+	 * Registered view names, left out of list_tables().
+	 *
+	 * @var string[]
+	 */
+	private array $views = array();
+
+	/**
+	 * The views the most recent list_tables() call left out.
+	 *
+	 * @var string[]
+	 */
+	private array $views_seen = array();
+
+	/**
+	 * Register a database view, which list_tables() leaves out and names.
+	 *
+	 * @param string $name View name.
+	 * @return void
+	 */
+	public function add_view( string $name ): void {
+		$this->views[] = $name;
+	}
+
+	/**
 	 * Return the registered table names in alphabetical order.
+	 *
+	 * Records the registered views as the ones left out, the way the real adapter
+	 * does from the same listing.
 	 *
 	 * @return string[]
 	 */
 	public function list_tables(): array {
 		$this->maybe_fail( __FUNCTION__ );
+		$this->views_seen = $this->views;
+		sort( $this->views_seen, SORT_STRING );
 		$names = array_keys( $this->tables );
 		sort( $names, SORT_STRING );
 		return $names;
+	}
+
+	/**
+	 * Return the views the most recent list_tables() call left out.
+	 *
+	 * @return string[]
+	 */
+	public function excluded_views(): array {
+		return $this->views_seen;
 	}
 
 	/**
@@ -313,6 +351,50 @@ final class FakeDbAdapter implements DatabaseAdapter {
 	 */
 	public function table_exists( string $table_name ): bool {
 		return isset( $this->tables[ $table_name ] ) || isset( $this->existing_tables[ $table_name ] );
+	}
+
+	/**
+	 * Collations collation_supported() reports as missing; every other name is supported.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $unsupported_collations = array();
+
+	/**
+	 * Every collation name collation_supported() was asked about, in order.
+	 *
+	 * @var string[]
+	 */
+	private array $collation_queries = array();
+
+	/**
+	 * Mark a collation as one this fake server does not have.
+	 *
+	 * @param string $collation The collation name to report as unsupported.
+	 * @return void
+	 */
+	public function mark_collation_unsupported( string $collation ): void {
+		$this->unsupported_collations[ $collation ] = true;
+	}
+
+	/**
+	 * Return every collation name asked about, in order.
+	 *
+	 * @return string[] The recorded names; empty when the adapter was never asked.
+	 */
+	public function collation_queries(): array {
+		return $this->collation_queries;
+	}
+
+	/**
+	 * Record the question and answer it: supported unless marked otherwise.
+	 *
+	 * @param string $collation The collation name asked about.
+	 * @return bool False when the name was marked unsupported.
+	 */
+	public function collation_supported( string $collation ): bool {
+		$this->collation_queries[] = $collation;
+		return ! isset( $this->unsupported_collations[ $collation ] );
 	}
 
 	/**

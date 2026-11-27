@@ -13,12 +13,15 @@ use DateTimeImmutable;
 use DateTimeZone;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Pontifex\Archive\Codec\Codec;
 use Pontifex\Archive\Codec\CodecRegistry;
+use Pontifex\Archive\Codec\CodecUnavailableException;
 use Pontifex\Archive\Codec\RawCodec;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
+use Pontifex\Archive\Reader\ArchiveLimits;
 use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
@@ -233,6 +236,10 @@ final class RestorePreflightTest extends TestCase {
 				RestorePreflight::CHECK_SCOPE,
 				RestorePreflight::CHECK_SYMLINK_CONFINEMENT,
 				RestorePreflight::CHECK_FREE_SPACE,
+				RestorePreflight::CHECK_ENTRY_SIZE,
+				RestorePreflight::CHECK_ENTRY_MEMORY,
+				RestorePreflight::CHECK_PATH_LENGTH,
+				RestorePreflight::CHECK_CODEC_SUPPORT,
 			),
 			$report->checks_run()
 		);
@@ -260,6 +267,268 @@ final class RestorePreflightTest extends TestCase {
 		$this->assertTrue( $report->archive_is_refused() );
 		$this->assertTrue( $report->host_cannot_restore() );
 		$this->assertCount( 2, $report->messages() );
+	}
+
+	// -------------------------------------------------------------------------
+	// Limits a restore enforces that verify never checked.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * An entry above the per-entry limit is a HOST finding, and the archive is not condemned.
+	 *
+	 * The archive is undamaged; the limit is a property of this build, not of the
+	 * host, and no server setting changes it.
+	 *
+	 * @return void
+	 */
+	public function test_an_entry_over_the_size_limit_is_a_host_finding(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/big.txt', str_repeat( 'x', 4096 ) ) ) );
+
+		$report = $this->report_with( $source, self::limits_with_entry_bytes( 1000 ), 1073741824 );
+
+		$this->assertTrue( $report->host_cannot_restore() );
+		$this->assertFalse( $report->archive_is_refused(), 'An installation limit must never condemn the archive.' );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->inconclusive() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->host_findings() );
+		$this->assertContains( RestorePreflight::CHECK_ENTRY_SIZE, $report->checks_run() );
+		$this->assertStringContainsString( 'wp-content/big.txt', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( '4,096', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( '1,000', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( 'limit this build of Pontifex applies to a single entry, on any host;', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+		$this->assertStringContainsString( 'The backup is not damaged and does not need replacing — no server setting changes this ceiling.', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+	}
+
+	/**
+	 * The size limit covers every entry kind, so an oversized database chunk is refused too.
+	 *
+	 * @return void
+	 */
+	public function test_an_oversized_database_chunk_is_refused_by_the_size_limit(): void {
+		$sql    = "INSERT INTO `wp_options` VALUES (1);\n" . str_repeat( '-', 4096 );
+		$source = self::build_archive_stream( array( self::db_chunk_plan( 'wp_options', 1, $sql ) ) );
+
+		$report = $this->report_with( $source, self::limits_with_entry_bytes( 1000 ), 1073741824 );
+
+		$this->assertArrayHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->host_findings() );
+		$this->assertStringContainsString( 'wp_options', $report->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ] );
+	}
+
+	/**
+	 * An entry within the size limit passes, and the check is still recorded as run.
+	 *
+	 * @return void
+	 */
+	public function test_entries_within_the_size_limit_pass(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_with( $source, self::limits_with_entry_bytes( 1000 ), 1073741824 );
+
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->inconclusive() );
+		$this->assertContains( RestorePreflight::CHECK_ENTRY_SIZE, $report->checks_run() );
+	}
+
+	/**
+	 * The size message names the largest entry, and reads correctly for one and for many.
+	 *
+	 * @return void
+	 */
+	public function test_the_size_message_counts_correctly_and_names_the_largest(): void {
+		$one = $this->report_with(
+			self::build_archive_stream( array( self::file_plan( 'wp-content/big.txt', str_repeat( 'x', 4096 ) ) ) ),
+			self::limits_with_entry_bytes( 1000 ),
+			1073741824
+		)->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ];
+
+		$this->assertStringStartsWith( 'One entry has', $one );
+		$this->assertStringNotContainsString( '1 entries', $one );
+
+		$many = $this->report_with(
+			self::build_archive_stream(
+				array(
+					self::file_plan( 'wp-content/a.txt', str_repeat( 'x', 2000 ) ),
+					self::file_plan( 'wp-content/b.txt', str_repeat( 'x', 4096 ) ),
+					self::file_plan( 'wp-content/c.txt', 'tiny' ),
+				)
+			),
+			self::limits_with_entry_bytes( 1000 ),
+			1073741824
+		)->host_findings()[ RestorePreflight::CHECK_ENTRY_SIZE ];
+
+		$this->assertStringStartsWith( '2 entries have', $many );
+		$this->assertStringContainsString( 'wp-content/b.txt', $many );
+		$this->assertStringNotContainsString( 'wp-content/a.txt', $many );
+	}
+
+	/**
+	 * An entry above the memory budget is a HOST finding.
+	 *
+	 * @return void
+	 */
+	public function test_an_entry_over_the_memory_budget_is_a_host_finding(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/big.txt', str_repeat( 'x', 4096 ) ) ) );
+
+		$report = $this->report_with( $source, null, 1000 );
+
+		$this->assertTrue( $report->host_cannot_restore() );
+		$this->assertFalse( $report->archive_is_refused() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->inconclusive() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->host_findings() );
+		$this->assertContains( RestorePreflight::CHECK_ENTRY_MEMORY, $report->checks_run() );
+		$message = $report->host_findings()[ RestorePreflight::CHECK_ENTRY_MEMORY ];
+		$this->assertStringStartsWith( 'One entry has', $message );
+		$this->assertStringNotContainsString( '1 entries', $message );
+		$this->assertStringContainsString( 'wp-content/big.txt', $message );
+		$this->assertStringContainsString( '1,000', $message );
+	}
+
+	/**
+	 * An entry within the memory budget passes, and the check is recorded as run.
+	 *
+	 * @return void
+	 */
+	public function test_entries_within_the_memory_budget_pass(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_with( $source, null, 1073741824 );
+
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->inconclusive() );
+		$this->assertContains( RestorePreflight::CHECK_ENTRY_MEMORY, $report->checks_run() );
+	}
+
+	/**
+	 * With no memory budget the check has nothing to judge by, and records nothing.
+	 *
+	 * A budget of 0 means the host enforces no memory cap, so a restore can never
+	 * refuse on memory grounds. That is not an unanswered question, so it is not
+	 * inconclusive either: the check ran, found nothing, and the report is clear.
+	 *
+	 * @return void
+	 */
+	public function test_no_memory_budget_records_nothing_and_stays_clear(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/big.txt', str_repeat( 'x', 4096 ) ) ) );
+
+		$report = $this->report_with( $source, null, 0 );
+
+		$this->assertContains( RestorePreflight::CHECK_ENTRY_MEMORY, $report->checks_run() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->inconclusive() );
+		$this->assertTrue( $report->is_clear(), implode( ' | ', $report->messages() ) );
+	}
+
+	/**
+	 * If the shared header pass cannot be completed, all three checks say so as inconclusive.
+	 *
+	 * The stream handed to the preflight is empty, so the first header read fails
+	 * deterministically. None of the three checks can then answer, and none may
+	 * condemn the archive or the host for it.
+	 *
+	 * @return void
+	 */
+	public function test_an_unreadable_header_makes_the_three_new_checks_inconclusive(): void {
+		$real     = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+		$manifest = self::manifest_of( $real );
+		$empty    = self::memory_stream();
+
+		$preflight = new RestorePreflight(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			null,
+			1073741824
+		);
+		$report    = $preflight->read_only_report( $empty, $manifest, null );
+
+		foreach ( array( RestorePreflight::CHECK_ENTRY_SIZE, RestorePreflight::CHECK_ENTRY_MEMORY, RestorePreflight::CHECK_PATH_LENGTH ) as $check ) {
+			$this->assertContains( $check, $report->checks_run() );
+			$this->assertArrayHasKey( $check, $report->inconclusive() );
+			$this->assertArrayNotHasKey( $check, $report->archive_findings() );
+			$this->assertArrayNotHasKey( $check, $report->host_findings() );
+		}
+		$this->assertFalse( $report->is_clear() );
+	}
+
+	/**
+	 * A path component over 255 bytes is a HOST finding naming the path.
+	 *
+	 * @return void
+	 */
+	public function test_a_path_component_over_255_bytes_is_a_host_finding(): void {
+		$path   = 'wp-content/uploads/' . str_repeat( 'a', 256 ) . '.txt';
+		$source = self::build_archive_stream( array( self::file_plan( $path, 'hello' ) ) );
+
+		$report = $this->report_with( $source, null, 1073741824 );
+
+		$this->assertTrue( $report->host_cannot_restore() );
+		$this->assertFalse( $report->archive_is_refused() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_PATH_LENGTH, $report->inconclusive() );
+		$this->assertContains( RestorePreflight::CHECK_PATH_LENGTH, $report->checks_run() );
+		$message = $report->host_findings()[ RestorePreflight::CHECK_PATH_LENGTH ];
+		$this->assertStringStartsWith( 'One entry has', $message );
+		$this->assertStringNotContainsString( '1 entries', $message );
+		$this->assertStringContainsString( 'wp-content/uploads/aaaa', $message );
+	}
+
+	/**
+	 * A component of exactly 255 bytes passes, and the whole path may be far longer.
+	 *
+	 * @return void
+	 */
+	public function test_a_component_of_exactly_255_bytes_passes(): void {
+		$path   = 'wp-content/' . str_repeat( 'a', 255 ) . '/' . str_repeat( 'b', 251 ) . '.txt';
+		$source = self::build_archive_stream( array( self::file_plan( $path, 'hello' ) ) );
+
+		$report = $this->report_with( $source, null, 1073741824 );
+
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_PATH_LENGTH, $report->host_findings() );
+		$this->assertContains( RestorePreflight::CHECK_PATH_LENGTH, $report->checks_run() );
+	}
+
+	/**
+	 * A name under 255 CHARACTERS but over 255 BYTES is refused.
+	 *
+	 * This is the case an mb_strlen() implementation would wrongly pass: 128
+	 * two-byte characters are 128 characters and 256 bytes. The message also
+	 * carries the name escaped, never as raw bytes.
+	 *
+	 * @return void
+	 */
+	public function test_a_multibyte_name_is_measured_in_bytes_not_characters(): void {
+		$name = str_repeat( "\u{E9}", 128 );
+		$this->assertSame( 128, mb_strlen( $name ) );
+		$this->assertSame( 256, strlen( $name ) );
+
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/' . $name, 'hello' ) ) );
+
+		$report = $this->report_with( $source, null, 1073741824 );
+
+		$this->assertArrayHasKey( RestorePreflight::CHECK_PATH_LENGTH, $report->host_findings() );
+		$message = $report->host_findings()[ RestorePreflight::CHECK_PATH_LENGTH ];
+		$this->assertStringContainsString( '\\xC3\\xA9', $message );
+		$this->assertSame( 1, preg_match( '/^[\x20-\x7E]*$/', $message ), 'The message must hold printable ASCII only.' );
+		$this->assertLessThan( 600, strlen( $message ), 'A long path must be shortened in the message.' );
+	}
+
+	/**
+	 * The three new checks run alongside the existing ones, so one finding does not hide another.
+	 *
+	 * @return void
+	 */
+	public function test_the_new_checks_do_not_hide_the_old_ones(): void {
+		$source = self::build_archive_stream(
+			array(
+				self::file_plan( 'wp-content/big.txt', str_repeat( 'x', 4096 ) ),
+				self::symlink_plan( 'wp-content/leak', '../../../../etc/passwd' ),
+			)
+		);
+
+		$report = $this->report_with( $source, self::limits_with_entry_bytes( 1000 ), 2000 );
+
+		$this->assertArrayHasKey( RestorePreflight::CHECK_SYMLINK_CONFINEMENT, $report->archive_findings() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_ENTRY_SIZE, $report->host_findings() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_ENTRY_MEMORY, $report->host_findings() );
 	}
 
 	// -------------------------------------------------------------------------
@@ -355,6 +624,147 @@ final class RestorePreflightTest extends TestCase {
 	// -------------------------------------------------------------------------
 
 	/**
+	 * A codec this host cannot decode is a HOST finding, never an archive one.
+	 *
+	 * Verify hashes stored bytes and never decodes, so without this check a zstd
+	 * backup is called sound on a host with no zstd extension and then fails to
+	 * restore. The registry here holds a codec whose decode() throws what the zstd
+	 * codec throws when its extension is missing.
+	 *
+	 * @return void
+	 */
+	public function test_a_codec_this_host_cannot_decode_is_a_host_finding(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_with_registry( $source, self::unavailable_codec( RawCodec::ID ) );
+
+		$this->assertContains( RestorePreflight::CHECK_CODEC_SUPPORT, $report->checks_run() );
+		$this->assertArrayHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+		$this->assertStringContainsString( 'not damaged', $report->host_findings()[ RestorePreflight::CHECK_CODEC_SUPPORT ] );
+	}
+
+	/**
+	 * An ordinary archive runs the codec check and records nothing for it.
+	 *
+	 * @return void
+	 */
+	public function test_an_ordinary_archive_records_nothing_for_codec_support(): void {
+		$source = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+
+		$report = $this->report_for( $source );
+
+		$this->assertContains( RestorePreflight::CHECK_CODEC_SUPPORT, $report->checks_run() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->archive_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+	}
+
+	/**
+	 * The codec check reads the manifest, so an unreadable header does not silence it.
+	 *
+	 * @return void
+	 */
+	public function test_the_codec_check_still_answers_when_an_entry_header_cannot_be_read(): void {
+		$real     = self::build_archive_stream( array( self::file_plan( 'wp-content/ok.txt', 'hello' ) ) );
+		$manifest = self::manifest_of( $real );
+		$empty    = self::memory_stream();
+
+		$registry = new CodecRegistry();
+		$registry->register( self::unavailable_codec( RawCodec::ID ) );
+		$preflight = new RestorePreflight(
+			new EntryReader( $registry ),
+			new FileWriter( $this->fixture_root )
+		);
+		$report    = $preflight->read_only_report( $empty, $manifest, null );
+
+		$this->assertArrayHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->host_findings() );
+		$this->assertArrayNotHasKey( RestorePreflight::CHECK_CODEC_SUPPORT, $report->inconclusive() );
+	}
+
+	/**
+	 * Run the read-only report with one extra codec registered in place of the real one.
+	 *
+	 * @param resource $source The archive stream.
+	 * @param Codec    $codec  The codec to register in an otherwise empty registry.
+	 * @return PreflightReport
+	 */
+	private function report_with_registry( $source, Codec $codec ): PreflightReport {
+		$manifest = self::manifest_of( $source );
+		$scope    = self::scope_of( $source );
+		$registry = new CodecRegistry();
+		$registry->register( $codec );
+
+		$preflight = new RestorePreflight(
+			new EntryReader( $registry ),
+			new FileWriter( $this->fixture_root )
+		);
+
+		return $preflight->read_only_report( $source, $manifest, $scope );
+	}
+
+	/**
+	 * A codec whose decode() fails the way a missing PHP extension makes it fail.
+	 *
+	 * @param int $id The codec id to report.
+	 * @return Codec
+	 */
+	private static function unavailable_codec( int $id ): Codec {
+		return new class( $id ) implements Codec {
+			/**
+			 * The codec id this double reports.
+			 *
+			 * @var int
+			 */
+			private int $stub_id;
+
+			/**
+			 * Construct the double.
+			 *
+			 * @param int $id The codec id to report.
+			 */
+			public function __construct( int $id ) {
+				$this->stub_id = $id;
+			}
+
+			/**
+			 * Return the configured id.
+			 *
+			 * @return int
+			 */
+			public function id(): int {
+				return $this->stub_id;
+			}
+
+			/**
+			 * No-op encode.
+			 *
+			 * @param resource      $input   Ignored.
+			 * @param resource      $output  Ignored.
+			 * @param callable|null $on_read Ignored.
+			 * @return int Always zero.
+			 */
+			public function encode( $input, $output, ?callable $on_read = null ): int {
+				return 0;
+			}
+
+			/**
+			 * Always report the extension as missing.
+			 *
+			 * @param resource $input            Ignored.
+			 * @param resource $output           Ignored.
+			 * @param int|null $max_output_bytes Ignored.
+			 * @return never
+			 * @throws CodecUnavailableException Always.
+			 */
+			public function decode( $input, $output, ?int $max_output_bytes = null ): never {
+				throw new CodecUnavailableException( 'The required PHP extension is not loaded.' );
+			}
+		};
+	}
+
+	/**
 	 * Run the read-only report over an archive stream, rooted at the fixture.
 	 *
 	 * @param resource      $source          The archive stream.
@@ -371,6 +781,42 @@ final class RestorePreflightTest extends TestCase {
 		);
 
 		return $preflight->read_only_report( $source, $manifest, $scope );
+	}
+
+	/**
+	 * Run the read-only report with explicit limits and memory budget.
+	 *
+	 * @param resource           $source The archive stream.
+	 * @param ArchiveLimits|null $limits Optional limits; null applies the defaults.
+	 * @param int|null           $budget Optional per-entry memory budget; null or 0 means none.
+	 * @return PreflightReport
+	 */
+	private function report_with( $source, ?ArchiveLimits $limits, ?int $budget ): PreflightReport {
+		$manifest  = self::manifest_of( $source );
+		$scope     = self::scope_of( $source );
+		$preflight = new RestorePreflight(
+			new EntryReader( CodecRegistry::with_defaults() ),
+			new FileWriter( $this->fixture_root ),
+			$limits,
+			$budget
+		);
+
+		return $preflight->read_only_report( $source, $manifest, $scope );
+	}
+
+	/**
+	 * Default limits with only the per-entry byte ceiling lowered.
+	 *
+	 * @param int $max_entry_bytes The per-entry ceiling.
+	 * @return ArchiveLimits
+	 */
+	private static function limits_with_entry_bytes( int $max_entry_bytes ): ArchiveLimits {
+		return new ArchiveLimits(
+			ArchiveLimits::DEFAULT_MAX_ENTRY_COUNT,
+			$max_entry_bytes,
+			ArchiveLimits::DEFAULT_MAX_TOTAL_RATIO,
+			ArchiveLimits::DEFAULT_MAX_TOTAL_BYTES
+		);
 	}
 
 	/**

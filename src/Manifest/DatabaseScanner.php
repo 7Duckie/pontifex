@@ -121,6 +121,13 @@ final class DatabaseScanner {
 	private int $chunk_size_bytes;
 
 	/**
+	 * The views the latest scan() left out of the table listing.
+	 *
+	 * @var string[]
+	 */
+	private array $excluded_views = array();
+
+	/**
 	 * Construct a DatabaseScanner with explicit dependencies.
 	 *
 	 * @param DatabaseAdapter $db               Provides table listing and SQL dumping.
@@ -158,6 +165,10 @@ final class DatabaseScanner {
 		$tables = $this->db->list_tables();
 		sort( $tables, SORT_STRING );
 
+		// Taken from the adapter straight after the listing it came from, so the names
+		// belong to the very pass that decided what the backup holds.
+		$this->excluded_views = $this->db->excluded_views();
+
 		$chunks = array();
 
 		foreach ( $tables as $table_name ) {
@@ -170,6 +181,19 @@ final class DatabaseScanner {
 		}
 
 		return $chunks;
+	}
+
+	/**
+	 * Name the views the latest scan left out of the backup.
+	 *
+	 * A view stores no rows and a restore cannot recreate one, so the table listing leaves
+	 * each out. The names are read from that same listing, never from a second query, and
+	 * are empty until scan() has run.
+	 *
+	 * @return string[] View names in alphabetical order; empty when none were left out.
+	 */
+	public function excluded_views(): array {
+		return $this->excluded_views;
 	}
 
 	/**

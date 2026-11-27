@@ -43,6 +43,18 @@ interface DatabaseAdapter {
 	public function list_tables(): array;
 
 	/**
+	 * Name the prefixed database objects the latest list_tables() call left out.
+	 *
+	 * These are the views a backup deliberately omits: a view stores no rows, and a restore
+	 * cannot recreate one. The names come from the listing list_tables() already read and
+	 * this method asks the database nothing, so it is empty until list_tables() has run and
+	 * is replaced, never added to, by each later call to it.
+	 *
+	 * @return string[] Names in alphabetical order; empty when nothing was left out.
+	 */
+	public function excluded_views(): array;
+
+	/**
 	 * Return the number of rows in the given table.
 	 *
 	 * Used by DatabaseScanner to decide chunking — large tables are
@@ -401,4 +413,27 @@ interface DatabaseAdapter {
 	 * @return string|null The SESSION sql_mode, e.g. "STRICT_TRANS_TABLES,NO_ZERO_DATE" (an empty string is a valid, legitimate answer — no modes set); null if it could not be read at all.
 	 */
 	public function sql_mode(): ?string;
+
+	/**
+	 * Whether this database server has a collation of exactly this name.
+	 *
+	 * Used by {@see \Pontifex\Restore\DatabaseWriter} to ask, before a restore
+	 * begins, whether the one collation an archive records for its database as a
+	 * whole exists on this server — rather than learn it from a failed
+	 * `CREATE TABLE` part-way through staging. It is a read-only question about
+	 * the server's own list of collations; it says nothing about any individual
+	 * table's or column's collation, which lives only inside each table's
+	 * `CREATE TABLE` text.
+	 *
+	 * Implementations must compare the name case-insensitively, as the server
+	 * does. Where the server could not be asked at all, they must answer true:
+	 * refusing a restore over a question that failed would be an invented
+	 * refusal, and the staged `CREATE TABLE` remains the arbiter. A failed query
+	 * can be silent (suppressed errors), so an empty collation list — which no
+	 * real server has — is what counts as "could not be asked".
+	 *
+	 * @param string $collation The collation name to look for, e.g. "utf8mb4_unicode_520_ci".
+	 * @return bool True when the server has this collation, or could not be asked.
+	 */
+	public function collation_supported( string $collation ): bool;
 }

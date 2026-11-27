@@ -527,39 +527,80 @@ numbered release:
   networks, deferred from v0.1.0 because single-site needs to be
   solid first.
 
-## v1.1.1 — Recovery undoes what the failed restore added
+## v1.3.0 — Verify answers for the server, not just the file
 
-A patch. Recovery after a failed import already claimed to put the site back to
-its state before the import; it now does.
+Closes eight failures that shared one shape: `wp pontifex verify` reported a
+backup sound, and a restore of that same backup then refused it. A minor rather
+than a patch, because two things a consumer can observe changed: a backup no
+longer contains database views, and `verify` now refuses archives it previously
+called sound, so a script reading its exit code can see a failure it could not
+see before. No public API moved, and the `.wpmig` format is untouched.
 
-- **The claim was false, and provably so.** A restore is additive — it
-  overwrites and creates and removes nothing — so replaying the safety archive
-  restored every file that existed before while leaving behind every file the
-  failed import had created. The site was the original files merged with
-  whatever the failed import managed to write, and the operator was told it was
-  back to normal. The dangerous shape is restoring a backup that is not your own
-  current site: a file it introduced at a path your site never had ends up live
-  and unmentioned.
-- **Recovery now removes exactly what the failed restore created**, tracked by a
-  ledger of paths whose target did not exist before the write. Deliberately not
-  a difference against the safety archive — a live site writes uploads, caches
-  and logs throughout a restore, and a difference would delete those too.
-- **When it cannot account for everything it added** — a very large restore, or
-  a file that would not delete — it reports a merge rather than claiming a
-  revert, the same honesty the fatal-error path already showed.
+- **Three host limits are named before a restore starts, not part-way through
+  it.** An entry too large to decode in one piece, an entry too large for the
+  memory budget, and a path longer than the host accepts were all enforced by a
+  restore and checked by nothing. They are reported through
+  `RestorePreflight::read_only_report()`, which runs after the hash walk, so the
+  message is entitled to say the backup is undamaged. The decode ceiling is
+  compiled into every build and identical on every host, so the message says so
+  rather than implying there is a setting to raise: `ArchiveLimits` is only ever
+  constructed through `?? ArchiveLimits::defaults()`, so no installation has a
+  higher one.
 
-See [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
+- **An archive compressed with a codec this build cannot load is refused by the
+  preflight.** In practice zstd, written by a server that had the extension and
+  read by one that does not — the ordinary move-to-a-new-server case this plugin
+  exists for. Checking never decodes anything, so every fingerprint matched and
+  verify called the archive sound. The question is put to the same reader that
+  would do the decoding, so the answer cannot drift from what a restore would
+  actually do.
 
-### What is deliberately deferred
+- **A restore's temporary name no longer borrows the name of the file it
+  replaces.** It added 37 characters, so a 219-character filename produced a
+  256-character temporary name that no standard filesystem accepts, and the
+  restore failed on a file whose real name it could have written perfectly well.
+  The temporary name is now a fixed 37 characters whatever the file is called.
+  Backups themselves were never affected.
 
-- `wp pontifex rollback` keeps its additive behaviour. It makes no claim to
-  revert, and it has no ledger to work from — the run it is undoing may have
-  been another process, or days earlier — so it could only use the
-  set-difference rule ADR 0024 rejects.
-- Full file-side restore atomicity, deferred by
-  [ADR 0009](./adr/0009-atomic-staging-table-restore.md) as "a separate, later
-  arc", is still deferred. This makes recovery honest; it does not make the file
-  half of a restore transactional.
+- **Verify decodes one entry to prove an encrypted backup's passphrase.** It
+  reads every fingerprint over the stored bytes and never unlocked anything, so
+  a mistyped passphrase was never put to the test. A wrong passphrase is an
+  `InvalidRequest` naming the real cause, never the BROKEN verdict:
+  `read_entry()` checks each entry's SHA-256 against both the file and the
+  manifest before decrypting, so hashes-pass-but-decryption-fails can only mean
+  a wrong key.
+
+- **Database views are left out of a backup, and named.** `SHOW TABLES` lists
+  views beside tables, so every view was swept into the archive, and ADR 0019's
+  containment rule then refused it mid-replay — after the database had already
+  begun to be rebuilt. The accepted object types now live in one place,
+  `Pontifex\Database\RestorableTableTypes`, read by both the export listing and
+  `DatabaseWriter`, and an object the server reports no type for is kept rather
+  than dropped: filtering to `BASE TABLE` instead would have silently dropped
+  MariaDB's sequences from every backup, a worse bug than the one being fixed.
+
+- **A restore onto a server lacking the backup's recorded collation is refused
+  up front, and the collation is named.** The check fails open, and does it with
+  a positive control — an empty result set from `SHOW COLLATION` — because
+  `suppress_errors` leaves `$wpdb->last_error` empty, so asking that instead
+  would have read a suppressed failure as a successful "no such collation" and
+  refused a good backup. It reads the collation the archive records for the
+  database as a whole; a per-table or per-column collation lives inside its own
+  `CREATE TABLE` and is not parsed, which the method name, the refusal message
+  and the documents all state.
+
+Deliberately not done, recorded so neither is rediscovered as a finding. The new
+checks inform `verify`, the admin Verify screen and the admin Restore screen —
+they are **not** run by `RestoreRunner::restore()` or by
+`ImportCommand::rehearse_restore()`, so a CLI `import` can still abort part-way
+through the tree on a host limit that `verify` would have named; whether the
+preflight should run before a restore writes anything has not been decided. And
+the eighth failure is still open: a filename the filesystem accepts but UTF-8
+forbids aborts the **backup**, not a restore, with an uncaught `JsonException`
+that names no file. Specification §13.2.1 locks UTF-8 for paths, so the only
+conforming answers are to refuse the backup and name the file, or to leave that
+one file out of it. It reproduces on Linux only, because macOS refuses such a
+name at the filesystem.
 
 ## v1.2.1 — A dependency advisory, and what encryption really covers
 
@@ -629,6 +670,20 @@ reserved for the Go reference reader.
   site's address after the restore had overwritten it, so it rewrote the old
   address to itself and reported success, leaving a migrated site serving the
   old domain and sending the operator to a login page on the old host.
+- **Recovery after a failed restore undoes what the restore added.** Recovery
+  already claimed to put the site back to its state before the import, and the
+  claim was false: a restore is additive — it overwrites and creates and removes
+  nothing — so replaying the safety archive restored every file that existed
+  before while leaving behind every file the failed import had created, and the
+  operator was told it was back to normal. The dangerous shape is restoring a
+  backup that is not your own current site: a file it introduced at a path your
+  site never had ends up live and unmentioned. It now removes exactly what the
+  failed restore created, tracked by a ledger of paths whose target did not
+  exist before the write rather than by differencing against the safety archive,
+  which would delete the uploads, caches and logs a live site writes throughout
+  a restore. When it cannot account for everything it added it reports a merge
+  rather than claiming a revert. See
+  [ADR 0024](./adr/0024-recovery-reverts-by-ledger.md).
 - **Recovery after a failed restore holds the operation lock for all of its
   work**, the file cleanup included, rather than releasing it and then replaying
   the safety archive with nothing to stop a second process writing the same
@@ -646,6 +701,17 @@ findings of the three-round audit of v1.1.0 — among them a backup naming anoth
 tenant's table, retention deleting the newest backup rather than the oldest, a
 full disk leaving a guard file at zero bytes, and a fourteen-byte cycle in
 serialised data hanging a migration.
+
+### What is deliberately deferred
+
+- `wp pontifex rollback` keeps its additive behaviour. It makes no claim to
+  revert, and it has no ledger to work from — the run it is undoing may have
+  been another process, or days earlier — so it could only use the
+  set-difference rule ADR 0024 rejects.
+- Full file-side restore atomicity, deferred by
+  [ADR 0009](./adr/0009-atomic-staging-table-restore.md) as "a separate, later
+  arc", is still deferred. This makes recovery honest; it does not make the file
+  half of a restore transactional.
 
 ## v1.1.0 — Verify stops promising what a restore will not honour
 

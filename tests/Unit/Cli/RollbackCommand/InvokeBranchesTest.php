@@ -1048,6 +1048,9 @@ final class InvokeBranchesTest extends TestCase {
 				return 0;
 			}
 		);
+		// The real adapter asks the server whether it has the archive's collation
+		// before the restore starts; any non-null scalar answers "it does".
+		$wpdb->shouldReceive( 'get_var' )->andReturn( 'utf8mb4_unicode_520_ci' );
 
 		$context = Mockery::mock( WordPressContext::class );
 		$context->shouldReceive( 'option_value' )->andReturnUsing(

@@ -85,8 +85,9 @@ final class WpdbMigrationDatabase implements MigrationDatabase {
 	 * List the tables the rewrite pass should walk.
 	 *
 	 * Returns the explicit scope when one was supplied, otherwise every
-	 * WordPress-prefixed table (SHOW TABLES LIKE '{prefix}%'), so unrelated
-	 * tables sharing the database are not pulled in.
+	 * WordPress-prefixed table (SHOW FULL TABLES LIKE '{prefix}%'), so unrelated
+	 * tables sharing the database are not pulled in. Views are left out: a view
+	 * holds no rows of its own, and the base tables behind it are walked directly.
 	 *
 	 * @return string[] Fully-prefixed table names, alphabetically sorted.
 	 * @throws RuntimeException If $wpdb signals a query error.

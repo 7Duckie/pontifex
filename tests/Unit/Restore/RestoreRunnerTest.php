@@ -19,16 +19,24 @@ use RuntimeException;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Codec\GzipCodec;
 use Pontifex\Archive\Codec\RawCodec;
+use Pontifex\Archive\Crypto\Cipher;
+use Pontifex\Archive\Crypto\EncryptionContext;
+use Pontifex\Archive\Crypto\OpensslAesGcmCipher;
 use Pontifex\Archive\Format\EntryHeader;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\Provenance;
+use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Reader\ArchiveLimits;
+use Pontifex\Archive\Reader\ArchiveReader;
 use Pontifex\Archive\Reader\EntryReader;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Archive\Writer\FooterWriter;
+use Pontifex\Exception\ArchiveNotTrustworthy;
 use Pontifex\Exception\BuildCannotComply;
+use Pontifex\Exception\HostCannotComply;
+use Pontifex\Exception\InvalidRequest;
 use Pontifex\Restore\DatabaseWriter;
 use Pontifex\Restore\FileWriter;
 use Pontifex\Restore\RestoreRunner;
@@ -212,12 +220,13 @@ final class RestoreRunnerTest extends TestCase {
 	/**
 	 * Build an archive in memory from the given EntryPlan list and return a stream of its bytes.
 	 *
-	 * @param EntryPlan[] $plans The plans to include.
+	 * @param EntryPlan[]     $plans      The plans to include.
+	 * @param Provenance|null $provenance Optional provenance; the sample one when null.
 	 * @return resource A readable, seekable stream containing the archive bytes.
 	 */
-	private static function build_archive_stream( array $plans ) {
+	private static function build_archive_stream( array $plans, ?Provenance $provenance = null ) {
 		$dest = self::memory_stream();
-		self::make_archive_writer()->write_archive( self::sample_provenance(), $plans, $dest );
+		self::make_archive_writer()->write_archive( $provenance ?? self::sample_provenance(), $plans, $dest );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
 		rewind( $dest );
 		return $dest;
@@ -1736,5 +1745,358 @@ final class RestoreRunnerTest extends TestCase {
 		$this->assertSame( '../languages', readlink( $this->fixture_root . '/wp-content/languages' ) );
 		$this->assertSame( '../../vendor/acme/lib/autoload.php', readlink( $this->fixture_root . '/wp-content/mu-plugins/autoload.php' ) );
 		$this->assertSame( '2026', readlink( $this->fixture_root . '/wp-content/uploads/alias' ) );
+	}
+
+	/**
+	 * The passphrase the encrypted-archive tests write with.
+	 *
+	 * @return string A Cipher::KEY_SIZE-byte key.
+	 */
+	private static function right_key(): string {
+		return str_repeat( 'k', Cipher::KEY_SIZE );
+	}
+
+	/**
+	 * A different key of the same length, standing in for a mistyped passphrase.
+	 *
+	 * @return string A Cipher::KEY_SIZE-byte key that is not {@see self::right_key()}.
+	 */
+	private static function wrong_key(): string {
+		return str_repeat( 'x', Cipher::KEY_SIZE );
+	}
+
+	/**
+	 * Build a RestoreRunner whose reader holds the given key.
+	 *
+	 * @param string             $key The key the reader decrypts with.
+	 * @param FakeDbAdapter|null $db  Optional adapter; a fresh one when null.
+	 * @return RestoreRunner Ready to call verify() on.
+	 */
+	private function make_keyed_runner( string $key, ?FakeDbAdapter $db = null ): RestoreRunner {
+		return new RestoreRunner(
+			new EntryReader( CodecRegistry::with_defaults(), new OpensslAesGcmCipher(), $key ),
+			new FileWriter( $this->fixture_root ),
+			new DatabaseWriter( $db ?? new FakeDbAdapter() )
+		);
+	}
+
+	/**
+	 * Build an encrypted archive: one sizeable file and one directory, whose payload is empty.
+	 *
+	 * The directory is deliberately the smallest record, so the key check has
+	 * to be satisfied by an entry with no payload at all.
+	 *
+	 * @return string The complete archive bytes.
+	 */
+	private static function build_encrypted_archive_bytes(): string {
+		$context = new EncryptionContext( new OpensslAesGcmCipher(), self::right_key(), str_repeat( 's', 16 ) );
+		$dest    = self::memory_stream();
+		self::make_archive_writer()->write_archive(
+			self::sample_provenance(),
+			array(
+				self::file_plan( 'a.txt', str_repeat( 'a sizeable payload ', 20 ) ),
+				self::directory_plan( 'd' ),
+			),
+			$dest,
+			null,
+			$context
+		);
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rewind -- Operating on a test stream resource, not a filesystem path.
+		rewind( $dest );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Operating on a test stream resource, not a filesystem path.
+		return (string) stream_get_contents( $dest );
+	}
+
+	/**
+	 * The manifest entry the key check reads: the one with the smallest record.
+	 *
+	 * @param string $bytes The complete archive bytes.
+	 * @return \Pontifex\Archive\Format\ManifestEntry The smallest entry.
+	 */
+	private static function smallest_entry( string $bytes ) {
+		$smallest = null;
+		foreach ( ( new ArchiveReader( self::memory_stream( $bytes ) ) )->manifest()->entries() as $entry ) {
+			if ( null === $smallest || $entry->length() < $smallest->length() ) {
+				$smallest = $entry;
+			}
+		}
+		return $smallest;
+	}
+
+	/**
+	 * Verifying an encrypted archive with the right passphrase still passes, and reads every entry once.
+	 *
+	 * @return void
+	 */
+	public function test_verify_passes_an_encrypted_archive_with_the_right_passphrase(): void {
+		$bytes = self::build_encrypted_archive_bytes();
+		$calls = array();
+		$read  = 0;
+		$total = 0;
+		foreach ( ( new ArchiveReader( self::memory_stream( $bytes ) ) )->manifest()->entries() as $entry ) {
+			$total += $entry->length();
+		}
+
+		$this->make_keyed_runner( self::right_key() )->verify(
+			self::memory_stream( $bytes ),
+			static function ( int $done, int $all ) use ( &$calls ): void {
+				$calls[] = array( $done, $all );
+			},
+			static function ( int $n ) use ( &$read ): void {
+				$read += $n;
+			}
+		);
+
+		$this->assertSame( array( array( 1, 2 ), array( 2, 2 ) ), $calls );
+		$this->assertSame( $total, $read, 'The key check must not add to the bytes the walk reports.' );
+	}
+
+	/**
+	 * A wrong passphrase is refused as a bad request that names the passphrase, not as a broken archive.
+	 *
+	 * Also proves an entry with an empty payload authenticates the key: the
+	 * smallest record in this archive is the directory.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_a_wrong_passphrase_as_an_invalid_request(): void {
+		$bytes = self::build_encrypted_archive_bytes();
+		$this->assertTrue( self::smallest_entry( $bytes )->is_directory(), 'Fixture: the smallest record must be the empty-payload directory.' );
+
+		try {
+			$this->make_keyed_runner( self::wrong_key() )->verify( self::memory_stream( $bytes ) );
+			$this->fail( 'A wrong passphrase must not verify.' );
+		} catch ( InvalidRequest $e ) {
+			$this->assertStringContainsStringIgnoringCase( 'passphrase', $e->getMessage() );
+			$this->assertStringNotContainsString( 'tampered', $e->getMessage() );
+		}
+	}
+
+	/**
+	 * A wrong passphrase is reported before the collation check, so no claim is made about an unread archive.
+	 *
+	 * The collation refusal speaks about the backup's restorability; on an encrypted
+	 * archive nothing of the payload has been read until the passphrase is proven.
+	 *
+	 * @return void
+	 */
+	public function test_verify_proves_the_passphrase_before_checking_the_collation(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_unicode_520_ci' );
+
+		try {
+			$this->make_keyed_runner( self::wrong_key(), $db )->verify( self::memory_stream( self::build_encrypted_archive_bytes() ) );
+			$this->fail( 'A wrong passphrase must not verify.' );
+		} catch ( InvalidRequest $e ) {
+			$this->assertStringContainsStringIgnoringCase( 'passphrase', $e->getMessage() );
+		}
+
+		$this->assertSame( array(), $db->collation_queries(), 'The collation must not be asked about until the passphrase is proven.' );
+
+		$this->expectException( HostCannotComply::class );
+		$this->make_keyed_runner( self::right_key(), $db )->verify( self::memory_stream( self::build_encrypted_archive_bytes() ) );
+	}
+
+	/**
+	 * The wrong passphrase is found before the per-entry walk begins.
+	 *
+	 * @return void
+	 */
+	public function test_a_wrong_passphrase_is_refused_before_the_walk_starts(): void {
+		$bytes = self::build_encrypted_archive_bytes();
+		$calls = 0;
+		$read  = 0;
+
+		try {
+			$this->make_keyed_runner( self::wrong_key() )->verify(
+				self::memory_stream( $bytes ),
+				static function () use ( &$calls ): void {
+					++$calls;
+				},
+				static function ( int $n ) use ( &$read ): void {
+					$read += $n;
+				}
+			);
+			$this->fail( 'A wrong passphrase must not verify.' );
+		} catch ( InvalidRequest $e ) {
+			$this->assertSame( 0, $calls, 'No entry may have been walked.' );
+			$this->assertSame( 0, $read, 'No byte progress may have been reported.' );
+		}
+	}
+
+	/**
+	 * An unencrypted archive takes no extra read: the bytes reported equal its records.
+	 *
+	 * @return void
+	 */
+	public function test_an_unencrypted_archive_gets_no_key_check_read(): void {
+		$bytes = self::build_archive_stream( array( self::file_plan( 'a.txt', 'apple' ), self::directory_plan( 'd' ) ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_stream_get_contents -- Operating on a test stream resource, not a filesystem path.
+		$raw   = (string) stream_get_contents( $bytes );
+		$total = 0;
+		foreach ( ( new ArchiveReader( self::memory_stream( $raw ) ) )->manifest()->entries() as $entry ) {
+			$total += $entry->length();
+		}
+		$read = 0;
+
+		$this->make_keyed_runner( self::wrong_key() )->verify(
+			self::memory_stream( $raw ),
+			null,
+			static function ( int $n ) use ( &$read ): void {
+				$read += $n;
+			}
+		);
+
+		$this->assertSame( $total, $read );
+	}
+
+	/**
+	 * Genuine corruption is still reported as damage, never as a wrong passphrase.
+	 *
+	 * The smallest record has a byte flipped in its stored payload. The hash
+	 * check runs before any decryption, so the damage is found first — with the
+	 * right passphrase and with the wrong one alike.
+	 *
+	 * @return void
+	 */
+	public function test_a_corrupt_encrypted_archive_is_still_reported_as_damaged(): void {
+		$bytes            = self::build_encrypted_archive_bytes();
+		$entry            = self::smallest_entry( $bytes );
+		$target           = $entry->offset() + $entry->length() - 40;
+		$bytes[ $target ] = chr( ord( $bytes[ $target ] ) ^ 0xFF );
+
+		foreach ( array( self::right_key(), self::wrong_key() ) as $key ) {
+			try {
+				$this->make_keyed_runner( $key )->verify( self::memory_stream( $bytes ) );
+				$this->fail( 'A corrupt archive must not verify.' );
+			} catch ( InvalidRequest $e ) {
+				$this->fail( 'Corruption was misreported as a wrong passphrase: ' . $e->getMessage() );
+			} catch ( ArchiveNotTrustworthy $e ) {
+				$this->assertStringContainsString( 'hash', $e->getMessage() );
+			}
+		}
+	}
+
+	/**
+	 * A provenance whose recorded database collation is the one given, with an optional scope.
+	 *
+	 * @param string     $collation The collation the archive records for its database.
+	 * @param Scope|null $scope     Optional scope; null records none, as an older archive does.
+	 * @return Provenance A valid provenance instance.
+	 */
+	private static function provenance_with_collation( string $collation, ?Scope $scope = null ): Provenance {
+		return new Provenance(
+			'6.6.1',
+			'8.2.10',
+			'https://example.test',
+			'utf8mb4',
+			$collation,
+			new ExporterInfo( 'pontifex', '0.1.0' ),
+			new DateTimeImmutable( '2026-05-23T10:00:00+00:00', new DateTimeZone( 'UTC' ) ),
+			null,
+			null,
+			$scope
+		);
+	}
+
+	/**
+	 * An archive carrying one db_chunk, recording the given database collation.
+	 *
+	 * @param string           $collation The recorded collation.
+	 * @param Scope|null       $scope     Optional recorded scope.
+	 * @param EntryPlan[]|null $plans     Optional entries; one db_chunk when null.
+	 * @return resource A readable, seekable archive stream.
+	 */
+	private static function archive_recording_collation( string $collation, ?Scope $scope = null, ?array $plans = null ) {
+		$plans = $plans ?? array( self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) );
+		return self::build_archive_stream( $plans, self::provenance_with_collation( $collation, $scope ) );
+	}
+
+	/**
+	 * A supported recorded collation changes nothing: the restore runs and the server was asked once.
+	 *
+	 * @return void
+	 */
+	public function test_restore_accepts_a_supported_recorded_collation(): void {
+		$db     = new FakeDbAdapter();
+		$runner = $this->make_runner( $db );
+
+		$runner->restore( self::archive_recording_collation( 'utf8mb4_unicode_520_ci' ) );
+
+		$this->assertSame( array( 'utf8mb4_unicode_520_ci' ), $db->collation_queries() );
+		$this->assertNotSame( array(), $db->executed_statements(), 'A supported collation must leave the replay running.' );
+	}
+
+	/**
+	 * A restore refuses a recorded collation this server lacks, as a host problem naming it, before touching anything.
+	 *
+	 * @return void
+	 */
+	public function test_restore_refuses_an_unsupported_recorded_collation_before_the_walk(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner   = $this->make_runner( $db );
+		$progress = 0;
+
+		try {
+			$runner->restore(
+				self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', null, array( self::file_plan( 'note.txt', 'hello' ), self::db_chunk_plan( 'wp_options', 1, "CREATE TABLE `wp_options` (id INT);\n" ) ) ),
+				static function () use ( &$progress ): void {
+					++$progress;
+				}
+			);
+			$this->fail( 'A restore must refuse a collation this server does not have.' );
+		} catch ( HostCannotComply $refusal ) {
+			$this->assertStringContainsString( 'utf8mb4_ja_0900_as_cs', $refusal->getMessage() );
+		}
+
+		$this->assertSame( 0, $progress, 'The refusal must land before the walk reads a single entry.' );
+		$this->assertSame( array(), $db->executed_statements(), 'No statement may run once the collation is refused.' );
+		$this->assertFileDoesNotExist( $this->fixture_root . '/note.txt', 'No file may be written once the collation is refused.' );
+	}
+
+	/**
+	 * Verify refuses the same archive the same way, so it cannot vouch for what a restore will not honour.
+	 *
+	 * @return void
+	 */
+	public function test_verify_refuses_an_unsupported_recorded_collation_before_the_walk(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner   = $this->make_runner( $db );
+		$progress = 0;
+
+		try {
+			$runner->verify(
+				self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs' ),
+				static function () use ( &$progress ): void {
+					++$progress;
+				}
+			);
+			$this->fail( 'Verify must refuse a collation this server does not have.' );
+		} catch ( HostCannotComply $refusal ) {
+			$this->assertStringContainsString( 'utf8mb4_ja_0900_as_cs', $refusal->getMessage() );
+		}
+
+		$this->assertSame( 0, $progress, 'The refusal must land before the walk reads a single entry.' );
+	}
+
+	/**
+	 * A files-only archive has no database half, so the server is never asked about its collation.
+	 *
+	 * @return void
+	 */
+	public function test_a_files_only_archive_is_never_checked_for_collation(): void {
+		$db = new FakeDbAdapter();
+		$db->mark_collation_unsupported( 'utf8mb4_ja_0900_as_cs' );
+		$runner = $this->make_runner( $db );
+		$scope  = Scope::files_only( array() );
+
+		// Each archive needs its own plan: building one consumes the plan's stream.
+		$runner->verify( self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', $scope, array( self::file_plan( 'note.txt', 'hello' ) ) ) );
+		$runner->restore( self::archive_recording_collation( 'utf8mb4_ja_0900_as_cs', $scope, array( self::file_plan( 'note.txt', 'hello' ) ) ) );
+
+		$this->assertSame( array(), $db->collation_queries(), 'A files-only archive must never put the question to the database.' );
+		$this->assertFileExists( $this->fixture_root . '/note.txt' );
 	}
 }

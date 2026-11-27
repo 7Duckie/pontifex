@@ -85,6 +85,13 @@ final class WpdbAdapter implements DatabaseAdapter {
 	private array $order_columns_are_primary_key = array();
 
 	/**
+	 * The views the latest list_tables() call left out, by name.
+	 *
+	 * @var string[]
+	 */
+	private array $excluded_views = array();
+
+	/**
 	 * Construct a WpdbAdapter around an existing wpdb instance.
 	 *
 	 * @param wpdb $wpdb The WordPress database object, typically the global $wpdb.
@@ -96,15 +103,36 @@ final class WpdbAdapter implements DatabaseAdapter {
 	/**
 	 * List every WordPress-prefixed table in the database.
 	 *
-	 * Queries SHOW TABLES LIKE '{prefix}%' so unrelated tables
+	 * Queries SHOW FULL TABLES LIKE '{prefix}%' so unrelated tables
 	 * sharing the same database (e.g. analytics, mailer queues) are
-	 * not pulled in.
+	 * not pulled in. Views are left out, because a restore cannot
+	 * recreate one; their names are kept from this same listing and
+	 * returned by {@see self::excluded_views()}.
 	 *
 	 * @return string[] Alphabetically sorted table names.
 	 * @throws RuntimeException If $wpdb signals a query error.
 	 */
 	public function list_tables(): array {
-		return $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter' );
+		$excluded = array();
+		$tables   = $this->list_prefixed_tables( $this->wpdb, 'WpdbAdapter', $excluded );
+
+		$this->excluded_views = $excluded;
+		return $tables;
+	}
+
+	/**
+	 * Name the prefixed database objects that the latest {@see self::list_tables()} left out.
+	 *
+	 * These are the views a backup deliberately omits: a view stores no rows of its own, and
+	 * a restore cannot recreate one. The names come from the listing list_tables() already
+	 * read, so this asks the database nothing: a second look could disagree with the first,
+	 * and the dump runs on a snapshot connection so that every read agrees. Empty until
+	 * list_tables() has run, and replaced (never added to) by each later call to it.
+	 *
+	 * @return string[] Alphabetically sorted names; empty when nothing was left out.
+	 */
+	public function excluded_views(): array {
+		return $this->excluded_views;
 	}
 
 	/**
@@ -841,6 +869,40 @@ final class WpdbAdapter implements DatabaseAdapter {
 			throw new RuntimeException( sprintf( 'Could not read the row count for "%s": %s', $table_name, $last_error ) );
 		}
 		return (int) $count;
+	}
+
+	/**
+	 * Whether this server has a collation of this name.
+	 *
+	 * Reads the server's whole collation list (`SHOW COLLATION`, a few hundred rows, once
+	 * per restore) and looks for the name in it, case-insensitively, as MySQL itself does.
+	 * It deliberately does not use `LIKE` to ask for one name: `$wpdb->get_col()` returns
+	 * an empty array, not `false`, when its query fails, and `$wpdb->last_error` is left
+	 * empty when errors are suppressed (`suppress_errors`, which WordPress turns on for
+	 * many operations), so a failed query is indistinguishable from "no such collation".
+	 * Every MySQL and MariaDB server has collations, so an EMPTY list is a failed query,
+	 * never a true answer — the same positive control {@see \Pontifex\Database\HardenedTableListing}
+	 * uses — and it answers true: nothing was learned, and refusing a restore over a
+	 * question that failed would tell an operator their server lacks a collation it has.
+	 * The staged CREATE TABLE stays the arbiter (see {@see DatabaseAdapter::collation_supported()}).
+	 * Do not "optimise" this back into a single-name lookup.
+	 *
+	 * @param string $collation The collation name to look for.
+	 * @return bool True when the server has this collation, or could not be asked.
+	 */
+	public function collation_supported( string $collation ): bool {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A static statement with no inputs; a restore preflight reads the server's own live collation list, so caching does not apply.
+		$names = $this->wpdb->get_col( 'SHOW COLLATION' );
+		if ( ! is_array( $names ) || array() === $names ) {
+			return true;
+		}
+		$wanted = strtolower( $collation );
+		foreach ( $names as $name ) {
+			if ( is_string( $name ) && strtolower( $name ) === $wanted ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
