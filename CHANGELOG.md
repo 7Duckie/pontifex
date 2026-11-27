@@ -12,6 +12,24 @@ a release" discipline — see
 [ADR 0001](docs/adr/0001-wordpress-context-abstraction.md) and the
 v0.0.x decision log for the reasoning.
 
+## [Unreleased]
+
+### Fixed
+
+- A file or symbolic link whose name is not valid UTF-8 no longer aborts a
+  backup with an unexplained encoding error. Every path in a `.wpmig` archive
+  is stored as UTF-8 text — a locked invariant of the format — so such a name
+  cannot be recorded at all. The export now refuses before writing anything
+  and names the entries, with their unprintable bytes escaped, alongside the
+  two remedies: rename them, or leave them out. Previously the backup stopped
+  part-way with "Malformed UTF-8 characters, possibly incorrectly encoded" and
+  no indication of which file was at fault. The refusal runs on every surface
+  that writes a backup — `wp pontifex export`, a resumable or scheduled
+  backup, the admin Backup screen, and the safety archive taken before a
+  restore, where it stops the restore rather than let it proceed with no undo.
+  A symbolic link whose own name is valid but whose target is not is refused
+  too; that case previously slipped the preflight and failed mid-write.
+
 ## [1.3.0] — 2026-11-26 — Verify answers for the server, not just the file
 
 ### Fixed

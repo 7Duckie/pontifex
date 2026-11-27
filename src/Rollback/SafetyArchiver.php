@@ -11,12 +11,14 @@ namespace Pontifex\Rollback;
 
 use DateTimeImmutable;
 use Throwable;
+use Pontifex\Archive\Format\PathEncoding;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\HostCannotComply;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ManifestTooLargeException;
+use Pontifex\Export\UnencodablePathException;
 use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilderInterface;
@@ -158,6 +160,7 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 	 * @param callable|null $on_bytes       Optional byte-progress callback forwarded to the export, called as `( int $bytes ): void` with each chunk's raw source byte count.
 	 * @param callable|null $on_total       Optional callback, called once before copying with the estimated total source bytes, as `( int $estimated_bytes ): void`, so the caller can show a determinate bar.
 	 * @return string The absolute path of the safety archive written.
+	 * @throws UnencodablePathException If the site holds a file name or symbolic-link target that is not valid UTF-8, which the archive format cannot record; re-thrown with the restore's context, and as a RuntimeException it stops the restore like any other failure here.
 	 * @throws HostCannotComply If the preflight refuses for lack of free disk space, the safety archive's file listing is too large for this installation to read back (a caught ManifestTooLargeException is converted to this, so the restore stops rather than proceed without a usable undo), or the written archive could not be secured to owner-only — none of these are evidence against the archive this run is protecting, only against this host, right now. HostCannotComply extends RuntimeException, so a caller catching RuntimeException already catches every failure this method can raise, including an unrelated write failure propagating unconverted from {@see ExportRunner::export()}.
 	 */
 	public function create( string $wordpress_root, ?callable $on_entry = null, ?callable $on_bytes = null, ?callable $on_total = null ): string {
@@ -222,6 +225,31 @@ final class SafetyArchiver implements SafetyArchiverInterface {
 				),
 				0,
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying ManifestTooLargeException, chained as the previous exception for diagnostics; not HTML output.
+				$e
+			);
+		} catch ( UnencodablePathException $e ) {
+			// Re-thrown as the same type, not converted: it extends RuntimeException, so
+			// the caller's RuntimeException catch still stops the destructive restore,
+			// while the message gains the restore context and stays true — the site
+			// itself holds a name the format cannot record, so no other host would
+			// take this safety archive either.
+			throw new UnencodablePathException(
+				sprintf(
+					'A safety archive could not be taken for this site, because the archive format records every path as UTF-8 text and these entries have a name, or a symbolic-link target, that is not valid UTF-8 — listed with their unprintable bytes escaped, so the real name on disk differs from what is shown: %1$s. The restore has been stopped because it could not be undone. Rename them on the server, then retry.',
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The offender list is escaped to printable ASCII by PathEncoding::printable(); exception path, not HTML output.
+					PathEncoding::describe_offenders(
+						PathEncoding::find_unencodable(
+							( static function () use ( $entry_plans ) {
+								foreach ( $entry_plans as $plan ) {
+									yield $plan->header();
+								}
+							} )(),
+							5
+						)
+					)
+				),
+				0,
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- $e is the underlying UnencodablePathException, chained as the previous exception for diagnostics; not HTML output.
 				$e
 			);
 		}
