@@ -17,6 +17,7 @@ use Pontifex\Archive\Crypto\SigningContext;
 use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ExporterInfo;
 use Pontifex\Archive\Format\ManifestEntry;
+use Pontifex\Archive\Format\PathEncoding;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Format\Scope;
 use Pontifex\Archive\Integrity\Sha256;
@@ -314,7 +315,11 @@ final class ResumableExportRunner {
 		// every tick because the resumable engine re-scans on every tick
 		// (ADR 0015) and the archive's shape could in principle change
 		// between them. $stream is a ManifestStream, safely re-iterable, so
-		// this costs nothing beyond the scan the tick was already doing.
+		// this costs nothing beyond the scan the tick was already doing. The
+		// unencodable-path check runs first: project_payload_bytes() throws a
+		// bare JsonException on an unencodable path, so a check placed after it
+		// would never run.
+		$this->refuse_unencodable_paths( $stream );
 		$this->refuse_if_manifest_too_large( $stream, $total );
 
 		// Persist the source-byte total the moment the scan knows it, so a
@@ -470,6 +475,43 @@ final class ResumableExportRunner {
 		$job->mark( Job::STATUS_PENDING, (int) $clock() );
 		$this->job_store->save( $job );
 		return false;
+	}
+
+	/**
+	 * Refuse before this tick's temp archive is opened when an entry has a path
+	 * the archive format cannot record.
+	 *
+	 * The format stores every path as UTF-8 text, so a file name or
+	 * symbolic-link target that is not valid UTF-8 cannot be written at all.
+	 * Shared by the CLI (`--resumable`/`--resume`) and the admin Backup screen,
+	 * which both drive this class; the wording covers both surfaces' real
+	 * remedies. As with {@see self::refuse_if_manifest_too_large()}, the job is
+	 * left for {@see self::tick()}, which marks any job a thrown exception
+	 * escapes from as FAILED.
+	 *
+	 * @param ManifestStream $stream The just-scanned entry stream (Countable, safely re-iterable).
+	 * @return void
+	 * @throws UnencodablePathException If any entry's name or symbolic-link target is not valid UTF-8.
+	 */
+	private function refuse_unencodable_paths( ManifestStream $stream ): void {
+		$headers = ( static function () use ( $stream ) {
+			foreach ( $stream as $plan ) {
+				yield $plan->header();
+			}
+		} )();
+
+		$result = PathEncoding::find_unencodable( $headers, 5 );
+		if ( 0 === $result['total'] ) {
+			return;
+		}
+
+		throw new UnencodablePathException(
+			sprintf(
+				'This backup cannot be written: the archive format records every path as UTF-8 text, and these entries have a name, or a symbolic-link target, that is not valid UTF-8 — listed with their unprintable bytes escaped, so the real name on disk differs from what is shown: %1$s. Nothing has been written, and this backup cannot be continued as configured. Rename them on the server, or leave them out (the Backup screen\'s file exclusions box, or --exclude on the CLI), then start again.',
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The offender list is escaped to printable ASCII by PathEncoding::printable(); exception path, not HTML output.
+				PathEncoding::describe_offenders( $result )
+			)
+		);
 	}
 
 	/**

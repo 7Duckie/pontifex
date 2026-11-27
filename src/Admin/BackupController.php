@@ -20,6 +20,7 @@ use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Export\UnencodablePathException;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Export\ExportCounters;
@@ -558,14 +559,15 @@ final class BackupController {
 			$this->clear_progress();
 			$this->store->clear_cancel();
 			wp_send_json_success( array( 'cancelled' => true ) );
-		} catch ( ManifestTooLargeException $error ) {
+		} catch ( ManifestTooLargeException | UnencodablePathException $error ) {
 			// Caught ahead of the generic Throwable handler below, the same
 			// shape as BackupCancelled: failure_message() unsets every other
 			// exception's message and returns a generic "check the log"
-			// sentence, but this one is a specific, actionable refusal the
-			// operator needs to see verbatim (it names the entry count and
-			// what to change), not one worth losing behind that sentence.
-			$this->logger->warning( 'Admin backup refused: the manifest would be too large to read back.', array( 'exception' => $error ) );
+			// sentence, but these two are specific, actionable refusals the
+			// operator needs to see verbatim (an oversized manifest names the
+			// entry count and what to change; an unencodable path names the
+			// entries at fault), not ones worth losing behind that sentence.
+			$this->logger->warning( 'Admin backup refused before writing.', array( 'exception' => $error ) );
 			$this->cleanup_job_artefacts();
 			$this->delete_partial_backup();
 			$this->active_backup_path = null;

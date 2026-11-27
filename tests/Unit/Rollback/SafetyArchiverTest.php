@@ -18,6 +18,7 @@ use Pontifex\Archive\Writer\EntryPlan;
 use Pontifex\Archive\Writer\EntryWriter;
 use Pontifex\Environment\Environment;
 use Pontifex\Exception\HostCannotComply;
+use Pontifex\Export\UnencodablePathException;
 use Pontifex\Filesystem\TempArtefact;
 use Pontifex\Manifest\ManifestBuilderInterface;
 use Pontifex\Rollback\RollbackStore;
@@ -145,6 +146,37 @@ final class SafetyArchiverTest extends TestCase {
 		$this->expectExceptionMessage( 'A safety archive could not be taken for this site because its file listing (1 entries) is too large for Pontifex to read back; the restore has been stopped because it could not be undone.' );
 
 		$archiver->create( '/var/www/html' );
+	}
+
+	/**
+	 * A site holding a name that is not valid UTF-8 stops the restore with the restore-context message.
+	 *
+	 * The export's refusal is re-thrown as the same type (so a RuntimeException catch still stops the
+	 * destructive restore), carrying the safety-archive wording and the original as its previous exception.
+	 *
+	 * @return void
+	 */
+	public function test_create_stops_the_restore_when_a_path_cannot_be_recorded(): void {
+		$store = new RollbackStore( $this->base );
+		$plans = array( $this->file_plan( "wp-content/uploads/caf\xe9.txt", 'x' ) );
+
+		$archiver = new SafetyArchiver(
+			$this->environment_with_free_space( (float) ( 1024 * 1024 * 1024 ) ),
+			$this->wordpress_context_mock(),
+			$store,
+			$this->manifest_builder_returning( $plans )
+		);
+
+		try {
+			$archiver->create( '/var/www/html' );
+			$this->fail( 'A path the format cannot record must stop the restore.' );
+		} catch ( UnencodablePathException $e ) {
+			$this->assertStringStartsWith( 'A safety archive could not be taken for this site', $e->getMessage() );
+			$this->assertStringContainsString( 'wp-content/uploads/caf\\351.txt', $e->getMessage() );
+			$this->assertStringContainsString( 'The restore has been stopped because it could not be undone.', $e->getMessage() );
+			$this->assertInstanceOf( UnencodablePathException::class, $e->getPrevious() );
+			$this->assertNotSame( $e->getMessage(), $e->getPrevious()->getMessage(), 'The re-thrown message must be the restore-context one, not the export\'s.' );
+		}
 	}
 
 	/**

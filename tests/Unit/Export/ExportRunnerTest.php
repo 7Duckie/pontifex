@@ -25,6 +25,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ExportRunner;
 use Pontifex\Export\ManifestTooLargeException;
+use Pontifex\Export\UnencodablePathException;
 use Pontifex\Manifest\ExclusionRules;
 use Pontifex\Manifest\ManifestBuilder;
 use Pontifex\Tests\TestCase;
@@ -306,6 +307,64 @@ final class ExportRunnerTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
 		$leftover = glob( $this->temp_output_path . '.*.tmp' );
 		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'A refusal before the temp file opens must leave nothing behind.' );
+	}
+
+	/**
+	 * An export with an entry whose name is not valid UTF-8 is refused by name before anything is written.
+	 *
+	 * The refusal must precede the manifest-size projection, which would otherwise abort with a bare
+	 * JsonException naming no file, and it must not open the destination.
+	 *
+	 * @return void
+	 */
+	public function test_export_refuses_an_unencodable_name_and_writes_nothing(): void {
+		$plans  = array(
+			$this->file_plan( 'wp-content/ok.txt', 'x' ),
+			$this->file_plan( "wp-content/uploads/caf\xe9.txt", 'x' ),
+		);
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+			$this->fail( 'An entry whose name is not valid UTF-8 must be refused.' );
+		} catch ( UnencodablePathException $e ) {
+			$this->assertStringContainsString( 'wp-content/uploads/caf\\351.txt', $e->getMessage() );
+			$this->assertStringNotContainsString( 'ok.txt', $e->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist( $this->temp_output_path, 'A refused export must never open the destination.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_glob -- Confirming no temp export file is left behind.
+		$leftover = glob( $this->temp_output_path . '.*.tmp' );
+		$this->assertSame( array(), false === $leftover ? array() : $leftover, 'A refusal before the temp file opens must leave nothing behind.' );
+	}
+
+	/**
+	 * A symbolic link with a valid name but a target that is not valid UTF-8 is refused too.
+	 *
+	 * That case slips the manifest-size projection (which measures only the path) and would
+	 * otherwise abort part-way through the write.
+	 *
+	 * @return void
+	 */
+	public function test_export_refuses_an_unencodable_symlink_target_and_names_the_entry(): void {
+		$plans  = array(
+			new EntryPlan(
+				EntryHeader::for_symlink( 'wp-content/link', "dest\xe9", 0 ),
+				0,
+				str_repeat( "\0", EntryWriter::NONCE_SIZE ),
+				$this->memory_stream( '' )
+			),
+		);
+		$runner = new ExportRunner( $this->environment_mock(), $this->wordpress_context_mock() );
+
+		try {
+			$runner->export( new ExportOptions( $this->temp_output_path ), $plans, null );
+			$this->fail( 'A symbolic link whose target is not valid UTF-8 must be refused.' );
+		} catch ( UnencodablePathException $e ) {
+			$this->assertStringContainsString( 'wp-content/link (its symbolic-link target)', $e->getMessage() );
+		}
+
+		$this->assertFileDoesNotExist( $this->temp_output_path, 'A refused export must never open the destination.' );
 	}
 
 	/**

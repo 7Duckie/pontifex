@@ -15,6 +15,7 @@ use Throwable;
 use Pontifex\Archive\Codec\CodecRegistry;
 use Pontifex\Archive\Format\ArchiveManifest;
 use Pontifex\Archive\Format\ExporterInfo;
+use Pontifex\Archive\Format\PathEncoding;
 use Pontifex\Archive\Format\Provenance;
 use Pontifex\Archive\Writer\ArchiveWriter;
 use Pontifex\Archive\Writer\EntryWriter;
@@ -170,8 +171,14 @@ final class ExportRunner {
 		// Skipped for a non-Countable $entry_plans (an arbitrary one-shot
 		// iterable): the projection needs a second pass over the entries,
 		// which only a plain array or the reusable ManifestStream safely
-		// support — the only two shapes any real caller passes.
+		// support — the only two shapes any real caller passes. The same
+		// restriction covers the unencodable-path check, which needs its own
+		// pass over the plans: consuming a one-shot iterable would leave the
+		// write with nothing. That check must run first —
+		// project_payload_bytes() throws a bare JsonException on an
+		// unencodable path, so a check placed after it would never run.
 		if ( is_countable( $entry_plans ) ) {
+			$this->refuse_unencodable_paths( $entry_plans );
 			$this->refuse_if_manifest_too_large( $entry_plans, $entry_count );
 		}
 
@@ -238,6 +245,42 @@ final class ExportRunner {
 		$this->move_into_place( $temp_path, $output_path );
 
 		return new ExportResult( $bytes_written, $entry_count, $changed_files, $media_type_unresolved_count );
+	}
+
+	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; see the matching disable on export() above.
+	/**
+	 * Refuse before writing a byte when an entry has a path the archive format cannot record.
+	 *
+	 * The format stores every path as UTF-8 text, so a file name or symbolic-link
+	 * target that is not valid UTF-8 cannot be written at all. Names the offending
+	 * entries (escaped, so the message is itself valid UTF-8) rather than let the
+	 * manifest projection or the header encoder abort with an unexplained
+	 * JsonException.
+	 *
+	 * @param iterable<int, \Pontifex\Archive\Writer\EntryPlan> $entry_plans The entries about to be written; iterated once here (a plain array or ManifestStream, both safely re-iterable).
+	 * @return void
+	 * @throws UnencodablePathException If any entry's name or symbolic-link target is not valid UTF-8.
+	 */
+	private function refuse_unencodable_paths( iterable $entry_plans ): void {
+		// phpcs:enable Squiz.Commenting.FunctionComment.IncorrectTypeHint
+		$headers = ( static function () use ( $entry_plans ) {
+			foreach ( $entry_plans as $plan ) {
+				yield $plan->header();
+			}
+		} )();
+
+		$result = PathEncoding::find_unencodable( $headers, 5 );
+		if ( 0 === $result['total'] ) {
+			return;
+		}
+
+		throw new UnencodablePathException(
+			sprintf(
+				'This backup cannot be written: the archive format records every path as UTF-8 text, and these entries have a name, or a symbolic-link target, that is not valid UTF-8 — listed with their unprintable bytes escaped, so the real name on disk differs from what is shown: %1$s. Nothing has been written. Rename them on the server, or leave them out with --exclude.',
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The offender list is escaped to printable ASCII by PathEncoding::printable(); exception path, not HTML output.
+				PathEncoding::describe_offenders( $result )
+			)
+		);
 	}
 
 	// phpcs:disable Squiz.Commenting.FunctionComment.IncorrectTypeHint -- $entry_plans is documented as iterable<EntryPlan> because PHPStan level 6 requires the value type; see the matching disable on export() above.

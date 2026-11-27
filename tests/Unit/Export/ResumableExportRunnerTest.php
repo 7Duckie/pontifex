@@ -26,6 +26,7 @@ use Pontifex\Environment\Environment;
 use Pontifex\Export\ExportOptions;
 use Pontifex\Export\ManifestTooLargeException;
 use Pontifex\Export\ResumableExportRunner;
+use Pontifex\Export\UnencodablePathException;
 use Pontifex\Job\Job;
 use Pontifex\Job\JobStore;
 use Pontifex\Manifest\ExclusionPattern;
@@ -891,6 +892,34 @@ final class ResumableExportRunnerTest extends TestCase {
 		}
 
 		$this->assertNotNull( $thrown, 'A projected-oversized manifest must refuse with ManifestTooLargeException.' );
+		$this->assertStringContainsString( 'cannot be continued', $thrown->getMessage() );
+		$this->assertFileDoesNotExist( $temp, 'The refusal must fire before the job\'s temp archive is opened.' );
+		$this->assertSame( Job::STATUS_FAILED, $store->get( $job->id() )->status() );
+	}
+
+	/**
+	 * A tick whose scan holds a name that is not valid UTF-8 refuses before opening the temp archive.
+	 *
+	 * @return void
+	 */
+	public function test_tick_refuses_an_unencodable_name_before_opening_temp(): void {
+		$this->specs            = array(
+			array( 'file', 'wp-content/ok.txt', 'x' ),
+			array( 'file', "wp-content/uploads/caf\xe9.txt", 'x' ),
+		);
+		list( $runner, $store ) = $this->make_runner();
+		$job                    = $this->start_job( $runner );
+		$temp                   = (string) $job->payload()['temp'];
+
+		$thrown = null;
+		try {
+			$runner->tick( $store->get( $job->id() ), 30.0 );
+		} catch ( UnencodablePathException $e ) {
+			$thrown = $e;
+		}
+
+		$this->assertNotNull( $thrown, 'An unencodable name must refuse with UnencodablePathException.' );
+		$this->assertStringContainsString( 'wp-content/uploads/caf\\351.txt', $thrown->getMessage() );
 		$this->assertStringContainsString( 'cannot be continued', $thrown->getMessage() );
 		$this->assertFileDoesNotExist( $temp, 'The refusal must fire before the job\'s temp archive is opened.' );
 		$this->assertSame( Job::STATUS_FAILED, $store->get( $job->id() )->status() );

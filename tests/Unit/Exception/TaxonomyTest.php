@@ -20,6 +20,7 @@ use Pontifex\Exception\HostCannotComply;
 use Pontifex\Exception\InvalidRequest;
 use Pontifex\Exception\PontifexException;
 use Pontifex\Export\ManifestTooLargeException;
+use Pontifex\Export\UnencodablePathException;
 use RuntimeException;
 
 /**
@@ -106,5 +107,19 @@ final class TaxonomyTest extends TestCase {
 				$class . ' predates the taxonomy and must still be reachable through the marker.'
 			);
 		}
+	}
+
+	/**
+	 * The unencodable-path refusal carries the marker.
+	 *
+	 * A sibling of the test above rather than an entry in it, because that test is about types that
+	 * predate the taxonomy and this one does not. Like ManifestTooLargeException it implements the
+	 * marker without being one of the three kinds, so a handler written for the marker still sees it.
+	 *
+	 * @return void
+	 */
+	public function test_the_unencodable_path_refusal_carries_the_marker(): void {
+		$this->assertContains( PontifexException::class, class_implements( UnencodablePathException::class ) );
+		$this->assertInstanceOf( RuntimeException::class, new UnencodablePathException( 'x' ) );
 	}
 }
