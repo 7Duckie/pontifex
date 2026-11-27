@@ -947,6 +947,59 @@ exclusions, including the one that stops your backups being inside your backup.
 
 **This is one of the few engine messages the admin screens show you in full.**
 
+### "have a name, or a symbolic-link target, that is not valid UTF-8"
+
+**Unusual filenames. Protecting you.**
+
+**What happened.** Every path inside a `.wpmig` archive is stored as UTF-8
+text. That is not a Pontifex preference — it is a locked invariant of the
+archive format (specification §13.2.1), which is what lets any future reader,
+on any operating system, open a backup written today. A few of this site's
+files or symbolic links have names that the filesystem accepted but UTF-8 does
+not allow, so the format has no way to record them.
+
+The names are shown with their unreadable bytes escaped — `caf\351.txt`, for
+example. The name on disk is *not* literally that; `\351` stands for one byte
+that cannot be printed. Match them by position and length rather than by
+copying the escaped text.
+
+This almost always comes from a file uploaded or created on a system using an
+older encoding — Latin-1 or a Windows code page — or restored from a very old
+archive. It is rare, and it is never something WordPress itself creates.
+
+**Nothing has been written.** Any previous backup at that path is untouched.
+If this happened during a restore, the restore was stopped before it changed
+anything, because the safety copy it would have needed could not be made.
+
+**What to do.** Rename them on the server. Any name your filesystem accepts
+and UTF-8 allows will do; plain ASCII is safest. On Linux you can find them
+with:
+
+```bash
+find wp-content -print0 | while IFS= read -r -d '' f; do printf '%s' "$f" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || printf '%s\n' "$f"; done
+```
+
+That prints only the offending paths and leaves legitimate accented or
+non-Latin names alone, because it tests each name against UTF-8 itself rather
+than guessing from which characters it contains.
+
+If you do not need the files in the backup, leaving them out works too —
+`--exclude` on the CLI, or the file exclusions box on the Backup screen. A
+glob pattern matches such a name correctly, so `--exclude='wp-content/odd/**'`
+does exclude it.
+
+**What not to do.** Do not delete them to make the backup run; a file you
+cannot read the name of may still be one your site serves. And do not expect a
+retry to help — the check runs every time, on every surface, including a
+scheduled backup and `--resume`.
+
+**Why Pontifex refuses instead of skipping the file.** Silently leaving a file
+out would produce a backup that looks complete, verifies sound, and is missing
+something you never agreed to lose. The alternative — writing the bytes anyway
+— would produce an archive outside its own published format, which some future
+reader would refuse to open. Refusing now, by name, is the only answer that
+leaves you with an accurate picture.
+
 ### "Refusing to build an empty backup" / "no database in it"
 
 **Protecting you. Nothing has been written.**

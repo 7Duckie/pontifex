@@ -337,8 +337,11 @@ reader refuses a major version above its own rather than guessing.
    by average row length, targeting ~4 MiB per chunk.
 2. **Plan.** `ManifestBuilder` produces the entry plan. Files first, then
    database chunks — the order matters at restore time.
-3. **Refuse early.** If the projected manifest would exceed 16 MiB, the export
-   is refused before the destination is opened. Pontifex will not write a
+3. **Refuse early.** Two refusals run here, before the destination is opened.
+   If any entry has a name or symbolic-link target that is not valid UTF-8, the
+   export is refused and the entries are named — the format records every path
+   as UTF-8 text, so there is no way to write them. If the projected manifest
+   would exceed 16 MiB, the export is refused too. Pontifex will not write a
    backup it could not read back.
 4. **Write.** Entries stream through a hashing stream into the codec (zstd if
    available, gzip otherwise) and, if encrypting, through AES-256-GCM. Memory
